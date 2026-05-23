@@ -10,7 +10,7 @@
 //!
 //! See ADR-0013 for the runtime choice.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
@@ -41,6 +41,15 @@ struct Cli {
     /// the watcher / opens the store.
     #[arg(long)]
     check_config: bool,
+
+    /// Rebuild the materialised `trips` / `detected_events` /
+    /// `clip_trip_map` tables from the current `clips` +
+    /// `waypoints` rows, then exit. Idempotent (full rebuild
+    /// inside a single transaction). Useful after a schema
+    /// migration adds new derived columns, or to backfill on
+    /// a device that hasn't completed bootstrap yet.
+    #[arg(long)]
+    rebuild_trips: bool,
 }
 
 fn main() -> ExitCode {
@@ -61,6 +70,9 @@ fn main() -> ExitCode {
             }
         }
     }
+    if cli.rebuild_trips {
+        return run_rebuild_trips(&cli.config);
+    }
     let opts = RunOptions {
         config_path: cli.config,
         bootstrap_only: cli.bootstrap_only,
@@ -79,6 +91,37 @@ fn main() -> ExitCode {
             // chain on one line; readable in journalctl.
             tracing::error!(error = ?e, "worker failed to start");
             ExitCode::from(2)
+        }
+    }
+}
+
+fn run_rebuild_trips(config: &Path) -> ExitCode {
+    let cfg = match teslausb_worker::config::Config::load(config) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = ?e, "--rebuild-trips: config invalid");
+            return ExitCode::from(2);
+        }
+    };
+    let mut store = match teslausb_worker::store::Store::open(&cfg.db_path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(
+                error = ?e,
+                db_path = %cfg.db_path.display(),
+                "--rebuild-trips: failed to open DB",
+            );
+            return ExitCode::from(2);
+        }
+    };
+    match store.rebuild_trips_now() {
+        Ok(stats) => {
+            tracing::info!(?stats, "--rebuild-trips: rebuild complete");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            tracing::error!(error = ?e, "--rebuild-trips: rebuild failed");
+            ExitCode::from(1)
         }
     }
 }

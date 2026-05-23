@@ -1252,12 +1252,14 @@ with small targeted SQL.
 | O.5 | `StoreError::Materializer(#[from])` for clean error propagation | ✅ |
 | O.6 | `Indexer::store_mut()` accessor; cross-build aarch64 binary | ✅ |
 | O.7a | Python `MappingQueries` snapshot cache (mtime+TTL keyed) to coalesce parallel calls | ✅ |
-| O.7b | Python rewrite: read trips/events from materialised tables instead of deriving | ⏳ |
-| O.8 | Delete `mapping_trip_derivation.py` + `mapping_event_derivation.py` (after O.7b) | ⏳ |
-| O.9 | Update web tests | ⏳ |
-| O.10 | Mark ADR-0017 §B Superseded; this PROGRESS update | ✅ (partial) |
+| O.7b | Python rewrite: read trips/events from materialised tables instead of deriving (with derivation fallback when tables empty/missing) | ✅ |
+| O.7c | `--rebuild-trips` CLI subcommand on `teslausb-worker` for on-demand backfill | ✅ |
+| O.8 | Delete `mapping_trip_derivation.py` + `mapping_event_derivation.py` (after O.7b) | ⏳ deferred — modules still imported by fallback path |
+| O.9 | Update web tests | ⏳ — covered by existing 22 mapping_queries + 39 blueprint tests (fallback path); explicit materialised-fixture tests deferred |
+| O.10 | Mark ADR-0017 §B Superseded; this PROGRESS update | ✅ |
 | O.11 | Charter-review on Phase O diff | ⏳ |
-| O.12 | Hardware deploy + verify map page < 2 s | ⏳ |
+| O.12 | Hardware deploy + verify map page < 2 s | ✅ (see O.7b table) |
+| O.13 | Schema v4: `description` + `frame_index` columns on `detected_events`; event_type renames (`harsh_braking`, `autopilot_engaged`, …) to align Rust+Python | ✅ |
 
 **O.6/O.7a deploy verification (2026-05-23):**
 - Binary sha256 on device: `0bddcce3b455ba9ddebc831768ad822fbe831cab20bc942f955a1022bb827420`.
@@ -1275,15 +1277,38 @@ with small targeted SQL.
   - Cold parallel 7-API simulation: 23 s (was 15-35 s)
 - O.7a alone cannot reach v1's sub-second target because each
   endpoint still iterates 95k waypoints / hundreds of events in
-  Python over the cached snapshot. The remaining work in O.7b
-  is to replace those iterations with SQL against the new
-  materialised tables (requires either Python-side
-  reconstruction of `description`/`video_path`/`frame_offset`,
-  or a schema extension to carry them on `detected_events`).
+  Python over the cached snapshot. O.7b/O.13 finish the job.
 
-**Open follow-ups (NOT blocking O.6/O.7a):**
-- O.7b Python rewrite still pending — biggest perf win is here.
-- Charter-review on Phase O diff (O.11).
+**O.7b/O.7c/O.13 deploy verification (2026-05-23):**
+- Worker binary sha256 on device:
+  `d9f0a8882881e8c7e6ef8e99b7f70fbdf07138a826adcff7f083d2ed73e85849`.
+- Schema migrated to v4 (`description NOT NULL DEFAULT ''` and
+  `frame_index INTEGER` on `detected_events`).
+- `--rebuild-trips` invoked manually to bypass the still-running
+  bootstrap: `clips_seen=1909, trips_written=6, events_written=10`.
+- `mapping_queries.py` now reads `trips` + `detected_events` +
+  `clip_trip_map` directly when populated; falls back to in-Python
+  derivation when tables empty/missing (preserves old test fixtures
+  + bootstrap window).
+- Measured timings on `cybertruckusb.local`:
+  - 1st `/api/stats` (cold snapshot build): 10.8 s
+  - 2nd `/api/stats`: 5.9 s
+  - 3rd `/api/stats` (cache hit): **0.017 s** (was 1.3 s @ O.7a, 31.5 s @ baseline)
+  - `/mapping` HTML cold: **0.012 s**
+  - `/api/days`: **0.006 s**
+  - Cold parallel 7-API simulation: **12 s** (was 23 s @ O.7a, 15-35 s @ baseline)
+- API payload shape unchanged — descriptions, `video_path`,
+  `frame_offset` all populated from materialised tables.
+
+**Open follow-ups (NOT blocking the perf milestone):**
+- O.8 deletion of `mapping_trip_derivation.py` /
+  `mapping_event_derivation.py` — still imported by fallback path
+  for the bootstrap window. Can be removed once bootstrap is
+  guaranteed-complete (or a worker-side guarantee is added).
+- O.11 charter-review on Phase O diff.
+- The remaining ~10 s cold `/api/stats` is `load_waypoints_by_clip`
+  over 95 k rows; not on the warm path, so visible only to the
+  very first request after a worker restart.
 
 ---
 

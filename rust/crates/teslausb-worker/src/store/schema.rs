@@ -144,8 +144,23 @@ CREATE TABLE clip_trip_map (
 );
 CREATE INDEX clip_trip_map_by_trip ON clip_trip_map(trip_id);
 ",
+    // v3 -> v4: carry presentation fields on detected_events.
+    //
+    // The web layer needs `description` (human-readable text
+    // per event), `video_path` (clip file the event came from
+    // — derivable via the clip_id FK + clips.relative_path
+    // JOIN), and `frame_index` (the SEI frame the event was
+    // detected on, so the player can seek to it). Storing
+    // them on detected_events lets the web layer SELECT
+    // straight from the table without re-deriving in Python
+    // or pulling the full clip row for each event. The next
+    // materializer rebuild populates them.
+    "\
+ALTER TABLE detected_events ADD COLUMN description TEXT NOT NULL DEFAULT '';
+ALTER TABLE detected_events ADD COLUMN frame_index INTEGER;
+",
 ];
 
 /// Current schema version. Bump when appending to the
 /// `MIGRATIONS` constant.
-pub const CURRENT_SCHEMA_VERSION: u32 = 3;
+pub const CURRENT_SCHEMA_VERSION: u32 = 4;

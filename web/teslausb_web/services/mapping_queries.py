@@ -637,8 +637,23 @@ class MappingQueries:
                 sentry_clips = load_sentry_clips(connection)
                 clip_ids = [clip.id for trip in group_trips(clips, 0) for clip in trip.clips]
                 waypoints_by_clip = load_waypoints_by_clip(connection, clip_ids)
+                materialised_data = _load_materialised(connection)
         except sqlite3.Error as exc:
             raise MappingQueryError(f"Failed to read worker DB: {exc}") from exc
+        if materialised_data is not None:
+            return _snapshot_from_materialised(
+                clips=clips,
+                sentry_clips=sentry_clips,
+                waypoints_by_clip=waypoints_by_clip,
+                trip_rows=materialised_data.trips,
+                trip_clip_map=materialised_data.trip_clip_map,
+                trip_events=materialised_data.trip_events,
+                sentry_events=materialised_data.sentry_events,
+            )
+        logger.warning(
+            "materialised trips/events tables empty; falling back to Python "
+            "derivation (worker bootstrap likely still running)",
+        )
         trips = group_trips(clips, self._config.trip_gap_seconds)
         materialised: list[_MaterialisedTrip] = []
         for trip in trips:
@@ -775,6 +790,172 @@ def _connect_readonly(db_path: Path) -> sqlite3.Connection:
         raise MappingQueryError(f"Failed to open worker DB at {db_path}: {exc}") from exc
     connection.row_factory = sqlite3.Row
     return connection
+
+
+@dataclass(frozen=True, slots=True)
+class _MaterialisedData:
+    """Raw rows pulled from the worker's derived tables."""
+
+    trips: tuple[sqlite3.Row, ...]
+    trip_clip_map: dict[int, list[int]]
+    trip_events: dict[int, list[sqlite3.Row]]
+    sentry_events: tuple[sqlite3.Row, ...]
+
+
+def _load_materialised(connection: sqlite3.Connection) -> _MaterialisedData | None:
+    """Read the worker-materialised trips/events tables.
+
+    Returns ``None`` if the ``trips`` table is empty or absent (signals
+    the caller to fall back to Python derivation). The "absent" case
+    happens in older test fixtures that only seed the v2-era
+    ``clips``/``waypoints`` schema.
+    """
+    has_trips = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='trips'",
+    ).fetchone()
+    if has_trips is None:
+        return None
+    trip_rows = connection.execute(
+        "SELECT id, start_utc, end_utc, start_clip_id, end_clip_id, "
+        "       start_lat, start_lon, end_lat, end_lon, "
+        "       distance_km, duration_seconds, video_count, bucket "
+        "  FROM trips ORDER BY start_utc ASC, id ASC",
+    ).fetchall()
+    if not trip_rows:
+        return None
+    trip_clip_map: dict[int, list[int]] = {}
+    for row in connection.execute(
+        "SELECT clip_id, trip_id FROM clip_trip_map ORDER BY trip_id, clip_id",
+    ):
+        trip_clip_map.setdefault(int(row["trip_id"]), []).append(int(row["clip_id"]))
+    trip_events: dict[int, list[sqlite3.Row]] = {}
+    for row in connection.execute(
+        "SELECT id, trip_id, clip_id, event_type, severity, timestamp_utc, "
+        "       latitude_deg, longitude_deg, description, frame_index "
+        "  FROM detected_events "
+        " WHERE trip_id IS NOT NULL "
+        " ORDER BY trip_id, timestamp_utc, id",
+    ):
+        trip_events.setdefault(int(row["trip_id"]), []).append(row)
+    sentry_events = tuple(
+        connection.execute(
+            "SELECT id, clip_id, event_type, severity, timestamp_utc, "
+            "       latitude_deg, longitude_deg, description "
+            "  FROM detected_events "
+            " WHERE trip_id IS NULL AND event_type = 'sentry' "
+            " ORDER BY timestamp_utc DESC, id DESC",
+        ).fetchall(),
+    )
+    return _MaterialisedData(
+        trips=tuple(trip_rows),
+        trip_clip_map=trip_clip_map,
+        trip_events=trip_events,
+        sentry_events=sentry_events,
+    )
+
+
+def _snapshot_from_materialised(  # noqa: PLR0913
+    *,
+    clips: Sequence,
+    sentry_clips: Sequence,
+    waypoints_by_clip: dict,
+    trip_rows: Sequence[sqlite3.Row],
+    trip_clip_map: dict[int, list[int]],
+    trip_events: dict[int, list[sqlite3.Row]],
+    sentry_events: Sequence[sqlite3.Row],
+) -> _Snapshot:
+    """Build a `_Snapshot` from materialised rows; skip Python derivation."""
+    clip_by_id = {clip.id: clip for clip in clips}
+    sentry_clip_by_id = {clip.id: clip for clip in sentry_clips}
+    materialised: list[_MaterialisedTrip] = []
+    for trip_row in trip_rows:
+        trip_id = int(trip_row["id"])
+        clip_ids_for_trip = trip_clip_map.get(trip_id, [])
+        trip_clips = tuple(clip_by_id[cid] for cid in clip_ids_for_trip if cid in clip_by_id)
+        if not trip_clips:
+            continue
+        # Python's TripGroup.id is the first clip id (legacy); preserve
+        # that contract so downstream code (chart keys, day routes) is
+        # unchanged.
+        trip_group = TripGroup(id=trip_clips[0].id, clips=trip_clips)
+        flattened = flatten_trip_waypoints(trip_group, waypoints_by_clip)
+        metrics = _metrics_from_trip_row(trip_row, flattened)
+        events = tuple(
+            _derived_event_from_row(row, trip_clips) for row in trip_events.get(trip_id, ())
+        )
+        materialised.append(
+            _MaterialisedTrip(
+                trip=trip_group,
+                waypoints=flattened,
+                metrics=metrics,
+                events=events,
+            ),
+        )
+    sentry_derived = tuple(
+        _derived_event_from_row(row, (sentry_clip_by_id.get(int(row["clip_id"])),))
+        for row in sentry_events
+        if int(row["clip_id"]) in sentry_clip_by_id
+    )
+    return _Snapshot(trips=tuple(materialised), sentry_events=sentry_derived)
+
+
+def _metrics_from_trip_row(
+    row: sqlite3.Row,
+    flattened: Sequence[AbsoluteWaypoint],
+) -> TripMetrics:
+    start_epoch = float(row["start_utc"])
+    end_epoch = float(row["end_utc"])
+    start_lat = row["start_lat"]
+    start_lon = row["start_lon"]
+    end_lat = row["end_lat"]
+    end_lon = row["end_lon"]
+    # If the worker hadn't materialised endpoint lat/lon yet (older row),
+    # fall back to the flattened waypoints. Cheap because we already
+    # have the list.
+    if start_lat is None and flattened:
+        start_lat = flattened[0].waypoint.latitude_deg
+        start_lon = flattened[0].waypoint.longitude_deg
+    if end_lat is None and flattened:
+        end_lat = flattened[-1].waypoint.latitude_deg
+        end_lon = flattened[-1].waypoint.longitude_deg
+    return TripMetrics(
+        distance_km=float(row["distance_km"] or 0.0),
+        duration_seconds=int(row["duration_seconds"] or 0),
+        start_epoch=start_epoch,
+        end_epoch=end_epoch,
+        start_lat=start_lat,
+        start_lon=start_lon,
+        end_lat=end_lat,
+        end_lon=end_lon,
+    )
+
+
+def _derived_event_from_row(
+    row: sqlite3.Row,
+    trip_clips: Sequence,
+) -> DerivedEvent:
+    """Materialise a `DerivedEvent` from a `detected_events` row."""
+    clip_id = row["clip_id"]
+    video_path: str | None = None
+    if clip_id is not None and trip_clips:
+        for clip in trip_clips:
+            if clip is not None and clip.id == int(clip_id):
+                video_path = clip.relative_path
+                break
+    frame_index = row["frame_index"] if "frame_index" in row.keys() else None  # noqa: SIM118
+    timestamp_utc = float(row["timestamp_utc"])
+    return DerivedEvent(
+        id=int(row["id"]),
+        trip_id=int(row["trip_id"]) if row["trip_id"] is not None else None,
+        timestamp=epoch_to_iso(timestamp_utc),
+        lat=row["latitude_deg"],
+        lon=row["longitude_deg"],
+        event_type=str(row["event_type"]),
+        severity=str(row["severity"]),
+        description=str(row["description"] or ""),
+        video_path=video_path,
+        frame_offset=int(frame_index) if frame_index is not None else None,
+    )
 
 
 def _materialised_trip_to_row(materialised: _MaterialisedTrip) -> TripRow:

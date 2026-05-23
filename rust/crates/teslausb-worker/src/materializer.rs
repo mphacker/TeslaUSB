@@ -60,13 +60,13 @@
 //!
 //! | Event             | Condition                              | Severity |
 //! |-------------------|----------------------------------------|----------|
-//! | speed-limit       | `speed_mps > 35.76` (80 mph)           | warning  |
-//! | hard-accel        | `acceleration_x > 3.5`                 | warning  |
-//! | harsh-brake       | `acceleration_x < -4.0`                | warning  |
-//! | emergency-brake   | `acceleration_x < -7.0` (supersedes)   | critical |
-//! | sharp-turn        | `|acceleration_y| > 4.0`               | warning  |
-//! | autopilot-on/off  | `autopilot_state` changes vs. previous | info     |
-//! | sentry            | `bucket='sentry' AND gps_waypoint_count=0` | info |
+//! | speed_limit_exceeded | `speed_mps > 35.76` (80 mph)        | warning  |
+//! | hard_acceleration    | `acceleration_x > 3.5`              | warning  |
+//! | harsh_braking        | `acceleration_x < -4.0`             | warning  |
+//! | emergency_braking    | `acceleration_x < -7.0` (supersedes)| critical |
+//! | sharp_turn           | `|acceleration_y| > 4.0`            | warning  |
+//! | autopilot_engaged/_disengaged | autopilot transitions       | info     |
+//! | sentry               | `bucket='sentry' AND gps_waypoint_count=0` | info |
 
 // "SEI", "GPS", "MP4", "SQLite", "UTC" — domain terms.
 #![allow(clippy::doc_markdown)]
@@ -318,8 +318,9 @@ impl Materializer {
             let mut ev_stmt = tx.prepare(
                 "INSERT INTO detected_events (
                     trip_id, clip_id, event_type, severity, timestamp_utc,
-                    latitude_deg, longitude_deg, speed_mps, metadata_json
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    latitude_deg, longitude_deg, speed_mps, metadata_json,
+                    description, frame_index
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             )?;
             for ev in &events {
                 ev_stmt.execute(params![
@@ -332,6 +333,8 @@ impl Materializer {
                     ev.longitude_deg,
                     ev.speed_mps,
                     ev.metadata_json,
+                    ev.description,
+                    ev.frame_index,
                 ])?;
             }
         }
@@ -394,6 +397,10 @@ struct ClipRow {
 #[derive(Debug, Clone)]
 struct WaypointRow {
     clip_id: i64,
+    /// Frame index within the clip (matches `waypoints.frame_index`).
+    /// Carried through derive_events to the detected_events row so
+    /// the player can seek straight to the SEI frame.
+    frame_index: i64,
     /// Frame-relative milliseconds — used to derive
     /// `absolute_utc` and kept for future per-waypoint
     /// timestamps in the events payload.
@@ -423,6 +430,13 @@ struct DerivedEvent {
     longitude_deg: Option<f64>,
     speed_mps: Option<f64>,
     metadata_json: Option<String>,
+    /// Human-readable description in the same format the v1 web
+    /// layer surfaced. Stored on the row so the Python query
+    /// layer never has to re-derive it.
+    description: String,
+    /// SEI frame index the event was derived from (NULL for
+    /// sentry-clip events, which don't have a waypoint).
+    frame_index: Option<i64>,
 }
 
 fn load_clip_rows(tx: &Transaction<'_>) -> Result<Vec<ClipRow>> {
@@ -455,7 +469,7 @@ fn load_waypoints_for_clips(tx: &Transaction<'_>, clip_ids: &[i64]) -> Result<Ve
         .collect::<Vec<_>>()
         .join(",");
     let sql = format!(
-        "SELECT w.clip_id, w.timestamp_ms,
+        "SELECT w.clip_id, w.frame_index, w.timestamp_ms,
                 w.latitude_deg, w.longitude_deg, w.speed_mps,
                 w.acceleration_x, w.acceleration_y, w.autopilot_state,
                 c.clip_started_utc
@@ -470,8 +484,8 @@ fn load_waypoints_for_clips(tx: &Transaction<'_>, clip_ids: &[i64]) -> Result<Ve
         .map(|id| id as &dyn rusqlite::ToSql)
         .collect();
     let rows = stmt.query_map(params.as_slice(), |r| {
-        let timestamp_ms: f64 = r.get(1)?;
-        let clip_started_utc: Option<i64> = r.get(8)?;
+        let timestamp_ms: f64 = r.get(2)?;
+        let clip_started_utc: Option<i64> = r.get(9)?;
         let absolute_utc = clip_started_utc.map(|s| {
             // Saturating cast — timestamp_ms is bounded by
             // clip length (max ~150 s).
@@ -481,14 +495,15 @@ fn load_waypoints_for_clips(tx: &Transaction<'_>, clip_ids: &[i64]) -> Result<Ve
         });
         Ok(WaypointRow {
             clip_id: r.get(0)?,
+            frame_index: r.get(1)?,
             timestamp_ms,
             absolute_utc,
-            latitude_deg: r.get(2)?,
-            longitude_deg: r.get(3)?,
-            speed_mps: r.get(4)?,
-            acceleration_x: r.get(5)?,
-            acceleration_y: r.get(6)?,
-            autopilot_state: r.get(7)?,
+            latitude_deg: r.get(3)?,
+            longitude_deg: r.get(4)?,
+            speed_mps: r.get(5)?,
+            acceleration_x: r.get(6)?,
+            acceleration_y: r.get(7)?,
+            autopilot_state: r.get(8)?,
         })
     })?;
     let v = rows.collect::<std::result::Result<Vec<_>, _>>()?;
@@ -581,6 +596,12 @@ fn endpoint_coords(
 /// function — no DB access, all decisions made from the
 /// `waypoints` slice. Order of returned events matches the
 /// input order so timestamps stay monotonic.
+///
+/// Event types and description format match v1's web layer
+/// verbatim (see `mapping_event_derivation.py`) so the
+/// /api/events response shape is unchanged when the Python
+/// query layer switches to reading these rows.
+#[allow(clippy::too_many_lines)]
 fn derive_events(trip_id: i64, waypoints: &[WaypointRow]) -> Vec<DerivedEvent> {
     let mut out = Vec::new();
     let mut prev_ap: Option<String> = None;
@@ -592,6 +613,7 @@ fn derive_events(trip_id: i64, waypoints: &[WaypointRow]) -> Vec<DerivedEvent> {
             .unwrap_or_else(|| i64::try_from(idx).unwrap_or(i64::MAX));
         let lat = Some(w.latitude_deg);
         let lon = Some(w.longitude_deg);
+        let fi = Some(w.frame_index);
 
         // Speed-limit. Strict `>` matches ADR-0019 and v1's
         // `> 35.76` (NOT `>=`).
@@ -599,13 +621,18 @@ fn derive_events(trip_id: i64, waypoints: &[WaypointRow]) -> Vec<DerivedEvent> {
             out.push(DerivedEvent {
                 trip_id: Some(trip_id),
                 clip_id: Some(w.clip_id),
-                event_type: "speed-limit",
+                event_type: "speed_limit_exceeded",
                 severity: "warning",
                 timestamp_utc: ts,
                 latitude_deg: lat,
                 longitude_deg: lon,
                 speed_mps: Some(w.speed_mps),
                 metadata_json: None,
+                description: format!(
+                    "Speed {:.1} m/s exceeded limit {:.1} m/s",
+                    w.speed_mps, SPEED_LIMIT_MPS
+                ),
+                frame_index: fi,
             });
         }
 
@@ -617,38 +644,44 @@ fn derive_events(trip_id: i64, waypoints: &[WaypointRow]) -> Vec<DerivedEvent> {
                 out.push(DerivedEvent {
                     trip_id: Some(trip_id),
                     clip_id: Some(w.clip_id),
-                    event_type: "emergency-brake",
+                    event_type: "emergency_braking",
                     severity: "critical",
                     timestamp_utc: ts,
                     latitude_deg: lat,
                     longitude_deg: lon,
                     speed_mps: Some(w.speed_mps),
                     metadata_json: Some(format!("{{\"acceleration_x\":{ax}}}")),
+                    description: format!("Emergency braking detected ({ax:.2} m/s^2)"),
+                    frame_index: fi,
                 });
             } else if ax < HARSH_BRAKE_X {
                 out.push(DerivedEvent {
                     trip_id: Some(trip_id),
                     clip_id: Some(w.clip_id),
-                    event_type: "harsh-brake",
+                    event_type: "harsh_braking",
                     severity: "warning",
                     timestamp_utc: ts,
                     latitude_deg: lat,
                     longitude_deg: lon,
                     speed_mps: Some(w.speed_mps),
                     metadata_json: Some(format!("{{\"acceleration_x\":{ax}}}")),
+                    description: format!("Harsh braking detected ({ax:.2} m/s^2)"),
+                    frame_index: fi,
                 });
             }
             if ax > HARD_ACCEL_X {
                 out.push(DerivedEvent {
                     trip_id: Some(trip_id),
                     clip_id: Some(w.clip_id),
-                    event_type: "hard-accel",
+                    event_type: "hard_acceleration",
                     severity: "warning",
                     timestamp_utc: ts,
                     latitude_deg: lat,
                     longitude_deg: lon,
                     speed_mps: Some(w.speed_mps),
                     metadata_json: Some(format!("{{\"acceleration_x\":{ax}}}")),
+                    description: format!("Hard acceleration detected ({ax:.2} m/s^2)"),
+                    frame_index: fi,
                 });
             }
         }
@@ -657,13 +690,15 @@ fn derive_events(trip_id: i64, waypoints: &[WaypointRow]) -> Vec<DerivedEvent> {
                 out.push(DerivedEvent {
                     trip_id: Some(trip_id),
                     clip_id: Some(w.clip_id),
-                    event_type: "sharp-turn",
+                    event_type: "sharp_turn",
                     severity: "warning",
                     timestamp_utc: ts,
                     latitude_deg: lat,
                     longitude_deg: lon,
                     speed_mps: Some(w.speed_mps),
                     metadata_json: Some(format!("{{\"acceleration_y\":{ay}}}")),
+                    description: format!("Sharp turn detected (lateral {ay:.2} m/s^2)"),
+                    frame_index: fi,
                 });
             }
         }
@@ -674,10 +709,16 @@ fn derive_events(trip_id: i64, waypoints: &[WaypointRow]) -> Vec<DerivedEvent> {
         let current_ap = normalise_ap(w.autopilot_state.as_deref());
         if let Some(prev) = prev_ap.as_deref() {
             if prev != current_ap {
-                let label = if current_ap == "off" {
-                    "autopilot-off"
+                let (label, desc) = if current_ap == "off" {
+                    ("autopilot_disengaged", "Autopilot disengaged".to_string())
                 } else {
-                    "autopilot-on"
+                    (
+                        "autopilot_engaged",
+                        format!(
+                            "Autopilot engaged ({})",
+                            w.autopilot_state.as_deref().unwrap_or("on")
+                        ),
+                    )
                 };
                 out.push(DerivedEvent {
                     trip_id: Some(trip_id),
@@ -689,6 +730,8 @@ fn derive_events(trip_id: i64, waypoints: &[WaypointRow]) -> Vec<DerivedEvent> {
                     longitude_deg: lon,
                     speed_mps: Some(w.speed_mps),
                     metadata_json: Some(format!("{{\"from\":\"{prev}\",\"to\":\"{current_ap}\"}}")),
+                    description: desc,
+                    frame_index: fi,
                 });
             }
         }
@@ -732,8 +775,10 @@ fn materialize_sentry_clip(
     tx.execute(
         "INSERT INTO detected_events (
             trip_id, clip_id, event_type, severity, timestamp_utc,
-            latitude_deg, longitude_deg, speed_mps, metadata_json
-         ) VALUES (NULL, ?1, 'sentry', 'info', ?2, NULL, NULL, NULL, NULL)",
+            latitude_deg, longitude_deg, speed_mps, metadata_json,
+            description, frame_index
+         ) VALUES (NULL, ?1, 'sentry', 'info', ?2, NULL, NULL, NULL, NULL,
+                   'Sentry mode recording', NULL)",
         params![clip.id, ts],
     )?;
     stats.events_written += 1;
@@ -776,7 +821,7 @@ mod tests {
         for sql in crate::store::migrations_for_tests() {
             conn.execute_batch(sql).unwrap();
         }
-        conn.execute_batch("INSERT INTO meta (key, value) VALUES ('schema_version', '3');")
+        conn.execute_batch("INSERT INTO meta (key, value) VALUES ('schema_version', '4');")
             .unwrap();
         conn
     }
@@ -968,8 +1013,8 @@ mod tests {
             .unwrap()
             .map(std::result::Result::unwrap)
             .collect();
-        assert!(types.contains(&"emergency-brake".to_string()));
-        assert!(!types.contains(&"harsh-brake".to_string()));
+        assert!(types.contains(&"emergency_braking".to_string()));
+        assert!(!types.contains(&"harsh_braking".to_string()));
     }
 
     #[test]

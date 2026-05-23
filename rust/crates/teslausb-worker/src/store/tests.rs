@@ -708,3 +708,34 @@ fn migration_v3_creates_trips_events_and_clip_trip_map() {
         assert_eq!(n, 0, "clip delete should cascade {tbl}");
     }
 }
+
+#[test]
+fn migration_v4_adds_description_and_frame_index_columns() {
+    let store = Store::open_in_memory().unwrap();
+    assert_eq!(store.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+    // Both columns must exist and be writable.
+    store
+        .conn
+        .execute_batch(
+            "INSERT INTO clips (relative_path, bucket, indexed_at_utc)
+                VALUES ('a.mp4', 'recent', 100);
+             INSERT INTO trips (start_utc, end_utc, start_clip_id, end_clip_id)
+                VALUES (100, 200, 1, 1);
+             INSERT INTO detected_events
+                (trip_id, clip_id, event_type, severity, timestamp_utc,
+                 description, frame_index)
+                VALUES (1, 1, 'harsh_braking', 'warning', 150,
+                        'Harsh braking detected (-4.50 m/s^2)', 42);",
+        )
+        .unwrap();
+    let (desc, fi): (String, i64) = store
+        .conn
+        .query_row(
+            "SELECT description, frame_index FROM detected_events",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(desc, "Harsh braking detected (-4.50 m/s^2)");
+    assert_eq!(fi, 42);
+}

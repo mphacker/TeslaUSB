@@ -1708,8 +1708,15 @@ async function loadDays() {
         }
         if (!stillExists) {
             currentDate = allDays[0].date;
+            await loadDay(currentDate);
+        } else if (!currentDayData || !currentDayData.trips || !currentDayData.trips.length) {
+            // initFromUrl() already kicked off loadDay() for the
+            // bootstrapped date; only re-fetch if that hasn't landed
+            // (or returned empty). Avoids a duplicate round-trip on
+            // the common case where /api/days returns AFTER /api/day/
+            // <date>/payload.
+            await loadDay(currentDate);
         }
-        await loadDay(currentDate);
     } catch (e) {
         console.error('Failed to load days:', e);
     }
@@ -1758,15 +1765,31 @@ async function loadDay(date, options) {
 
     beginMapLoading();
     try {
-        // No date-scoped event cap: a busy sentry day can have
-        // hundreds of events and silently truncating would hide
-        // markers the day card promises. Server caps at 5000.
-        const [routesResp, eventsResp] = await Promise.all([
-            fetch(BOOTSTRAP.api.day_routes_template.replace('__DATE__', encodeURIComponent(date))),
-            fetch(`${BOOTSTRAP.api.events}?date=${encodeURIComponent(date)}&limit=5000`),
-        ]);
-        const routesData = await routesResp.json();
-        const eventsData = await eventsResp.json();
+        // Prefer the single-shot day payload (trips + events in one
+        // round-trip with server-side RDP-simplified polylines and a
+        // process-level cache). Fall back to the legacy two-fetch pair
+        // when the bootstrap doesn't expose the payload template, e.g.
+        // an older deployed backend.
+        let routesData;
+        let eventsData;
+        if (BOOTSTRAP.api.day_payload_template) {
+            const payloadResp = await fetch(
+                BOOTSTRAP.api.day_payload_template.replace('__DATE__', encodeURIComponent(date)),
+            );
+            const payload = await payloadResp.json();
+            routesData = { trips: payload.trips || [] };
+            eventsData = { events: payload.events || [] };
+        } else {
+            // No date-scoped event cap: a busy sentry day can have
+            // hundreds of events and silently truncating would hide
+            // markers the day card promises. Server caps at 5000.
+            const [routesResp, eventsResp] = await Promise.all([
+                fetch(BOOTSTRAP.api.day_routes_template.replace('__DATE__', encodeURIComponent(date))),
+                fetch(`${BOOTSTRAP.api.events}?date=${encodeURIComponent(date)}&limit=5000`),
+            ]);
+            routesData = await routesResp.json();
+            eventsData = await eventsResp.json();
+        }
 
         // Race guard: only apply if we're still the latest load AND
         // the user didn't navigate away while we were waiting.
@@ -3877,13 +3900,14 @@ document.getElementById('vpList').addEventListener('click', function(e) {
 });
 
 // --- Init ---
-loadStats();
-
-// Restore selected day / view-mode from the URL before the first
-// loadDays() call so the page lands on the correct view on refresh /
-// shared link / bookmark. loadDays() consults ``currentDate`` and
-// ``showingAllTime`` when deciding what to render and falls back to
-// the most-recent day if the URL-supplied date isn't in allDays.
+//
+// Render the selected day FIRST (using the bootstrap-supplied date /
+// latest_date), then fetch /api/days + stats in the background so the
+// day picker and stat cards populate without blocking first paint.
+// /api/days and /api/stats currently rebuild the snapshot on cold hit
+// and can take 10+ s on a busy device — making them blockers for the
+// initial render was the #1 source of operator-reported "page is very
+// slow" complaints.
 (function initFromUrl() {
     const urlState = readUrlState();
     if (urlState && urlState.view === 'all-time') {
@@ -3891,7 +3915,19 @@ loadStats();
     } else if (urlState && urlState.date) {
         currentDate = urlState.date;
     }
+    const bootstrapDate = (BOOTSTRAP.view && (BOOTSTRAP.view.date || BOOTSTRAP.view.latest_date)) || '';
+    if (!currentDate && bootstrapDate) {
+        currentDate = bootstrapDate;
+    }
+    if (currentDate && !showingAllTime) {
+        // Kick off the actual day render immediately. loadDays() runs
+        // in parallel to populate the day picker; it will skip the
+        // selection-change branch because ``currentDate`` already
+        // matches the day we just rendered.
+        loadDay(currentDate);
+    }
     loadDays();
+    loadStats();
 })();
 
 // Browser back/forward — re-derive state from the URL and dispatch

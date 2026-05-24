@@ -108,8 +108,13 @@ pub fn is_indexable(path: &Path) -> bool {
 /// in time. The other angles are still served by the video
 /// stream endpoint (the user can switch cameras in the overlay)
 /// — they are just not crawled by the indexer.
-const NON_FRONT_CAMERA_SUFFIXES: [&str; 3] =
-    ["-back.mp4", "-left_repeater.mp4", "-right_repeater.mp4"];
+const NON_FRONT_CAMERA_SUFFIXES: [&str; 5] = [
+    "-back.mp4",
+    "-left_repeater.mp4",
+    "-right_repeater.mp4",
+    "-left_pillar.mp4",
+    "-right_pillar.mp4",
+];
 
 /// Returns `true` if `path` is the front-camera variant of a
 /// Tesla clip group (or has no camera suffix at all, e.g. test
@@ -378,6 +383,12 @@ mod tests {
         )));
         assert!(!is_front_camera_clip(Path::new(
             "/srv/RecentClips/2026-05-22_19-42-29-LEFT_REPEATER.MP4"
+        )));
+        assert!(!is_front_camera_clip(Path::new(
+            "/srv/RecentClips/2026-05-22_19-42-29-left_pillar.mp4"
+        )));
+        assert!(!is_front_camera_clip(Path::new(
+            "/srv/RecentClips/2026-05-22_19-42-29-right_pillar.mp4"
         )));
     }
 

@@ -330,11 +330,13 @@ fn relative_to_backing_root(path: &Path, backing_root: &Path) -> PathBuf {
 /// `…/2026-…-19-42-29`, so [`bootstrap`] can deduplicate the four
 /// per-clip files into a single group.
 fn clip_group_key(path: &Path) -> PathBuf {
-    const SUFFIXES: [&str; 4] = [
+    const SUFFIXES: [&str; 6] = [
         "-front.mp4",
         "-back.mp4",
         "-left_repeater.mp4",
         "-right_repeater.mp4",
+        "-left_pillar.mp4",
+        "-right_pillar.mp4",
     ];
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return path.to_path_buf();
@@ -425,7 +427,14 @@ mod tests {
         let recent = cfg.bucket_root(Bucket::Recent);
         std::fs::create_dir_all(&recent).unwrap();
         let base = "2026-05-22_19-42-29";
-        for suffix in ["front", "back", "left_repeater", "right_repeater"] {
+        for suffix in [
+            "front",
+            "back",
+            "left_repeater",
+            "right_repeater",
+            "left_pillar",
+            "right_pillar",
+        ] {
             write_garbage_clip(&recent.join(format!("{base}-{suffix}.mp4")));
         }
         let store = Store::open_in_memory().unwrap();

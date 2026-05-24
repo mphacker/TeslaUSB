@@ -271,18 +271,42 @@ async function loadDays() {
 async function loadDay(date, selectedTripId) {
     mapRenderer.setLoading(true);
     try {
-        const [routes, events] = await Promise.all([
-            fetchJson(replaceTemplate(bootstrap.api.day_routes_template, { __DATE__: date })),
-            fetchJson(`${bootstrap.api.events}?date=${encodeURIComponent(date)}&limit=5000&overview=1`),
-        ]);
+        const url = bootstrap.api.day_payload_template
+            ? replaceTemplate(bootstrap.api.day_payload_template, { __DATE__: date })
+            : null;
+        let trips = [];
+        let events = [];
+        let latestDate = state.latestDate;
+        if (url) {
+            const payload = await fetchJson(url);
+            trips = payload.trips || [];
+            events = payload.events || [];
+            if (payload.latest_date) {
+                latestDate = payload.latest_date;
+            }
+        } else {
+            const [routes, eventsPayload] = await Promise.all([
+                fetchJson(replaceTemplate(bootstrap.api.day_routes_template, { __DATE__: date })),
+                fetchJson(`${bootstrap.api.events}?date=${encodeURIComponent(date)}&limit=5000&overview=1`),
+            ]);
+            trips = routes.trips || [];
+            events = eventsPayload.events || [];
+        }
         state.showingAllRoutes = false;
         state.currentDate = date;
-        state.currentTrips = routes.trips || [];
-        state.currentEvents = events.events || [];
-        state.currentTripId = selectedTripId || state.currentTrips[0]?.trip_id || null;
+        state.latestDate = latestDate || state.latestDate;
+        state.currentTrips = trips;
+        state.currentEvents = events;
+        state.currentTripId = selectedTripId || trips[0]?.trip_id || null;
         setEnabledTypes(state.currentEvents);
         renderCurrentView();
         eventsPanel.renderDays(state.days, state.currentDate, state.showingAllRoutes);
+        try {
+            const target = `${window.location.pathname}?date=${encodeURIComponent(date)}`;
+            window.history.replaceState(null, "", target);
+        } catch (_err) {
+            // history API unavailable; URL stays unchanged
+        }
         if (state.currentTripId) {
             const trip = state.currentTrips.find((candidate) => (candidate.trip_id || candidate.id) === state.currentTripId);
             if (trip) {
@@ -362,20 +386,40 @@ document.getElementById("mappingZoomSelectedButton")?.addEventListener("click", 
 
 window.addEventListener("resize", () => mapRenderer.invalidateSize());
 
-Promise.all([loadStats(), loadSentryEvents(), loadDays()])
-    .then(async () => {
+function scheduleIdle(fn) {
+    if (typeof window.requestIdleCallback === "function") {
+        window.requestIdleCallback(fn, { timeout: 2000 });
+    } else {
+        window.setTimeout(fn, 0);
+    }
+}
+
+async function bootstrapMappingPage() {
+    state.latestDate = bootstrap.view.latest_date || "";
+    const initialDate = bootstrap.view.date || state.latestDate;
+    try {
         if (state.showingAllRoutes) {
             await loadAllRoutes();
-            return;
-        }
-        const initialDate = bootstrap.view.date || state.latestDate;
-        if (initialDate) {
+        } else if (initialDate) {
             await loadDay(initialDate);
         } else {
             mapRenderer.clear();
         }
-    })
-    .catch((error) => {
+    } catch (error) {
         notify(error.message, "warning");
         mapRenderer.clear();
+    }
+    scheduleIdle(() => {
+        Promise.all([
+            loadStats().catch(() => {}),
+            loadSentryEvents().catch(() => {}),
+            loadDays()
+                .then(() => {
+                    eventsPanel.renderDays(state.days, state.currentDate, state.showingAllRoutes);
+                })
+                .catch(() => {}),
+        ]);
     });
+}
+
+bootstrapMappingPage();

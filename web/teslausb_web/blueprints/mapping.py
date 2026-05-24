@@ -14,6 +14,7 @@ from flask import (
     Response,
     current_app,
     jsonify,
+    redirect,
     render_template,
     request,
     url_for,
@@ -22,6 +23,7 @@ from flask import (
 from teslausb_web.services.mapping_queries import (
     AllRoutesTrip,
     ChartCount,
+    DayPayload,
     DayRouteTrip,
     DayRow,
     DrivingStats,
@@ -234,6 +236,15 @@ def _serialize_day_route_trip(trip: DayRouteTrip) -> dict[str, object]:
     }
 
 
+def _serialize_day_payload(payload: DayPayload) -> dict[str, object]:
+    return {
+        "date": payload.date,
+        "latest_date": payload.latest_date,
+        "trips": [_serialize_day_route_trip(trip) for trip in payload.trips],
+        "events": [_serialize_event(event) for event in payload.events],
+    }
+
+
 def _serialize_all_routes_trip(trip: AllRoutesTrip) -> dict[str, object]:
     return {
         "trip_id": trip.id,
@@ -443,10 +454,29 @@ def _handle_query_error(exc: Exception) -> ResponseReturnValue:
 
 @mapping_bp.route("/")
 def map_view() -> ResponseReturnValue:
+    requested_date = request.args.get("date", "").strip()
+    requested_mode = request.args.get("view", "day")
+    # Server-side redirect to the latest day so the user lands directly on
+    # rendered data instead of an empty map. Skipped when the URL already
+    # carries a date or when the page is opened in all-routes mode.
+    initial_date = requested_date
+    latest_date: str | None = None
+    if requested_mode != "all":
+        try:
+            latest_date = _get_queries().query_latest_date()
+        except (MappingQueryError, RuntimeError) as exc:
+            logger.warning("latest-date lookup failed: %s", exc)
+            latest_date = None
+        if not requested_date and latest_date:
+            target = url_for("mapping.map_view", date=latest_date)
+            return redirect(target, code=HTTPStatus.FOUND)
+        if not initial_date and latest_date:
+            initial_date = latest_date
     bootstrap = {
         "api": {
             "days": url_for("mapping.api_days"),
             "day_routes_template": url_for("mapping.api_day_routes", date="__DATE__"),
+            "day_payload_template": url_for("mapping.api_day_payload", date="__DATE__"),
             "trips": url_for("mapping.api_trips"),
             "playable_trips": url_for("mapping.api_trips_playable"),
             "trip_route_template": url_for("mapping.api_trip_route", trip_id=0).replace(
@@ -476,8 +506,9 @@ def map_view() -> ResponseReturnValue:
             "dashcam_proto": url_for("static", filename="vendor/dashcam-mp4/dashcam.proto"),
         },
         "view": {
-            "date": request.args.get("date", ""),
-            "mode": request.args.get("view", "day"),
+            "date": initial_date,
+            "latest_date": latest_date or "",
+            "mode": requested_mode,
             "video_stream_template": "/videos/stream/__PATH__",
         },
     }
@@ -624,6 +655,23 @@ def api_day_routes(date: str) -> ResponseReturnValue:
     except (MappingQueryError, RuntimeError) as exc:
         return _handle_query_error(exc)
     return jsonify({"date": date, "trips": [_serialize_day_route_trip(trip) for trip in trips]})
+
+
+@mapping_bp.route("/api/day/<date>/payload")
+def api_day_payload(date: str) -> ResponseReturnValue:
+    """Single-shot payload for the map page: trips + events for one date.
+
+    Replaces the four parallel calls the page used to fire on initial
+    load (``/api/day/<date>/routes``, ``/api/events?date=``,
+    ``/api/stats``, ``/api/driving-stats``) with one direct-SQL call.
+    """
+    try:
+        payload = _get_queries().query_day_payload(_require_iso_date(date))
+    except MappingRequestError as exc:
+        return _handle_request_error(exc)
+    except (MappingQueryError, RuntimeError) as exc:
+        return _handle_query_error(exc)
+    return jsonify(_serialize_day_payload(payload))
 
 
 @mapping_bp.route("/api/trips/playable")

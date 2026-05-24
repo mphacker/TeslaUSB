@@ -31,6 +31,7 @@ from teslausb_web.services.mapping_trip_derivation import (
     AbsoluteWaypoint,
     TripGroup,
     TripMetrics,
+    WorkerClip,
     bucket_to_folder,
     cap_indices_uniform,
     compute_trip_metrics,
@@ -168,6 +169,21 @@ class DayRouteTrip:
     end_lon: float | None
     source_folder: str | None
     waypoints: tuple[RouteWaypoint, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class DayPayload:
+    """Single-shot payload for the map page: trips + events for one date.
+
+    Built directly from materialised SQL tables; no global snapshot. The
+    `latest_date` field is returned so the UI can offer a one-click jump to
+    the most recent recorded day when the user navigated to an empty date.
+    """
+
+    date: str
+    trips: tuple[DayRouteTrip, ...]
+    events: tuple[EventRow, ...]
+    latest_date: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -325,6 +341,15 @@ class MappingQueries:
         self._playable_trips_cache_lock = threading.RLock()
         self._snapshot_cache: _SnapshotCacheEntry | None = None
         self._snapshot_lock = threading.RLock()
+        # date -> (mtime_ns, size, computed_at, payload). We serve from
+        # cache while the DB is unchanged AND while the cached entry is
+        # younger than the TTL even if the DB has rolled forward — the
+        # worker writes constantly during recording, so mtime-only
+        # invalidation would defeat the cache. The TTL bounds staleness.
+        self._day_payload_cache: dict[
+            str, tuple[int, int, float, DayPayload]
+        ] = {}
+        self._day_payload_lock = threading.RLock()
 
     @contextmanager
     def open_db(self) -> Iterator[sqlite3.Connection]:
@@ -439,6 +464,232 @@ class MappingQueries:
         # downstream gap-stamping and event-matching keys are unchanged.
         trip = TripGroup(id=clips[0].id, clips=clips)
         return flatten_trip_waypoints(trip, waypoints_by_clip)
+
+    def query_latest_date(self) -> str | None:
+        """Return the most-recent trip's UTC date as ``YYYY-MM-DD``, or None.
+
+        Trivially cheap (single MAX() on `trips.start_utc`). Used by the
+        page route to redirect bare ``/`` requests to the latest day so the
+        user lands directly on rendered data instead of an empty map.
+        """
+        try:
+            with self.open_db() as connection:
+                row = connection.execute(
+                    "SELECT date(MAX(start_utc), 'unixepoch') FROM trips",
+                ).fetchone()
+        except sqlite3.OperationalError:
+            return None
+        except sqlite3.Error as exc:
+            raise MappingQueryError(f"Failed to query latest date: {exc}") from exc
+        if row is None or row[0] is None:
+            return None
+        return str(row[0])
+
+    def query_day_payload(self, date_str: str) -> DayPayload:
+        """Cached single-day payload (RDP-simplified + cap)."""
+        mtime_ns, size = self._stat_db()
+        now = time.monotonic()
+        with self._day_payload_lock:
+            cached = self._day_payload_cache.get(date_str)
+            if cached is not None:
+                cached_mtime, cached_size, computed_at, payload = cached
+                same_db = cached_mtime == mtime_ns and cached_size == size
+                fresh = (now - computed_at) < _SNAPSHOT_CACHE_TTL_SECONDS
+                if same_db or fresh:
+                    return payload
+        payload = self._compute_day_payload(date_str)
+        with self._day_payload_lock:
+            self._day_payload_cache[date_str] = (
+                mtime_ns,
+                size,
+                time.monotonic(),
+                payload,
+            )
+        return payload
+
+    def _compute_day_payload(self, date_str: str) -> DayPayload:
+        """Return trips + events for a single date via direct SQL.
+
+        This is the fast path the map page uses on initial load: ONE
+        round-trip to the DB, only the requested day's data, no global
+        snapshot. Uses the existing ``trips_by_start_utc`` and
+        ``clip_trip_map_by_trip`` and ``events_by_ts`` indexes.
+
+        Returns an empty ``DayPayload`` (still populated with
+        ``latest_date``) when the date has no trips so the front-end can
+        render an empty state.
+
+        Falls back to the snapshot path when the materialised ``trips``
+        table is missing (older DBs / pre-bootstrap test fixtures) so
+        existing tests and recovery flows continue to work.
+        """
+        try:
+            with self.open_db() as connection:
+                trip_rows = connection.execute(
+                    "SELECT id, start_utc, end_utc, start_clip_id, end_clip_id, "
+                    "       start_lat, start_lon, end_lat, end_lon, "
+                    "       distance_km, duration_seconds, video_count, bucket "
+                    "  FROM trips "
+                    " WHERE date(start_utc, 'unixepoch') = ? "
+                    " ORDER BY start_utc DESC, id DESC",
+                    (date_str,),
+                ).fetchall()
+                latest = self._latest_date_locked(connection)
+                if not trip_rows:
+                    # No trips for this day; still load any standalone
+                    # events recorded against the date (e.g. sentry-only
+                    # day) so the front-end can show event markers even
+                    # without trip routes.
+                    event_rows = connection.execute(
+                        "SELECT id, trip_id, clip_id, event_type, severity, "
+                        "       timestamp_utc, latitude_deg, longitude_deg, "
+                        "       description, frame_index "
+                        "  FROM detected_events "
+                        " WHERE date(timestamp_utc, 'unixepoch') = ? "
+                        " ORDER BY timestamp_utc DESC, id DESC",
+                        (date_str,),
+                    ).fetchall()
+                    events = self._build_events_for_day({}, event_rows)
+                    return DayPayload(
+                        date=date_str,
+                        trips=(),
+                        events=events,
+                        latest_date=latest,
+                    )
+                real_trip_ids = [int(r["id"]) for r in trip_rows]
+                placeholders = ",".join("?" for _ in real_trip_ids)
+                clip_rows = connection.execute(
+                    "SELECT c.id, c.relative_path, c.bucket, c.clip_started_utc, "  # noqa: S608
+                    "       c.indexed_at_utc, c.gps_waypoint_count, m.trip_id "
+                    "  FROM clips c "
+                    "  JOIN clip_trip_map m ON m.clip_id = c.id "
+                    f" WHERE m.trip_id IN ({placeholders}) "
+                    " ORDER BY m.trip_id, c.clip_started_utc ASC, c.id ASC",
+                    real_trip_ids,
+                ).fetchall()
+                clips_by_trip: dict[int, list[WorkerClip]] = {}
+                all_clip_ids: list[int] = []
+                for row in clip_rows:
+                    tid = int(row["trip_id"])
+                    clip = WorkerClip(
+                        id=int(row["id"]),
+                        relative_path=str(row["relative_path"]),
+                        bucket=str(row["bucket"]),
+                        clip_started_utc=int(row["clip_started_utc"]),
+                        indexed_at_utc=int(row["indexed_at_utc"]),
+                        gps_waypoint_count=int(row["gps_waypoint_count"]),
+                    )
+                    clips_by_trip.setdefault(tid, []).append(clip)
+                    all_clip_ids.append(clip.id)
+                waypoints_by_clip = load_waypoints_by_clip(connection, all_clip_ids)
+                event_rows = connection.execute(
+                    "SELECT id, trip_id, clip_id, event_type, severity, "
+                    "       timestamp_utc, latitude_deg, longitude_deg, "
+                    "       description, frame_index "
+                    "  FROM detected_events "
+                    " WHERE date(timestamp_utc, 'unixepoch') = ? "
+                    " ORDER BY timestamp_utc DESC, id DESC",
+                    (date_str,),
+                ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc).lower():
+                return self._day_payload_via_snapshot(date_str)
+            raise MappingQueryError(f"Failed to load day payload: {exc}") from exc
+        except sqlite3.Error as exc:
+            raise MappingQueryError(f"Failed to load day payload: {exc}") from exc
+        trips_out: list[DayRouteTrip] = []
+        for row in trip_rows:
+            tid = int(row["id"])
+            trip_clips_list = clips_by_trip.get(tid, [])
+            if not trip_clips_list:
+                continue
+            trip_clips = tuple(trip_clips_list)
+            trip_group = TripGroup(id=trip_clips[0].id, clips=trip_clips)
+            flattened = flatten_trip_waypoints(trip_group, waypoints_by_clip)
+            metrics = _metrics_from_trip_row(row, flattened)
+            stamped = _simplified_route_waypoints(
+                flattened,
+                epsilon_m=_DEFAULT_EPSILON_METERS,
+                max_points=_DEFAULT_MAX_POINTS_PER_TRIP,
+            )
+            trips_out.append(
+                DayRouteTrip(
+                    id=trip_clips[0].id,  # legacy: first-clip-id contract
+                    start_time=epoch_to_iso(metrics.start_epoch),
+                    end_time=epoch_to_iso(metrics.end_epoch),
+                    distance_km=round(metrics.distance_km, 3),
+                    duration_seconds=metrics.duration_seconds,
+                    start_lat=metrics.start_lat,
+                    start_lon=metrics.start_lon,
+                    end_lat=metrics.end_lat,
+                    end_lon=metrics.end_lon,
+                    source_folder=bucket_to_folder(trip_clips[0].bucket),
+                    waypoints=stamped,
+                ),
+            )
+        events_out = self._build_events_for_day(clips_by_trip, event_rows)
+        return DayPayload(
+            date=date_str,
+            trips=tuple(trips_out),
+            events=events_out,
+            latest_date=latest,
+        )
+
+    @staticmethod
+    def _latest_date_locked(connection: sqlite3.Connection) -> str | None:
+        row = connection.execute(
+            "SELECT date(MAX(start_utc), 'unixepoch') FROM trips",
+        ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        return str(row[0])
+
+    @staticmethod
+    def _build_events_for_day(
+        clips_by_trip: dict[int, list[WorkerClip]],
+        event_rows: Sequence[sqlite3.Row],
+    ) -> tuple[EventRow, ...]:
+        """Convert raw event rows into EventRow tuples for the day.
+
+        Maps the materialised ``trips.id`` back to the legacy public-API
+        trip id (first clip's id), and resolves ``video_path`` from the
+        event's ``clip_id`` against the per-trip clips already loaded.
+        """
+        out: list[EventRow] = []
+        for row in event_rows:
+            real_trip_id = int(row["trip_id"]) if row["trip_id"] is not None else None
+            trip_clips_for_event: tuple[WorkerClip, ...] = ()
+            legacy_trip_id: int | None = None
+            if real_trip_id is not None:
+                clips_for_trip = clips_by_trip.get(real_trip_id, [])
+                trip_clips_for_event = tuple(clips_for_trip)
+                if clips_for_trip:
+                    legacy_trip_id = clips_for_trip[0].id
+            derived = _derived_event_from_row(row, trip_clips_for_event)
+            out.append(
+                EventRow(
+                    id=derived.id,
+                    trip_id=legacy_trip_id,
+                    timestamp=derived.timestamp,
+                    lat=derived.lat,
+                    lon=derived.lon,
+                    event_type=derived.event_type,
+                    severity=derived.severity,
+                    description=derived.description,
+                    video_path=derived.video_path,
+                    frame_offset=derived.frame_offset,
+                    metadata=None,
+                ),
+            )
+        return tuple(out)
+
+    def _day_payload_via_snapshot(self, date_str: str) -> DayPayload:
+        """Fallback day-payload path for older DB schemas / test fixtures."""
+        trips = self.query_day_routes(date_str, min_distance_km=0.0)
+        events = self.query_events(date=date_str, limit=5000)
+        days = self.query_days(limit=1, min_distance_km=0.0)
+        latest = days[0].date if days else None
+        return DayPayload(date=date_str, trips=trips, events=events, latest_date=latest)
 
     def waypoints_for_video(self, video_path: str) -> tuple[int | None, tuple[RouteWaypoint, ...]]:
         if not video_path:
@@ -1136,6 +1387,54 @@ def _route_waypoint_from_entry(entry: AbsoluteWaypoint) -> RouteWaypoint:
         video_path=_video_url_path(entry.clip.relative_path),
         frame_offset=entry.waypoint.frame_index,
     )
+
+
+def _simplified_route_waypoints(
+    flattened: Sequence[AbsoluteWaypoint],
+    *,
+    epsilon_m: float,
+    max_points: int,
+) -> tuple[RouteWaypoint, ...]:
+    """Return RDP-simplified, gap-stamped RouteWaypoints for the day payload.
+
+    Avoids shipping every raw frame to the browser (a 30-minute trip
+    yields ~22k frames). Splits on travel-gaps so RDP can't shortcut
+    across them, simplifies each segment with the standard epsilon,
+    uniformly caps the total to ``max_points``, then sets ``gap_after``
+    on the last point of each non-final segment so the Leaflet renderer
+    breaks the polyline correctly.
+    """
+    if not flattened:
+        return ()
+    segments: list[list[AbsoluteWaypoint]] = [[flattened[0]]]
+    for index in range(1, len(flattened)):
+        if is_gap_between(flattened[index - 1], flattened[index]):
+            segments.append([flattened[index]])
+        else:
+            segments[-1].append(flattened[index])
+    picks: list[tuple[AbsoluteWaypoint, bool]] = []
+    for seg_idx, segment in enumerate(segments):
+        if len(segment) >= _MIN_RENDERABLE_POINTS:
+            indices = simplify_polyline_rdp(
+                [(e.waypoint.latitude_deg, e.waypoint.longitude_deg) for e in segment],
+                epsilon_m,
+            )
+            chosen = [segment[i] for i in indices]
+        else:
+            chosen = list(segment)
+        for j, entry in enumerate(chosen):
+            mark_gap = j == len(chosen) - 1 and seg_idx < len(segments) - 1
+            picks.append((entry, mark_gap))
+    if len(picks) > max_points:
+        keep = set(cap_indices_uniform(list(range(len(picks))), max_points))
+        picks = [pick for idx, pick in enumerate(picks) if idx in keep]
+    out: list[RouteWaypoint] = []
+    for entry, gap_after in picks:
+        wp = _route_waypoint_from_entry(entry)
+        if gap_after:
+            wp = replace(wp, gap_after=True)
+        out.append(wp)
+    return tuple(out)
 
 
 def _event_row_from_derived(event: DerivedEvent) -> EventRow:

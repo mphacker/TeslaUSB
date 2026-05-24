@@ -309,6 +309,7 @@ class TestUrlMap:
             "mapping.api_events",
             "mapping.api_days",
             "mapping.api_day_routes",
+            "mapping.api_day_payload",
             "mapping.api_trips_playable",
             "mapping.api_all_routes",
             "mapping.api_stats",

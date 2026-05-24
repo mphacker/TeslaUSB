@@ -120,7 +120,6 @@ from teslausb_web.services.lock_chime_service import (
     validate_tesla_wav,
 )
 from teslausb_web.services.mapping_queries import (
-    AllRoutesTrip,
     ChartCount,
     DayRouteTrip,
     DayRow,
@@ -136,7 +135,6 @@ from teslausb_web.services.mapping_queries import (
     PlayableTrip,
     RouteWaypoint,
     SeverityChartPoint,
-    SimplifiedRoutePoint,
     Stats,
     TripRow,
     make_mapping_queries,
@@ -194,7 +192,6 @@ from teslausb_web.services.wrap_service import (
 
 __all__ = (
     "ActiveChimeResolution",
-    "AllRoutesTrip",
     "ApMode",
     "AuthorizationStart",
     "BoomboxConfig",
@@ -285,7 +282,6 @@ __all__ = (
     "Schedule",
     "ScheduleOperationResult",
     "SeverityChartPoint",
-    "SimplifiedRoutePoint",
     "Stats",
     "SystemSettings",
     "SystemSettingsConfig",

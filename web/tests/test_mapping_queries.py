@@ -514,30 +514,3 @@ class TestPlayableCache:
             q.playable_trips_for_date(f"2024-02-{day:02d}")
         # After trimming, the internal map must be <= 64 entries.
         assert len(q._playable_trips_cache) <= 64  # whitebox check
-
-
-class TestSimplifiedRoutes:
-    def test_all_routes_caps_dense_trip(self, worker_db_factory: WorkerDbFactory) -> None:
-        base = _epoch(2024, 7, 1, 8)
-        waypoints = [
-            {
-                "lat": 37.0 + i * 0.0005,
-                "lon": -122.0 + i * 0.0005,
-                "speed_mps": 15.0,
-                "timestamp_ms": i * 1000.0,
-            }
-            for i in range(60)
-        ]
-        q = worker_db_factory(
-            [
-                {
-                    "relative_path": "RecentClips/dense-front.mp4",
-                    "bucket": "recent",
-                    "clip_started_utc": base,
-                    "waypoints": waypoints,
-                }
-            ]
-        )
-        trips = q.query_all_routes_simplified(max_points_per_trip=10)
-        assert len(trips) == 1
-        assert len(trips[0].waypoints) <= 10

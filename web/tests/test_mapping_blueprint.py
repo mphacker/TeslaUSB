@@ -311,7 +311,6 @@ class TestUrlMap:
             "mapping.api_day_routes",
             "mapping.api_day_payload",
             "mapping.api_trips_playable",
-            "mapping.api_all_routes",
             "mapping.api_stats",
             "mapping.api_driving_stats",
             "mapping.api_event_charts",
@@ -535,24 +534,8 @@ class TestPlayableTrips:
 
 
 # ---------------------------------------------------------------------------
-# All routes / stats / charts
+# Stats / charts
 # ---------------------------------------------------------------------------
-
-
-class TestAllRoutes:
-    def test_returns_simplified_routes(self, client: FlaskClient) -> None:
-        response = client.get("/api/all-routes?max_points=50")
-        assert response.status_code == HTTPStatus.OK
-        trips = response.get_json()["trips"]
-        assert len(trips) == 2
-        for trip in trips:
-            assert trip["waypoints"]
-            assert len(trip["waypoints"]) <= 50
-
-    def test_max_points_is_capped_to_minimum(self, client: FlaskClient) -> None:
-        # max_points=1 is below the renderable floor; it is coerced up.
-        response = client.get("/api/all-routes?max_points=1")
-        assert response.status_code == HTTPStatus.OK
 
 
 class TestStats:

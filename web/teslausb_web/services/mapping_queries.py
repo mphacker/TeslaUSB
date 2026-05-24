@@ -187,29 +187,6 @@ class DayPayload:
 
 
 @dataclass(frozen=True, slots=True)
-class SimplifiedRoutePoint:
-    lat: float
-    lon: float
-    speed_mps: float | None
-    gap_after: bool = False
-
-
-@dataclass(frozen=True, slots=True)
-class AllRoutesTrip:
-    id: int
-    date: str
-    start_time: str
-    end_time: str | None
-    start_lat: float | None
-    start_lon: float | None
-    end_lat: float | None
-    end_lon: float | None
-    distance_km: float
-    duration_seconds: int
-    waypoints: tuple[SimplifiedRoutePoint, ...]
-
-
-@dataclass(frozen=True, slots=True)
 class PlayableTrip:
     id: int
     is_playable: bool
@@ -781,29 +758,6 @@ class MappingQueries:
         ]
         matches.sort(key=lambda item: item.metrics.start_epoch, reverse=True)
         return tuple(_day_route_trip_from_materialised(item) for item in matches)
-
-    def query_all_routes_simplified(
-        self,
-        *,
-        min_distance_km: float | None = _DEFAULT_MIN_DISTANCE_KM,
-        epsilon_m: float | None = _DEFAULT_EPSILON_METERS,
-        max_points_per_trip: int | None = _DEFAULT_MAX_POINTS_PER_TRIP,
-    ) -> tuple[AllRoutesTrip, ...]:
-        snapshot = self._load_snapshot()
-        threshold = _coerce_min_distance(min_distance_km)
-        epsilon = _coerce_epsilon(epsilon_m)
-        max_points = _coerce_max_points(max_points_per_trip)
-        results: list[AllRoutesTrip] = []
-        for materialised in snapshot.trips:
-            if materialised.metrics.distance_km < threshold:
-                continue
-            built = _build_simplified_trip(
-                materialised, epsilon_m=epsilon, max_points_per_trip=max_points
-            )
-            if built is not None:
-                results.append(built)
-        results.sort(key=lambda trip: trip.start_time, reverse=True)
-        return tuple(results)
 
     def playable_trips_for_date(self, date_str: str) -> tuple[PlayableTrip, ...]:
         cached = self._get_playable_trips_cache(date_str)
@@ -1511,96 +1465,6 @@ def _day_route_trip_from_materialised(materialised: _MaterialisedTrip) -> DayRou
     )
 
 
-def _build_simplified_trip(
-    materialised: _MaterialisedTrip,
-    *,
-    epsilon_m: float,
-    max_points_per_trip: int,
-) -> AllRoutesTrip | None:
-    if len(materialised.waypoints) < _MIN_RENDERABLE_POINTS:
-        return None
-    segments = _split_segments_by_gap(materialised.waypoints)
-    simplified_points = _simplify_segments(segments, epsilon_m)
-    if len(simplified_points) < _MIN_RENDERABLE_POINTS:
-        return None
-    capped = _cap_simplified_points(simplified_points, max_points_per_trip)
-    metrics = materialised.metrics
-    return AllRoutesTrip(
-        id=materialised.trip.id,
-        date=_iso_day(metrics.start_epoch),
-        start_time=epoch_to_iso(metrics.start_epoch),
-        end_time=epoch_to_iso(metrics.end_epoch),
-        start_lat=metrics.start_lat,
-        start_lon=metrics.start_lon,
-        end_lat=metrics.end_lat,
-        end_lon=metrics.end_lon,
-        distance_km=round(metrics.distance_km, 3),
-        duration_seconds=metrics.duration_seconds,
-        waypoints=capped,
-    )
-
-
-def _split_segments_by_gap(
-    waypoints: Sequence[AbsoluteWaypoint],
-) -> tuple[tuple[AbsoluteWaypoint, ...], ...]:
-    current: list[AbsoluteWaypoint] = [waypoints[0]]
-    segments: list[tuple[AbsoluteWaypoint, ...]] = []
-    for index in range(1, len(waypoints)):
-        previous = waypoints[index - 1]
-        point = waypoints[index]
-        if is_gap_between(previous, point):
-            segments.append(tuple(current))
-            current = [point]
-        else:
-            current.append(point)
-    segments.append(tuple(current))
-    return tuple(segments)
-
-
-def _simplify_segments(
-    segments: Sequence[Sequence[AbsoluteWaypoint]],
-    epsilon_m: float,
-) -> tuple[SimplifiedRoutePoint, ...]:
-    output: list[SimplifiedRoutePoint] = []
-    for index, segment in enumerate(segments):
-        simplified_segment = _simplify_segment(segment, epsilon_m)
-        if index < len(segments) - 1 and simplified_segment:
-            simplified_segment[-1] = replace(simplified_segment[-1], gap_after=True)
-        output.extend(simplified_segment)
-    return tuple(output)
-
-
-def _simplify_segment(
-    segment: Sequence[AbsoluteWaypoint], epsilon_m: float
-) -> list[SimplifiedRoutePoint]:
-    if len(segment) == 1:
-        wp = segment[0].waypoint
-        return [
-            SimplifiedRoutePoint(lat=wp.latitude_deg, lon=wp.longitude_deg, speed_mps=wp.speed_mps)
-        ]
-    indices = simplify_polyline_rdp(
-        [(entry.waypoint.latitude_deg, entry.waypoint.longitude_deg) for entry in segment],
-        epsilon_m,
-    )
-    return [
-        SimplifiedRoutePoint(
-            lat=segment[index].waypoint.latitude_deg,
-            lon=segment[index].waypoint.longitude_deg,
-            speed_mps=segment[index].waypoint.speed_mps,
-        )
-        for index in indices
-    ]
-
-
-def _cap_simplified_points(
-    points: tuple[SimplifiedRoutePoint, ...], max_points_per_trip: int
-) -> tuple[SimplifiedRoutePoint, ...]:
-    if len(points) <= max_points_per_trip:
-        return points
-    indices = cap_indices_uniform(list(range(len(points))), max_points_per_trip)
-    return tuple(points[index] for index in indices)
-
-
 def _trip_is_playable(trip: TripGroup, media_root: Path, file_cache: dict[str, bool]) -> bool:
     for clip in trip.clips:
         cached = file_cache.get(clip.relative_path)
@@ -1719,18 +1583,6 @@ def _coerce_min_distance(value: float | None) -> float:
     return value
 
 
-def _coerce_epsilon(value: float | None) -> float:
-    if value is None or value < 0:
-        return 0.0
-    return value
-
-
-def _coerce_max_points(value: int | None) -> int:
-    if value is None or value < _MIN_RENDERABLE_POINTS:
-        return _MIN_RENDERABLE_POINTS
-    return value
-
-
 def _cutoff_day_string(days: int) -> str:
     return (datetime.now(tz=UTC) - timedelta(days=days)).date().isoformat()
 
@@ -1752,7 +1604,6 @@ def _events_per_100km(event_count: int, distance_km: float) -> float:
 
 
 __all__ = (
-    "AllRoutesTrip",
     "ChartCount",
     "DayRouteTrip",
     "DayRow",
@@ -1768,7 +1619,6 @@ __all__ = (
     "PlayableTrip",
     "RouteWaypoint",
     "SeverityChartPoint",
-    "SimplifiedRoutePoint",
     "Stats",
     "TripRow",
     "TripTelemetryPoint",

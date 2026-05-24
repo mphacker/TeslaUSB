@@ -21,7 +21,6 @@ from flask import (
 )
 
 from teslausb_web.services.mapping_queries import (
-    AllRoutesTrip,
     ChartCount,
     DayPayload,
     DayRouteTrip,
@@ -58,9 +57,6 @@ _DEFAULT_EVENT_OVERVIEW_CAP: Final[int] = 5000
 _DEFAULT_DAY_MIN_DISTANCE_KM: Final[float] = 0.05
 _DAYS_LIMIT_DEFAULT: Final[int] = 60
 _DAYS_LIMIT_MAX: Final[int] = 365
-_DEFAULT_ALL_ROUTES_MAX_POINTS: Final[int] = 200
-_ALL_ROUTES_MAX_POINTS_CAP: Final[int] = 1000
-_MIN_ROUTE_POINT_COUNT: Final[int] = 2
 _FRONT_CLIP_SUFFIX: Final[str] = "-front.mp4"
 _EVENT_FOLDER_PART_COUNT: Final[int] = 3
 
@@ -141,13 +137,6 @@ def _coerce_non_negative_float(value: float | None, *, default: float) -> float:
     if value is None or value < 0:
         return default
     return value
-
-
-def _coerce_max_points(value: int | None) -> int:
-    resolved = (
-        _DEFAULT_ALL_ROUTES_MAX_POINTS if value is None or value < _MIN_ROUTE_POINT_COUNT else value
-    )
-    return min(resolved, _ALL_ROUTES_MAX_POINTS_CAP)
 
 
 def _safe_segment(segment: str, *, field_name: str) -> str:
@@ -242,30 +231,6 @@ def _serialize_day_payload(payload: DayPayload) -> dict[str, object]:
         "latest_date": payload.latest_date,
         "trips": [_serialize_day_route_trip(trip) for trip in payload.trips],
         "events": [_serialize_event(event) for event in payload.events],
-    }
-
-
-def _serialize_all_routes_trip(trip: AllRoutesTrip) -> dict[str, object]:
-    return {
-        "trip_id": trip.id,
-        "date": trip.date,
-        "start_time": trip.start_time,
-        "end_time": trip.end_time,
-        "start_lat": trip.start_lat,
-        "start_lon": trip.start_lon,
-        "end_lat": trip.end_lat,
-        "end_lon": trip.end_lon,
-        "distance_km": trip.distance_km,
-        "duration_seconds": trip.duration_seconds,
-        "waypoints": [
-            {
-                "lat": waypoint.lat,
-                "lon": waypoint.lon,
-                "speed_mps": waypoint.speed_mps,
-                "gap_after": waypoint.gap_after,
-            }
-            for waypoint in trip.waypoints
-        ],
     }
 
 
@@ -455,23 +420,21 @@ def _handle_query_error(exc: Exception) -> ResponseReturnValue:
 @mapping_bp.route("/")
 def map_view() -> ResponseReturnValue:
     requested_date = request.args.get("date", "").strip()
-    requested_mode = request.args.get("view", "day")
     # Server-side redirect to the latest day so the user lands directly on
     # rendered data instead of an empty map. Skipped when the URL already
-    # carries a date or when the page is opened in all-routes mode.
+    # carries a date.
     initial_date = requested_date
     latest_date: str | None = None
-    if requested_mode != "all":
-        try:
-            latest_date = _get_queries().query_latest_date()
-        except (MappingQueryError, RuntimeError) as exc:
-            logger.warning("latest-date lookup failed: %s", exc)
-            latest_date = None
-        if not requested_date and latest_date:
-            target = url_for("mapping.map_view", date=latest_date)
-            return redirect(target, code=HTTPStatus.FOUND)
-        if not initial_date and latest_date:
-            initial_date = latest_date
+    try:
+        latest_date = _get_queries().query_latest_date()
+    except (MappingQueryError, RuntimeError) as exc:
+        logger.warning("latest-date lookup failed: %s", exc)
+        latest_date = None
+    if not requested_date and latest_date:
+        target = url_for("mapping.map_view", date=latest_date)
+        return redirect(target, code=HTTPStatus.FOUND)
+    if not initial_date and latest_date:
+        initial_date = latest_date
     bootstrap = {
         "api": {
             "days": url_for("mapping.api_days"),
@@ -486,7 +449,6 @@ def map_view() -> ResponseReturnValue:
                 "0", "__TRIP_ID__"
             ),
             "events": url_for("mapping.api_events"),
-            "all_routes": url_for("mapping.api_all_routes"),
             "stats": url_for("mapping.api_stats"),
             "driving_stats": url_for("mapping.api_driving_stats"),
             "event_charts": url_for("mapping.api_event_charts"),
@@ -508,7 +470,6 @@ def map_view() -> ResponseReturnValue:
         "view": {
             "date": initial_date,
             "latest_date": latest_date or "",
-            "mode": requested_mode,
             "video_stream_template": "/videos/stream/__PATH__",
         },
     }
@@ -684,23 +645,6 @@ def api_trips_playable() -> ResponseReturnValue:
     except (MappingQueryError, RuntimeError) as exc:
         return _handle_query_error(exc)
     return jsonify({"date": date, "trips": {str(trip.id): trip.is_playable for trip in trips}})
-
-
-@mapping_bp.route("/api/all-routes")
-def api_all_routes() -> ResponseReturnValue:
-    try:
-        trips = _get_queries().query_all_routes_simplified(
-            min_distance_km=_coerce_non_negative_float(
-                request.args.get("min_distance", _DEFAULT_DAY_MIN_DISTANCE_KM, type=float),
-                default=_DEFAULT_DAY_MIN_DISTANCE_KM,
-            ),
-            max_points_per_trip=_coerce_max_points(
-                request.args.get("max_points", _DEFAULT_ALL_ROUTES_MAX_POINTS, type=int)
-            ),
-        )
-    except (MappingQueryError, RuntimeError) as exc:
-        return _handle_query_error(exc)
-    return jsonify({"trips": [_serialize_all_routes_trip(trip) for trip in trips]})
 
 
 @mapping_bp.route("/api/stats")

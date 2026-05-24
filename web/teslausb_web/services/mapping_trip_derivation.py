@@ -148,6 +148,27 @@ def load_clips(
     return tuple(_clip_from_row(row) for row in rows)
 
 
+def load_clips_for_trip(
+    connection: sqlite3.Connection,
+    trip_id: int,
+) -> tuple[WorkerClip, ...]:
+    """Load only the clips belonging to one trip (via `clip_trip_map`).
+
+    Uses the `clip_trip_map_by_trip` index — O(N_trip), not O(N_total).
+    Returns clips in trip-chronological order.
+    """
+    rows = connection.execute(
+        "SELECT c.id, c.relative_path, c.bucket, c.clip_started_utc, "
+        "       c.indexed_at_utc, c.gps_waypoint_count "
+        "  FROM clips c "
+        "  JOIN clip_trip_map m ON m.clip_id = c.id "
+        " WHERE m.trip_id = ? "
+        " ORDER BY c.clip_started_utc ASC, c.id ASC",
+        (trip_id,),
+    ).fetchall()
+    return tuple(_clip_from_row(row) for row in rows)
+
+
 def load_sentry_clips(connection: sqlite3.Connection) -> tuple[WorkerClip, ...]:
     """Load every sentry-bucket clip that has no GPS waypoints."""
     rows = connection.execute(

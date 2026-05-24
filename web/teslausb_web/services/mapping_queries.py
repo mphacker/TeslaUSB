@@ -40,6 +40,7 @@ from teslausb_web.services.mapping_trip_derivation import (
     haversine_km,
     is_gap_between,
     load_clips,
+    load_clips_for_trip,
     load_sentry_clips,
     load_waypoints_by_clip,
     simplify_polyline_rdp,
@@ -359,19 +360,33 @@ class MappingQueries:
         return tuple(ordered[skip : skip + cap])
 
     def query_trip_route(self, trip_id: int) -> tuple[RouteWaypoint, ...]:
-        snapshot = self._load_snapshot()
-        materialised = _find_trip(snapshot.trips, trip_id)
-        if materialised is None:
+        # Direct per-trip SQL path: snapshot rebuilds load ~95K waypoints
+        # across every trip; a single-trip route page only ever needs the
+        # waypoints belonging to ONE trip. Going via the snapshot turned
+        # this endpoint into 10-80 s under load. Direct query is O(N_trip)
+        # and uses the (clip_trip_map_by_trip, waypoints_by_clip) indexes.
+        entries = self._load_trip_waypoints_direct(trip_id)
+        if entries is None:
+            # Materialised tables not present (older DB / pre-bootstrap);
+            # fall back to the snapshot path.
+            snapshot = self._load_snapshot()
+            materialised = _find_trip(snapshot.trips, trip_id)
+            if materialised is None:
+                return ()
+            entries = materialised.waypoints
+        if not entries:
             return ()
-        return _stamp_gap_waypoints(
-            tuple(_route_waypoint_from_entry(entry) for entry in materialised.waypoints)
-        )
+        return _stamp_gap_waypoints(tuple(_route_waypoint_from_entry(entry) for entry in entries))
 
     def query_trip_telemetry(self, trip_id: int) -> tuple[TripTelemetryPoint, ...]:
-        snapshot = self._load_snapshot()
-        materialised = _find_trip(snapshot.trips, trip_id)
-        if materialised is None:
-            return ()
+        # Direct per-trip SQL path; see query_trip_route for rationale.
+        entries = self._load_trip_waypoints_direct(trip_id)
+        if entries is None:
+            snapshot = self._load_snapshot()
+            materialised = _find_trip(snapshot.trips, trip_id)
+            if materialised is None:
+                return ()
+            entries = materialised.waypoints
         return tuple(
             TripTelemetryPoint(
                 waypoint_id=entry.waypoint.id,
@@ -380,8 +395,50 @@ class MappingQueries:
                 acceleration_z=entry.waypoint.acceleration_z,
                 autopilot_state=entry.waypoint.autopilot_state,
             )
-            for entry in materialised.waypoints
+            for entry in entries
         )
+
+    def _load_trip_waypoints_direct(self, trip_id: int) -> tuple[AbsoluteWaypoint, ...] | None:
+        """Return one trip's waypoints in absolute-time order via direct SQL.
+
+        Bypasses the global snapshot. Loads only the clips for the requested
+        trip (`clip_trip_map_by_trip` index) and only those clips' waypoints
+        (`waypoints_by_clip` index).
+
+        ``trip_id`` follows the public-API contract preserved by
+        ``_snapshot_from_materialised``: it is the *first clip's id* of the
+        trip, not the materialised ``trips.id``. We resolve it via
+        ``clip_trip_map`` (clip_id -> trip_id) before loading the trip's
+        clips.
+
+        Returns ``None`` when the `clip_trip_map` table is missing (older
+        DB schema or pre-bootstrap) — the caller falls back to the snapshot
+        path so behaviour is preserved. Returns ``()`` when the table exists
+        but the api-id resolves to no clips (genuinely unknown trip).
+        """
+        try:
+            with self.open_db() as connection:
+                row = connection.execute(
+                    "SELECT trip_id FROM clip_trip_map WHERE clip_id = ?",
+                    (trip_id,),
+                ).fetchone()
+                if row is None:
+                    return ()
+                real_trip_id = int(row[0])
+                clips = load_clips_for_trip(connection, real_trip_id)
+                if not clips:
+                    return ()
+                waypoints_by_clip = load_waypoints_by_clip(connection, [clip.id for clip in clips])
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc).lower():
+                return None
+            raise MappingQueryError(f"Failed to load trip waypoints: {exc}") from exc
+        except sqlite3.Error as exc:
+            raise MappingQueryError(f"Failed to load trip waypoints: {exc}") from exc
+        # Preserve the legacy TripGroup.id == first_clip.id contract so that
+        # downstream gap-stamping and event-matching keys are unchanged.
+        trip = TripGroup(id=clips[0].id, clips=clips)
+        return flatten_trip_waypoints(trip, waypoints_by_clip)
 
     def waypoints_for_video(self, video_path: str) -> tuple[int | None, tuple[RouteWaypoint, ...]]:
         if not video_path:

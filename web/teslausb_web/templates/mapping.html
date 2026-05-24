@@ -1811,10 +1811,16 @@ function renderDayCard() {
     const nextBtn = document.getElementById('dayNext');
 
     if (!day) {
-        dateEl.textContent = currentDate || 'No data';
+        dateEl.textContent = currentDate ? formatDayLabel(currentDate) : 'No data';
         statsEl.textContent = '\u2014';
-        if (prevBtn) prevBtn.disabled = true;
-        if (nextBtn) nextBtn.disabled = true;
+        // currentDate isn't in allDays (e.g. user navigated to a day
+        // with no indexed trips). Still allow nav by jumping to the
+        // nearest available day in either direction. allDays is sorted
+        // newest-first, so the FIRST entry strictly older than
+        // currentDate is the prev target, and the LAST entry strictly
+        // newer than currentDate is the next target.
+        if (prevBtn) prevBtn.disabled = !(currentDate && allDays.some(d => d.date < currentDate));
+        if (nextBtn) nextBtn.disabled = !(currentDate && allDays.some(d => d.date > currentDate));
         return;
     }
 
@@ -1825,6 +1831,9 @@ function renderDayCard() {
         const dist = (day.total_distance_km * 0.621371).toFixed(1);
         parts.push(`${day.trip_count} trip${day.trip_count === 1 ? '' : 's'}`);
         parts.push(`${dist} mi`);
+    }
+    if (day.video_count > 0) {
+        parts.push(`${day.video_count} video${day.video_count === 1 ? '' : 's'}`);
     }
     if (day.event_count > 0) {
         parts.push(`${day.event_count} event${day.event_count === 1 ? '' : 's'}`);
@@ -1890,7 +1899,22 @@ function cycleDay(direction) {
 
     const idx = allDays.findIndex(d => d.date === currentDate);
     if (idx < 0) {
-        loadDay(allDays[0].date);
+        // currentDate isn't in allDays (date with no indexed trips).
+        // allDays is sorted newest-first. Jump to the nearest available
+        // day in the requested direction so prev/next chevrons behave
+        // intuitively even when the user is parked on an empty day.
+        if (direction < 0) {
+            // older: first entry strictly older than currentDate.
+            const target = allDays.find(d => d.date < currentDate);
+            if (target) loadDay(target.date);
+        } else {
+            // newer: LAST entry strictly newer than currentDate.
+            let target = null;
+            for (const d of allDays) {
+                if (d.date > currentDate) target = d; else break;
+            }
+            if (target) loadDay(target.date);
+        }
         return;
     }
     const newIdx = idx - direction;  // -1 = older = +1 idx, etc.

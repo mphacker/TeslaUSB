@@ -201,6 +201,7 @@ def _serialize_day(day: DayRow) -> dict[str, object]:
     return {
         "date": day.date,
         "trip_count": day.trip_count,
+        "video_count": day.video_count,
         "total_distance_km": day.total_distance_km,
         "event_count": day.event_count,
         "sentry_count": day.sentry_count,

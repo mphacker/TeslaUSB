@@ -84,3 +84,7 @@ rust/teslafat-out
 
 
 rust/target-aarch64-out/
+
+node_modules/
+package.json
+package-lock.json

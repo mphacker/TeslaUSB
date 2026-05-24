@@ -149,6 +149,7 @@ class EventRow:
 class DayRow:
     date: str
     trip_count: int
+    video_count: int
     total_distance_km: float
     event_count: int
     sentry_count: int
@@ -1013,6 +1014,7 @@ class _ClipCounts:
 @dataclass(slots=True)
 class _DayAccumulator:
     trip_count: int = 0
+    video_count: int = 0
     total_distance_km: float = 0.0
     event_count: int = 0
     sentry_count: int = 0
@@ -1021,6 +1023,7 @@ class _DayAccumulator:
 
     def observe_trip(self, materialised: _MaterialisedTrip) -> None:
         self.trip_count += 1
+        self.video_count += len(materialised.trip.clips)
         self.total_distance_km += materialised.metrics.distance_km
         start_iso = epoch_to_iso(materialised.metrics.start_epoch)
         end_iso = epoch_to_iso(materialised.metrics.end_epoch)
@@ -1038,6 +1041,7 @@ class _DayAccumulator:
         return DayRow(
             date=day,
             trip_count=self.trip_count,
+            video_count=self.video_count,
             total_distance_km=round(self.total_distance_km, 2),
             event_count=self.event_count,
             sentry_count=self.sentry_count,

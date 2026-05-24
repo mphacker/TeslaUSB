@@ -75,6 +75,7 @@ use teslausb_core::fs::geometry::{Geometry, SECTOR_SIZE_BYTES};
 
 use super::dir_tree::{DirTreeError, DirTreeWriter};
 use super::dirty_map::DirtyByteMap;
+use super::pending_spill::PendingSpill;
 use crate::retention::DeletedSet;
 
 /// Number of FAT mirrors the FAT32 geometry advertises. Pulled
@@ -184,14 +185,6 @@ struct PendingFile {
     parents: HashSet<u32>,
 }
 
-/// One stashed data-cluster write that arrived before the
-/// cluster's owning file was known.
-#[derive(Debug)]
-struct PendingDataChunk {
-    byte_in_cluster: usize,
-    bytes: Vec<u8>,
-}
-
 /// FAT32 write-side state machine. See module-level docs.
 #[derive(Debug)]
 pub struct Fat32WriteState {
@@ -218,8 +211,10 @@ pub struct Fat32WriteState {
     /// but whose FAT chain hasn't fully resolved yet.
     pending_files: HashMap<u32, PendingFile>,
     /// `cluster_number -> queued data chunks` for writes that
-    /// arrived before the cluster's owner was known.
-    pending_data: HashMap<u32, Vec<PendingDataChunk>>,
+    /// arrived before the cluster's owner was known. Bounded FIFO
+    /// spill buffer; see [`super::pending_spill`] for the eviction
+    /// policy and the 2026-05-24 OOM incident that motivated it.
+    pending_data: PendingSpill,
     /// Relative paths that have ever been written to via
     /// `dir_tree.apply_chunk` and have not yet been finalized.
     /// Flush iterates this set.
@@ -337,7 +332,7 @@ impl Fat32WriteState {
             directories: HashMap::new(),
             cluster_to_directory: HashMap::new(),
             pending_files: HashMap::new(),
-            pending_data: HashMap::new(),
+            pending_data: PendingSpill::new(),
             in_flight_files: HashSet::new(),
             pre_existing_files,
             recorded_file_sizes,
@@ -475,13 +470,11 @@ impl Fat32WriteState {
             return Ok(());
         }
         // Unknown cluster — stash for later reconciliation.
+        // See `super::pending_spill::PendingSpill` — bounded FIFO
+        // eviction guards against unbounded growth when a cluster's
+        // owning file/FAT chain never arrives.
         self.pending_data
-            .entry(cluster_number)
-            .or_default()
-            .push(PendingDataChunk {
-                byte_in_cluster,
-                bytes: bytes.to_vec(),
-            });
+            .push(cluster_number, byte_in_cluster, bytes);
         Ok(())
     }
 
@@ -928,7 +921,7 @@ impl Fat32WriteState {
         &mut self,
         cluster_number: u32,
     ) -> Result<(), Fat32WriteError> {
-        let Some(chunks) = self.pending_data.remove(&cluster_number) else {
+        let Some(chunks) = self.pending_data.take(cluster_number) else {
             return Ok(());
         };
         for chunk in chunks {
@@ -1030,6 +1023,20 @@ impl Fat32WriteState {
             }
             // After finalize the file IS pre-existing.
             self.pre_existing_files.insert(path);
+        }
+        // Spill-buffer telemetry — surfaces the unresolved-cluster
+        // pattern that drove the 2026-05-24 OOM incident before it
+        // can grow back to that scale. `pending_data` is bounded to
+        // 16 MiB by `super::pending_spill::PendingSpill`; this log
+        // line lets the operator see when the bound is approached.
+        if !self.pending_data.is_empty() || self.pending_data.evicted_clusters_total() > 0 {
+            tracing::debug!(
+                pending_bytes = self.pending_data.total_bytes(),
+                evicted_clusters_total = self.pending_data.evicted_clusters_total(),
+                evicted_chunks_total = self.pending_data.evicted_chunks_total(),
+                evicted_bytes_total = self.pending_data.evicted_bytes_total(),
+                "fat32 pending-data spill state at flush",
+            );
         }
         Ok(())
     }
@@ -1379,7 +1386,7 @@ mod tests {
         // Write into cluster 5 — not known to any file.
         let offset = cluster_to_volume_byte(&g, 5);
         s.apply_write(offset, &[0xAB; 16]).unwrap();
-        assert_eq!(s.pending_data.get(&5).map(|v| v.len()), Some(1));
+        assert!(s.pending_data.contains(5));
         assert_eq!(s.in_flight_file_count(), 0);
     }
 
@@ -1436,13 +1443,13 @@ mod tests {
         // 1) Data arrives first into cluster 4 — stashed.
         let data_byte = cluster_to_volume_byte(&g, 4);
         s.apply_write(data_byte, b"abcdefgh").unwrap();
-        assert!(s.pending_data.contains_key(&4));
+        assert!(s.pending_data.contains(4));
 
         // 2) FAT entry for cluster 4 -> EOC.
         write_fat_entry(&mut s, 4, 0x0FFF_FFFF);
         // Still no dir entry — chain head exists in FAT but
         // unowned. Pending data NOT yet replayed.
-        assert!(s.pending_data.contains_key(&4));
+        assert!(s.pending_data.contains(4));
 
         // 3) Dir entry for "out.bin" -> cluster 4, size = 8.
         let dir_entry = build_file_dir_entry("out.bin", 4, 8);
@@ -1451,7 +1458,7 @@ mod tests {
 
         // Now resolved; pending data replayed; .partial contains
         // the bytes.
-        assert!(!s.pending_data.contains_key(&4));
+        assert!(!s.pending_data.contains(4));
         s.flush().unwrap();
         let content = fs::read(tmp.path().join("out.bin")).unwrap();
         assert_eq!(content, b"abcdefgh");

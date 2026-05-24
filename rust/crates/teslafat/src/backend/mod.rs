@@ -28,6 +28,11 @@
 //!   `PartialEntrySet` between dir-cluster boundaries and
 //!   short-circuiting the FAT walk for the common
 //!   `NoFatChain == true` extents.
+//! * [`pending_spill`] — `PendingSpill`: shared bounded-FIFO spill
+//!   buffer for data-cluster writes that arrive before their
+//!   owning file or FAT chain is known. Used by both `fat32_write`
+//!   and `exfat_write` to prevent the unbounded growth that
+//!   OOM-killed `teslafat` on the Pi Zero 2 W on 2026-05-24.
 //!
 //! [`BlockBackend`]: teslausb_core::backend::BlockBackend
 
@@ -35,6 +40,7 @@ pub mod dir_tree;
 pub mod dirty_map;
 pub mod exfat_write;
 pub mod fat32_write;
+pub(crate) mod pending_spill;
 pub mod synth;
 pub mod zero;
 

@@ -51,6 +51,7 @@ use teslausb_core::fs::geometry::{Geometry, SECTOR_SIZE_BYTES};
 
 use super::dir_tree::{DirTreeError, DirTreeWriter};
 use super::dirty_map::DirtyByteMap;
+use super::pending_spill::PendingSpill;
 use crate::retention::DeletedSet;
 
 /// `exFAT` FAT entry width (spec §4.1).
@@ -154,14 +155,6 @@ struct PendingFile {
     parents: HashSet<u32>,
 }
 
-/// One stashed data-cluster write that arrived before the
-/// cluster's owning file was known.
-#[derive(Debug)]
-struct PendingDataChunk {
-    byte_in_cluster: usize,
-    bytes: Vec<u8>,
-}
-
 /// `exFAT` write-side state machine. See module-level docs.
 #[derive(Debug)]
 pub struct ExfatWriteState {
@@ -184,8 +177,10 @@ pub struct ExfatWriteState {
     /// but whose FAT chain hasn't fully resolved yet.
     pending_files: HashMap<u32, PendingFile>,
     /// `cluster_number -> queued data chunks` for writes that
-    /// arrived before the cluster's owner was known.
-    pending_data: HashMap<u32, Vec<PendingDataChunk>>,
+    /// arrived before the cluster's owner was known. Bounded FIFO
+    /// spill buffer; see [`super::pending_spill`] for the eviction
+    /// policy and the 2026-05-24 OOM incident that motivated it.
+    pending_data: PendingSpill,
     /// Relative paths currently in `.partial` waiting on flush.
     in_flight_files: HashSet<PathBuf>,
     /// Relative paths the caller seeded as already-existing on
@@ -374,7 +369,7 @@ impl ExfatWriteState {
             directories: HashMap::new(),
             cluster_to_directory: HashMap::new(),
             pending_files: HashMap::new(),
-            pending_data: HashMap::new(),
+            pending_data: PendingSpill::new(),
             in_flight_files: HashSet::new(),
             pre_existing_files,
             recorded_file_sizes,
@@ -531,13 +526,11 @@ impl ExfatWriteState {
             return Ok(());
         }
         // Unknown cluster — stash for later reconciliation.
+        // See `super::pending_spill::PendingSpill` — bounded FIFO
+        // eviction guards against unbounded growth when a cluster's
+        // owning file/FAT chain never arrives.
         self.pending_data
-            .entry(cluster_number)
-            .or_default()
-            .push(PendingDataChunk {
-                byte_in_cluster,
-                bytes: bytes.to_vec(),
-            });
+            .push(cluster_number, byte_in_cluster, bytes);
         Ok(())
     }
 
@@ -934,7 +927,7 @@ impl ExfatWriteState {
         &mut self,
         cluster_number: u32,
     ) -> Result<(), ExfatWriteError> {
-        let Some(chunks) = self.pending_data.remove(&cluster_number) else {
+        let Some(chunks) = self.pending_data.take(cluster_number) else {
             return Ok(());
         };
         for chunk in chunks {
@@ -1028,6 +1021,20 @@ impl ExfatWriteState {
                 }
             }
             self.pre_existing_files.insert(path);
+        }
+        // Spill-buffer telemetry — surfaces the unresolved-cluster
+        // pattern that drove the 2026-05-24 OOM incident before it
+        // can grow back to that scale. `pending_data` is bounded to
+        // 16 MiB by `super::pending_spill::PendingSpill`; this log
+        // line lets the operator see when the bound is approached.
+        if !self.pending_data.is_empty() || self.pending_data.evicted_clusters_total() > 0 {
+            tracing::debug!(
+                pending_bytes = self.pending_data.total_bytes(),
+                evicted_clusters_total = self.pending_data.evicted_clusters_total(),
+                evicted_chunks_total = self.pending_data.evicted_chunks_total(),
+                evicted_bytes_total = self.pending_data.evicted_bytes_total(),
+                "exfat pending-data spill state at flush",
+            );
         }
         Ok(())
     }
@@ -2080,7 +2087,7 @@ mod tests {
         // pending_data instead.
         write_cluster_data(&mut s, 9, b"payload");
         assert!(
-            s.pending_data.contains_key(&9),
+            s.pending_data.contains(9),
             "data write past bitmap end must fall through to pending_data, not be swallowed"
         );
     }

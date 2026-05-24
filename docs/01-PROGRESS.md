@@ -2907,3 +2907,52 @@ cleanup executor with tier-aware (RecentClips no-GPS -> with-GPS
 
 AC.9 (charter-review) and AC.H (hardware test) are tracked in
 the AC todo set and will be run as separate gated increments.
+
+
+---
+
+## Phase P — Bounded pending-data spill (ADR-0020)
+
+Trigger: 2026-05-24 outage on `cybertruckusb.local`. `teslafat@0`
+OOM-killed twice (RSS 346 MB then 357 MB on the 512 MB Pi Zero 2 W).
+USB-gadget LUN file kept `/dev/nbd0` open, so `nbd-attach@0` could
+not reattach; after 10 retries systemd refused, and `usb-gadget.service`
+failed in turn. Tesla lost USB visibility and stopped recording.
+
+Root cause: unbounded `HashMap<u32, Vec<PendingDataChunk>>` named
+`pending_data` in both `backend/exfat_write.rs` and
+`backend/fat32_write.rs`. Each write to a not-yet-resolved cluster
+heap-copies its payload into the map; orphan clusters (data without
+a directory entry / FAT chain ever arriving) leak forever.
+
+| Inc | Deliverable | Status | Review | Test |
+|---|---|---|---|---|
+| P.1 | Shared `backend/pending_spill::PendingSpill` module (FIFO, 16 MiB cap, 9 unit tests including 2026-05-24 regression test) | ✅ | ⏳ | ✅ |
+| P.2 | `exfat_write.rs` migrated to `PendingSpill`; removed duplicated `PendingDataChunk` struct | ✅ | ⏳ | ✅ |
+| P.3 | `fat32_write.rs` migrated to `PendingSpill`; removed duplicated `PendingDataChunk` struct | ✅ | ⏳ | ✅ |
+| P.4 | Spill state `tracing::debug!` at end of `flush()`; eviction `warn!` with cluster + lifetime counters | ✅ | ⏳ | ✅ |
+| P.5 | ADR-0020 documenting the bounded-eviction trade-off and rejected alternatives | ✅ | ⏳ | n/a |
+| P.6 | Live recovery on `cybertruckusb.local` (cleared LUN file → `nbd-client -d /dev/nbd0` → re-bind → write UDC) | ✅ | n/a | ✅ |
+| P.7 | Cross-build aarch64 `teslafat` binary and deploy with dead-man arm | ⏳ | ⏳ | ⏳ |
+| P.8 | Monitor RSS + eviction counter over 30+ min Tesla driving | ⏳ | ⏳ | ⏳ |
+| P.9 | Cascading-recovery gap: `nbd-attach@.service` `ExecStopPost=` to clear LUN file + release nbd binding so future teslafat crashes self-heal | ⏳ | ⏳ | ⏳ |
+| P.10 | Defense-in-depth: `MemoryHigh=240M` + `OOMScoreAdjust=300` on `teslafat@.service` | ⏳ | ⏳ | ⏳ |
+| P.11 | `charter-review` on full Phase P diff | ⏳ | ⏳ | n/a |
+
+Validation (local, `main` workstation):
+
+- `cargo test --workspace` — all tests pass (238 teslafat-lib +
+  workspace-wide passes; `regression_2026_05_24_unbounded_growth_does_not_recur`
+  among them).
+- `cargo clippy --workspace --all-targets -- -D warnings` — clean.
+
+Pending hardware validation (P.7-P.10): operator must physically
+power-cycle the Pi (it became unreachable under swap thrashing during
+the incident).
+
+Behaviour change (called out per charter): under sustained pressure,
+the spill *drops* the oldest cluster's pending bytes rather than
+letting the map grow unbounded. If the directory entry for an evicted
+cluster does eventually arrive, the resulting file will be truncated
+for the evicted ranges. Trade-off justified in ADR-0020 §"Why drop,
+not block".

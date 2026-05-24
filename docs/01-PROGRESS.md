@@ -2956,3 +2956,36 @@ letting the map grow unbounded. If the directory entry for an evicted
 cluster does eventually arrive, the resulting file will be truncated
 for the evicted ranges. Trade-off justified in ADR-0020 §"Why drop,
 not block".
+
+
+### Phase P live deploy findings (2026-05-24 13:13 UTC)
+
+Binary `77e261dd…` deployed to `/usr/local/bin/teslafat` on
+`cybertruckusb.local`. teslafat@0 RSS held at **23 MB** (vs. 350+ MB
+pre-fix) — OOM cascade is **prevented**. UDC bound, all services
+active, USB gadget stable.
+
+However, post-deploy monitoring revealed a **second-order issue**:
+the spill is evicting at a steady **~1400 clusters/minute** (~180 MB/min
+of host writes dropped). The eviction span (cluster 6 → 628000+ in the
+first minute) means Tesla writes are landing on data clusters whose
+owning dir entry never arrives within the 16 MiB window — Tesla's
+sentry-mode write pattern is *data-bursts-first, dir-entry-last*, with
+clip sizes (1.7 GB) far exceeding any in-memory cap that fits on a
+464 MB Pi.
+
+**This means**: the immediate OOM emergency is resolved, but
+**eviction-based partial video corruption is now the failure mode**
+instead of OOM-cascade total recording loss. Per ADR-0020, the
+trade-off is intentional (partial-loss is preferable to total-loss
+when the alternative is the gadget dropping), but it is **not** the
+"easily keep up with archiving the videos" bar the operator set on
+2026-05-23.
+
+| Inc | Deliverable | Status |
+|---|---|---|
+| Q.1 | Design: spill pending data to a `/var/lib/teslafat/spill/` tmpfile per cluster instead of memory, so cap can be GB-sized (Pi has ~270 GB SD) | ⏳ |
+| Q.2 | Alternative: pre-load cluster_map from existing exFAT volume on startup so already-allocated clusters resolve immediately (closes cold-start window) | ⏳ |
+| Q.3 | Alternative: invert pending-data flow — write through to backing volume at the cluster's natural offset, then patch on dir-entry arrival | ⏳ |
+| Q.4 | Spike + pick winner; implement; deploy | ⏳ |
+| Q.5 | P.9 / P.10 follow-ups from Phase P still apply (`nbd-attach@.service` `ExecStopPost` cleanup, `MemoryHigh` defense-in-depth) | ⏳ |

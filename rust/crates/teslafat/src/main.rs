@@ -117,6 +117,7 @@ fn run(args: &Args) -> Result<()> {
 mod unix_serve {
     use std::fs;
     use std::path::Path;
+    use std::time::{Duration, Instant};
 
     use anyhow::{Context, Result};
     use tokio::net::UnixListener;
@@ -127,6 +128,7 @@ mod unix_serve {
     use teslafat::backend::SynthBackend;
     use teslafat::config::Config;
     use teslafat::server;
+    use teslausb_core::backend::BlockBackend;
 
     /// Build the runtime, bind the listener, and run the accept
     /// loop until `SIGTERM` or `SIGINT`. Returns `Ok(())` on a
@@ -152,6 +154,23 @@ mod unix_serve {
                 file_count = backend.file_count(),
                 "SynthBackend ready"
             );
+            // Warm the backend's read path BEFORE telling systemd we
+            // are ready. `SynthBackend::open` completes when the
+            // backing tree is parsed and the FAT can answer reads,
+            // but the first reads after open are cold: page cache is
+            // empty, allocator hasn't sized its arenas, and the
+            // exFAT directory walker hasn't materialised the per-
+            // cluster maps it lazily caches. On a Pi Zero 2 W with
+            // ~2000 files those first reads can take 50–200 ms each,
+            // which is too slow for the Tesla USB host: it issues
+            // SCSI READs back-to-back during enumeration, sees them
+            // time out, and falls back to a read-only mount until
+            // the next replug. Sending READY=1 only after the
+            // warmup means `nbd-attach@N` → `usb-gadget` → UDC bind
+            // are all held back by systemd ordering until the
+            // backend can actually answer fast — closing the
+            // boot-race window the operator saw on 2026-05-24.
+            warm_backend(&backend).await;
             // Tell systemd we are ready. Under `Type=notify` this is
             // what gates `After=teslafat@N.service` consumers (e.g.
             // `nbd-attach@N`) — they will not start until this
@@ -222,6 +241,84 @@ mod unix_serve {
         match sock.send_to(b"READY=1\n", Path::new(&raw)) {
             Ok(_) => info!("sd_notify: READY=1 sent"),
             Err(e) => warn!(error = ?e, "sd_notify: send failed"),
+        }
+    }
+
+    /// Regions of the synthesised volume that a host SCSI/USB
+    /// initiator always touches first during enumeration. The
+    /// values are chosen to cover both FAT32 and exFAT layouts:
+    /// boot sector at offset 0, reserved/FSInfo around 512 B, the
+    /// FAT region (which the synth backend lazily builds in 64 KiB
+    /// windows), and the root directory cluster (~1 MiB in for our
+    /// typical volume geometry). Reading them up front populates
+    /// the synth backend's internal caches before we tell systemd
+    /// the daemon is ready.
+    const WARMUP_REGIONS: &[(u64, usize)] = &[
+        (0, 4096),
+        (0x1_0000, 65_536),
+        (0x10_0000, 65_536),
+        (0x20_0000, 65_536),
+    ];
+
+    /// Number of warm-up passes. Two passes is enough to populate
+    /// the cluster-map cache and exercise both the cold and warm
+    /// code paths of the read dispatcher. The third pass is a
+    /// safety margin and its duration is what we log + use to
+    /// decide whether to warn.
+    const WARMUP_PASSES: usize = 3;
+
+    /// p99 read-latency budget for the final warm-up pass. If a
+    /// pass exceeds this we log a `WARN` (so it shows up in
+    /// `journalctl -p err` triage) but still proceed to signal
+    /// READY=1 — being slow to answer reads is better than never
+    /// answering them, and blocking systemd forever would leave
+    /// the user with no USB at all.
+    const WARMUP_PASS_BUDGET: Duration = Duration::from_millis(250);
+
+    /// Exercise [`BlockBackend::read`] over a small set of regions
+    /// the host will touch during USB enumeration. Logs each pass
+    /// duration so a regression in cold-read latency is visible in
+    /// the journal; never aborts the daemon — a slow backend that
+    /// can still answer is strictly better than no LUN.
+    async fn warm_backend(backend: &SynthBackend) {
+        let mut buf = vec![0_u8; 65_536];
+        let mut last_pass = Duration::ZERO;
+        for pass in 1..=WARMUP_PASSES {
+            let pass_start = Instant::now();
+            for &(off, len) in WARMUP_REGIONS {
+                let take = len.min(buf.len());
+                let slice = &mut buf[..take];
+                if let Err(e) = backend.read(off, slice).await {
+                    warn!(
+                        error = ?e,
+                        offset = off,
+                        len = take,
+                        pass,
+                        "warmup read failed; continuing"
+                    );
+                }
+            }
+            last_pass = pass_start.elapsed();
+            info!(
+                pass,
+                duration_ms = last_pass.as_millis() as u64,
+                regions = WARMUP_REGIONS.len(),
+                "SynthBackend warmup pass"
+            );
+        }
+        if last_pass > WARMUP_PASS_BUDGET {
+            warn!(
+                duration_ms = last_pass.as_millis() as u64,
+                budget_ms = WARMUP_PASS_BUDGET.as_millis() as u64,
+                "SynthBackend warmup final pass exceeded budget; \
+                 USB host may see read timeouts during enumeration"
+            );
+        } else {
+            info!(
+                duration_ms = last_pass.as_millis() as u64,
+                budget_ms = WARMUP_PASS_BUDGET.as_millis() as u64,
+                "SynthBackend warmup complete, within budget"
+            );
         }
     }
 

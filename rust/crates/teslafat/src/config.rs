@@ -92,6 +92,25 @@ pub struct Config {
     /// NBD listen-socket configuration (Phase 1.6+).
     #[serde(default)]
     pub nbd: NbdConfig,
+
+    /// Directory under which the write path stores pending data
+    /// chunks that arrived before their owning file's directory
+    /// entry. Each cluster's chunks live in one append-only file
+    /// at `<spill_dir>/<cluster:08x>.bin`. The directory is
+    /// truncated on daemon start (in-memory index naming the
+    /// files is gone after a crash, so the stale files are
+    /// unreachable).
+    ///
+    /// `None` falls back to the legacy in-memory spill (16 MiB
+    /// cap), which is unsuitable for production — Tesla writes
+    /// pre-dir-entry bursts of multiple GB per clip that cannot
+    /// fit in any in-memory cap on a 464 MB Pi. See ADR-0021.
+    ///
+    /// Default `None` for backwards compatibility with existing
+    /// test configs; setup.sh writes an explicit path in
+    /// production.
+    #[serde(default)]
+    pub spill_dir: Option<PathBuf>,
 }
 
 /// NBD daemon listen-socket configuration.
@@ -251,6 +270,7 @@ volume_size_gb = 64
             fs_type: FsType::default(),
             retention: RetentionConfig::default(),
             nbd: NbdConfig::default(),
+            spill_dir: None,
         }
     }
 

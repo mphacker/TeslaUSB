@@ -2989,3 +2989,45 @@ when the alternative is the gadget dropping), but it is **not** the
 | Q.3 | Alternative: invert pending-data flow — write through to backing volume at the cluster's natural offset, then patch on dir-entry arrival | ⏳ |
 | Q.4 | Spike + pick winner; implement; deploy | ⏳ |
 | Q.5 | P.9 / P.10 follow-ups from Phase P still apply (`nbd-attach@.service` `ExecStopPost` cleanup, `MemoryHigh` defense-in-depth) | ⏳ |
+
+
+## Phase Q — Disk-backed pending-data spill (2026-05-24, shipped)
+
+**Mandate (operator, 2026-05-24):** *"We MUST not lose data and the
+device must keep writing."* Phase P's 16 MiB in-memory cap stopped
+the OOM cascade but caused ~1400 cluster evictions per minute under
+Tesla load (≈180 MB/min silent partial video loss). Phase Q replaces
+the bounded in-memory store with a disk-backed per-cluster spill so
+the cap can be 4 GiB instead of 16 MiB, fully on the SD card.
+
+Design captured in `docs/adr/0021-disk-backed-pending-spill.md`
+(supersedes ADR-0020).
+
+| Inc | Deliverable | Status |
+|---|---|---|
+| Q.1 | Rewrite `PendingSpill` with `Storage::Memory`/`Storage::Disk` enum; per-cluster append-only files; `with_disk_spill(...)` builder on both FAT32/exFAT write states | ✅ |
+| Q.2 | `Config.spill_dir: Option<PathBuf>` (+ `#[serde(default)]`); wired through `synth::open_{fat32,exfat}`; 4 unit tests for disk mode | ✅ |
+| Q.3 | `teslafat@.service`: `StateDirectory=teslafat` + `ReadWritePaths=… /var/lib/teslafat` so `ProtectSystem=strict` does not `EROFS` the spill dir; `setup-lib/11-gadget.sh` emits `spill_dir =` in both TOML templates | ✅ |
+| Q.4 | Cross-build aarch64 binary (sha `f234e8c4…`), deploy via dead-man, verify under 3-min Tesla load | ✅ |
+| Q.5 | ADR-0021 written; PROGRESS updated; commit + push | ✅ |
+
+**Live verification (2026-05-24, cybertruckusb.local):**
+
+- Binary sha256 `f234e8c46da71a7c6c8d3d54bf973b901655bd4406cdf2a37873eba03217816a`
+  installed at `/usr/local/bin/teslafat`.
+- 3-minute steady-state under active Tesla writes: **0 evictions, 0 I/O
+  errors, 4227 spill files holding 544 MB, RSS 8.7 MB**, both LUNs
+  active, UDC `3f980000.usb` bound, mem 322 MiB available.
+- Compared with Phase P live snapshot: **1428 evictions/min → 0/min.**
+  The "lose video bytes to honour the cap" failure mode is eliminated.
+
+**Open follow-ups (Phase Q tail):**
+
+- Q.6: derive a default `spill_dir` so omitting the TOML key falls back
+  to a safe disk path rather than the 16 MiB memory mode.
+- Q.7: sustained 24-hour observation to confirm 4 GiB cap holds across
+  multi-camera burst writes; raise to 8 GiB if evictions ever resurface.
+- (carried from Phase P) P.9 `nbd-attach@.service` `ExecStopPost`
+  cleanup so post-crash recovery is automatic.
+- (carried from Phase P) P.10 systemd `MemoryHigh=`/`MemoryMax=`
+  defence-in-depth.

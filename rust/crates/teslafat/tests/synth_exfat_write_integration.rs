@@ -63,6 +63,7 @@ fn sample_cfg(backing_root: PathBuf) -> Config {
         fs_type: FsType::Exfat,
         retention: RetentionConfig::default(),
         nbd: NbdConfig::default(),
+        spill_dir: None,
     }
 }
 

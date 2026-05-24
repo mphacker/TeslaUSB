@@ -412,7 +412,14 @@ impl SynthBackend {
         }
         let dir_tree =
             DirTreeWriter::new(cfg.backing_root.clone()).map_err(SynthBackendError::DirTree)?;
-        let fat32_write = Fat32WriteState::new(geometry.clone(), dir_tree, &pre_existing_extents);
+        let mut fat32_write =
+            Fat32WriteState::new(geometry.clone(), dir_tree, &pre_existing_extents);
+        if let Some(ref spill_dir) = cfg.spill_dir {
+            fat32_write = fat32_write.with_disk_spill(
+                spill_dir.clone(),
+                crate::backend::pending_spill::DEFAULT_DISK_SPILL_BYTES,
+            );
+        }
         let synth = Fat32Synth::new(
             geometry,
             cfg.volume_label.as_bytes(),
@@ -514,8 +521,14 @@ impl SynthBackend {
             DirTreeWriter::new(cfg.backing_root.clone()).map_err(SynthBackendError::DirTree)?;
         let bitmap_first_cluster = synth.bitmap_first_cluster();
         let bitmap_cluster_count = synth.bitmap_cluster_count();
-        let exfat_write = ExfatWriteState::new(geometry.clone(), dir_tree, &pre_existing_extents)
+        let mut exfat_write = ExfatWriteState::new(geometry.clone(), dir_tree, &pre_existing_extents)
             .with_allocation_bitmap(bitmap_first_cluster, bitmap_cluster_count);
+        if let Some(ref spill_dir) = cfg.spill_dir {
+            exfat_write = exfat_write.with_disk_spill(
+                spill_dir.clone(),
+                crate::backend::pending_spill::DEFAULT_DISK_SPILL_BYTES,
+            );
+        }
         Ok(Self {
             inner: SynthInner::Exfat(Box::new(synth)),
             file_extents: RwLock::new(file_extents),
@@ -913,6 +926,7 @@ mod tests {
             fs_type,
             retention: crate::config::RetentionConfig::default(),
             nbd: crate::config::NbdConfig::default(),
+            spill_dir: None,
         }
     }
 

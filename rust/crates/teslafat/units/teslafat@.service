@@ -79,15 +79,21 @@ NoNewPrivileges=yes
 # BEFORE the namespace is set up — necessary because the unit-level
 # `ReadWritePaths=/run/teslausb` would otherwise fail with ENOENT
 # when both teslafat instances start before any other consumer.
-# `ReadWritePaths=` opens `/run/teslausb` (socket file) and
-# `/srv/teslausb` (default `backing_root` parent — both LUNs);
-# a non-default `backing_root` requires editing this line.
+# `ReadWritePaths=` opens `/run/teslausb` (socket file),
+# `/srv/teslausb` (default `backing_root` parent — both LUNs), and
+# `/var/lib/teslafat` (per-instance disk-backed pending-data spill
+# directories, see ADR-0021). `StateDirectory=teslafat` ensures
+# `/var/lib/teslafat` exists with the right owner before the
+# namespace is set up. A non-default `backing_root` requires editing
+# the `ReadWritePaths=` line.
 RuntimeDirectory=teslausb
 RuntimeDirectoryPreserve=yes
+StateDirectory=teslafat
+StateDirectoryMode=0755
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-ReadWritePaths=/run/teslausb /srv/teslausb
+ReadWritePaths=/run/teslausb /srv/teslausb /var/lib/teslafat
 
 # Network isolation — the daemon is `AF_UNIX`-only.
 PrivateNetwork=yes

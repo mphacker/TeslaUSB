@@ -351,6 +351,17 @@ impl Fat32WriteState {
         state
     }
 
+    /// Switch the pending-data spill from the default in-memory
+    /// store (16 MiB cap) to a disk-backed store at `spill_dir`
+    /// with a much larger cap (default 4 GiB). Production must
+    /// call this — Tesla's 1.7 GB pre-dir-entry write bursts do
+    /// not fit in any in-memory cap that lives on a 464 MB Pi.
+    #[must_use]
+    pub fn with_disk_spill(mut self, spill_dir: PathBuf, max_bytes: u64) -> Self {
+        self.pending_data = PendingSpill::open_disk(spill_dir, max_bytes);
+        self
+    }
+
     /// Apply one kernel-issued write to the state machine.
     ///
     /// # Errors
@@ -1029,12 +1040,16 @@ impl Fat32WriteState {
         // can grow back to that scale. `pending_data` is bounded to
         // 16 MiB by `super::pending_spill::PendingSpill`; this log
         // line lets the operator see when the bound is approached.
-        if !self.pending_data.is_empty() || self.pending_data.evicted_clusters_total() > 0 {
+        if !self.pending_data.is_empty()
+            || self.pending_data.evicted_clusters_total() > 0
+            || self.pending_data.io_errors_total() > 0
+        {
             tracing::debug!(
                 pending_bytes = self.pending_data.total_bytes(),
                 evicted_clusters_total = self.pending_data.evicted_clusters_total(),
                 evicted_chunks_total = self.pending_data.evicted_chunks_total(),
                 evicted_bytes_total = self.pending_data.evicted_bytes_total(),
+                io_errors_total = self.pending_data.io_errors_total(),
                 "fat32 pending-data spill state at flush",
             );
         }

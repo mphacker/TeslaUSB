@@ -62,6 +62,7 @@ fn sample_cfg(backing_root: PathBuf) -> Config {
         fs_type: FsType::Fat32,
         retention: RetentionConfig::default(),
         nbd: NbdConfig::default(),
+        spill_dir: None,
     }
 }
 
@@ -578,6 +579,7 @@ async fn exfat_power_cut_mid_write_recovery_discards_partial() {
         fs_type: FsType::Exfat,
         retention: RetentionConfig::default(),
         nbd: NbdConfig::default(),
+        spill_dir: None,
     };
     let backend = SynthBackend::open(&cfg).expect("open exfat");
     let g = ExfatGeometry::for_volume_size(VOLUME_BYTES).expect("geo");

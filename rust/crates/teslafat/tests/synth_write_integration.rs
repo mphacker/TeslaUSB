@@ -63,6 +63,7 @@ fn sample_cfg(backing_root: PathBuf, fs_type: FsType) -> Config {
         fs_type,
         retention: RetentionConfig::default(),
         nbd: NbdConfig::default(),
+        spill_dir: None,
     }
 }
 

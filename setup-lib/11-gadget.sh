@@ -145,6 +145,11 @@ backing_root = "/srv/teslausb/teslacam"
 volume_size_gb = __SIZE_GB__
 volume_label = "TESLACAM"
 fs_type = "exfat"
+# Disk-backed pending-data spill (ADR-0021). Holds pre-dir-entry
+# cluster writes safely on disk so we never lose Tesla video bytes
+# under burst load. Per-instance subdir is created by StateDirectory=
+# in teslafat@.service.
+spill_dir = "/var/lib/teslafat/spill/0"
 
 [retention]
 # Hide RecentClips entries older than 1 hour from Tesla. Matches
@@ -163,6 +168,8 @@ backing_root = "/srv/teslausb/media"
 volume_size_gb = __SIZE_GB__
 volume_label = "MEDIA"
 fs_type = "fat32"
+# Disk-backed pending-data spill (ADR-0021); see LUN-0 comment above.
+spill_dir = "/var/lib/teslafat/spill/1"
 
 [retention]
 # Media files are user-managed; never hide based on age.

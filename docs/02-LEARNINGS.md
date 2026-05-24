@@ -1165,3 +1165,142 @@ crashes. On a Pi Zero 2 W under heavy iowait (which is normal
 when teslafat is serving the USB gadget) WiFi packet processing
 can briefly stall. The device is fine; it's just the platform
 performance ceiling.
+
+
+## Phase Q — disk-backed pending spill (2026-05-24)
+
+### `ProtectSystem=strict` + `ReadWritePaths` silently degrades pending-spill
+
+The `teslafat@.service` unit hardens with `ProtectSystem=strict`,
+which makes `/usr`, `/boot`, `/etc`, AND `/var` (the whole rest
+of `/`) read-only inside the service namespace unless explicitly
+listed under `ReadWritePaths=`. When we first deployed the
+disk-backed `PendingSpill`, `prepare_spill_dir()` succeeded
+(directory was pre-created with the right owner) but every
+subsequent `append_chunk_to_disk` call hit
+`Read-only file system (os error 30)`. The daemon caught the
+error per its best-effort policy, logged a `WARN`, dropped the
+chunk, and silently continued in legacy 16 MiB memory-cap mode —
+behaviourally identical to Phase P, including the 1428
+evictions/minute.
+
+Lesson: any per-instance writable state outside `/run` and
+`/srv/teslausb` (the only two paths in the original
+`ReadWritePaths=`) requires either `StateDirectory=<name>` (which
+creates `/var/lib/<name>` and adds it to `ReadWritePaths` for you)
+or an explicit `ReadWritePaths=/var/lib/...` line. Confirmed by
+running `sudo -u teslausb touch /var/lib/teslafat/spill/0/test`:
+host-shell write succeeded (proving filesystem perms were fine),
+but in-namespace writes from the service failed.
+
+Fix shipped: `StateDirectory=teslafat` plus
+`ReadWritePaths=/run/teslausb /srv/teslausb /var/lib/teslafat`
+in `teslafat@.service`, plus a drop-in
+`/etc/systemd/system/teslafat@.service.d/10-spill.conf` written
+during deploy for any device that pre-dates the unit-file change.
+
+### `setup-lib`-emitted TOML lacks newlines between sections
+
+`B1_TESLAFAT_CONF_0_TEMPLATE` in `setup-lib/11-gadget.sh` happens
+to inline `[retention]` immediately after `fs_type = "exfat"` with
+no intervening newline:
+
+```
+fs_type = "exfat"[retention]
+```
+
+The Rust `toml` crate parses this correctly (it doesn't require
+inter-section newlines), so it has worked silently for the whole
+project. But any `sed -i "s|fs_type = \"exfat\"|fs_type = \"exfat\"\nspill_dir = ...|"`
+inserts the new key BEFORE the `[retention]` token on the same
+line — producing `spill_dir = "..."[retention]`, which is invalid
+TOML. The daemon fails to deserialize and falls back to defaults
+(no `spill_dir` = legacy memory mode).
+
+Lesson: when editing these generated configs in place, always
+preserve the trailing token by inserting a newline before the next
+section header. Better: regenerate the file from the template
+rather than patching it. Better still: fix the template to include
+the newline (done in Phase Q's `11-gadget.sh` change, where the
+new lines push `[retention]` onto its own line for both LUN
+templates).
+
+### Tesla's write pattern: data-clusters-first, dir-entry-last, ~7 GiB worst case
+
+Sustained telemetry from cybertruckusb.local confirmed Tesla's
+sentry recording pattern that motivated Phase Q:
+
+* Cluster size on the 256 GiB exFAT TeslaCam LUN is **128 KiB**.
+* A single 1.7 GB sentry clip = ~13 K data-cluster writes.
+* All four cameras' data clusters arrive **before** any
+  directory entry for any of those files — so the worst-case
+  in-flight pre-dir-entry buffer is roughly
+  `4 cameras × 1.7 GB ≈ 6.8 GiB`.
+* Steady-state burst rate was **1400 unresolved clusters /
+  minute = ~180 MB/min** of bytes-in-flight.
+
+This makes any in-memory cap that fits on a 464 MiB Pi
+fundamentally too small. The 4 GiB disk cap (`DEFAULT_DISK_SPILL_BYTES`)
+is currently 2× headroom over the observed worst case; if a future
+firmware revision pushes the working set above that we will see
+non-zero evictions in the `evicted_clusters_total` counter and can
+raise to 8 GiB without a code change (just an ADR).
+
+### Two installation roots on the device — `/opt` is prod, `/home/pi` is dev
+
+Both `/opt/teslausb/web/teslausb_web/services/mapping_queries.py`
+AND `/home/pi/teslausb-b1/web/teslausb_web/services/mapping_queries.py`
+exist on the live device. The `teslausb-web.service` unit
+`ExecStart=/opt/teslausb/web/.venv/bin/gunicorn ... teslausb_web.wsgi:app`
+imports from `/opt/teslausb/web/.venv/lib/.../teslausb_web/` —
+the `/home/pi/teslausb-b1/web/` tree is the cloned source for
+operator ad-hoc work and is **not** what gunicorn loads.
+
+When deploying Python changes by `scp` + `install`, always target
+`/opt/teslausb/web/...`. A successful `systemctl restart teslausb-web`
+followed by behaviour that doesn't change is the canonical symptom
+that you deployed into `/home/pi/teslausb-b1` instead. Verify with
+`cat /proc/<gunicorn-pid>/cmdline` and follow the path.
+
+There is no documented contract for keeping the two trees in sync;
+treat `/opt/teslausb/web/` as the only authoritative deployment
+location for Python and templates.
+
+### Mapping `video_path` had a silent double-prefix
+
+The worker stores `clips.relative_path` rooted at `backing_root`
+(so every value begins with `TeslaCam/`). The videos blueprint
+allow-lists `backing_root/TeslaCam` as its one root and joins
+the URL `<path:filepath>` underneath. Sending the raw DB value
+to the front-end made every `/videos/stream/TeslaCam/RecentClips/...`
+URL resolve to `<backing_root>/TeslaCam/TeslaCam/...`, which
+doesn't exist — every map-click produced a "Video file not found
+— Tesla may have overwritten it" toast even though the file was
+sitting on disk.
+
+The bug shipped because:
+
+* `_video_path_exists()` (the existence probe used by
+  `_trip_is_playable`) joins against `media_root = backing_root`,
+  so it correctly returns `True` for the raw `TeslaCam/...` path.
+* The blueprint joins against `backing_root/TeslaCam`, so it
+  needs the path *without* `TeslaCam/`.
+
+No single test exercised the end-to-end flow, so the two
+mismatched conventions never collided in CI.
+
+Fix shipped: `mapping_queries.py::_video_url_path()` strips one
+leading `TeslaCam/` at every emission point that goes to the
+front-end (`_derived_event_from_row`,
+`_route_waypoint_from_entry`, `_event_row_from_derived`,
+`waypoints_for_video`). Raw `relative_path` is preserved for
+all internal users.
+
+Lesson going forward: when the same value is consumed by two
+modules with different rooting conventions, make the boundary
+explicit (a `to_url_path()` helper) and write at least one
+integration test that walks the actual `clip → API JSON → blueprint
+resolve → HTTP 206` round-trip. Charter pillar 1 ("primitive
+obsession") would have flagged `str` for both forms; a `ClipDbPath`
++ `ClipUrlPath` newtype pair would make the conversion required
+rather than implicit.

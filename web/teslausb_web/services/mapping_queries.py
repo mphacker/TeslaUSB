@@ -266,6 +266,11 @@ class TripTelemetryPoint:
     acceleration_x: float | None
     acceleration_y: float | None
     acceleration_z: float | None
+    gear: str | None
+    steering_angle: float | None
+    brake_applied: bool
+    blinker_on_left: bool
+    blinker_on_right: bool
     autopilot_state: str | None
 
 
@@ -395,6 +400,11 @@ class MappingQueries:
                 acceleration_x=entry.waypoint.acceleration_x,
                 acceleration_y=entry.waypoint.acceleration_y,
                 acceleration_z=entry.waypoint.acceleration_z,
+                gear=entry.waypoint.gear,
+                steering_angle=entry.waypoint.steering_angle,
+                brake_applied=entry.waypoint.brake_applied,
+                blinker_on_left=entry.waypoint.blinker_on_left,
+                blinker_on_right=entry.waypoint.blinker_on_right,
                 autopilot_state=entry.waypoint.autopilot_state,
             )
             for entry in entries
@@ -522,7 +532,8 @@ class MappingQueries:
                         "       timestamp_utc, latitude_deg, longitude_deg, "
                         "       description, frame_index "
                         "  FROM detected_events "
-                        " WHERE date(timestamp_utc, 'unixepoch') = ? "
+                        " WHERE trip_id IS NULL "
+                        "   AND date(timestamp_utc, 'unixepoch') = ? "
                         " ORDER BY timestamp_utc DESC, id DESC",
                         (date_str,),
                     ).fetchall()
@@ -560,13 +571,17 @@ class MappingQueries:
                     all_clip_ids.append(clip.id)
                 waypoints_by_clip = load_waypoints_by_clip(connection, all_clip_ids)
                 event_rows = connection.execute(
-                    "SELECT id, trip_id, clip_id, event_type, severity, "
-                    "       timestamp_utc, latitude_deg, longitude_deg, "
-                    "       description, frame_index "
-                    "  FROM detected_events "
-                    " WHERE date(timestamp_utc, 'unixepoch') = ? "
-                    " ORDER BY timestamp_utc DESC, id DESC",
-                    (date_str,),
+                    "SELECT e.id, e.trip_id, e.clip_id, e.event_type, e.severity, "
+                    "       e.timestamp_utc, e.latitude_deg, e.longitude_deg, "
+                    "       e.description, e.frame_index "
+                    "  FROM detected_events e "
+                    "  LEFT JOIN trips t ON t.id = e.trip_id "
+                    " WHERE (e.trip_id IS NOT NULL "
+                    "        AND date(t.start_utc, 'unixepoch') = ?) "
+                    "    OR (e.trip_id IS NULL "
+                    "        AND date(e.timestamp_utc, 'unixepoch') = ?) "
+                    " ORDER BY e.timestamp_utc DESC, e.id DESC",
+                    (date_str, date_str),
                 ).fetchall()
         except sqlite3.OperationalError as exc:
             if "no such table" in str(exc).lower():
@@ -729,9 +744,9 @@ class MappingQueries:
             entry = per_day.setdefault(day, _DayAccumulator())
             entry.observe_trip(materialised)
         for materialised in snapshot.trips:
+            trip_day = _iso_day(materialised.metrics.start_epoch)
             for event in materialised.events:
-                day = event.timestamp[:10]
-                entry = per_day.setdefault(day, _DayAccumulator())
+                entry = per_day.setdefault(trip_day, _DayAccumulator())
                 entry.observe_event(event)
         for sentry_event in snapshot.sentry_events:
             day = sentry_event.timestamp[:10]

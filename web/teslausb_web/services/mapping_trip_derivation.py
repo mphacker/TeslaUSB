@@ -60,6 +60,11 @@ class WorkerWaypoint:
     acceleration_x: float | None
     acceleration_y: float | None
     acceleration_z: float | None
+    gear: str | None
+    steering_angle: float | None
+    brake_applied: bool
+    blinker_on_left: bool
+    blinker_on_right: bool
     autopilot_state: str | None
 
 
@@ -193,6 +198,7 @@ def load_waypoints_by_clip(
     sql = (
         "SELECT id, clip_id, frame_index, timestamp_ms, latitude_deg, longitude_deg, "  # noqa: S608
         "       speed_mps, heading_deg, acceleration_x, acceleration_y, acceleration_z, "
+        "       gear, steering_angle, brake_applied, blinker_on_left, blinker_on_right, "
         "       autopilot_state "
         "  FROM waypoints "
         f" WHERE clip_id IN ({placeholders}) "
@@ -398,6 +404,11 @@ def _waypoint_from_row(row: sqlite3.Row) -> WorkerWaypoint:
         acceleration_x=_optional_float(row["acceleration_x"]),
         acceleration_y=_optional_float(row["acceleration_y"]),
         acceleration_z=_optional_float(row["acceleration_z"]),
+        gear=_optional_str(row["gear"]),
+        steering_angle=_optional_float(row["steering_angle"]),
+        brake_applied=bool(row["brake_applied"]),
+        blinker_on_left=bool(row["blinker_on_left"]),
+        blinker_on_right=bool(row["blinker_on_right"]),
         autopilot_state=_optional_str(row["autopilot_state"]),
     )
 

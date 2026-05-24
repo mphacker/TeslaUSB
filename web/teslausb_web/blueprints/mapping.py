@@ -299,6 +299,11 @@ def _serialize_telemetry_point(point: TripTelemetryPoint) -> dict[str, object]:
         "acceleration_x": point.acceleration_x,
         "acceleration_y": point.acceleration_y,
         "acceleration_z": point.acceleration_z,
+        "gear": point.gear,
+        "steering_angle": point.steering_angle,
+        "brake_applied": point.brake_applied,
+        "blinker_on_left": point.blinker_on_left,
+        "blinker_on_right": point.blinker_on_right,
         "autopilot_state": point.autopilot_state,
     }
 

@@ -127,6 +127,13 @@ impl Indexer {
                 path: root.clone(),
                 source: e,
             })?;
+            // First pass: collect every `is_indexable` MP4 path under
+            // this bucket, grouped by clip base ("RecentClips/2026-...
+            // -19-42-29" → all four camera angles).  We then index the
+            // canonical front variant per group, falling back to any
+            // sibling angle if Tesla never wrote a front.mp4 for that
+            // group (rare, but harmless to recover).
+            let mut groups: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
             for entry in entries {
                 let entry = entry.map_err(|e| IndexerError::Io {
                     path: root.clone(),
@@ -136,18 +143,23 @@ impl Indexer {
                 if !crate::watcher::is_indexable(&path) {
                     continue;
                 }
+                let base = clip_group_key(&path);
+                groups.entry(base).or_default().push(path);
+            }
+            for (_, paths) in groups {
+                let canonical = pick_canonical_clip(&paths);
                 summary.seen += 1;
-                let relative = relative_to_backing_root(&path, &self.config.backing_root);
+                let relative = relative_to_backing_root(canonical, &self.config.backing_root);
                 if self.store.knows_clip(&relative)? {
                     summary.skipped += 1;
                     continue;
                 }
-                match self.walk_and_record(bucket, &path) {
+                match self.walk_and_record(bucket, canonical) {
                     Ok(()) => summary.indexed += 1,
                     Err(walk_err) => {
                         summary.failed += 1;
                         warn!(
-                            path = %path.display(),
+                            path = %canonical.display(),
                             error = %walk_err,
                             "bootstrap: SEI walk failed; skipping clip",
                         );
@@ -177,6 +189,18 @@ impl Indexer {
     /// failures are not propagated.
     pub fn handle_event(&mut self, event: &WatchEvent) -> Result<bool> {
         if !crate::watcher::is_indexable(&event.path) {
+            return Ok(false);
+        }
+        // Skip non-front camera angles — only the front MP4 carries
+        // the GPS + SEI metadata we need, and indexing every angle in
+        // a clip group would create duplicate waypoint rows. If a
+        // group never receives a front sibling (rare hardware quirk),
+        // the bootstrap pass picks up the orphan on next restart.
+        if !crate::watcher::is_front_camera_clip(&event.path) {
+            debug!(
+                path = %event.path.display(),
+                "non-front camera angle; skipping (front sibling is canonical)",
+            );
             return Ok(false);
         }
         let now = Instant::now();
@@ -300,6 +324,52 @@ fn relative_to_backing_root(path: &Path, backing_root: &Path) -> PathBuf {
         .map_or_else(|_| path.to_path_buf(), Path::to_path_buf)
 }
 
+/// Group key for a Tesla clip: the path with any camera-angle
+/// suffix stripped off the file stem. `…/2026-…-19-42-29-front.mp4`
+/// and `…/2026-…-19-42-29-left_repeater.mp4` both reduce to
+/// `…/2026-…-19-42-29`, so [`bootstrap`] can deduplicate the four
+/// per-clip files into a single group.
+fn clip_group_key(path: &Path) -> PathBuf {
+    const SUFFIXES: [&str; 4] = [
+        "-front.mp4",
+        "-back.mp4",
+        "-left_repeater.mp4",
+        "-right_repeater.mp4",
+    ];
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return path.to_path_buf();
+    };
+    let lower = name.to_ascii_lowercase();
+    for suffix in SUFFIXES {
+        if lower.ends_with(suffix) {
+            let stem = &name[..name.len() - suffix.len()];
+            return path.with_file_name(stem);
+        }
+    }
+    path.to_path_buf()
+}
+
+/// Choose the canonical MP4 from a clip group. Front is preferred
+/// because it carries the GPS + SEI metadata; otherwise we fall
+/// back to whichever sibling is lexicographically first so the
+/// pick is deterministic across reboots. Caller guarantees
+/// `paths` is non-empty (groups are only created when a path is
+/// pushed).
+fn pick_canonical_clip(paths: &[PathBuf]) -> &Path {
+    debug_assert!(!paths.is_empty(), "pick_canonical_clip on empty group");
+    if let Some(front) = paths.iter().find(|p| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.to_ascii_lowercase().ends_with("-front.mp4"))
+    }) {
+        return front;
+    }
+    paths
+        .iter()
+        .min_by(|a, b| a.file_name().cmp(&b.file_name()))
+        .map_or(Path::new(""), |p| p.as_path())
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -342,6 +412,65 @@ mod tests {
             std::fs::create_dir_all(parent).unwrap();
         }
         std::fs::write(path, vec![0_u8; 64]).unwrap();
+    }
+
+    #[test]
+    fn bootstrap_dedupes_clip_group_to_front_only() {
+        // Tesla writes four MP4s per clip event (-front, -back,
+        // -left_repeater, -right_repeater). The indexer must
+        // see exactly one "clip" per group and walk only the
+        // -front variant (which carries the GPS + SEI metadata).
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = make_config(dir.path());
+        let recent = cfg.bucket_root(Bucket::Recent);
+        std::fs::create_dir_all(&recent).unwrap();
+        let base = "2026-05-22_19-42-29";
+        for suffix in ["front", "back", "left_repeater", "right_repeater"] {
+            write_garbage_clip(&recent.join(format!("{base}-{suffix}.mp4")));
+        }
+        let store = Store::open_in_memory().unwrap();
+        let mut indexer = Indexer::new(cfg, store);
+        let s = indexer.bootstrap().unwrap();
+        // One group → one clip seen, not four
+        assert_eq!(s.seen, 1, "expected 1 group, got {}", s.seen);
+        assert_eq!(s.failed, 1, "garbage MP4 fails parse but counts as the canonical pick");
+    }
+
+    #[test]
+    fn bootstrap_falls_back_when_front_missing() {
+        // If a clip group is missing its -front sibling (Tesla
+        // wrote partial group on crash), we still pick a
+        // deterministic canonical so the orphan group is
+        // recoverable.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = make_config(dir.path());
+        let recent = cfg.bucket_root(Bucket::Recent);
+        std::fs::create_dir_all(&recent).unwrap();
+        write_garbage_clip(&recent.join("2026-05-22_19-42-29-back.mp4"));
+        write_garbage_clip(&recent.join("2026-05-22_19-42-29-left_repeater.mp4"));
+        let store = Store::open_in_memory().unwrap();
+        let mut indexer = Indexer::new(cfg, store);
+        let s = indexer.bootstrap().unwrap();
+        assert_eq!(s.seen, 1);
+    }
+
+    #[test]
+    fn handle_event_skips_non_front_camera() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = make_config(dir.path());
+        let recent = cfg.bucket_root(Bucket::Recent);
+        std::fs::create_dir_all(&recent).unwrap();
+        let left = recent.join("2026-05-22_19-42-29-left_repeater.mp4");
+        write_garbage_clip(&left);
+        let store = Store::open_in_memory().unwrap();
+        let mut idx = Indexer::new(cfg, store);
+        let ev = WatchEvent {
+            bucket: Bucket::Recent,
+            path: left,
+            kind: WatchKind::CloseWrite,
+        };
+        let did_index = idx.handle_event(&ev).unwrap();
+        assert!(!did_index, "left_repeater event must be skipped");
     }
 
     #[test]

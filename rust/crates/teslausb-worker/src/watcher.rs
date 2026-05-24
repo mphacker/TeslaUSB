@@ -101,6 +101,31 @@ pub fn is_indexable(path: &Path) -> bool {
     }
 }
 
+/// Camera-angle suffixes Tesla writes per clip group. Front is
+/// canonical: only front carries the GPS + SEI metadata the
+/// indexer needs, and indexing the others would create
+/// duplicate waypoint rows that all point at the same instant
+/// in time. The other angles are still served by the video
+/// stream endpoint (the user can switch cameras in the overlay)
+/// — they are just not crawled by the indexer.
+const NON_FRONT_CAMERA_SUFFIXES: [&str; 3] =
+    ["-back.mp4", "-left_repeater.mp4", "-right_repeater.mp4"];
+
+/// Returns `true` if `path` is the front-camera variant of a
+/// Tesla clip group (or has no camera suffix at all, e.g. test
+/// fixtures named `a.mp4`). Non-front angles are skipped so we
+/// index each clip group exactly once.
+#[must_use]
+pub fn is_front_camera_clip(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let lower = name.to_ascii_lowercase();
+    !NON_FRONT_CAMERA_SUFFIXES
+        .iter()
+        .any(|suffix| lower.ends_with(suffix))
+}
+
 /// Map an event-fd path to its bucket. The watcher receives
 /// events with the watch descriptor's directory plus the
 /// event's basename; the caller is expected to assemble the
@@ -325,6 +350,35 @@ mod tests {
     #[test]
     fn is_indexable_rejects_empty_name() {
         assert!(!is_indexable(Path::new("/")));
+    }
+
+    #[test]
+    fn is_front_camera_clip_accepts_front_and_legacy_names() {
+        assert!(is_front_camera_clip(Path::new(
+            "/srv/RecentClips/2026-05-22_19-42-29-front.mp4"
+        )));
+        assert!(is_front_camera_clip(Path::new(
+            "/srv/RecentClips/2026-05-22_19-42-29-FRONT.MP4"
+        )));
+        // Bare/legacy names with no camera suffix are treated as
+        // canonical (test fixtures, hand-copied clips, etc.).
+        assert!(is_front_camera_clip(Path::new("/srv/RecentClips/a.mp4")));
+    }
+
+    #[test]
+    fn is_front_camera_clip_rejects_other_angles() {
+        assert!(!is_front_camera_clip(Path::new(
+            "/srv/RecentClips/2026-05-22_19-42-29-back.mp4"
+        )));
+        assert!(!is_front_camera_clip(Path::new(
+            "/srv/RecentClips/2026-05-22_19-42-29-left_repeater.mp4"
+        )));
+        assert!(!is_front_camera_clip(Path::new(
+            "/srv/RecentClips/2026-05-22_19-42-29-right_repeater.mp4"
+        )));
+        assert!(!is_front_camera_clip(Path::new(
+            "/srv/RecentClips/2026-05-22_19-42-29-LEFT_REPEATER.MP4"
+        )));
     }
 
     #[test]

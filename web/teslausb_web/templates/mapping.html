@@ -449,6 +449,25 @@
         display: flex; gap: 12px; flex-wrap: wrap;
     }
     .video-overlay-stage { position: relative; }
+    .video-overlay-spinner {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(0,0,0,0.35);
+        z-index: 5;
+        pointer-events: none;
+    }
+    .vol-spinner-ring {
+        width: 42px;
+        height: 42px;
+        border: 3px solid rgba(255,255,255,0.25);
+        border-top-color: #ffffff;
+        border-radius: 50%;
+        animation: vol-spin 0.9s linear infinite;
+    }
+    @keyframes vol-spin { to { transform: rotate(360deg); } }
     .cam-switcher {
         display: flex; gap: 3px; padding: 6px;
         background: var(--bg-primary, var(--mapping-header-bg));
@@ -901,8 +920,6 @@
 {{ super() }}
 <script src="{{ url_for('static', filename='vendor/leaflet/leaflet.js') }}"></script>
 <script src="{{ url_for('static', filename='vendor/leaflet/leaflet.markercluster.js') }}"></script>
-<script src="{{ url_for('static', filename='js/protobuf.min.js') }}"></script>
-<script src="{{ url_for('static', filename='js/dashcam-mp4.js') }}"></script>
 <script>
 const BOOTSTRAP = {{ mapping_bootstrap | tojson }};
 const LUCIDE_SPRITE = BOOTSTRAP.assets.sprite;
@@ -2291,178 +2308,144 @@ function getBasePath(videoPath) {
     return angle ? videoPath.replace(`-${angle}.mp4`, '') : videoPath.replace('.mp4', '');
 }
 
-// ─── SEI-from-MP4 (client-side parser, V1 parity) ────────────────────────
-// The HUD reads its telemetry (gear/steering/brake/throttle/blinkers/
-// autopilot) directly from the MP4 SEI stream, NOT from the DB. The DB
-// only stores sparse, GPS-bearing waypoints; SEI frames in the video
-// are emitted at the full ~30 Hz rate, so the in-clip overlay can scrub
-// smoothly and show every state transition.
-let seiProtoType = null;
-let seiEnumFields = null;
-let seiInitPromise = null;
-let overlaySeiFrames = [];          // [{time: sec, sei: {...}}]
-let overlaySeiToken = 0;            // bumps on each load → discards stale fetches
-let overlaySeiAbort = null;
+// Issue #184 Wave 3 — Phase D. Monotonic sequence tagged on each
+// overlay open. Used by the lazy telemetry fetch to discard a
+// stale response when the user opens a different clip before the
+// fetch returns.
+let overlayOpenSeq = 0;
 
-async function initOverlaySei() {
-    if (seiInitPromise) return seiInitPromise;
-    seiInitPromise = (async () => {
-        try {
-            const protoUrl = "{{ url_for('static', filename='dashcam.proto') }}";
-            const res = await window.DashcamHelpers.initProtobuf(protoUrl);
-            seiProtoType = res.SeiMetadata;
-            seiEnumFields = res.enumFields;
-        } catch (err) {
-            console.warn('SEI protobuf init failed; HUD will use DB fallback:', err);
-        }
-    })();
-    return seiInitPromise;
-}
-
-// Kick off init in the background — by the time the user opens a clip
-// the proto is almost always ready.
-initOverlaySei();
-
-async function loadOverlayVideoWithSei(videoElement, streamUrl, seekSec) {
-    const token = ++overlaySeiToken;
-    overlaySeiFrames = [];
-    if (overlaySeiAbort) {
-        try { overlaySeiAbort.abort(); } catch (e) { /* noop */ }
-    }
-
-    await initOverlaySei();
-
-    // Without the parser we fall back to plain streaming so the video
-    // still plays — HUD will show neutral defaults.
-    if (!seiProtoType || !window.DashcamMP4) {
-        videoElement.src = streamUrl;
-        videoElement.load();
-        if (seekSec != null) {
-            videoElement.addEventListener('loadedmetadata', () => {
-                if (seekSec > 0 && seekSec < videoElement.duration) {
-                    videoElement.currentTime = seekSec;
-                }
-            }, { once: true });
-        }
-        return;
-    }
-
-    overlaySeiAbort = new AbortController();
-    const signal = overlaySeiAbort.signal;
-
-    // Pause and clear the current src so the browser doesn't double-fetch.
-    videoElement.pause();
-    videoElement.removeAttribute('src');
-    videoElement.load();
-
-    try {
-        const resp = await fetch(streamUrl, { credentials: 'same-origin', signal });
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const buffer = await resp.arrayBuffer();
-        if (token !== overlaySeiToken) return;  // superseded
-
-        const mp4 = new window.DashcamMP4(buffer);
-        const frames = mp4.parseFrames(seiProtoType);
-        const cfg = mp4.getConfig();
-        let timeMs = 0;
-        overlaySeiFrames = frames.map(frame => {
-            const out = { time: timeMs / 1000, sei: frame.sei };
-            timeMs += cfg.durations[frame.index] || 33;
-            return out;
-        });
-
-        const blob = new Blob([buffer], { type: 'video/mp4' });
-        const blobUrl = URL.createObjectURL(blob);
-        videoElement.src = blobUrl;
-        videoElement.load();
-        videoElement.addEventListener('loadedmetadata', () => {
-            if (seekSec != null && seekSec > 0 && seekSec < videoElement.duration) {
-                videoElement.currentTime = seekSec;
-            }
-        }, { once: true });
-    } catch (err) {
-        if (err.name === 'AbortError') return;
-        console.warn('SEI fetch/parse failed; falling back to stream:', err);
-        videoElement.src = streamUrl;
-        videoElement.load();
-        if (seekSec != null) {
-            videoElement.addEventListener('loadedmetadata', () => {
-                if (seekSec > 0 && seekSec < videoElement.duration) {
-                    videoElement.currentTime = seekSec;
-                }
-            }, { once: true });
-        }
-    }
-}
-
-function seiFrameAt(currentTimeSec) {
-    if (!overlaySeiFrames.length) return null;
-    // Binary search would be tidier but the frame count per clip is
-    // ~1800 and timeupdate fires ~4 Hz, so a linear scan is plenty
-    // fast and keeps the code readable.
-    let match = null;
-    for (let i = 0; i < overlaySeiFrames.length; i++) {
-        if (overlaySeiFrames[i].time > currentTimeSec) break;
-        match = overlaySeiFrames[i];
-    }
-    return match;
-}
-
-function updateOverlayTelemetryFromSei(sei) {
-    if (!sei) return;
+function updateOverlayTelemetry(wp) {
+    const coords = document.getElementById('olCoords');
+    if (coords) coords.textContent = `📍 ${(wp.lat || 0).toFixed(4)}, ${(wp.lon || 0).toFixed(4)}`;
 
     const speedVal = document.getElementById('olSpeedVal');
-    if (speedVal && sei.vehicleSpeedMps !== undefined && sei.vehicleSpeedMps !== null) {
-        speedVal.textContent = Math.round(Math.abs(sei.vehicleSpeedMps) * 2.23694);
-    }
+    if (speedVal) speedVal.textContent = Math.round(Math.abs((wp.speed_mps || 0) * 2.237));
 
     const gear = document.getElementById('olGear');
-    if (gear && sei.gearState !== undefined && seiEnumFields?.gearState) {
-        const name = window.DashcamHelpers.formatValue(sei.gearState, seiEnumFields.gearState);
-        gear.textContent = String(name).replace('GEAR_', '').charAt(0);
+    if (gear) {
+        const g = (wp.gear || 'PARK').replace('GEAR_', '');
+        gear.textContent = g.charAt(0);
     }
 
     const wheel = document.getElementById('olWheel');
-    if (wheel && sei.steeringWheelAngle !== undefined && sei.steeringWheelAngle !== null) {
-        wheel.style.setProperty('--oh-wheel', `${sei.steeringWheelAngle}deg`);
-    }
+    if (wheel) wheel.style.setProperty('--oh-wheel', `${wp.steering_angle || 0}deg`);
 
     const brake = document.getElementById('olBrake');
-    if (brake && sei.brakeApplied !== undefined) {
-        brake.style.setProperty('--oh-fill', sei.brakeApplied ? '100%' : '0%');
-    }
+    if (brake) brake.style.setProperty('--oh-fill', wp.brake_applied ? '100%' : '0%');
 
     const throttle = document.getElementById('olThrottle');
-    if (throttle && sei.acceleratorPedalPosition !== undefined && sei.acceleratorPedalPosition !== null) {
-        let pct = sei.acceleratorPedalPosition;
-        if (pct <= 1.2) pct *= 100;          // proto sometimes 0-1, sometimes 0-100
-        pct = Math.min(100, Math.max(0, pct));
+    if (throttle) {
+        const accel = Math.max(0, (wp.acceleration_x || 0));
+        const pct = Math.min(100, accel * 15);
         throttle.style.setProperty('--oh-fill', `${pct}%`);
     }
 
     const bL = document.getElementById('olBlinkerL');
     const bR = document.getElementById('olBlinkerR');
-    if (bL) bL.classList.toggle('active', sei.blinkerOnLeft === true);
-    if (bR) bR.classList.toggle('active', sei.blinkerOnRight === true);
+    if (bL) bL.classList.toggle('active', !!wp.blinker_on_left);
+    if (bR) bR.classList.toggle('active', !!wp.blinker_on_right);
 
     const ap = document.getElementById('olAP2');
-    if (ap && sei.autopilotState !== undefined && seiEnumFields?.autopilotState) {
-        const apName = String(window.DashcamHelpers.formatValue(sei.autopilotState, seiEnumFields.autopilotState));
-        const engaged = apName !== 'NONE';
-        ap.textContent = engaged ? apName.replace('_', ' ') : '';
+    if (ap) {
+        const state = wp.autopilot_state || 'NONE';
+        const engaged = ['SELF_DRIVING', 'AUTOSTEER'].includes(state);
+        ap.textContent = engaged ? state.replace('_', ' ') : '';
         ap.classList.toggle('active', engaged);
     }
+}
+
+// Show a loading spinner inside the overlay stage while the video
+// element is buffering. Cleared on `playing` or `error`.
+function setOverlayLoading(isLoading) {
+    const stage = document.querySelector('#videoOverlay .video-overlay-stage');
+    if (!stage) return;
+    let spinner = stage.querySelector('.video-overlay-spinner');
+    if (isLoading) {
+        if (!spinner) {
+            spinner = document.createElement('div');
+            spinner.className = 'video-overlay-spinner';
+            spinner.innerHTML = '<div class="vol-spinner-ring" aria-label="Loading video"></div>';
+            stage.appendChild(spinner);
+        }
+        spinner.style.display = '';
+    } else if (spinner) {
+        spinner.remove();
+    }
+}
+
+function wireVideoLoadingIndicator(video) {
+    setOverlayLoading(true);
+    const clear = () => setOverlayLoading(false);
+    const show = () => setOverlayLoading(true);
+    video.addEventListener('playing', clear);
+    video.addEventListener('canplay', clear);
+    video.addEventListener('error', clear, { once: true });
+    video.addEventListener('waiting', show);
+    video.addEventListener('stalled', show);
+}
+
+// Prefer the front camera variant of a clip when one is available.
+// The disambiguation flow picks the geographically-nearest waypoint,
+// which may reference any camera angle (left_repeater, back, etc.);
+// the user almost always wants front first and can switch from there.
+function preferFrontVariant(waypoint, allWaypoints) {
+    if (!waypoint || !waypoint.video_path) return waypoint;
+    const base = getBasePath(waypoint.video_path);
+    if (waypoint.video_path.endsWith(`${base.split('/').pop()}-front.mp4`) ||
+        waypoint.video_path.endsWith('-front.mp4')) {
+        return waypoint;
+    }
+    const frontMatch = (allWaypoints || []).find(w =>
+        w && w.video_path && getBasePath(w.video_path) === base && w.video_path.endsWith('-front.mp4'));
+    if (frontMatch) {
+        return { ...waypoint, video_path: frontMatch.video_path };
+    }
+    // Synthesise the front path even if no waypoint references it;
+    // the video stream endpoint will 404 cleanly if the file is missing
+    // and the existing error handler shows the right toast.
+    return { ...waypoint, video_path: `${base}-front.mp4` };
 }
 
 function openVideoOverlay(waypoint, clickPoint, routeWps, tripId) {
     closeDisambigPopup();
     closeVideoOverlay();
 
-    // Set waypoints AFTER close clears them. The waypoints carry
-    // hot data (lat/lon/speed/heading) used for the prev-clip cursor
-    // and the coordinates pill; HUD telemetry comes from the SEI
-    // stream parsed out of the MP4 itself (see loadOverlayVideoWithSei).
     overlayWaypoints = routeWps || [];
+
+    // Operator preference: always open on the front camera first.
+    waypoint = preferFrontVariant(waypoint, overlayWaypoints);
+
+    // Issue #184 Wave 3 — Phase D. The map polyline endpoints
+    // (/api/trip/<id>/route, /api/day/<date>/routes) only return
+    // hot columns (lat/lon/speed/heading/autopilot_state) so the
+    // server saves SD page-cache pressure on routine map browsing.
+    // When the overlay opens we lazy-fetch cold telemetry
+    // (steering/brake/accel/gear/blinker) and merge it into the
+    // existing waypoints array so updateOverlayTelemetry() can
+    // read wp.steering_angle / wp.brake_applied / etc. unchanged.
+    if (tripId && Array.isArray(overlayWaypoints) && overlayWaypoints.length > 0) {
+        const opSeq = ++overlayOpenSeq;
+        fetch(BOOTSTRAP.api.trip_telemetry_template.replace('__TRIP_ID__', encodeURIComponent(String(tripId))))
+            .then(r => (r && r.ok) ? r.json() : null)
+            .then(data => {
+                if (!data || !data.telemetry) return;
+                if (opSeq !== overlayOpenSeq) return;
+                const telem = data.telemetry;
+                for (const wp of overlayWaypoints) {
+                    const t = telem[String(wp.id)];
+                    if (!t) continue;
+                    if (wp.acceleration_x === undefined) wp.acceleration_x = t.acceleration_x;
+                    if (wp.acceleration_y === undefined) wp.acceleration_y = t.acceleration_y;
+                    if (wp.acceleration_z === undefined) wp.acceleration_z = t.acceleration_z;
+                    if (wp.gear === undefined) wp.gear = t.gear;
+                    if (wp.steering_angle === undefined) wp.steering_angle = t.steering_angle;
+                    if (wp.brake_applied === undefined) wp.brake_applied = t.brake_applied;
+                    if (wp.blinker_on_left === undefined) wp.blinker_on_left = t.blinker_on_left;
+                    if (wp.blinker_on_right === undefined) wp.blinker_on_right = t.blinker_on_right;
+                }
+            })
+            .catch(() => { /* HUD already falls back to neutral defaults */ });
+    }
 
     const filename = waypoint.video_path.split('/').pop();
     overlayCurrentAngle = CAMERA_ANGLES.find(a => filename.includes('-' + a + '.')) || 'front';
@@ -2542,13 +2525,25 @@ function openVideoOverlay(waypoint, clickPoint, routeWps, tripId) {
     document.body.appendChild(overlay);
     document.getElementById('overlayTitle').textContent = '🎥 ' + filename;
 
-    // Load the video — uses client-side SEI parser so the HUD
-    // gets full-rate gear/steering/brake/throttle/blinker/AP data
-    // directly from the MP4 SEI stream (V1 parity).
+    // Stream the video directly (V1 parity) — instant playback.
+    // The HUD gets sparse but-fast telemetry from the waypoints +
+    // the lazy DB-telemetry merge above; this avoids the 20-30 s
+    // wait that a fetch-then-blob approach would impose.
     const video = document.getElementById('overlayVideo');
     const streamUrl = BOOTSTRAP.view.video_stream_template.replace('__PATH__', waypoint.video_path);
-    const initialSeek = Math.max(0, (waypoint.frame_offset || 0) / 36 - 2);
-    loadOverlayVideoWithSei(video, streamUrl, initialSeek);
+    video.src = streamUrl;
+
+    wireVideoLoadingIndicator(video);
+
+    // Seek to the event time once the browser has enough metadata
+    // to know the duration.
+    video.addEventListener('loadedmetadata', function onLoad() {
+        const seek = Math.max(0, (waypoint.frame_offset || 0) / 36 - 2);
+        if (seek > 0 && seek < video.duration) {
+            video.currentTime = seek;
+        }
+        video.removeEventListener('loadedmetadata', onLoad);
+    });
 
     // Handle video load error — file may no longer exist on disk.
     // NOTE: check the raw src ATTRIBUTE, not the .src property. The property
@@ -2564,19 +2559,19 @@ function openVideoOverlay(waypoint, clickPoint, routeWps, tripId) {
         }
     }, { once: true });
 
-    // Live telemetry on timeupdate
+    // Live telemetry on timeupdate (driven by waypoints — V1 parity)
     video.addEventListener('timeupdate', onOverlayTimeUpdate);
 
-    // Show the HUD — SEI frames will populate it once parsing completes;
-    // until then it shows the static defaults baked into the markup.
     const hud = document.getElementById('overlayHud');
-    if (hud) hud.style.display = '';
+    if (hud) hud.style.display = overlayWaypoints.length > 0 ? '' : 'none';
 
-    // Seed coordinates from the click point so the location pill is
-    // populated immediately. Full SEI HUD updates land via timeupdate
-    // once the MP4 finishes downloading + parsing.
-    const coords = document.getElementById('olCoords');
-    if (coords) coords.textContent = `📍 ${(waypoint.lat || 0).toFixed(4)}, ${(waypoint.lon || 0).toFixed(4)}`;
+    // Seed HUD from the seed waypoint immediately.
+    if (overlayWaypoints.length > 0) {
+        updateOverlayTelemetry(waypoint);
+    } else {
+        const coords = document.getElementById('olCoords');
+        if (coords) coords.textContent = `📍 ${(waypoint.lat || 0).toFixed(4)}, ${(waypoint.lon || 0).toFixed(4)}`;
+    }
 
     // Draggable. Use an AbortController so we can remove all document-level
     // listeners in one shot when the overlay closes — previously these
@@ -2775,24 +2770,12 @@ document.addEventListener('keydown', (e) => {
 
 function onOverlayTimeUpdate() {
     const video = document.getElementById('overlayVideo');
-    if (!video) return;
+    if (!video || !overlayWaypoints.length) return;
 
     const currentTimeSec = video.currentTime;
-
-    // Authoritative HUD data comes from the MP4-embedded SEI stream
-    // (parsed client-side once per clip). This matches V1 behaviour and
-    // gives the HUD full-rate gear/steering/brake/throttle updates instead
-    // of the sparse, GPS-only waypoint snapshots stored in the DB.
-    const sei = seiFrameAt(currentTimeSec);
-    if (sei && sei.sei) {
-        updateOverlayTelemetryFromSei(sei.sei);
-    }
-
-    // Coordinates still come from the waypoint stream (the SEI stream
-    // contains lat/lon too but the existing pre-loaded waypoints are
-    // already there and cheap to scan).
-    if (!overlayWaypoints.length) return;
     const currentFrame = Math.round(currentTimeSec * 36);
+
+    // Find the nearest waypoint matching the CURRENT clip's base path
     let nearest = null, minDelta = Infinity;
     for (const wp of overlayWaypoints) {
         if (!wp.video_path) continue;
@@ -2800,10 +2783,8 @@ function onOverlayTimeUpdate() {
         const delta = Math.abs((wp.frame_offset || 0) - currentFrame);
         if (delta < minDelta) { minDelta = delta; nearest = wp; }
     }
-    if (nearest) {
-        const coords = document.getElementById('olCoords');
-        if (coords) coords.textContent = `📍 ${(nearest.lat || 0).toFixed(4)}, ${(nearest.lon || 0).toFixed(4)}`;
-    }
+
+    if (nearest) updateOverlayTelemetry(nearest);
 }
 
 function switchCamera(angle) {
@@ -2824,10 +2805,15 @@ function switchCamera(angle) {
     const title = document.getElementById('overlayTitle');
     if (title) title.textContent = `🎥 ${newFilename}`;
 
-    const newUrl = BOOTSTRAP.view.video_stream_template.replace('__PATH__', newPath);
-    loadOverlayVideoWithSei(video, newUrl, currentTime).then(() => {
+    video.src = BOOTSTRAP.view.video_stream_template.replace('__PATH__', newPath);
+    wireVideoLoadingIndicator(video);
+    video.addEventListener('loadedmetadata', function onLoad() {
+        if (currentTime > 0 && currentTime < video.duration) {
+            video.currentTime = currentTime;
+        }
         if (!wasPaused) video.play().catch(() => {});
-    });
+        video.removeEventListener('loadedmetadata', onLoad);
+    }, { once: true });
 }
 
 function navigateClip(direction) {
@@ -2847,14 +2833,15 @@ function navigateClip(direction) {
     const video = document.getElementById('overlayVideo');
     if (!video) return;
 
-    const newUrl = BOOTSTRAP.view.video_stream_template.replace('__PATH__', newPath);
-    loadOverlayVideoWithSei(video, newUrl, 0).then(() => {
+    video.src = BOOTSTRAP.view.video_stream_template.replace('__PATH__', newPath);
+    wireVideoLoadingIndicator(video);
+    video.addEventListener('loadedmetadata', function onLoad() {
         video.play().catch(() => {});
-    });
+        video.removeEventListener('loadedmetadata', onLoad);
+    }, { once: true });
 
-    const coords = document.getElementById('olCoords');
-    if (coords && clip.firstWaypoint) {
-        coords.textContent = `📍 ${(clip.firstWaypoint.lat || 0).toFixed(4)}, ${(clip.firstWaypoint.lon || 0).toFixed(4)}`;
+    if (clip.firstWaypoint) {
+        updateOverlayTelemetry(clip.firstWaypoint);
     }
 }
 
@@ -2907,15 +2894,10 @@ document.addEventListener('click', function(e) {
 });
 
 function closeVideoOverlay() {
-    // Invalidate any in-flight SEI fetch so a slow MP4 download that
-    // returns after the user has closed (or reopened) the overlay
-    // doesn't paint stale telemetry onto the new clip.
-    ++overlaySeiToken;
-    overlaySeiFrames = [];
-    if (overlaySeiAbort) {
-        try { overlaySeiAbort.abort(); } catch (e) { /* noop */ }
-        overlaySeiAbort = null;
-    }
+    // Bump the open-sequence counter so any in-flight lazy-load
+    // telemetry fetch (started by openVideoOverlay) discards its
+    // response when it returns.
+    ++overlayOpenSeq;
     const existing = document.getElementById('videoOverlay');
     if (existing) {
         const video = existing.querySelector('video');

@@ -386,10 +386,11 @@ class MappingQueries:
     def waypoints_for_video(self, video_path: str) -> tuple[int | None, tuple[RouteWaypoint, ...]]:
         if not video_path:
             return None, ()
+        target = _video_url_path(video_path)
         snapshot = self._load_snapshot()
         for materialised in snapshot.trips:
             for clip in materialised.trip.clips:
-                if clip.relative_path == video_path:
+                if _video_url_path(clip.relative_path) == target:
                     return materialised.trip.id, _stamp_gap_waypoints(
                         tuple(_route_waypoint_from_entry(entry) for entry in materialised.waypoints)
                     )
@@ -930,6 +931,30 @@ def _metrics_from_trip_row(
     )
 
 
+def _video_url_path(relative_path: str | None) -> str | None:
+    """Strip the leading ``TeslaCam/`` segment for URL emission.
+
+    Worker stores ``relative_path`` rooted at ``backing_root`` so
+    every clip path begins with ``TeslaCam/``. The videos blueprint,
+    however, allow-lists ``backing_root/TeslaCam`` as its single
+    root and joins the URL ``<path:filepath>`` underneath it — so
+    sending the raw DB value would resolve to
+    ``<backing_root>/TeslaCam/TeslaCam/...`` and 404.
+
+    Strip exactly one leading ``TeslaCam/`` so the emitted
+    ``video_path`` matches the videos blueprint's contract. The
+    raw DB value is preserved for internal use (``_video_path_exists``,
+    cleanup queries) which join under ``backing_root`` directly.
+    """
+    if not relative_path:
+        return relative_path
+    normalised = relative_path.replace("\\", "/").lstrip("/")
+    prefix = "TeslaCam/"
+    if normalised.startswith(prefix):
+        return normalised[len(prefix) :]
+    return normalised
+
+
 def _derived_event_from_row(
     row: sqlite3.Row,
     trip_clips: Sequence,
@@ -940,7 +965,7 @@ def _derived_event_from_row(
     if clip_id is not None and trip_clips:
         for clip in trip_clips:
             if clip is not None and clip.id == int(clip_id):
-                video_path = clip.relative_path
+                video_path = _video_url_path(clip.relative_path)
                 break
     frame_index = row["frame_index"] if "frame_index" in row.keys() else None  # noqa: SIM118
     timestamp_utc = float(row["timestamp_utc"])
@@ -1051,7 +1076,7 @@ def _route_waypoint_from_entry(entry: AbsoluteWaypoint) -> RouteWaypoint:
         heading=entry.waypoint.heading_deg,
         speed_mps=entry.waypoint.speed_mps,
         autopilot_state=entry.waypoint.autopilot_state,
-        video_path=entry.clip.relative_path,
+        video_path=_video_url_path(entry.clip.relative_path),
         frame_offset=entry.waypoint.frame_index,
     )
 
@@ -1066,7 +1091,7 @@ def _event_row_from_derived(event: DerivedEvent) -> EventRow:
         event_type=event.event_type,
         severity=event.severity,
         description=event.description,
-        video_path=event.video_path,
+        video_path=_video_url_path(event.video_path),
         frame_offset=event.frame_offset,
         metadata=None,
     )

@@ -1,0 +1,214 @@
+{# Storage Health card — replaces the dead v1 Filesystem Health Check section.
+
+   Backed by /api/storage/health (storage_health blueprint). The initial
+   render uses `storage_health` from the Jinja context so the user sees
+   data instantly; JS then polls every 60 s while the page is visible.
+
+   Severity tokens drive the badge colour via design-system classes
+   (no hex literals in this file — `.status-dot status-*` already exist
+   in base.css). Card auto-expands when severity != "ok".
+#}
+{% set _sev_to_dot = {"ok": "health-dot-ok", "warn": "health-dot-warn", "critical": "health-dot-error", "unknown": "health-dot-unknown"} %}
+<details class="settings-section" id="storage-health-section"
+         {% if storage_health and storage_health.severity != "ok" %}open{% endif %}>
+  <summary>Storage Health</summary>
+  <div class="section-content" id="storage-health-card"
+       data-poll-url="{{ url_for('storage_health.get_storage_health') }}">
+    <div class="storage-health-header">
+      <span class="status-dot health-dot {{ _sev_to_dot.get((storage_health.severity if storage_health else 'unknown'), 'health-dot-unknown') }}"
+            id="storage-health-dot"
+            aria-label="Storage health severity"></span>
+      <strong id="storage-health-summary">
+        {% if storage_health and storage_health.messages %}
+          {{ storage_health.messages[0] }}
+        {% else %}
+          Checking…
+        {% endif %}
+      </strong>
+    </div>
+
+    <dl class="storage-health-grid" id="storage-health-grid">
+      <dt>Device</dt>
+      <dd id="sh-device">
+        {% if storage_health and storage_health.sd_card_name %}
+          {{ storage_health.sd_card_name }}
+          {% if storage_health.sd_card_manfid %}(manfid {{ storage_health.sd_card_manfid }}){% endif %}
+        {% else %}—{% endif %}
+      </dd>
+
+      <dt>Filesystem</dt>
+      <dd id="sh-fs">
+        {% if storage_health %}
+          {{ storage_health.fs_type or '—' }} on {{ storage_health.device or '—' }}
+        {% else %}—{% endif %}
+      </dd>
+
+      <dt>Mount</dt>
+      <dd id="sh-mount">
+        {% if storage_health and storage_health.mount_readonly is sameas true %}
+          <span class="storage-health-bad">READ-ONLY — Tesla cannot record clips</span>
+        {% elif storage_health and storage_health.mount_readonly is sameas false %}
+          read-write
+        {% else %}—{% endif %}
+      </dd>
+
+      <dt>Filesystem errors</dt>
+      <dd id="sh-fserrors">
+        {% if storage_health and storage_health.fs_errors is not none %}
+          {{ storage_health.fs_errors }}
+          {% if storage_health.fs_errors > 0 and storage_health.fs_last_error_iso %}
+            (last {{ storage_health.fs_last_error_iso }})
+          {% endif %}
+        {% else %}—{% endif %}
+      </dd>
+
+      <dt>I/O errors (24 h)</dt>
+      <dd id="sh-ioerrors">
+        {% if storage_health and storage_health.io_errors_24h is not none %}
+          {{ storage_health.io_errors_24h }}
+        {% else %}—{% endif %}
+      </dd>
+
+      <dt>Last filesystem check</dt>
+      <dd id="sh-lastcheck">
+        {% if storage_health and storage_health.last_checked_iso %}
+          {{ storage_health.last_checked_iso }}
+        {% else %}—{% endif %}
+      </dd>
+
+      <dt>Online scrub (weekly)</dt>
+      <dd id="sh-scrub">
+        {% if storage_health and storage_health.e2scrub_last_run_iso %}
+          last ran {{ storage_health.e2scrub_last_run_iso }}
+        {% else %}—{% endif %}
+      </dd>
+
+      <dt>TRIM</dt>
+      <dd id="sh-trim">
+        {% if storage_health and storage_health.fstrim_last_run_iso %}
+          last ran {{ storage_health.fstrim_last_run_iso }}
+        {% else %}—{% endif %}
+      </dd>
+    </dl>
+
+    <p class="storage-health-footer">
+      SD cards expose no wear telemetry (no SMART, no per-block checksums).
+      Plan to replace the card every 12 months and keep cloud archive enabled
+      so a card failure never costs you data.
+    </p>
+  </div>
+</details>
+
+<script>
+(function () {
+  var card = document.getElementById('storage-health-card');
+  if (!card) return;
+  var url = card.getAttribute('data-poll-url');
+  var POLL_MS = 60000;
+  var dot = document.getElementById('storage-health-dot');
+  var summary = document.getElementById('storage-health-summary');
+
+  function setText(id, text) {
+    var el = document.getElementById(id);
+    if (el) el.textContent = text;
+  }
+
+  function fmt(v, fallback) {
+    return (v === null || v === undefined || v === '') ? (fallback || '—') : v;
+  }
+
+  function render(data) {
+    if (!data) return;
+    if (dot) {
+      var sev = data.severity || 'unknown';
+      var cls = sev === 'critical' ? 'health-dot-error'
+              : sev === 'warn' ? 'health-dot-warn'
+              : sev === 'ok' ? 'health-dot-ok'
+              : 'health-dot-unknown';
+      dot.className = 'status-dot health-dot ' + cls;
+    }
+    if (summary && data.messages && data.messages.length) {
+      summary.textContent = data.messages[0];
+    }
+    var devName = data.sd_card_name
+      ? data.sd_card_name + (data.sd_card_manfid ? ' (manfid ' + data.sd_card_manfid + ')' : '')
+      : '—';
+    setText('sh-device', devName);
+    setText('sh-fs', fmt(data.fs_type) + ' on ' + fmt(data.device));
+    var mountEl = document.getElementById('sh-mount');
+    if (mountEl) {
+      if (data.mount_readonly === true) {
+        mountEl.innerHTML = '<span class="storage-health-bad">READ-ONLY — Tesla cannot record clips</span>';
+      } else if (data.mount_readonly === false) {
+        mountEl.textContent = 'read-write';
+      } else {
+        mountEl.textContent = '—';
+      }
+    }
+    var fsErrText = '—';
+    if (data.fs_errors !== null && data.fs_errors !== undefined) {
+      fsErrText = String(data.fs_errors);
+      if (data.fs_errors > 0 && data.fs_last_error_iso) {
+        fsErrText += ' (last ' + data.fs_last_error_iso + ')';
+      }
+    }
+    setText('sh-fserrors', fsErrText);
+    setText('sh-ioerrors', fmt(data.io_errors_24h));
+    setText('sh-lastcheck', fmt(data.last_checked_iso));
+    setText('sh-scrub', data.e2scrub_last_run_iso ? 'last ran ' + data.e2scrub_last_run_iso : '—');
+    setText('sh-trim', data.fstrim_last_run_iso ? 'last ran ' + data.fstrim_last_run_iso : '—');
+
+    var section = document.getElementById('storage-health-section');
+    if (section && data.severity && data.severity !== 'ok' && !section.open) {
+      section.open = true;
+    }
+  }
+
+  function poll() {
+    if (document.hidden) return;
+    fetch(url, { credentials: 'same-origin' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(render)
+      .catch(function () { /* swallow — page already shows last-known state */ });
+  }
+
+  setInterval(poll, POLL_MS);
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden) poll();
+  });
+})();
+</script>
+
+<style>
+.storage-health-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.storage-health-grid {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 16px;
+  margin: 0 0 12px 0;
+  font-size: 0.9rem;
+}
+.storage-health-grid dt {
+  color: var(--text-secondary);
+  font-weight: normal;
+}
+.storage-health-grid dd {
+  margin: 0;
+  color: var(--text-primary);
+  word-break: break-word;
+}
+.storage-health-bad {
+  color: var(--color-error, var(--text-primary));
+  font-weight: 600;
+}
+.storage-health-footer {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  margin: 8px 0 0 0;
+}
+</style>

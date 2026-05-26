@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 # uninstall-lib/01-packages.sh — reverses setup-lib/01-packages.sh.
 #
-# NOOP without --purge (every package in B1_RUNTIME_PACKAGES is also
-# used by stock Pi OS / v1, with one exception: btrfs-progs).
+# NOOP regardless of --purge: every package in B1_RUNTIME_PACKAGES
+# is also used by stock Pi OS / v1, so removing them risks breaking
+# the operator's other workflows.
 #
-# With --purge: apt-get purge ONLY packages on the safe-purge list.
-# Everything else is on the deny-list because v1 (or stock Pi OS Lite)
-# installs it and the operator may still depend on it after uninstall.
-#
-# SAFE PURGE LIST (apt-get purge with --purge):
-#   * btrfs-progs   — only B-1 ever needed this on a stock Pi OS image
+# With --purge: nothing to purge for B-1 itself. The setup script
+# previously installed btrfs-progs (used for an aborted btrfs
+# subvolume design); that package is no longer requested, and the
+# safe-purge list is empty.
 #
 # DENY LIST (never apt-purged, even with --purge):
 #   * nbd-client       — v1 used this for its loopback gadget path
@@ -26,14 +25,19 @@ source "$(dirname "${BASH_SOURCE[0]}")/../setup-lib/00-common.sh"
 # shellcheck source=../setup-lib/01-packages.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../setup-lib/01-packages.sh"
 
-# Conservative allow-list. If you add a package to B1_RUNTIME_PACKAGES
-# that v1 / Pi OS Lite definitely did NOT ship, add it here and update
-# the header comment with the rationale.
-B1_SAFE_PURGE=(btrfs-progs)
+# Conservative allow-list. If a future setup step ever installs a
+# package that v1 / Pi OS Lite definitely did NOT ship, add it here
+# along with the rationale in the header comment.
+B1_SAFE_PURGE=()
 
 b1_undo_01() {
   if (( ${B1_PURGE:-0} != 1 )); then
     b1_log "  packages kept (no --purge): ${B1_RUNTIME_PACKAGES[*]}"
+    return 0
+  fi
+
+  if (( ${#B1_SAFE_PURGE[@]} == 0 )); then
+    b1_log "  no B-1-specific packages to purge"
     return 0
   fi
 

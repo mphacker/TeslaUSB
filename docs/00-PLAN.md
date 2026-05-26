@@ -81,7 +81,7 @@ argument. v1 code is reference material, not a starting point.
 │     SentryClips/        │  │   Wraps/                 │
 │     SavedClips/         │  │   Music/                 │
 └─────────────────────────┘  └──────────────────────────┘
-        └────────── btrfs subvolumes ─────────────┘
+        └────────── ext4 data roots ──────────────┘
                 ▲                   ▲
                 │ inotify           │ inotify
                 │                   │
@@ -360,8 +360,8 @@ TeslaUSB/
 | `/usr/local/bin/teslausb-worker` | Rust background worker binary |
 | `/usr/local/lib/teslausb/web/` | Python web app install root |
 | `/usr/local/bin/teslausb-{present,hide}-usb` | Gadget control scripts |
-| `/srv/teslausb/teslacam/` | btrfs subvolume — Tesla writes here |
-| `/srv/teslausb/media/` | btrfs subvolume — user-uploaded chimes/lightshows/music/wraps |
+| `/srv/teslausb/teslacam/` | ext4 data root — Tesla writes here |
+| `/srv/teslausb/media/` | ext4 data root — user-uploaded chimes/lightshows/music/wraps |
 | `/var/lib/teslausb/teslausb.db` | Single consolidated SQLite DB |
 | `/var/lib/teslausb/cache/` | rclone cache, temp downloads |
 | `/run/teslausb/teslafat-0.sock` | LUN 0 control IPC |
@@ -847,11 +847,12 @@ explicit list of mode-removal changes below.
    - DELETE the "Reboot to apply" prompts that v1 sometimes
      showed after mode-related changes
 2. **Remove the "fsck status" widget** from Settings →
-   System Health. B-1 uses btrfs which is journaled; no
-   periodic fsck of FAT/exFAT images is needed because
-   there are no images. Replace with a btrfs health
-   indicator (output of `btrfs scrub status` on
-   `/srv/teslausb/teslacam` and `/srv/teslausb/media`).
+   System Health. B-1 ships on a single ext4 partition and the
+   per-partition FAT/exFAT images of v1 do not exist. Replace
+   with a Storage Health card (`blueprints/storage_health.py`)
+   that surfaces ext4 mount state, `dumpe2fs` error counters,
+   recent kernel I/O errors, and `fstrim` / `e2scrub_all` timer
+   status.
 3. **Lock chime / light show / music / wraps upload flows:**
    no longer go through quick_edit. They become simple
    `POST /api/lock_chimes/upload` → write file to
@@ -948,7 +949,7 @@ diff (where applicable) per `docs/03-CODE-QUALITY-CHARTER.md`
 | 5.4 | Templates skeleton: `base.html`, layout partials, theme switcher. Same UI rules as v1 (no emoji, CSS tokens only). | ~200 |
 | 5.5 | `services/teslafat_client.py` — Unix socket IPC client with retry, async-friendly. Unit tests against a mock socket. | ~250 |
 | 5.6 | `services/cache_invalidation.py` (covered by 4c.3, just register with the app). | tiny |
-| 5.7 | `blueprints/system_health.py` + template — port from v1, replace fsck widget with btrfs-scrub widget. Screenshot diff vs. v1. | ~300 |
+| 5.7 | `blueprints/system_health.py` + template — port from v1, replace fsck widget with the Storage Health card delivered by `blueprints/storage_health.py`. Screenshot diff vs. v1. | ~300 |
 | 5.8 | `blueprints/lock_chimes.py` + service + template + JS — full upload/list/set-active flow, drop quick_edit, add cache invalidate. Screenshot diff. | ~500 |
 | 5.9 | `blueprints/light_shows.py` + service + template + JS — same pattern. Screenshot diff. | ~400 |
 | 5.10 | `blueprints/wraps.py` + service + template + JS — PNG dimension validation per v1 rules. Screenshot diff. | ~400 |
@@ -1007,9 +1008,9 @@ before Phase 7 soak.
 
 | # | Deliverable | LOC ceiling |
 |---|---|---|
-| 6.1 | `setup.sh` package install (`nbd-client`, `btrfs-progs`, `nginx`, `python3-venv`, `network-manager`, `watchdog`, `dnsmasq-base`, `hostapd`, kernel headers if needed) + idempotency check + `--dry-run` flag. **DO NOT install `rustup` / `cargo` / `gcc` / `build-essential`** — building Rust on a Pi Zero 2 W is forbidden by ADR-0008; the device runs cross-compiled binaries only. | ~200 |
+| 6.1 | `setup.sh` package install (`nbd-client`, `nginx`, `python3-venv`, `network-manager`, `watchdog`, `dnsmasq-base`, `hostapd`, kernel headers if needed) + idempotency check + `--dry-run` flag. **DO NOT install `rustup` / `cargo` / `gcc` / `build-essential`** — building Rust on a Pi Zero 2 W is forbidden by ADR-0008; the device runs cross-compiled binaries only. | ~200 |
 | 6.2 | `setup.sh` user/group creation (`teslausb` system user, sudoers fragment install) | ~100 |
-| 6.3 | `setup.sh` per-LUN data root creation at `/srv/teslausb/teslacam/` + `/srv/teslausb/media/`, idempotent. Uses btrfs subvolumes if `/srv` is on btrfs; falls back to plain directories on ext4 / other filesystems (revised 2026-05-21: live device had no btrfs partition; teslafat + worker only need POSIX I/O, so the FS underneath is opaque). | ~200 |
+| 6.3 | `setup.sh` per-LUN data root creation at `/srv/teslausb/teslacam/` + `/srv/teslausb/media/`, idempotent. Creates plain directories on whatever filesystem hosts `/srv` (the live device is ext4; teslafat + worker only need POSIX I/O, so the FS underneath is opaque — revised 2026-05-21 after the btrfs subvolume path was abandoned). | ~200 |
 | 6.4 | `setup.sh` systemd unit install (teslafat@0, teslafat@1, teslausb-worker, teslausb-web, nginx, watchdog) | ~150 |
 | 6.5 | `setup.sh` NetworkManager + AP config — IDEMPOTENT, never overwrites without `.b1-backup` siblings | ~250 |
 | 6.6 | `setup.sh` boot cmdline + config.txt edits — IDEMPOTENT, always with backup siblings, dry-run shows diff before apply | ~200 |
@@ -1261,7 +1262,7 @@ These come from the v1 codebase's lessons (see
    time.
 5. **Hardware watchdog 90 s.** Workers must yield.
 6. **Crash-safe writes.** Every Tesla SCSI write is `fdatasync(2)`'d
-   to the underlying btrfs file before the NBD/SCSI completion
+   to the underlying ext4 file before the NBD/SCSI completion
    is returned. The kernel's NBD layer + g_mass_storage will
    propagate this back to Tesla's SCSI request, so Tesla only
    sees "write complete" when the data is durable on the SD card.
@@ -1345,7 +1346,7 @@ flock owner, one DB connection pool, one supervisor pattern.
 | 8 | Mode toggle in UI? | **Removed.** No modes in B-1. | Phase 5 edit list |
 | 9 | One LUN or many? | **Two LUNs**: TeslaCam (LUN 0) + media (LUN 1, lock chimes / lightshows / wraps / music). Isolates cache invalidation on media from active dashcam recording. | (user 2026-05-19) |
 | 10 | Volume capacity reporting? | **Actual SD free space − headroom.** A 128 GB SD with ~110 GB free → advertise ~100 GB. Re-checked at boot. Tesla never sees more than is real. | (user 2026-05-19) |
-| 11 | btrfs auto-snapshots? | **No.** Simplifies the system; cloud sync is the backup. Web UI deletes are final. | (user 2026-05-19) |
+| 11 | btrfs auto-snapshots? | **No.** B-1 ships on ext4; snapshots ruled out architecturally. Cloud sync is the backup. Web UI deletes are final. | (user 2026-05-19) |
 | 12 | Music & Wraps subsystems? | **Both in scope.** Reimplemented in Rust (worker side) + Python (UI side); user-facing behaviour matches v1 but no v1 code is reused. | (user 2026-05-19, revised 2026-05-19) |
 | 13 | Web UI auth? | **Optional basic auth** via TOML config (`web.auth.username` / `web.auth.password_hash`). Off by default. nginx layer can also add TLS later. | (user 2026-05-19) |
 | 14 | teslafat upgrade strategy? | **Brief outage acceptable** (~1-3 s). `systemctl restart teslafat@N` is the upgrade. Tesla sees medium gone, then back. | (user 2026-05-19) |
@@ -1568,7 +1569,8 @@ can be marked complete.
     *Resolved in:* Phase 5 (port verbatim).
 
 16. **User-content backup strategy**: with btrfs snapshots ruled
-    out (Decision #11), is there an explicit backup path for
+    out (ext4-only architecture; see Decision #11), is there an
+    explicit backup path for
     `/srv/teslausb/media/`? The user content there (custom chimes,
     wraps, music) is not on Tesla and not in the cloud sync target.
     *Default:* explicit "Export ZIP" button per directory in the

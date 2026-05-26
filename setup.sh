@@ -69,13 +69,13 @@ Options:
 
 Steps (sourced from setup-lib/<NN>-<name>.sh in numeric order):
   01  packages        apt-install B-1 runtime packages (nbd-client,
-                      btrfs-progs, nginx, python3-venv, network-manager,
+                      nginx, python3-venv, network-manager,
                       watchdog, dnsmasq-base, hostapd).
   02  users           Create teslausb user/group, add pi to teslausb,
                       install /etc/sudoers.d/teslausb-b1 fragment.
   03  data-roots      Create per-LUN data roots /srv/teslausb/{teslacam,media}
-                      owned teslausb:teslausb 0775. Uses btrfs subvolumes
-                      if /srv is on btrfs, plain directories otherwise.
+                      owned teslausb:teslausb 0775 as plain directories
+                      on whatever filesystem hosts /srv.
   04  units           Install systemd unit files + nginx site, daemon-reload
                       (does NOT enable or start — that is step 10).
   05  network         Lay down NetworkManager AP profile + dnsmasq/hostapd

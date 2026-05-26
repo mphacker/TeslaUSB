@@ -8,7 +8,13 @@ Map, matching v1.
 
 Removed from v1 parity (per docs/00-PLAN.md invariants):
 * Mode-toggle button and all mode_control.* switch endpoints.
-* Filesystem Health Check section (fsck / IMG / loopback — B-1 uses btrfs).
+* Filesystem Health Check section. v1's per-partition fsck made
+  sense when each LUN was a real exFAT image; in B-1 the LUNs are
+  synthesised by ``teslafat`` from POSIX files on the host's ext4
+  filesystem, so there is nothing for fsck.exfat / fsck.vfat to
+  check. Replaced by the Storage Health card (ext4 superblock +
+  kernel I/O error monitoring) wired through the
+  ``storage_health`` blueprint.
 """
 
 from __future__ import annotations
@@ -33,6 +39,7 @@ from flask import (
     url_for,
 )
 
+from teslausb_web.blueprints.storage_health import current_snapshot as _storage_health_snapshot
 from teslausb_web.services.gadget_state import gadget_mode_token
 from teslausb_web.services.mapping_settings_service import (
     MappingSettingsError,
@@ -282,6 +289,7 @@ def _index_context() -> dict[str, object]:
     mapping_snapshot = mapping_service.get_settings()
     samba_on = _samba_on()
     share_paths = _share_paths_for_display()
+    storage_health = _storage_health_snapshot()
     return {
         "page": "settings",
         "auto_refresh": False,
@@ -299,6 +307,7 @@ def _index_context() -> dict[str, object]:
         },
         "system_info": _system_info(),
         "samba_on": samba_on,
+        "storage_health": storage_health.to_dict(),
         # Probe the live USB-gadget state (configfs UDC + both LUN
         # backing files). Returns 'present' only when the gadget is
         # actually bound to a UDC and both LUNs have backing block

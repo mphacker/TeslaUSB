@@ -27,16 +27,16 @@
 # Default mode is CONSERVATIVE: it removes unit files, drop-ins, the
 # sudoers fragment, the sysctl drop-in, and AP profile, but preserves:
 #   * user data (/srv/teslausb, /var/lib/teslausb-b1, the teslausb user)
-#   * btrfs subvolumes (operator data is sacred)
 #   * the swap file (existing v1 swap untouched, B-1 swap kept)
 #   * every apt package (no `apt-get purge`)
 #   * /home/pi/ — v1 lived there too; NEVER touched, even under --purge
 #
 # --purge additionally:
-#   * unmounts + btrfs-deletes B1_BTRFS_SUBVOLS
+#   * rm -rf the per-LUN data trees under /srv/teslausb
 #   * swapoffs + rm /var/swap/b1.swap, removes the matching fstab line
 #   * userdel -r teslausb (only if no running processes own it)
-#   * apt-get purge btrfs-progs (the ONLY package on the safe purge list)
+#   * apt-get purge of the safe-purge list (currently empty — every
+#     B-1 runtime package is also used by stock Pi OS / v1)
 #   * wipes /var/lib/teslausb-b1
 # --purge NEVER touches /home/pi/, the pi user, /var/swap/fsck.swap,
 # or any package v1 also installed (nginx, python3-venv, watchdog,
@@ -74,10 +74,11 @@ Options:
   --dry-run            Print every command, mutate nothing.
   --only NN[,NN...]    Run only the listed step numbers (e.g. --only 09,10).
   --skip NN[,NN...]    Skip the listed step numbers.
-  --purge              Also delete user data, btrfs subvolumes, B-1 swap
-                       file, and apt-purge packages that v1 did NOT install
-                       (currently: only btrfs-progs). NEVER touches the
-                       `pi` user or /home/pi/.
+  --purge              Also delete user data, B-1 swap file, and
+                       apt-purge any B-1-specific packages (currently
+                       none; every B-1 runtime package is also used by
+                       stock Pi OS / v1). NEVER touches the `pi` user
+                       or /home/pi/.
   --help               Show this message.
 
 Undo steps (sourced from uninstall-lib/<NN>-<name>.sh in REVERSE numeric
@@ -94,23 +95,22 @@ order so dependencies are torn down before what depends on them):
   05  network         Remove AP profile + dnsmasq/hostapd configs.
   04  units           Remove every B-1 systemd unit + nginx drop-in;
                       daemon-reload.
-  03  data-roots      No-op by default (data is sacred); --purge deletes the
-                      data roots — `btrfs subvolume delete` if subvolumes,
-                      `rm -rf` if plain directories.
+  03  data-roots      No-op by default (data is sacred); --purge
+                      `rm -rf` the data root directories.
   02  users           Remove sudoers fragment + drop pi from teslausb group
                       (the teslausb user itself stays unless --purge).
-  01  packages        No-op by default; --purge runs `apt-get purge
-                      btrfs-progs` (the only package on the safe purge list).
+  01  packages        No-op by default; --purge runs `apt-get purge`
+                      on the safe purge list (currently empty).
 
 Default mode is CONSERVATIVE: removes unit files, drop-ins, sudoers
 fragment, sysctl drop-in, and AP profile, but PRESERVES user data,
-btrfs subvolumes, the swap file, every apt package, and /home/pi/.
+the swap file, every apt package, and /home/pi/.
 
 --purge additionally:
-  * btrfs subvolume delete each subvolume in /srv/teslausb
+  * rm -rf each data root under /srv/teslausb (teslacam, media)
   * swapoff + rm /var/swap/b1.swap (NOT /var/swap/fsck.swap — v1's stays)
   * userdel -r teslausb (only if no running processes own it)
-  * apt-get purge btrfs-progs (the only package on the safe purge list)
+  * apt-get purge of the safe purge list (currently empty)
   * wipe /var/lib/teslausb-b1
 --purge NEVER touches /home/pi/, the `pi` user, /var/swap/fsck.swap, or
 any package v1 also installed (nginx, python3-venv, watchdog,
@@ -180,10 +180,10 @@ if (( B1_PURGE == 1 )) && [[ "${TESLAUSB_DRY_RUN:-0}" != "1" ]]; then
   cat >&2 <<'PURGE_BANNER'
 ================================================================================
   --purge is set. This will additionally:
-    * btrfs subvolume delete each subvolume in /srv/teslausb (teslacam, media)
+    * rm -rf each data root under /srv/teslausb (teslacam, media)
     * swapoff + rm /var/swap/b1.swap (NOT /var/swap/fsck.swap — v1's swap stays)
     * userdel -r teslausb (only if no running processes own it)
-    * apt-get purge btrfs-progs (the only package on the safe purge list)
+    * apt-get purge of the safe purge list (currently empty)
     * wipe /var/lib/teslausb-b1
   /home/pi/, the pi user, and any package v1 also installed are NEVER touched.
   Sleeping 5 seconds; Ctrl-C now to abort.

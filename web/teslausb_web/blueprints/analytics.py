@@ -13,8 +13,8 @@ What changed from v1 (per docs/00-PLAN.md Phase 5 invariants):
 * The v1 ``before_request`` ``IMG_CAM_PATH`` gate is **gone**. B-1 has
   no IMG/loopback layer; the page is always reachable.
 * ``mode_control.*`` redirects → ``settings.index``.
-* Per-partition fsck status is dropped (B-1 uses btrfs scrub via the
-  system_health card; analytics is read-only).
+* Per-partition fsck status is dropped (B-1 surfaces SD-card health
+  via the Storage Health card on /settings/; analytics is read-only).
 """
 
 from __future__ import annotations

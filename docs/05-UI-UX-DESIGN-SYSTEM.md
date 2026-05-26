@@ -18,7 +18,7 @@ The edits in this B-1 copy are limited to the small list of changes
 documented in `docs/00-PLAN.md` Phase 5 §"What changes":
 
 1. **No Edit / Present mode anywhere.** The B-1 backend writes files
-   directly to btrfs subvolumes that the Rust `teslafat` daemon
+   directly to ext4-backed data roots that the Rust `teslafat` daemon
    synthesises into FAT on the fly — there is no quick_edit, no
    mode_service, no auto-switch on upload. References to "Edit Mode",
    "Present Mode", and "quick_edit" are removed throughout.
@@ -39,8 +39,9 @@ documented in `docs/00-PLAN.md` Phase 5 §"What changes":
    and "Disk image sizes" sliders are deleted. A single "Tesla volume
    size (GB)" slider takes the place of the disk-image sliders.
 6. **The fsck status widget on Settings → System Health is removed.**
-   Replaced by a btrfs scrub status widget reading `btrfs scrub
-   status` on `/srv/teslausb/teslacam` and `/srv/teslausb/media`.
+   Replaced by a Storage Health card (see `blueprints/storage_health.py`)
+   that reports ext4 mount state, `dumpe2fs` error counters, recent
+   kernel I/O errors, and `fstrim` / `e2scrub_all` timer status.
 7. **Lock chime / light show / music / wraps upload flows no longer
    go through quick_edit.** Same JSON shape, same toast, same UX —
    the implementation is just `write file → fsync → atomic rename →
@@ -336,7 +337,7 @@ In B-1 there is no Present/Edit mode distinction — Tesla always sees the USB. 
 
 **Rules:**
 - Never show "Present Mode" or "Edit Mode" or "quick_edit" in the UI — these concepts do not exist in B-1
-- Write operations (delete, upload) happen directly to the backing btrfs subvolume; the Rust `teslafat` daemon presents the change to Tesla via cache invalidation. The user sees no mode flip and no reboot prompt.
+- Write operations (delete, upload) happen directly to the backing ext4 data root; the Rust `teslafat` daemon presents the change to Tesla via cache invalidation. The user sees no mode flip and no reboot prompt.
 - The only user-facing toggle is "Network File Sharing" in Settings → Network Sharing
 
 ### Tables

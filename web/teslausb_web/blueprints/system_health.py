@@ -5,12 +5,12 @@ client-side card + nav-bar status dot work unchanged after the B-1
 cutover. The subsystems probed here are the B-1 set:
 
 * ``disk`` — free / total bytes on the data root that holds the
-  TeslaCam + media trees. The root may be a btrfs subvolume parent
-  (when the SD layout is btrfs) or a plain ext4 directory (when it
-  isn't); ``os.statvfs`` answers either way.
+  TeslaCam + media trees. ``os.statvfs`` answers regardless of the
+  underlying filesystem (B-1 ships on ext4).
 * ``daemon`` — ``teslafat`` daemon state via the Unix-socket IPC client
-  built in Phase 5.5 (replaces v1's fsck/IMG widget; when the data
-  root is btrfs an additional scrub widget may be wired in later).
+  built in Phase 5.5 (replaces v1's fsck/IMG widget). SD-card storage
+  health is surfaced separately via the Storage Health blueprint on
+  /settings/.
 * ``samba`` — whether the Samba feature is enabled in config. Full
   service-up probe lands in Phase 5.17 alongside ``samba_service``.
 

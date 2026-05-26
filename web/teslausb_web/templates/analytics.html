@@ -3,8 +3,9 @@
 {# B-1 Phase 5.24: ported from v1 main:scripts/web/templates/analytics.html
    with the following edits per docs/00-PLAN.md + docs/05-UI-UX-DESIGN-SYSTEM.md:
      1. v1's emoji icons replaced with Lucide SVG sprite references.
-     2. v1's per-partition fsck status section dropped — B-1 uses btrfs
-        scrub via the system_health card, not legacy fsck.
+     2. v1's per-partition fsck status section dropped — B-1 reports
+        SD-card storage health via the Storage Health card on
+        /settings/, not legacy per-partition fsck.
      3. v1's three-partition (part1/part2/part3) loop replaced with a
         purpose-named partitions tuple emitted by AnalyticsService.
      4. Folder priority badges retained; descriptions come from the

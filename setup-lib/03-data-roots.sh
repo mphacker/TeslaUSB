@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# setup-lib/03-data-roots.sh — Phase 6.3 (filesystem-agnostic).
+# setup-lib/03-data-roots.sh — Phase 6.3 (ext4-only).
 #
 # Creates the per-LUN data roots that B-1 uses:
 #
@@ -9,28 +9,31 @@
 # Both are owned `teslausb:teslausb` mode 0775 so the web app
 # (running as `pi`, added to group `teslausb` by 6.2) can write them.
 #
-# FILESYSTEM POLICY (revised 2026-05-21):
-#   * If /srv is on btrfs: each root is created as a btrfs subvolume
-#     (so `btrfs scrub`/quotas/etc. can operate on it).
-#   * If /srv is on ext4 / any other FS: each root is created as a
-#     plain directory. teslafat and teslausb-worker only require
-#     POSIX I/O; the underlying FS is otherwise opaque.
+# FILESYSTEM POLICY (revised 2026-05-31):
+#   * Each root is a plain directory on whatever filesystem hosts
+#     /srv (typically the SD card's ext4 root). teslafat and
+#     teslausb-worker only require POSIX I/O; we never reformat the
+#     operator's filesystem. The btrfs subvolume path was tried
+#     during early B-1 design and dropped — Raspberry Pi OS images
+#     ship ext4, no consumer SD card exposes wear telemetry, and
+#     btrfs scrub has no value on a single-device pool. Storage
+#     health is now surfaced by the Storage Health card in the web
+#     UI (see web/teslausb_web/services/storage_health_service.py).
 #
 # Hard constraints (operator data is sacred):
 #   * NO mkfs — we never reformat anyone's filesystem.
 #   * NO mount — mount management is the operator's job.
 #   * NO auto-delete — if a target path exists but is the wrong
-#     kind (e.g. a btrfs subvolume on a btrfs-aware host became a
-#     plain dir on a re-image), we STOP with a clear error rather
-#     than silently rewriting.
+#     kind (e.g. a leftover from a prior btrfs-era install), we
+#     STOP with a clear error rather than silently rewriting.
 #
-# Idempotency: existing paths in the correct shape (subvolume on
-# btrfs, plain dir elsewhere) are detected and skipped. Ownership
-# and mode are corrected only when they don't already match.
+# Idempotency: existing plain-directory paths are detected and
+# skipped. Ownership and mode are corrected only when they don't
+# already match.
 #
-# Dry-run: every mutation goes through b1_run. Probing (`stat -f`,
-# `btrfs subvolume show`, `getent`) runs even under TESLAUSB_DRY_RUN
-# so the dry-run report accurately predicts what WOULD change.
+# Dry-run: every mutation goes through b1_run. Probing (`stat`,
+# `getent`) runs even under TESLAUSB_DRY_RUN so the dry-run report
+# accurately predicts what WOULD change.
 
 # shellcheck source=00-common.sh
 source "$(dirname "${BASH_SOURCE[0]}")/00-common.sh"
@@ -78,38 +81,13 @@ B1_MEDIA_SUBDIRS=(
 export B1_DATA_ROOT B1_DATA_DIRS B1_DATA_OWNER B1_DATA_GROUP B1_DATA_MODE \
   B1_TESLACAM_SUBDIRS B1_MEDIA_SUBDIRS B1_STATE_DIR B1_STATE_DIR_MODE
 
-# Backwards-compat aliases (older docs / commits reference B1_BTRFS_*).
-# shellcheck disable=SC2034  # exported for downstream consumers
-B1_BTRFS_ROOT="${B1_DATA_ROOT}"
-# shellcheck disable=SC2034
-B1_BTRFS_SUBVOLS=("${B1_DATA_DIRS[@]}")
-# shellcheck disable=SC2034
-B1_BTRFS_OWNER="${B1_DATA_OWNER}"
-# shellcheck disable=SC2034
-B1_BTRFS_GROUP="${B1_DATA_GROUP}"
-# shellcheck disable=SC2034
-B1_BTRFS_MODE="${B1_DATA_MODE}"
-export B1_BTRFS_ROOT B1_BTRFS_SUBVOLS B1_BTRFS_OWNER B1_BTRFS_GROUP B1_BTRFS_MODE
-
-# _b1_fs_type <path> — e.g. "btrfs", "ext2/ext3", "tmpfs", or "" on
-# stat failure / missing path.
+# _b1_fs_type <path> — e.g. "ext2/ext3", "tmpfs", or "" on stat
+# failure / missing path. Retained only for diagnostic logging.
 _b1_fs_type() {
   stat -f -c %T "$1" 2>/dev/null || true
 }
 
-# _b1_have_btrfs — true iff btrfs userspace + at least mountpoint is
-# on btrfs. Used to decide subvolume vs plain-dir creation.
-_b1_root_is_btrfs() {
-  [[ "$(_b1_fs_type "${B1_DATA_ROOT}")" == "btrfs" ]]
-}
-
-# _b1_is_subvolume <path> — quiet probe.
-_b1_is_subvolume() {
-  command -v btrfs >/dev/null 2>&1 && btrfs subvolume show "$1" >/dev/null 2>&1
-}
-
-# _b1_ensure_root — make sure B1_DATA_ROOT exists. Tolerant of any
-# filesystem (no longer requires btrfs).
+# _b1_ensure_root — make sure B1_DATA_ROOT exists.
 _b1_ensure_root() {
   if [[ -d "${B1_DATA_ROOT}" ]]; then
     return 0
@@ -120,41 +98,23 @@ _b1_ensure_root() {
   b1_run mkdir -p "${B1_DATA_ROOT}"
 }
 
-# _b1_create_root <name> — idempotent. Decides subvolume vs dir
-# based on the filesystem hosting B1_DATA_ROOT.
+# _b1_create_root <name> — idempotent plain-directory create.
 _b1_create_root() {
   local name="$1"
   local path="${B1_DATA_ROOT}/${name}"
-  local want_subvol=0
-  _b1_root_is_btrfs && want_subvol=1
 
   if [[ -e "${path}" ]]; then
-    if (( want_subvol )); then
-      if _b1_is_subvolume "${path}"; then
-        b1_log "subvolume present: ${path}"
-        return 0
-      fi
-      b1_err "${path} exists but is not a btrfs subvolume (parent is btrfs)."
-      b1_err "Move it aside or remove it manually, then re-run setup.sh."
-      return 1
-    else
-      if [[ -d "${path}" ]]; then
-        b1_log "data root present: ${path}"
-        return 0
-      fi
-      b1_err "${path} exists but is not a directory."
-      b1_err "Move it aside or remove it manually, then re-run setup.sh."
-      return 1
+    if [[ -d "${path}" ]]; then
+      b1_log "data root present: ${path}"
+      return 0
     fi
+    b1_err "${path} exists but is not a directory."
+    b1_err "Move it aside or remove it manually, then re-run setup.sh."
+    return 1
   fi
 
-  if (( want_subvol )); then
-    b1_log "creating btrfs subvolume: ${path}"
-    b1_run btrfs subvolume create "${path}"
-  else
-    b1_log "creating data root (plain dir): ${path}"
-    b1_run mkdir -p "${path}"
-  fi
+  b1_log "creating data root (plain dir): ${path}"
+  b1_run mkdir -p "${path}"
 }
 
 # _b1_fix_ownership <path> — chown teslausb:teslausb + chmod 0775
@@ -195,15 +155,7 @@ _b1_ensure_tesla_subdir() {
 b1_step_03() {
   _b1_ensure_root || return 1
 
-  if _b1_root_is_btrfs; then
-    if ! command -v btrfs >/dev/null 2>&1; then
-      b1_warn "/srv is btrfs but 'btrfs' command not found — install btrfs-progs (step 01) first; skipping 03."
-      return 0
-    fi
-    b1_log "filesystem at ${B1_DATA_ROOT}: btrfs — using subvolumes"
-  else
-    b1_log "filesystem at ${B1_DATA_ROOT}: $(_b1_fs_type "${B1_DATA_ROOT}") — using plain directories"
-  fi
+  b1_log "filesystem at ${B1_DATA_ROOT}: $(_b1_fs_type "${B1_DATA_ROOT}") — using plain directories"
 
   local have_group=1
   if ! getent group "${B1_DATA_GROUP}" >/dev/null 2>&1; then

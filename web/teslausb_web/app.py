@@ -45,6 +45,7 @@ from teslausb_web.blueprints.music import music_bp
 from teslausb_web.blueprints.settings import settings_dashboard_bp
 from teslausb_web.blueprints.settings_advanced import settings_bp
 from teslausb_web.blueprints.storage import storage_bp
+from teslausb_web.blueprints.storage_health import storage_health_bp
 from teslausb_web.blueprints.system_health import system_health_bp
 from teslausb_web.blueprints.videos import videos_bp
 from teslausb_web.blueprints.wraps import wraps_bp
@@ -70,6 +71,7 @@ from teslausb_web.services.photo_plate_service import make_photo_plate_service
 from teslausb_web.services.samba_password_service import make_samba_password_service
 from teslausb_web.services.samba_service import SambaError, make_samba_service
 from teslausb_web.services.samba_watcher import make_samba_watcher
+from teslausb_web.services.storage_health_service import make_storage_health_service
 from teslausb_web.services.system_settings_service import (
     SystemSettings,
     SystemSettingsService,
@@ -269,6 +271,7 @@ def _register_blueprints(app: Flask, extras: Iterable[object]) -> None:
     # (it is API-only with no URL in base.html).
     real_blueprints: tuple[Blueprint, ...] = (
         system_health_bp,
+        storage_health_bp,
         lock_chimes_bp,
         light_shows_bp,
         music_bp,
@@ -363,6 +366,7 @@ def _register_system_settings_services(app: Flask, cfg: WebConfig) -> None:
     """Construct the advanced-settings service and shared IPC client once."""
     app.extensions["system_settings_service"] = make_system_settings_service(cfg)
     app.extensions["teslafat_client"] = TeslaFatClient(cfg.paths.ipc_socket)
+    app.extensions["storage_health_service"] = make_storage_health_service(cfg)
 
 
 def _register_samba_services(

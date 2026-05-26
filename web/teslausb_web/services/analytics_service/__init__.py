@@ -176,7 +176,7 @@ def _discover_teslafat_luns(
 
     Each LUN exposes a separate USB volume to Tesla (TeslaCam / MEDIA),
     so the analytics dashboard should show one card per LUN even when
-    the backing roots share an underlying btrfs filesystem.
+    the backing roots share an underlying filesystem.
 
     Returns an empty list on dev machines without ``/etc/teslausb``.
     """
@@ -223,7 +223,7 @@ def make_analytics_service(
     On B-1 hardware we emit one probe per teslafat LUN
     (``/etc/teslausb/teslafat-*.toml``) so the dashboard renders one
     card per USB volume Tesla sees — even when the LUN backing roots
-    share the underlying btrfs filesystem.
+    share the underlying filesystem.
 
     On dev machines (no ``/etc/teslausb``) we fall back to the legacy
     behaviour: probe ``backing_root`` and ``mapping.media_root`` via

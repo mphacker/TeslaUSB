@@ -4,7 +4,7 @@
 # Installs the apt packages that B-1 needs at runtime. Per
 # `docs/00-PLAN.md` row 6.1 the list is:
 #
-#   nbd-client btrfs-progs nginx python3-venv network-manager
+#   nbd-client nginx python3-venv network-manager
 #   watchdog dnsmasq-base hostapd
 #
 # FORBIDDEN by ADR-0008: rustup, cargo, gcc, build-essential.
@@ -28,7 +28,6 @@ source "$(dirname "${BASH_SOURCE[0]}")/00-common.sh"
 # inverse step picks it up automatically.
 B1_RUNTIME_PACKAGES=(
   nbd-client       # client-side NBD (Rust teslafat daemon ships server-side)
-  btrfs-progs      # mkfs.btrfs + subvol mgmt for 6.3
   nginx            # reverse proxy in front of gunicorn (6.10)
   python3-venv     # Phase 5 web app venv
   network-manager  # NetworkManager + nmcli used by captive_portal

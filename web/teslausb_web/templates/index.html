@@ -350,20 +350,10 @@
             <form method="post" action="{{ url_for('settings.save_mapping_settings') }}">
                 <p style="font-size:0.85rem; color:var(--text-secondary); margin:0 0 16px">
                     Tesla embeds GPS coordinates and telemetry data (speed, braking, steering) inside each dashcam video.
-                    The indexer extracts this data and builds a database of trips, routes, and driving events.
-                    This powers the map view — showing where you drove, plotting routes, and detecting events
-                    like hard braking or sharp turns.
+                    The indexer always extracts this data from videos that carry GPS or SEI telemetry and builds a
+                    database of trips, routes, and driving events. This powers the map view — showing where you drove,
+                    plotting routes, and detecting events like hard braking or sharp turns.
                 </p>
-                <div class="form-group" style="margin-bottom:14px">
-                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer">
-                        <input type="checkbox" name="enabled" {% if cfg_mapping.enabled %}checked{% endif %}>
-                        <strong>Enable GPS indexing</strong>
-                    </label>
-                    <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0 26px">
-                        Scans dashcam videos to extract GPS waypoints and build trip routes.
-                        When disabled, the map page won't show any trips or routes. Videos can still be browsed by folder.
-                    </p>
-                </div>
                 <div class="settings-form-grid">
                     <div class="form-group">
                         <label style="font-size:0.85rem"><strong>Trip gap (minutes)</strong></label>

@@ -34,6 +34,10 @@ from flask import (
 )
 
 from teslausb_web.services.gadget_state import gadget_mode_token
+from teslausb_web.services.mapping_settings_service import (
+    MappingSettingsError,
+    MappingSettingsService,
+)
 from teslausb_web.services.system_settings_service import (
     SystemSettingsConfigError,
     SystemSettingsService,
@@ -65,6 +69,22 @@ def _get_system_settings_service() -> SystemSettingsService:
     if not isinstance(service, SystemSettingsService):
         raise RuntimeError("system_settings_service extension is not configured")
     return service
+
+
+def _get_mapping_settings_service() -> MappingSettingsService:
+    service = current_app.extensions.get("mapping_settings_service")
+    if not isinstance(service, MappingSettingsService):
+        raise RuntimeError("mapping_settings_service extension is not configured")
+    return service
+
+
+def _coerce_int_form_field(field_name: str, raw: str | None) -> int:
+    if raw is None or not raw.strip():
+        raise MappingSettingsError(f"{field_name} is required")
+    try:
+        return int(raw.strip())
+    except ValueError as exc:
+        raise MappingSettingsError(f"{field_name} must be an integer") from exc
 
 
 def _redirect_to_index() -> Response:
@@ -222,6 +242,8 @@ def _system_info() -> dict[str, object]:
 
 def _index_context() -> dict[str, object]:
     wifi_status, ap_status, ap_config = _wifi_context()
+    mapping_service = _get_mapping_settings_service()
+    mapping_snapshot = mapping_service.get_settings()
     return {
         "page": "settings",
         "auto_refresh": False,
@@ -230,7 +252,7 @@ def _index_context() -> dict[str, object]:
         "wifi_status": wifi_status,
         "ap_status": ap_status,
         "ap_config": ap_config,
-        "cfg_mapping": {"enabled": False, "trip_gap_minutes": 15, "speed_limit_mph": 80},
+        "cfg_mapping": mapping_service.serialize_for_template(mapping_snapshot),
         "cfg_network": {"samba_password": ""},
         "system_info": _system_info(),
         "samba_on": _samba_on(),
@@ -320,7 +342,31 @@ def force_ap() -> ResponseReturnValue:
 
 @settings_dashboard_bp.route("/settings/save/mapping", methods=["POST"])
 def save_mapping_settings() -> ResponseReturnValue:
-    return _stub_save("Mapping settings are not yet supported in B-1")
+    """Persist mapping thresholds. Worker picks them up on next tick."""
+    service = _get_mapping_settings_service()
+    try:
+        trip_gap = _coerce_int_form_field(
+            "Trip gap (minutes)",
+            request.form.get("trip_gap_minutes"),
+        )
+        speed_mph = _coerce_int_form_field(
+            "Speed alert (mph)",
+            request.form.get("speed_limit_mph"),
+        )
+        snapshot = service.save_settings(
+            trip_gap_minutes=trip_gap,
+            speed_limit_mph=speed_mph,
+        )
+    except MappingSettingsError as exc:
+        flash(f"Invalid mapping settings: {exc}", "error")
+        return _redirect_to_index()
+    flash(
+        f"Mapping settings saved (trip gap {snapshot.trip_gap_minutes} min, "
+        f"speed alert {snapshot.speed_limit_mph} mph"
+        f"{' — disabled' if not snapshot.speed_limit_enabled else ''}).",
+        "success",
+    )
+    return _redirect_to_index()
 
 
 @settings_dashboard_bp.route("/settings/save/network", methods=["POST"])

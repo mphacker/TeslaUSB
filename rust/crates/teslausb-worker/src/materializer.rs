@@ -150,6 +150,11 @@ pub struct RebuildStats {
 pub struct Materializer {
     gap_seconds: i64,
     min_distance_km: f64,
+    /// Speed-limit threshold in m/s. `0.0` (or any non-positive
+    /// value) **disables** speed-limit event emission entirely.
+    /// Live-edited via `/var/lib/teslausb/mapping_settings.json`
+    /// — see [`crate::mapping_overrides`].
+    speed_limit_mps: f64,
 }
 
 impl Default for Materializer {
@@ -157,18 +162,33 @@ impl Default for Materializer {
         Self {
             gap_seconds: DEFAULT_TRIP_GAP_SECONDS,
             min_distance_km: DEFAULT_TRIP_MIN_DISTANCE_KM,
+            speed_limit_mps: SPEED_LIMIT_MPS,
         }
     }
 }
 
 impl Materializer {
     /// Build with custom thresholds. Used by tests; production
-    /// uses [`Materializer::default`].
+    /// uses [`Materializer::from_overrides`].
     #[must_use]
     pub const fn new(gap_seconds: i64, min_distance_km: f64) -> Self {
         Self {
             gap_seconds,
             min_distance_km,
+            speed_limit_mps: SPEED_LIMIT_MPS,
+        }
+    }
+
+    /// Build from the live JSON-backed overrides snapshot. This
+    /// is the production constructor — the supervisor calls
+    /// [`crate::mapping_overrides::MappingOverridesReader::load`]
+    /// once per rebuild and hands the snapshot in here.
+    #[must_use]
+    pub fn from_overrides(overrides: &crate::mapping_overrides::MappingOverrides) -> Self {
+        Self {
+            gap_seconds: overrides.trip_gap_seconds,
+            min_distance_km: DEFAULT_TRIP_MIN_DISTANCE_KM,
+            speed_limit_mps: overrides.speed_limit_mps,
         }
     }
 
@@ -312,7 +332,7 @@ impl Materializer {
             }
         }
 
-        let events = derive_events(trip_id, &waypoints);
+        let events = derive_events(trip_id, &waypoints, self.speed_limit_mps);
         let event_count = u32::try_from(events.len()).unwrap_or(u32::MAX);
         {
             let mut ev_stmt = tx.prepare(
@@ -602,9 +622,14 @@ fn endpoint_coords(
 /// /api/events response shape is unchanged when the Python
 /// query layer switches to reading these rows.
 #[allow(clippy::too_many_lines)]
-fn derive_events(trip_id: i64, waypoints: &[WaypointRow]) -> Vec<DerivedEvent> {
+fn derive_events(
+    trip_id: i64,
+    waypoints: &[WaypointRow],
+    speed_limit_mps: f64,
+) -> Vec<DerivedEvent> {
     let mut out = Vec::new();
     let mut prev_ap: Option<String> = None;
+    let speed_limit_enabled = speed_limit_mps > 0.0;
     for (idx, w) in waypoints.iter().enumerate() {
         // `idx` is bounded by waypoints-per-trip (well under
         // i64::MAX); a saturating cast is loud-correct here.
@@ -616,8 +641,10 @@ fn derive_events(trip_id: i64, waypoints: &[WaypointRow]) -> Vec<DerivedEvent> {
         let fi = Some(w.frame_index);
 
         // Speed-limit. Strict `>` matches ADR-0019 and v1's
-        // `> 35.76` (NOT `>=`).
-        if w.speed_mps > SPEED_LIMIT_MPS {
+        // `> threshold` (NOT `>=`). When the user disables the
+        // threshold (mph = 0) we skip this branch entirely so
+        // the per-waypoint hot path pays one float compare.
+        if speed_limit_enabled && w.speed_mps > speed_limit_mps {
             out.push(DerivedEvent {
                 trip_id: Some(trip_id),
                 clip_id: Some(w.clip_id),
@@ -630,7 +657,7 @@ fn derive_events(trip_id: i64, waypoints: &[WaypointRow]) -> Vec<DerivedEvent> {
                 metadata_json: None,
                 description: format!(
                     "Speed {:.1} m/s exceeded limit {:.1} m/s",
-                    w.speed_mps, SPEED_LIMIT_MPS
+                    w.speed_mps, speed_limit_mps
                 ),
                 frame_index: fi,
             });
@@ -1130,5 +1157,94 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM clip_trip_map", [], |r| r.get(0))
             .unwrap();
         assert_eq!(map, 0);
+    }
+
+    fn count_speed_events(conn: &Connection) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM detected_events WHERE event_type = 'speed_limit_exceeded'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// A trip with one waypoint above 35.76 m/s emits a
+    /// speed-limit event under the default threshold.
+    #[test]
+    fn from_overrides_default_speed_threshold_emits_event() {
+        let mut conn = fresh_db();
+        // 7,200,000 km/h… er, just need a fast waypoint and enough
+        // distance to clear the 0.05 km min trip distance.
+        let a = insert_clip(&mut conn, "a.mp4", "recent", Some(8_000_000), 2);
+        insert_wp(&mut conn, a, 0, 0.0, 40.0, -75.0, 40.0, None, None, None);
+        insert_wp(&mut conn, a, 1, 1_000.0, 40.01, -75.0, 40.0, None, None, None);
+        let overrides = crate::mapping_overrides::MappingOverrides {
+            trip_gap_seconds: 300,
+            speed_limit_mps: SPEED_LIMIT_MPS,
+        };
+        Materializer::from_overrides(&overrides)
+            .rebuild_all(&mut conn)
+            .unwrap();
+        assert!(count_speed_events(&conn) >= 1);
+    }
+
+    /// `speed_limit_mps = 0.0` disables emission even when
+    /// waypoints exceed the legacy default threshold.
+    #[test]
+    fn from_overrides_zero_speed_limit_disables_emission() {
+        let mut conn = fresh_db();
+        let a = insert_clip(&mut conn, "a.mp4", "recent", Some(9_000_000), 2);
+        insert_wp(&mut conn, a, 0, 0.0, 40.0, -75.0, 40.0, None, None, None);
+        insert_wp(&mut conn, a, 1, 1_000.0, 40.01, -75.0, 40.0, None, None, None);
+        let overrides = crate::mapping_overrides::MappingOverrides {
+            trip_gap_seconds: 300,
+            speed_limit_mps: 0.0,
+        };
+        Materializer::from_overrides(&overrides)
+            .rebuild_all(&mut conn)
+            .unwrap();
+        assert_eq!(count_speed_events(&conn), 0);
+    }
+
+    /// Custom (low) speed threshold emits a speed event at a
+    /// speed well below the legacy default.
+    #[test]
+    fn from_overrides_custom_speed_limit_emits_at_lower_threshold() {
+        let mut conn = fresh_db();
+        let a = insert_clip(&mut conn, "a.mp4", "recent", Some(10_000_000), 2);
+        // ~13.4 m/s = 30 mph — below the legacy 80-mph default,
+        // above the custom 25-mph threshold (11.176 m/s).
+        insert_wp(&mut conn, a, 0, 0.0, 40.0, -75.0, 13.4, None, None, None);
+        insert_wp(&mut conn, a, 1, 1_000.0, 40.01, -75.0, 13.4, None, None, None);
+        let overrides = crate::mapping_overrides::MappingOverrides {
+            trip_gap_seconds: 300,
+            speed_limit_mps: 25.0 * 0.44704,
+        };
+        Materializer::from_overrides(&overrides)
+            .rebuild_all(&mut conn)
+            .unwrap();
+        assert!(count_speed_events(&conn) >= 1);
+    }
+
+    /// Custom trip-gap propagates: with a 60-second gap, clips
+    /// 120 seconds apart end up in two trips rather than one.
+    #[test]
+    fn from_overrides_custom_trip_gap_splits_trips() {
+        let mut conn = fresh_db();
+        let a = insert_clip(&mut conn, "a.mp4", "recent", Some(11_000_000), 2);
+        insert_wp(&mut conn, a, 0, 0.0, 40.0, -75.0, 10.0, None, None, None);
+        insert_wp(&mut conn, a, 1, 500.0, 40.01, -75.0, 10.0, None, None, None);
+        // 120 s later (well past the 60-second custom gap).
+        let b = insert_clip(&mut conn, "b.mp4", "recent", Some(11_000_120), 2);
+        insert_wp(&mut conn, b, 0, 0.0, 40.02, -75.0, 10.0, None, None, None);
+        insert_wp(&mut conn, b, 1, 500.0, 40.03, -75.0, 10.0, None, None, None);
+        let overrides = crate::mapping_overrides::MappingOverrides {
+            trip_gap_seconds: 60,
+            speed_limit_mps: 0.0,
+        };
+        let stats = Materializer::from_overrides(&overrides)
+            .rebuild_all(&mut conn)
+            .unwrap();
+        assert_eq!(stats.trips_written, 2);
     }
 }

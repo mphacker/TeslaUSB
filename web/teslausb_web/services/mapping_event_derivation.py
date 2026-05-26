@@ -95,12 +95,20 @@ def is_autopilot_engaged(autopilot_state: str | None) -> bool:
 def derive_trip_events(
     trip: TripGroup,
     waypoints: Sequence[AbsoluteWaypoint],
+    *,
+    speed_limit_mps: float = _SPEED_LIMIT_MPS,
 ) -> tuple[DerivedEvent, ...]:
-    """Emit every waypoint-derived event for the given trip."""
+    """Emit every waypoint-derived event for the given trip.
+
+    ``speed_limit_mps`` controls the speed-limit-exceeded threshold;
+    pass ``0`` (or any non-positive value) to disable the event entirely.
+    Defaults to the legacy 80 mph (35.76 m/s) to keep existing call
+    sites working unchanged.
+    """
     events: list[DerivedEvent] = []
     previous_engaged: bool | None = None
     for entry in waypoints:
-        events.extend(_speed_event(entry, trip.id))
+        events.extend(_speed_event(entry, trip.id, speed_limit_mps))
         events.extend(_accel_event(entry, trip.id))
         events.extend(_sharp_turn_event(entry, trip.id))
         current_engaged = is_autopilot_engaged(entry.waypoint.autopilot_state)
@@ -115,15 +123,19 @@ def derive_sentry_events(clips: Iterable[WorkerClip]) -> tuple[DerivedEvent, ...
     return tuple(_sentry_event(clip) for clip in clips)
 
 
-def _speed_event(entry: AbsoluteWaypoint, trip_id: int) -> tuple[DerivedEvent, ...]:
-    if entry.waypoint.speed_mps <= _SPEED_LIMIT_MPS:
+def _speed_event(
+    entry: AbsoluteWaypoint,
+    trip_id: int,
+    speed_limit_mps: float,
+) -> tuple[DerivedEvent, ...]:
+    if speed_limit_mps <= 0.0 or entry.waypoint.speed_mps <= speed_limit_mps:
         return ()
     return (
         _waypoint_event(
             entry,
             trip_id,
             EVENT_SPEED_LIMIT_EXCEEDED,
-            f"Speed {entry.waypoint.speed_mps:.1f} m/s exceeded limit {_SPEED_LIMIT_MPS:.1f} m/s",
+            f"Speed {entry.waypoint.speed_mps:.1f} m/s exceeded limit {speed_limit_mps:.1f} m/s",
         ),
     )
 

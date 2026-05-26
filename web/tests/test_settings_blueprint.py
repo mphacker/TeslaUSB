@@ -121,10 +121,47 @@ class TestDashboardRoutes:
 
 
 class TestStubRoutes:
-    def test_save_mapping_stub_redirects(self, client) -> None:
-        response = client.post("/settings/save/mapping")
+    def test_save_mapping_persists(self, client, app) -> None:
+        response = client.post(
+            "/settings/save/mapping",
+            data={"trip_gap_minutes": "7", "speed_limit_mph": "65"},
+        )
         assert response.status_code == HTTPStatus.FOUND
         assert response.headers["Location"] == "/settings/"
+        svc = app.extensions["mapping_settings_service"]
+        snap = svc.get_settings()
+        assert snap.trip_gap_minutes == 7
+        assert snap.speed_limit_mph == 65
+        # And the JSON file was actually written.
+        import json
+
+        payload = json.loads(svc.path.read_text(encoding="utf-8"))
+        assert payload == {
+            "schema_version": 1,
+            "speed_limit_mph": 65,
+            "trip_gap_minutes": 7,
+        }
+
+    def test_save_mapping_zero_speed_disables(self, client, app) -> None:
+        response = client.post(
+            "/settings/save/mapping",
+            data={"trip_gap_minutes": "5", "speed_limit_mph": "0"},
+        )
+        assert response.status_code == HTTPStatus.FOUND
+        svc = app.extensions["mapping_settings_service"]
+        snap = svc.get_settings()
+        assert snap.speed_limit_enabled is False
+
+    def test_save_mapping_rejects_out_of_range(self, client, app) -> None:
+        response = client.post(
+            "/settings/save/mapping",
+            data={"trip_gap_minutes": "999", "speed_limit_mph": "0"},
+        )
+        assert response.status_code == HTTPStatus.FOUND
+        svc = app.extensions["mapping_settings_service"]
+        # File was never written — defaults remain.
+        snap = svc.get_settings()
+        assert snap.trip_gap_minutes == 5
 
     def test_save_network_stub_redirects(self, client) -> None:
         response = client.post("/settings/save/network")

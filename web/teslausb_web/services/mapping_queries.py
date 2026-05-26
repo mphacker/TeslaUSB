@@ -27,6 +27,7 @@ from teslausb_web.services.mapping_event_derivation import (
     derive_trip_events,
     is_autopilot_engaged,
 )
+from teslausb_web.services.mapping_settings_service import MappingSettings
 from teslausb_web.services.mapping_trip_derivation import (
     AbsoluteWaypoint,
     TripGroup,
@@ -48,7 +49,7 @@ from teslausb_web.services.mapping_trip_derivation import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Callable, Iterator, Sequence
     from pathlib import Path
 
     from teslausb_web.config import WebConfig
@@ -90,6 +91,7 @@ class MappingQueriesConfig:
     db_path: Path
     media_root: Path
     trip_gap_seconds: int = _TRIP_GAP_SECONDS_DEFAULT
+    speed_limit_mps: float = 35.76
     playable_trips_ttl_seconds: float = _PLAYABLE_TRIPS_TTL_SECONDS
 
     def __post_init__(self) -> None:
@@ -97,6 +99,8 @@ class MappingQueriesConfig:
             raise ValueError("trip_gap_seconds must be > 0")
         if self.playable_trips_ttl_seconds <= 0:
             raise ValueError("playable_trips_ttl_seconds must be > 0")
+        if self.speed_limit_mps < 0:
+            raise ValueError("speed_limit_mps must be >= 0")
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,10 +305,17 @@ class _Snapshot:
 
 @dataclass(frozen=True, slots=True)
 class _SnapshotCacheEntry:
-    """A cached snapshot keyed by the worker DB's mtime+size."""
+    """A cached snapshot keyed by the worker DB's mtime+size and the
+    settings identity that produced it.
+
+    The settings identity bumps invalidate the cache instantly when the
+    operator changes `trip_gap_minutes` or `speed_limit_mph`, without
+    waiting for the worker DB to roll forward.
+    """
 
     db_mtime_ns: int
     db_size: int
+    settings_key: tuple[int, int]
     computed_at: float
     snapshot: _Snapshot
 
@@ -316,9 +327,11 @@ class MappingQueries:
         self,
         *,
         config: MappingQueriesConfig,
+        settings_provider: Callable[[], MappingSettings] | None = None,
         migrations_runner: object | None = None,  # Deprecated: worker owns the schema
     ) -> None:
         self._config = config
+        self._settings_provider = settings_provider
         del migrations_runner
         self._playable_trips_cache: dict[str, _PlayableTripsCacheEntry] = {}
         self._playable_trips_cache_lock = threading.RLock()
@@ -876,6 +889,8 @@ class MappingQueries:
 
     def _load_snapshot(self) -> _Snapshot:
         mtime_ns, size = self._stat_db()
+        settings = self._live_settings()
+        settings_key = (settings.trip_gap_seconds, settings.speed_limit_mph)
         now = time.monotonic()
         with self._snapshot_lock:
             cached = self._snapshot_cache
@@ -883,10 +898,11 @@ class MappingQueries:
                 cached is not None
                 and cached.db_mtime_ns == mtime_ns
                 and cached.db_size == size
+                and cached.settings_key == settings_key
                 and (now - cached.computed_at) < _SNAPSHOT_CACHE_TTL_SECONDS
             ):
                 return cached.snapshot
-        snapshot = self._build_snapshot()
+        snapshot = self._build_snapshot(settings)
         with self._snapshot_lock:
             # Re-stat under the lock so we record the mtime that was
             # actually observed when the snapshot was built. If another
@@ -897,10 +913,24 @@ class MappingQueries:
             self._snapshot_cache = _SnapshotCacheEntry(
                 db_mtime_ns=mtime_ns,
                 db_size=size,
+                settings_key=settings_key,
                 computed_at=time.monotonic(),
                 snapshot=snapshot,
             )
         return snapshot
+
+    def _live_settings(self) -> MappingSettings:
+        if self._settings_provider is not None:
+            return self._settings_provider()
+        # No provider wired (tests / explicit-config construction).
+        # Synthesize a snapshot from the static MappingQueriesConfig so
+        # legacy callers see the same numeric thresholds they always did.
+        mph = round(self._config.speed_limit_mps / 0.44704)
+        return MappingSettings(
+            trip_gap_minutes=max(1, self._config.trip_gap_seconds // 60),
+            speed_limit_mph=mph,
+            speed_limit_mps=self._config.speed_limit_mps,
+        )
 
     def _stat_db(self) -> tuple[int, int]:
         try:
@@ -909,7 +939,7 @@ class MappingQueries:
             return (0, 0)
         return (stat.st_mtime_ns, stat.st_size)
 
-    def _build_snapshot(self) -> _Snapshot:
+    def _build_snapshot(self, settings: MappingSettings) -> _Snapshot:
         try:
             with self.open_db() as connection:
                 clips = load_clips(connection, require_gps=True)
@@ -933,12 +963,16 @@ class MappingQueries:
             "materialised trips/events tables empty; falling back to Python "
             "derivation (worker bootstrap likely still running)",
         )
-        trips = group_trips(clips, self._config.trip_gap_seconds)
+        trips = group_trips(clips, settings.trip_gap_seconds)
         materialised: list[_MaterialisedTrip] = []
         for trip in trips:
             flattened = flatten_trip_waypoints(trip, waypoints_by_clip)
             metrics = compute_trip_metrics(flattened)
-            events = derive_trip_events(trip, flattened)
+            events = derive_trip_events(
+                trip,
+                flattened,
+                speed_limit_mps=settings.speed_limit_mps,
+            )
             materialised.append(
                 _MaterialisedTrip(
                     trip=trip,
@@ -1050,17 +1084,23 @@ class _DayAccumulator:
         )
 
 
-def make_mapping_queries(cfg: WebConfig | MappingQueriesConfig) -> MappingQueries:
+def make_mapping_queries(
+    cfg: WebConfig | MappingQueriesConfig,
+    *,
+    settings_provider: Callable[[], MappingSettings] | None = None,
+) -> MappingQueries:
     """Build the mapping query service from app config or explicit settings."""
     if isinstance(cfg, MappingQueriesConfig):
-        return MappingQueries(config=cfg)
+        return MappingQueries(config=cfg, settings_provider=settings_provider)
     return MappingQueries(
         config=MappingQueriesConfig(
             db_path=cfg.mapping.db_path,
             media_root=cfg.paths.backing_root,
             trip_gap_seconds=cfg.mapping.trip_gap_minutes * 60,
+            speed_limit_mps=cfg.mapping.speed_limit_mps,
             playable_trips_ttl_seconds=_PLAYABLE_TRIPS_TTL_SECONDS,
         ),
+        settings_provider=settings_provider,
     )
 
 

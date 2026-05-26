@@ -57,6 +57,16 @@ pub struct Config {
     #[serde(default = "default_db_path")]
     pub db_path: PathBuf,
 
+    /// Path to the JSON file holding live mapping settings
+    /// (`trip_gap_minutes`, `speed_limit_mph`). Written by the
+    /// web app, read by the materialiser on every rebuild. The
+    /// reader is mtime-cached, so re-reads are sub-microsecond
+    /// on the Pi when the file hasn't changed. Defaults to
+    /// `/var/lib/teslausb/mapping_settings.json`; matches the
+    /// Python `MappingSection.overrides_path` default.
+    #[serde(default = "default_mapping_overrides_path")]
+    pub mapping_overrides_path: PathBuf,
+
     /// Indexer configuration.
     #[serde(default)]
     pub indexer: IndexerConfig,
@@ -163,6 +173,10 @@ fn default_db_path() -> PathBuf {
     PathBuf::from("/var/lib/teslausb/index.sqlite3")
 }
 
+fn default_mapping_overrides_path() -> PathBuf {
+    PathBuf::from("/var/lib/teslausb/mapping_settings.json")
+}
+
 const fn default_sei_sample_rate() -> u32 {
     DEFAULT_SEI_SAMPLE_RATE
 }
@@ -224,6 +238,10 @@ impl Config {
         ensure!(
             !self.db_path.as_os_str().is_empty(),
             "db_path must not be empty",
+        );
+        ensure!(
+            !self.mapping_overrides_path.as_os_str().is_empty(),
+            "mapping_overrides_path must not be empty",
         );
         ensure!(
             self.cleanup.retention_days <= RETENTION_DAYS_MAX,

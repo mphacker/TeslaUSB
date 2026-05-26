@@ -173,12 +173,14 @@ _DEFAULT_CLOUD_SYNC_FOLDERS: Final[tuple[str, ...]] = (
 )
 _DEFAULT_CLOUD_DEAD_LETTER_MAX_AGE_DAYS: Final[int] = 30
 _DEFAULT_MAPPING_DB_NAME: Final[str] = "index.sqlite3"
+_DEFAULT_MAPPING_OVERRIDES_FILENAME: Final[str] = "mapping_settings.json"
+_DEFAULT_MAPPING_OVERRIDES_PATH: Path = _DEFAULT_STATE_DIR / _DEFAULT_MAPPING_OVERRIDES_FILENAME
 _DEFAULT_MAPPING_TRIP_GAP_MINUTES: Final[int] = 5
 _DEFAULT_MAPPING_HARSH_BRAKE_THRESHOLD: Final[float] = -4.0
 _DEFAULT_MAPPING_EMERGENCY_BRAKE_THRESHOLD: Final[float] = -7.0
 _DEFAULT_MAPPING_HARD_ACCEL_THRESHOLD: Final[float] = 3.5
 _DEFAULT_MAPPING_SHARP_TURN_LATERAL_MPS2: Final[float] = 4.0
-_DEFAULT_MAPPING_SPEED_LIMIT_MPS: Final[float] = 35.76
+_DEFAULT_MAPPING_SPEED_LIMIT_MPS: Final[float] = 0.0
 _DEFAULT_MAPPING_PLAYABLE_TRIPS_TTL_SECONDS: Final[float] = 60.0
 _DEFAULT_MAPPING_DB_PATH: Path = Path("/var/lib/teslausb") / _DEFAULT_MAPPING_DB_NAME
 # Mapping's discovery walker iterates ``<media_root>/{Recent,Saved,Sentry}Clips``
@@ -892,6 +894,7 @@ class MappingSection:
 
     db_path: Path = _DEFAULT_MAPPING_DB_PATH
     media_root: Path = _DEFAULT_MAPPING_MEDIA_ROOT
+    overrides_path: Path = _DEFAULT_MAPPING_OVERRIDES_PATH
     trip_gap_minutes: int = _DEFAULT_MAPPING_TRIP_GAP_MINUTES
     harsh_brake_threshold: float = _DEFAULT_MAPPING_HARSH_BRAKE_THRESHOLD
     emergency_brake_threshold: float = _DEFAULT_MAPPING_EMERGENCY_BRAKE_THRESHOLD
@@ -907,6 +910,7 @@ class MappingSection:
         for name, value in (
             ("db_path", self.db_path),
             ("media_root", self.media_root),
+            ("overrides_path", self.overrides_path),
         ):
             if not value.is_absolute() and not PurePosixPath(value.as_posix()).is_absolute():
                 raise ConfigError(None, f"[mapping] {name} must be absolute, got {value!r}")
@@ -1722,6 +1726,12 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
                 mapping_raw,
                 "media_root",
                 paths_section.backing_root / _MAPPING_MEDIA_SUBDIR,
+                source,
+            ),
+            overrides_path=_coerce_path(
+                mapping_raw,
+                "overrides_path",
+                _DEFAULT_MAPPING_OVERRIDES_PATH,
                 source,
             ),
             trip_gap_minutes=_coerce_int(

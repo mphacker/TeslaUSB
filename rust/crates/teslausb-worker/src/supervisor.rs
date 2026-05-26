@@ -208,6 +208,12 @@ pub async fn run(opts: RunOptions) -> Result<ShutdownReason> {
         return Ok(ShutdownReason::BootstrapOnly);
     }
 
+    let overrides_reader = std::sync::Arc::new(
+        crate::mapping_overrides::MappingOverridesReader::new(
+            config.mapping_overrides_path.clone(),
+        ),
+    );
+
     // Phase O — startup materialise pass. If the bootstrap
     // pass freshly indexed clips (or the v2 → v3 migration
     // just landed against a populated DB), the derived
@@ -217,9 +223,11 @@ pub async fn run(opts: RunOptions) -> Result<ShutdownReason> {
     // first paint. Subsequent updates flow through the
     // dirty-flag tick inside the cleanup loop.
     {
+        let overrides_reader_clone = std::sync::Arc::clone(&overrides_reader);
         let (indexer_back, rebuild_outcome) = tokio::task::spawn_blocking(move || {
             let mut idx = indexer;
-            let stats = idx.store_mut().rebuild_trips_now();
+            let snap = overrides_reader_clone.load();
+            let stats = idx.store_mut().rebuild_trips_now(&snap);
             (idx, stats)
         })
         .await
@@ -255,10 +263,20 @@ pub async fn run(opts: RunOptions) -> Result<ShutdownReason> {
     // The *watcher* still runs on its own blocking thread
     // because `next_batch` blocks indefinitely on inotify.
     #[cfg(target_os = "linux")]
-    let reason = steady_state_linux(&config, &mut indexer, &cleanup, interval).await?;
+    let reason = steady_state_linux(
+        &config,
+        &mut indexer,
+        &cleanup,
+        interval,
+        &overrides_reader,
+    )
+    .await?;
 
     #[cfg(not(target_os = "linux"))]
     let reason = steady_state_non_linux(&mut indexer, &cleanup, interval).await?;
+
+    #[cfg(not(target_os = "linux"))]
+    let _ = &overrides_reader;
 
     let _ = indexer; // explicit: keep alive through the loop
     info!(reason = ?reason, "supervisor stopped");
@@ -271,6 +289,7 @@ async fn steady_state_linux(
     indexer: &mut Indexer,
     cleanup: &Cleanup,
     interval: Duration,
+    overrides_reader: &crate::mapping_overrides::MappingOverridesReader,
 ) -> Result<ShutdownReason> {
     use tokio::signal::unix::{SignalKind, signal};
     use tokio::sync::mpsc;
@@ -406,7 +425,22 @@ async fn steady_state_linux(
                 // set the dirty flag. No-op when the flag is
                 // clear, so we don't pay the rebuild cost on
                 // idle ticks.
-                match indexer.store_mut().rebuild_trips_if_dirty() {
+                //
+                // Live-edit of mapping settings (web app rewrites
+                // the overrides JSON) propagates here: if the
+                // overrides file's mtime changed since our last
+                // load, mark trips dirty so the next branch
+                // rebuilds with the new thresholds.
+                if overrides_reader.mtime_changed_since_last_load() {
+                    if let Err(e) = indexer.store().mark_trips_dirty() {
+                        warn!(error = %e,
+                            "mapping overrides changed but mark_trips_dirty failed");
+                    } else {
+                        info!("mapping overrides changed on disk; trips marked dirty");
+                    }
+                }
+                let overrides_snapshot = overrides_reader.load();
+                match indexer.store_mut().rebuild_trips_if_dirty(&overrides_snapshot) {
                     Ok(None) => {}
                     Ok(Some(stats)) => info!(
                         clips_seen = stats.clips_seen,

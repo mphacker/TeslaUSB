@@ -61,6 +61,10 @@ from teslausb_web.services.jobs_service import CloudSyncAdapterProtocol, make_jo
 from teslausb_web.services.license_plate_service import make_license_plate_service
 from teslausb_web.services.light_show_service import make_light_show_service
 from teslausb_web.services.mapping_queries import MappingQueries, make_mapping_queries
+from teslausb_web.services.mapping_settings_service import (
+    MappingSettingsService,
+    make_mapping_settings_service,
+)
 from teslausb_web.services.music_service import make_music_service
 from teslausb_web.services.photo_plate_service import make_photo_plate_service
 from teslausb_web.services.samba_service import SambaError, make_samba_service
@@ -473,8 +477,13 @@ def _register_wrap_services(app: Flask, cfg: WebConfig) -> None:
 
 
 def _register_mapping_services(app: Flask, cfg: WebConfig) -> None:
-    """Register the read-only worker-DB query service."""
-    app.extensions["mapping_queries"] = make_mapping_queries(cfg)
+    """Register the read-only worker-DB query service and live settings store."""
+    settings_service = make_mapping_settings_service(cfg)
+    app.extensions["mapping_settings_service"] = settings_service
+    app.extensions["mapping_queries"] = make_mapping_queries(
+        cfg,
+        settings_provider=settings_service.get_settings,
+    )
 
 
 def _register_analytics_service(app: Flask, cfg: WebConfig) -> None:

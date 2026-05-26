@@ -139,6 +139,12 @@ from teslausb_web.services.mapping_queries import (
     TripRow,
     make_mapping_queries,
 )
+from teslausb_web.services.mapping_settings_service import (
+    MappingSettings,
+    MappingSettingsError,
+    MappingSettingsService,
+    make_mapping_settings_service,
+)
 from teslausb_web.services.samba_service import (
     SambaCommandError,
     SambaConfigError,
@@ -236,6 +242,9 @@ __all__ = (
     "MappingQueries",
     "MappingQueriesConfig",
     "MappingQueryError",
+    "MappingSettings",
+    "MappingSettingsError",
+    "MappingSettingsService",
     "OAuthConfig",
     "OAuthConfigError",
     "OAuthCredentials",
@@ -318,6 +327,7 @@ __all__ = (
     "make_chime_scheduler",
     "make_license_plate_service",
     "make_mapping_queries",
+    "make_mapping_settings_service",
     "make_oauth_service",
     "make_rclone_service",
     "make_samba_service",

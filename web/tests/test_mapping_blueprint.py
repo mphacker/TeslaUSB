@@ -237,17 +237,28 @@ def media_root(tmp_path: Path) -> Path:
 def app(tmp_path: Path, media_root: Path) -> Flask:
     db_path = tmp_path / "index.sqlite3"
     _seed_db(db_path, _dataset())
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    overrides_path = state_dir / "mapping_settings.json"
+    overrides_path.write_text(
+        '{"schema_version": 1, "trip_gap_minutes": 5, "speed_limit_mph": 80}\n',
+        encoding="utf-8",
+    )
     cfg = WebConfig(
         web=WebSection(secret_key="x" * 32),
         paths=PathsSection(
             backing_root=media_root,
-            state_dir=tmp_path / "state",
+            state_dir=state_dir,
             cache_invalidate_script=tmp_path / "invalidate.sh",
         ),
         storage_retention=StorageRetentionSection(
-            policy_path=tmp_path / "state" / "retention_policy.json"
+            policy_path=state_dir / "retention_policy.json"
         ),
-        mapping=MappingSection(db_path=db_path, media_root=media_root),
+        mapping=MappingSection(
+            db_path=db_path,
+            media_root=media_root,
+            overrides_path=overrides_path,
+        ),
         source_path=None,
     )
     flask_app = create_app(cfg)
@@ -262,17 +273,23 @@ def empty_app(tmp_path: Path) -> Flask:
     _seed_db(db_path, [])
     media = tmp_path / "backing"
     media.mkdir()
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
     cfg = WebConfig(
         web=WebSection(secret_key="x" * 32),
         paths=PathsSection(
             backing_root=media,
-            state_dir=tmp_path / "state",
+            state_dir=state_dir,
             cache_invalidate_script=tmp_path / "invalidate.sh",
         ),
         storage_retention=StorageRetentionSection(
-            policy_path=tmp_path / "state" / "retention_policy.json"
+            policy_path=state_dir / "retention_policy.json"
         ),
-        mapping=MappingSection(db_path=db_path, media_root=media),
+        mapping=MappingSection(
+            db_path=db_path,
+            media_root=media,
+            overrides_path=state_dir / "mapping_settings.json",
+        ),
         source_path=None,
     )
     flask_app = create_app(cfg)

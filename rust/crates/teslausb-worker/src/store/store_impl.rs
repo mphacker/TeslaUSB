@@ -435,6 +435,20 @@ impl Store {
             .map_err(|_| StoreError::SchemaCorrupt(format!("negative waypoint count: {n}")))
     }
 
+    /// Mark the `trips`/`detected_events` tables as dirty so
+    /// the next [`Store::rebuild_trips_if_dirty`] call performs
+    /// a rebuild. Used by the supervisor when the mapping
+    /// overrides file changes on disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` on any SQLite error while writing the
+    /// `meta` row.
+    pub fn mark_trips_dirty(&self) -> Result<()> {
+        crate::materializer::mark_trips_dirty(&self.conn)?;
+        Ok(())
+    }
+
     /// Run the trip+event materialiser if the `trips_dirty`
     /// flag is set. No-op when the flag is clear, so callers
     /// can drive this from a periodic tick without paying for
@@ -446,11 +460,15 @@ impl Store {
     /// # Errors
     ///
     /// Returns `Err` on any SQLite error during the rebuild.
-    pub fn rebuild_trips_if_dirty(&mut self) -> Result<Option<crate::materializer::RebuildStats>> {
+    pub fn rebuild_trips_if_dirty(
+        &mut self,
+        overrides: &crate::mapping_overrides::MappingOverrides,
+    ) -> Result<Option<crate::materializer::RebuildStats>> {
         if !crate::materializer::trips_dirty(&self.conn)? {
             return Ok(None);
         }
-        let stats = crate::materializer::Materializer::default().rebuild_all(&mut self.conn)?;
+        let stats = crate::materializer::Materializer::from_overrides(overrides)
+            .rebuild_all(&mut self.conn)?;
         Ok(Some(stats))
     }
 
@@ -462,8 +480,12 @@ impl Store {
     /// # Errors
     ///
     /// Returns `Err` on any SQLite error during the rebuild.
-    pub fn rebuild_trips_now(&mut self) -> Result<crate::materializer::RebuildStats> {
-        let stats = crate::materializer::Materializer::default().rebuild_all(&mut self.conn)?;
+    pub fn rebuild_trips_now(
+        &mut self,
+        overrides: &crate::mapping_overrides::MappingOverrides,
+    ) -> Result<crate::materializer::RebuildStats> {
+        let stats = crate::materializer::Materializer::from_overrides(overrides)
+            .rebuild_all(&mut self.conn)?;
         Ok(stats)
     }
 }

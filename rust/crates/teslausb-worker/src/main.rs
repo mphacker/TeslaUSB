@@ -114,7 +114,11 @@ fn run_rebuild_trips(config: &Path) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match store.rebuild_trips_now() {
+    let overrides_reader = teslausb_worker::mapping_overrides::MappingOverridesReader::new(
+        cfg.mapping_overrides_path.clone(),
+    );
+    let overrides = overrides_reader.load();
+    match store.rebuild_trips_now(&overrides) {
         Ok(stats) => {
             tracing::info!(?stats, "--rebuild-trips: rebuild complete");
             ExitCode::SUCCESS

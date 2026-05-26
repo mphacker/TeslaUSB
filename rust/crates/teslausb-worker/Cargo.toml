@@ -37,6 +37,7 @@ clap = { version = "4.5", features = ["derive"] }
 
 # Config file format: TOML (ADR-0001). Matches teslafat's config.
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 toml = "0.8"
 
 # Indexer waypoint store. SQLite via rusqlite with the
@@ -70,3 +71,6 @@ features = ["rt", "macros", "signal", "time", "sync", "net"]
 
 [dev-dependencies]
 tempfile = "3.10"
+# Cross-platform mtime stamping for tests that need to bump a
+# file's mtime explicitly (mapping-overrides cache invalidation).
+filetime = "0.2"

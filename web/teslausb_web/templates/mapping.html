@@ -2911,21 +2911,11 @@ function seiToWaypointShim(sei) {
 // `seekTimeSec` is restored on the new src so playback resumes from
 // the same position the streamed src was at.
 async function loadLiveSeiForClip(videoPath, seekTimeSec) {
-    // DISABLED on B-1 Pi Zero 2 W: fetching the full MP4
-    // (10-30 MB) into an ArrayBuffer alongside the gunicorn
-    // worker indexer OOMs the 512 MB device and requires a
-    // physical power-cycle. The DB-derived per-trip
-    // telemetry (lazy-loaded into trip.waypoints) drives the
-    // HUD instead, until we land worker sidecar SEI or
-    // raise sei_sample_rate. See plan.md → "LEARNING #3:
-    // Live-SEI in browser OOMs the Pi".
-    SEI_CURRENT_PATH = videoPath;
-    return;
-    /* eslint-disable no-unreachable */
     const mySeq = ++SEI_LOAD_SEQ;
     if (SEI_ABORT) { try { SEI_ABORT.abort(); } catch (e) {} }
     SEI_ABORT = new AbortController();
     const sig = SEI_ABORT.signal;
+    SEI_CURRENT_PATH = videoPath;
 
     const proto = await ensureSeiProto();
     if (mySeq !== SEI_LOAD_SEQ) return; // superseded
@@ -2985,7 +2975,6 @@ async function loadLiveSeiForClip(videoPath, seekTimeSec) {
         // Drive the HUD immediately from the SEI we just loaded.
         onOverlayTimeUpdate();
     }, { once: true });
-    /* eslint-enable no-unreachable */
 }
 
 function onOverlayTimeUpdate() {

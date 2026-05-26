@@ -23,14 +23,12 @@ from __future__ import annotations
 
 from teslausb_web.blueprints.light_shows import light_shows_bp
 from teslausb_web.blueprints.lock_chimes import lock_chimes_bp
-from teslausb_web.blueprints.settings_advanced import settings_bp
 from teslausb_web.blueprints.storage import storage_bp
 from teslausb_web.blueprints.system_health import system_health_bp
 
 __all__ = (
     "light_shows_bp",
     "lock_chimes_bp",
-    "settings_bp",
     "storage_bp",
     "system_health_bp",
 )

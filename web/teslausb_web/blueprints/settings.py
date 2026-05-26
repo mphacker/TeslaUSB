@@ -39,7 +39,7 @@ from flask import (
     url_for,
 )
 
-from teslausb_web.blueprints.storage_health import current_snapshot as _storage_health_snapshot
+from teslausb_web.blueprints.storage_health import current_snapshot as _storage_health_snapshot  # noqa: F401
 from teslausb_web.services.gadget_state import gadget_mode_token
 from teslausb_web.services.mapping_settings_service import (
     MappingSettingsError,
@@ -289,7 +289,10 @@ def _index_context() -> dict[str, object]:
     mapping_snapshot = mapping_service.get_settings()
     samba_on = _samba_on()
     share_paths = _share_paths_for_display()
-    storage_health = _storage_health_snapshot()
+    # Storage-health snapshot is intentionally NOT taken on the render
+    # path: tune2fs / findmnt / systemctl probes add ~3-5 s on the Pi.
+    # The storage card template is null-tolerant and the JS card
+    # hydrates from /api/storage/health after DOMContentLoaded.
     return {
         "page": "settings",
         "auto_refresh": False,
@@ -307,7 +310,7 @@ def _index_context() -> dict[str, object]:
         },
         "system_info": _system_info(),
         "samba_on": samba_on,
-        "storage_health": storage_health.to_dict(),
+        "storage_health": None,
         # Probe the live USB-gadget state (configfs UDC + both LUN
         # backing files). Returns 'present' only when the gadget is
         # actually bound to a UDC and both LUNs have backing block

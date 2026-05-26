@@ -119,6 +119,9 @@ class StorageHealthServiceConfig:
     binary_tune2fs: str = "tune2fs"
     binary_journalctl: str = "journalctl"
     binary_systemctl: str = "systemctl"
+    binary_touch: str = "touch"
+    binary_rm: str = "rm"
+    forcefsck_sentinel: Path = Path("/forcefsck")
     sudo_prefix: tuple[str, ...] = ()
     probe_timeout_seconds: float = _PROBE_TIMEOUT_SECONDS
 
@@ -132,6 +135,8 @@ class StorageHealthServiceConfig:
             ("binary_tune2fs", self.binary_tune2fs),
             ("binary_journalctl", self.binary_journalctl),
             ("binary_systemctl", self.binary_systemctl),
+            ("binary_touch", self.binary_touch),
+            ("binary_rm", self.binary_rm),
             ("fstrim_timer_unit", self.fstrim_timer_unit),
             ("e2scrub_timer_unit", self.e2scrub_timer_unit),
         ):
@@ -173,6 +178,7 @@ class StorageHealthSnapshot:
     e2scrub_last_run_iso: str | None = None
     sd_card_name: str | None = None
     sd_card_manfid: str | None = None
+    fsck_scheduled: bool = False
     probe_errors: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
@@ -194,6 +200,7 @@ class StorageHealthSnapshot:
             "e2scrub_last_run_iso": self.e2scrub_last_run_iso,
             "sd_card_name": self.sd_card_name,
             "sd_card_manfid": self.sd_card_manfid,
+            "fsck_scheduled": self.fsck_scheduled,
             "probe_errors": list(self.probe_errors),
         }
 
@@ -267,6 +274,7 @@ class StorageHealthService:
             self._config.e2scrub_timer_unit, probe_errors
         )
         sd_name, sd_manfid = self._probe_sd_card(probe_errors)
+        fsck_scheduled = self._probe_fsck_scheduled(probe_errors)
 
         severity, messages = self._derive_severity(
             readonly=readonly,
@@ -275,6 +283,7 @@ class StorageHealthService:
             mount_count=mount_count,
             max_mount_count=max_mount_count,
             last_checked_iso=last_checked,
+            fsck_scheduled=fsck_scheduled,
         )
 
         return StorageHealthSnapshot(
@@ -295,8 +304,67 @@ class StorageHealthService:
             e2scrub_last_run_iso=e2scrub_last,
             sd_card_name=sd_name,
             sd_card_manfid=sd_manfid,
+            fsck_scheduled=fsck_scheduled,
             probe_errors=tuple(probe_errors),
         )
+
+    # ------------------------------------------------------------------
+    # Mutating actions
+    # ------------------------------------------------------------------
+
+    def schedule_fsck_at_next_boot(self) -> None:
+        """Create the ``/forcefsck`` sentinel.
+
+        systemd-fsck@.service on Debian/Ubuntu honours this file at
+        boot and runs ``e2fsck -fy`` on every filesystem in
+        ``/etc/fstab`` before mounting them read-write. The operator
+        must then reboot to take effect — we deliberately do NOT
+        reboot for them.
+        """
+        binary = self._which(self._config.binary_touch)
+        if binary is None:
+            raise RuntimeError("touch binary not found")
+        command = [
+            *self._config.sudo_prefix,
+            binary,
+            str(self._config.forcefsck_sentinel),
+        ]
+        completed = self._run_command(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=self._config.probe_timeout_seconds,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(
+                f"touch {self._config.forcefsck_sentinel} failed (rc="
+                f"{completed.returncode}): {(completed.stderr or '').strip()}"
+            )
+
+    def cancel_scheduled_fsck(self) -> None:
+        """Remove the ``/forcefsck`` sentinel if it exists."""
+        binary = self._which(self._config.binary_rm)
+        if binary is None:
+            raise RuntimeError("rm binary not found")
+        command = [
+            *self._config.sudo_prefix,
+            binary,
+            "-f",
+            str(self._config.forcefsck_sentinel),
+        ]
+        completed = self._run_command(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=self._config.probe_timeout_seconds,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(
+                f"rm -f {self._config.forcefsck_sentinel} failed (rc="
+                f"{completed.returncode}): {(completed.stderr or '').strip()}"
+            )
 
     # ------------------------------------------------------------------
     # Individual probes
@@ -471,6 +539,14 @@ class StorageHealthService:
     def _default_sysfs_reader(path: Path) -> str:
         return path.read_text(encoding="ascii", errors="replace")
 
+    def _probe_fsck_scheduled(self, errors: list[str]) -> bool:
+        """Return True iff ``/forcefsck`` exists (boot-time fsck pending)."""
+        try:
+            return self._config.forcefsck_sentinel.exists()
+        except OSError as exc:
+            errors.append(f"forcefsck sentinel: {exc}")
+            return False
+
     # ------------------------------------------------------------------
     # Severity rollup
     # ------------------------------------------------------------------
@@ -484,9 +560,15 @@ class StorageHealthService:
         mount_count: int | None,
         max_mount_count: int | None,
         last_checked_iso: str | None,
+        fsck_scheduled: bool = False,
     ) -> tuple[str, list[str]]:
         messages: list[str] = []
         severity = SEV_OK
+
+        if fsck_scheduled:
+            messages.append(
+                "Filesystem check is scheduled to run at next boot."
+            )
 
         if readonly is True:
             severity = SEV_CRITICAL
@@ -524,11 +606,13 @@ class StorageHealthService:
                 f"maximum ({max_mount_count}); schedule an offline e2fsck."
             )
 
-        if last_checked_iso is not None and severity == SEV_OK:
+        if last_checked_iso is not None and severity == SEV_OK and not fsck_scheduled:
             try:
                 last_checked = datetime.fromisoformat(last_checked_iso)
+                if last_checked.tzinfo is None:
+                    last_checked = last_checked.replace(tzinfo=timezone.utc)
                 age_days = (
-                    datetime.now(timezone.utc) - last_checked.replace(tzinfo=timezone.utc)
+                    datetime.now(timezone.utc) - last_checked.astimezone(timezone.utc)
                 ).days
                 if age_days >= _WARN_DAYS_SINCE_FSCK:
                     severity = SEV_WARN
@@ -603,10 +687,23 @@ _MONTHS: Final[dict[str, int]] = {
 }
 
 
-def _tune2fs_date_to_iso(value: str) -> str | None:
-    """Parse e.g. ``Sun Apr 14 02:11:42 2024`` → ``2024-04-14T02:11:42``.
+def _local_iso(dt_naive: datetime) -> str:
+    """Treat ``dt_naive`` as system local time and return an ISO-8601 string
+    with the appropriate UTC offset (handles historical DST correctly via
+    ``astimezone``).
+    """
+    # ``astimezone`` on a naive datetime assumes the system local TZ and
+    # returns an aware datetime with the offset that was in effect at
+    # that moment (DST-correct for the historical date).
+    return dt_naive.astimezone().isoformat()
 
-    Returns ``None`` if the value doesn't match (e.g. ``<not set>``).
+
+def _tune2fs_date_to_iso(value: str) -> str | None:
+    """Parse e.g. ``Sun Apr 14 02:11:42 2024`` → ISO with local offset.
+
+    tune2fs prints wall-clock time in the system's local timezone, so
+    we re-attach the local offset to make the value unambiguous for
+    the client.
     """
     value = (value or "").strip()
     if not value or value.startswith("<"):
@@ -621,7 +718,7 @@ def _tune2fs_date_to_iso(value: str) -> str | None:
         day = int(match.group("day"))
         year = int(match.group("year"))
         hour, minute, second = (int(x) for x in match.group("time").split(":"))
-        return datetime(year, month, day, hour, minute, second).isoformat()
+        return _local_iso(datetime(year, month, day, hour, minute, second))
     except (TypeError, ValueError):
         return None
 
@@ -632,15 +729,21 @@ _SYSTEMCTL_DATE_RE: Final[re.Pattern[str]] = re.compile(
 
 
 def _systemctl_date_to_iso(value: str) -> str | None:
-    """``Sun 2026-05-24 07:50:01 EDT`` → ``2026-05-24T07:50:01``.
+    """``Sun 2026-05-24 07:50:01 EDT`` → ISO with local offset.
 
-    The timezone abbreviation is stripped (we only display the
-    wall-clock time, never compute deltas across timezones here).
+    The printed TZ abbreviation is dropped (Python's stdlib can't parse
+    e.g. ``EDT`` portably); the wall-clock value is in the system local
+    TZ so we re-attach the offset here.
     """
     match = _SYSTEMCTL_DATE_RE.match((value or "").strip())
     if match is None:
         return None
-    return f"{match.group('date')}T{match.group('time')}"
+    try:
+        year, month, day = (int(x) for x in match.group("date").split("-"))
+        hour, minute, second = (int(x) for x in match.group("time").split(":"))
+        return _local_iso(datetime(year, month, day, hour, minute, second))
+    except (TypeError, ValueError):
+        return None
 
 
 def make_storage_health_service(cfg: WebConfig) -> StorageHealthService:

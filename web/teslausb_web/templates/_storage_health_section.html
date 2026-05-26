@@ -57,7 +57,7 @@
         {% if storage_health and storage_health.fs_errors is not none %}
           {{ storage_health.fs_errors }}
           {% if storage_health.fs_errors > 0 and storage_health.fs_last_error_iso %}
-            (last {{ storage_health.fs_last_error_iso }})
+            (last <time data-iso="{{ storage_health.fs_last_error_iso }}">{{ storage_health.fs_last_error_iso }}</time>)
           {% endif %}
         {% else %}—{% endif %}
       </dd>
@@ -72,24 +72,55 @@
       <dt>Last filesystem check</dt>
       <dd id="sh-lastcheck">
         {% if storage_health and storage_health.last_checked_iso %}
-          {{ storage_health.last_checked_iso }}
+          <time data-iso="{{ storage_health.last_checked_iso }}">{{ storage_health.last_checked_iso }}</time>
         {% else %}—{% endif %}
       </dd>
 
       <dt>Online scrub (weekly)</dt>
       <dd id="sh-scrub">
         {% if storage_health and storage_health.e2scrub_last_run_iso %}
-          last ran {{ storage_health.e2scrub_last_run_iso }}
+          last ran <time data-iso="{{ storage_health.e2scrub_last_run_iso }}">{{ storage_health.e2scrub_last_run_iso }}</time>
         {% else %}—{% endif %}
       </dd>
 
       <dt>TRIM</dt>
       <dd id="sh-trim">
         {% if storage_health and storage_health.fstrim_last_run_iso %}
-          last ran {{ storage_health.fstrim_last_run_iso }}
+          last ran <time data-iso="{{ storage_health.fstrim_last_run_iso }}">{{ storage_health.fstrim_last_run_iso }}</time>
         {% else %}—{% endif %}
       </dd>
     </dl>
+
+    <div class="storage-health-actions" id="storage-health-actions"
+         data-schedule-url="{{ url_for('storage_health.schedule_fsck') }}">
+      <div class="storage-health-action-row">
+        <button type="button" class="btn btn-secondary"
+                id="sh-schedule-fsck"
+                {% if storage_health and storage_health.fsck_scheduled %}hidden{% endif %}>
+          Schedule filesystem check at next boot
+        </button>
+        <button type="button" class="btn btn-secondary"
+                id="sh-cancel-fsck"
+                {% if not (storage_health and storage_health.fsck_scheduled) %}hidden{% endif %}>
+          Cancel scheduled check
+        </button>
+        <span class="storage-health-action-status" id="sh-fsck-status"
+              role="status" aria-live="polite">
+          {% if storage_health and storage_health.fsck_scheduled %}
+            Filesystem check is scheduled — reboot to run it.
+          {% endif %}
+        </span>
+      </div>
+      <p class="storage-health-action-help">
+        The root filesystem is mounted; an online repair isn't possible.
+        Scheduling a check creates <code>/forcefsck</code>, which makes
+        <code>systemd-fsck</code> run <code>e2fsck&nbsp;-fy</code> on
+        every fstab filesystem at the next boot, before they're mounted
+        read-write. The check typically adds ~30&nbsp;s to boot time on
+        a healthy SD card. <strong>Reboot after scheduling</strong> for
+        the check to actually run.
+      </p>
+    </div>
 
     <p class="storage-health-footer">
       SD cards expose no wear telemetry (no SMART, no per-block checksums).
@@ -104,9 +135,14 @@
   var card = document.getElementById('storage-health-card');
   if (!card) return;
   var url = card.getAttribute('data-poll-url');
+  var actions = document.getElementById('storage-health-actions');
+  var scheduleUrl = actions ? actions.getAttribute('data-schedule-url') : null;
   var POLL_MS = 60000;
   var dot = document.getElementById('storage-health-dot');
   var summary = document.getElementById('storage-health-summary');
+  var scheduleBtn = document.getElementById('sh-schedule-fsck');
+  var cancelBtn = document.getElementById('sh-cancel-fsck');
+  var fsckStatus = document.getElementById('sh-fsck-status');
 
   function setText(id, text) {
     var el = document.getElementById(id);
@@ -115,6 +151,61 @@
 
   function fmt(v, fallback) {
     return (v === null || v === undefined || v === '') ? (fallback || '—') : v;
+  }
+
+  // Format an ISO-8601 timestamp (with offset, e.g. 2025-09-30T20:14:54-04:00)
+  // as a short locale string in the user's browser timezone. Falls back to
+  // the raw value if Date parsing fails (avoids a blank cell on bad input).
+  function formatIsoLocal(iso) {
+    if (!iso) return '';
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return iso;
+    try {
+      return d.toLocaleString(undefined, {
+        year: 'numeric', month: 'short', day: '2-digit',
+        hour: '2-digit', minute: '2-digit'
+      });
+    } catch (_) {
+      return d.toLocaleString();
+    }
+  }
+
+  function applyLocalTimes(root) {
+    var nodes = (root || document).querySelectorAll('time[data-iso]');
+    nodes.forEach(function (n) {
+      var iso = n.getAttribute('data-iso');
+      var local = formatIsoLocal(iso);
+      if (local) {
+        n.textContent = local;
+        n.setAttribute('title', iso);
+      }
+    });
+  }
+
+  function setTimeCell(id, iso, prefix) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    if (!iso) { el.textContent = '—'; return; }
+    var local = formatIsoLocal(iso);
+    var text = (prefix ? prefix : '') + local;
+    el.innerHTML = '';
+    if (prefix) el.appendChild(document.createTextNode(prefix));
+    var t = document.createElement('time');
+    t.setAttribute('data-iso', iso);
+    t.setAttribute('title', iso);
+    t.textContent = local;
+    el.appendChild(t);
+  }
+
+  function updateActions(data) {
+    var scheduled = !!(data && data.fsck_scheduled);
+    if (scheduleBtn) scheduleBtn.hidden = scheduled;
+    if (cancelBtn) cancelBtn.hidden = !scheduled;
+    if (fsckStatus) {
+      fsckStatus.textContent = scheduled
+        ? 'Filesystem check is scheduled — reboot to run it.'
+        : '';
+    }
   }
 
   function render(data) {
@@ -145,18 +236,30 @@
         mountEl.textContent = '—';
       }
     }
-    var fsErrText = '—';
-    if (data.fs_errors !== null && data.fs_errors !== undefined) {
-      fsErrText = String(data.fs_errors);
-      if (data.fs_errors > 0 && data.fs_last_error_iso) {
-        fsErrText += ' (last ' + data.fs_last_error_iso + ')';
+    var fserrEl = document.getElementById('sh-fserrors');
+    if (fserrEl) {
+      if (data.fs_errors === null || data.fs_errors === undefined) {
+        fserrEl.textContent = '—';
+      } else {
+        fserrEl.innerHTML = '';
+        fserrEl.appendChild(document.createTextNode(String(data.fs_errors)));
+        if (data.fs_errors > 0 && data.fs_last_error_iso) {
+          fserrEl.appendChild(document.createTextNode(' (last '));
+          var t = document.createElement('time');
+          t.setAttribute('data-iso', data.fs_last_error_iso);
+          t.setAttribute('title', data.fs_last_error_iso);
+          t.textContent = formatIsoLocal(data.fs_last_error_iso);
+          fserrEl.appendChild(t);
+          fserrEl.appendChild(document.createTextNode(')'));
+        }
       }
     }
-    setText('sh-fserrors', fsErrText);
     setText('sh-ioerrors', fmt(data.io_errors_24h));
-    setText('sh-lastcheck', fmt(data.last_checked_iso));
-    setText('sh-scrub', data.e2scrub_last_run_iso ? 'last ran ' + data.e2scrub_last_run_iso : '—');
-    setText('sh-trim', data.fstrim_last_run_iso ? 'last ran ' + data.fstrim_last_run_iso : '—');
+    setTimeCell('sh-lastcheck', data.last_checked_iso, '');
+    setTimeCell('sh-scrub', data.e2scrub_last_run_iso, data.e2scrub_last_run_iso ? 'last ran ' : '');
+    setTimeCell('sh-trim', data.fstrim_last_run_iso, data.fstrim_last_run_iso ? 'last ran ' : '');
+
+    updateActions(data);
 
     var section = document.getElementById('storage-health-section');
     if (section && data.severity && data.severity !== 'ok' && !section.open) {
@@ -171,6 +274,44 @@
       .then(render)
       .catch(function () { /* swallow — page already shows last-known state */ });
   }
+
+  function mutate(method) {
+    if (!scheduleUrl) return;
+    var prevText = fsckStatus ? fsckStatus.textContent : '';
+    if (fsckStatus) fsckStatus.textContent = 'Working…';
+    if (scheduleBtn) scheduleBtn.disabled = true;
+    if (cancelBtn) cancelBtn.disabled = true;
+    fetch(scheduleUrl, { method: method, credentials: 'same-origin' })
+      .then(function (r) {
+        return r.json().then(function (body) { return { ok: r.ok, body: body }; });
+      })
+      .then(function (result) {
+        if (result.ok) {
+          render(result.body);
+        } else {
+          if (fsckStatus) {
+            fsckStatus.textContent = (result.body && result.body.error)
+              ? ('Failed: ' + result.body.error)
+              : 'Failed.';
+          }
+          if (result.body && result.body.snapshot) render(result.body.snapshot);
+        }
+      })
+      .catch(function (err) {
+        if (fsckStatus) fsckStatus.textContent = 'Network error.';
+      })
+      .finally(function () {
+        if (scheduleBtn) scheduleBtn.disabled = false;
+        if (cancelBtn) cancelBtn.disabled = false;
+        if (!fsckStatus.textContent && prevText) fsckStatus.textContent = prevText;
+      });
+  }
+
+  if (scheduleBtn) scheduleBtn.addEventListener('click', function () { mutate('POST'); });
+  if (cancelBtn) cancelBtn.addEventListener('click', function () { mutate('DELETE'); });
+
+  // Initial pass: convert server-rendered ISO strings to local-time display.
+  applyLocalTimes(card);
 
   setInterval(poll, POLL_MS);
   document.addEventListener('visibilitychange', function () {
@@ -205,6 +346,27 @@
 .storage-health-bad {
   color: var(--color-error, var(--text-primary));
   font-weight: 600;
+}
+.storage-health-actions {
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid var(--border-subtle, var(--text-secondary));
+  border-radius: 6px;
+}
+.storage-health-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+.storage-health-action-status {
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+}
+.storage-health-action-help {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  margin: 8px 0 0 0;
 }
 .storage-health-footer {
   font-size: 0.85rem;

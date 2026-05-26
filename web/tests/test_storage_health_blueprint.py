@@ -96,3 +96,51 @@ def test_storage_health_endpoint_caches_snapshot_per_request(app, client) -> Non
     client.get("/api/storage/health")
     client.get("/api/storage/health")
     assert fake.read_snapshot.call_count == 2
+
+
+def test_schedule_fsck_post_invokes_service_and_returns_fresh_snapshot(
+    app, client
+) -> None:
+    fake = MagicMock(spec=StorageHealthService)
+    fake.read_snapshot.return_value = StorageHealthSnapshot(
+        severity=SEV_OK, fsck_scheduled=True
+    )
+    app.extensions["storage_health_service"] = fake
+
+    response = client.post("/api/storage/health/fsck-on-next-boot")
+
+    assert response.status_code == HTTPStatus.OK
+    fake.schedule_fsck_at_next_boot.assert_called_once()
+    data = response.get_json()
+    assert data["fsck_scheduled"] is True
+
+
+def test_schedule_fsck_post_surfaces_runtime_error_as_500(app, client) -> None:
+    fake = MagicMock(spec=StorageHealthService)
+    fake.schedule_fsck_at_next_boot.side_effect = RuntimeError("denied")
+    fake.read_snapshot.return_value = StorageHealthSnapshot(severity=SEV_OK)
+    app.extensions["storage_health_service"] = fake
+
+    response = client.post("/api/storage/health/fsck-on-next-boot")
+
+    assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
+    data = response.get_json()
+    assert "denied" in data["error"]
+    assert "snapshot" in data
+
+
+def test_cancel_fsck_delete_invokes_service_and_returns_fresh_snapshot(
+    app, client
+) -> None:
+    fake = MagicMock(spec=StorageHealthService)
+    fake.read_snapshot.return_value = StorageHealthSnapshot(
+        severity=SEV_OK, fsck_scheduled=False
+    )
+    app.extensions["storage_health_service"] = fake
+
+    response = client.delete("/api/storage/health/fsck-on-next-boot")
+
+    assert response.status_code == HTTPStatus.OK
+    fake.cancel_scheduled_fsck.assert_called_once()
+    data = response.get_json()
+    assert data["fsck_scheduled"] is False

@@ -1,14 +1,20 @@
 """Storage Health blueprint — JSON snapshot for the Settings page card.
 
-Exposes a single read-only endpoint, ``GET /api/storage/health``,
-that returns the latest :class:`StorageHealthSnapshot` as JSON. The
-front-end polls this every 60 s while the page is visible.
+Endpoints:
 
-There is intentionally **no** mutating endpoint. The B-1 architecture
-puts Tesla writes onto POSIX files in an ext4 filesystem on the SD
-card; the correct response to corruption is "replace the SD card +
-restore from cloud archive", not click a Repair button. Surfacing
-the alarm is enough — the operator decides what to do.
+* ``GET /api/storage/health`` — returns the latest
+  :class:`StorageHealthSnapshot` as JSON. The front-end polls this
+  every 60 s while the page is visible.
+* ``POST /api/storage/health/fsck-on-next-boot`` — touches
+  ``/forcefsck`` so the kernel's systemd-fsck@.service runs
+  ``e2fsck -fy`` on every fstab filesystem at the next boot. The
+  operator must then reboot to take effect — this endpoint
+  intentionally does NOT reboot for them.
+* ``DELETE /api/storage/health/fsck-on-next-boot`` — removes the
+  sentinel so the scheduled fsck is cancelled.
+
+The endpoints always return the freshly-recomputed snapshot so the
+client can render the new state with no second round-trip.
 """
 
 from __future__ import annotations
@@ -63,10 +69,46 @@ def current_snapshot() -> StorageHealthSnapshot:
     return snapshot
 
 
+def _refresh_snapshot() -> StorageHealthSnapshot:
+    """Force a re-probe after a mutating action."""
+    g.pop("_storage_health_snapshot", None)
+    return current_snapshot()
+
+
 @storage_health_bp.route("/api/storage/health", methods=["GET"])
 def get_storage_health() -> ResponseReturnValue:
     snapshot = current_snapshot()
     return jsonify(snapshot.to_dict()), HTTPStatus.OK
+
+
+@storage_health_bp.route(
+    "/api/storage/health/fsck-on-next-boot", methods=["POST"]
+)
+def schedule_fsck() -> ResponseReturnValue:
+    try:
+        _get_service().schedule_fsck_at_next_boot()
+    except Exception as exc:  # noqa: BLE001 — surface to user as JSON
+        logger.exception("storage_health: failed to schedule fsck")
+        return (
+            jsonify({"error": str(exc), "snapshot": current_snapshot().to_dict()}),
+            HTTPStatus.INTERNAL_SERVER_ERROR,
+        )
+    return jsonify(_refresh_snapshot().to_dict()), HTTPStatus.OK
+
+
+@storage_health_bp.route(
+    "/api/storage/health/fsck-on-next-boot", methods=["DELETE"]
+)
+def cancel_fsck() -> ResponseReturnValue:
+    try:
+        _get_service().cancel_scheduled_fsck()
+    except Exception as exc:  # noqa: BLE001 — surface to user as JSON
+        logger.exception("storage_health: failed to cancel scheduled fsck")
+        return (
+            jsonify({"error": str(exc), "snapshot": current_snapshot().to_dict()}),
+            HTTPStatus.INTERNAL_SERVER_ERROR,
+        )
+    return jsonify(_refresh_snapshot().to_dict()), HTTPStatus.OK
 
 
 __all__ = ("current_snapshot", "storage_health_bp")

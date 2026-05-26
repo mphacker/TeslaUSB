@@ -182,7 +182,8 @@ def test_tune2fs_clean_parsed_fields() -> None:
     assert snap.mount_count == 48
     # tune2fs prints "-1" for disabled max; surfaced as None.
     assert snap.max_mount_count is None
-    assert snap.last_checked_iso == "2024-04-14T02:11:42"
+    assert snap.last_checked_iso is not None
+    assert snap.last_checked_iso.startswith("2024-04-14T02:11:42")
     # Severity is warn because the fixture's "Last checked" date is
     # > 180 days old — exactly what the heuristic is designed to flag.
     assert snap.severity == SEV_WARN
@@ -212,8 +213,10 @@ def test_tune2fs_errored_triggers_critical() -> None:
     )
     snap = service.read_snapshot()
     assert snap.fs_errors == 3
-    assert snap.fs_first_error_iso == "2025-01-06T11:12:13"
-    assert snap.fs_last_error_iso == "2025-05-14T22:01:09"
+    assert snap.fs_first_error_iso is not None
+    assert snap.fs_first_error_iso.startswith("2025-01-06T11:12:13")
+    assert snap.fs_last_error_iso is not None
+    assert snap.fs_last_error_iso.startswith("2025-05-14T22:01:09")
     assert snap.severity == SEV_CRITICAL
 
 
@@ -277,8 +280,10 @@ def test_systemctl_last_trigger_normalised_to_iso() -> None:
         },
     )
     snap = service.read_snapshot()
-    assert snap.fstrim_last_run_iso == "2026-05-24T07:50:01"
-    assert snap.e2scrub_last_run_iso == "2026-05-24T07:50:01"
+    assert snap.fstrim_last_run_iso is not None
+    assert snap.fstrim_last_run_iso.startswith("2026-05-24T07:50:01")
+    assert snap.e2scrub_last_run_iso is not None
+    assert snap.e2scrub_last_run_iso.startswith("2026-05-24T07:50:01")
 
 
 def test_systemctl_na_treated_as_none() -> None:
@@ -404,3 +409,149 @@ def test_config_rejects_empty_sudo_prefix_token() -> None:
 def test_config_rejects_zero_timeout() -> None:
     with pytest.raises(ValueError, match="probe_timeout_seconds"):
         StorageHealthServiceConfig(probe_timeout_seconds=0)
+
+
+# --------------------------------------------------------------------- fsck-scheduling
+
+
+def _build_service_with_sentinel(
+    sentinel: Path,
+    *,
+    run_results: dict[str, Any] | None = None,
+    sudo_prefix: tuple[str, ...] = (),
+) -> tuple[StorageHealthService, list[list[str]]]:
+    run_results = run_results or {}
+    invocations: list[list[str]] = []
+
+    def fake_which(name: str) -> str | None:
+        return f"/usr/bin/{name}"
+
+    def fake_run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        invocations.append(list(command))
+        binary = next(
+            (
+                Path(token).name
+                for token in command
+                if not token.startswith("-") and token not in {"sudo", "-n"}
+            ),
+            "",
+        )
+        result = run_results.get(binary)
+        if result is None:
+            return _completed("")
+        if callable(result):
+            result = result(command)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    cfg = StorageHealthServiceConfig(
+        sudo_prefix=sudo_prefix,
+        forcefsck_sentinel=sentinel,
+    )
+    service = StorageHealthService(
+        cfg,
+        which=fake_which,
+        run_command=fake_run,
+        sysfs_reader=lambda p: (_ for _ in ()).throw(FileNotFoundError(str(p))),
+    )
+    return service, invocations
+
+
+def test_fsck_scheduled_false_when_sentinel_absent(tmp_path: Path) -> None:
+    sentinel = tmp_path / "forcefsck"
+    service, _ = _build_service_with_sentinel(
+        sentinel,
+        run_results={
+            "findmnt": _completed(_FINDMNT_OK),
+            "tune2fs": _completed(_TUNE2FS_CLEAN),
+            "journalctl": _completed(_JOURNAL_CLEAN),
+            "systemctl": _completed(_SYSTEMCTL_OK),
+        },
+    )
+    snap = service.read_snapshot()
+    assert snap.fsck_scheduled is False
+
+
+def test_fsck_scheduled_true_when_sentinel_present(tmp_path: Path) -> None:
+    sentinel = tmp_path / "forcefsck"
+    sentinel.write_text("")
+    service, _ = _build_service_with_sentinel(
+        sentinel,
+        run_results={
+            "findmnt": _completed(_FINDMNT_OK),
+            "tune2fs": _completed(_TUNE2FS_CLEAN_WITH_FSCK_DATE),
+            "journalctl": _completed(_JOURNAL_CLEAN),
+            "systemctl": _completed(_SYSTEMCTL_OK),
+        },
+    )
+    snap = service.read_snapshot()
+    assert snap.fsck_scheduled is True
+    # When a check is already scheduled, the "stale fsck" nag is suppressed
+    # — the operator has already chosen the remedy.
+    assert all("hasn't been fsck" not in m for m in snap.messages)
+    assert any("scheduled" in m.lower() for m in snap.messages)
+
+
+def test_schedule_fsck_invokes_touch_with_sudo(tmp_path: Path) -> None:
+    sentinel = tmp_path / "forcefsck"
+    service, invocations = _build_service_with_sentinel(
+        sentinel,
+        run_results={"touch": _completed("")},
+        sudo_prefix=("sudo", "-n"),
+    )
+    service.schedule_fsck_at_next_boot()
+    touch_call = next(c for c in invocations if "touch" in " ".join(c))
+    assert touch_call[0:2] == ["sudo", "-n"]
+    assert touch_call[-1] == str(sentinel)
+
+
+def test_schedule_fsck_raises_on_nonzero_return(tmp_path: Path) -> None:
+    sentinel = tmp_path / "forcefsck"
+    service, _ = _build_service_with_sentinel(
+        sentinel,
+        run_results={"touch": _completed("", returncode=1, stderr="denied")},
+    )
+    with pytest.raises(RuntimeError, match="touch"):
+        service.schedule_fsck_at_next_boot()
+
+
+def test_cancel_scheduled_fsck_invokes_rm_with_force_flag(tmp_path: Path) -> None:
+    sentinel = tmp_path / "forcefsck"
+    service, invocations = _build_service_with_sentinel(
+        sentinel,
+        run_results={"rm": _completed("")},
+        sudo_prefix=("sudo", "-n"),
+    )
+    service.cancel_scheduled_fsck()
+    rm_call = next(c for c in invocations if "rm" in " ".join(c))
+    assert rm_call[0:2] == ["sudo", "-n"]
+    assert "-f" in rm_call
+    assert rm_call[-1] == str(sentinel)
+
+
+# --------------------------------------------------------------------- local TZ
+
+
+def test_date_helpers_emit_offset_suffix() -> None:
+    """tune2fs + systemctl ISO outputs include a UTC offset so the
+    browser can render them in the user's local timezone."""
+    service, _ = _build_service(
+        run_results={
+            "findmnt": _completed(_FINDMNT_OK),
+            "tune2fs": _completed(_TUNE2FS_CLEAN_WITH_FSCK_DATE),
+            "journalctl": _completed(_JOURNAL_CLEAN),
+            "systemctl": _completed(_SYSTEMCTL_OK),
+        },
+    )
+    snap = service.read_snapshot()
+    # Either ``+HH:MM`` or ``-HH:MM`` — never a naive timestamp.
+    import re as _re
+
+    pattern = _re.compile(r"[+-]\d{2}:\d{2}$")
+    assert snap.last_checked_iso is not None
+    assert pattern.search(snap.last_checked_iso) is not None
+    assert snap.fstrim_last_run_iso is not None
+    assert pattern.search(snap.fstrim_last_run_iso) is not None
+    assert snap.e2scrub_last_run_iso is not None
+    assert pattern.search(snap.e2scrub_last_run_iso) is not None

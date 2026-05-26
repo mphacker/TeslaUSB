@@ -67,6 +67,7 @@ from teslausb_web.services.mapping_settings_service import (
 )
 from teslausb_web.services.music_service import make_music_service
 from teslausb_web.services.photo_plate_service import make_photo_plate_service
+from teslausb_web.services.samba_password_service import make_samba_password_service
 from teslausb_web.services.samba_service import SambaError, make_samba_service
 from teslausb_web.services.samba_watcher import make_samba_watcher
 from teslausb_web.services.system_settings_service import (
@@ -373,8 +374,10 @@ def _register_samba_services(
     """Construct the Samba daemon + watcher pair and bind them to settings changes."""
     samba_service = make_samba_service(cfg)
     samba_watcher = make_samba_watcher(cfg, cache_invalidator)
+    samba_password_service = make_samba_password_service(cfg)
     app.extensions["samba_service"] = samba_service
     app.extensions["samba_watcher"] = samba_watcher
+    app.extensions["samba_password_service"] = samba_password_service
 
     state_lock = threading.RLock()
     active_enabled = False

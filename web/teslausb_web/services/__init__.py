@@ -145,6 +145,15 @@ from teslausb_web.services.mapping_settings_service import (
     MappingSettingsService,
     make_mapping_settings_service,
 )
+from teslausb_web.services.samba_password_service import (
+    SambaPasswordCommandError,
+    SambaPasswordError,
+    SambaPasswordNotInstalledError,
+    SambaPasswordService,
+    SambaPasswordServiceConfig,
+    SambaPasswordValidationError,
+    make_samba_password_service,
+)
 from teslausb_web.services.samba_service import (
     SambaCommandError,
     SambaConfigError,
@@ -280,6 +289,12 @@ __all__ = (
     "SambaConfigRenderResult",
     "SambaError",
     "SambaNotInstalledError",
+    "SambaPasswordCommandError",
+    "SambaPasswordError",
+    "SambaPasswordNotInstalledError",
+    "SambaPasswordService",
+    "SambaPasswordServiceConfig",
+    "SambaPasswordValidationError",
     "SambaService",
     "SambaServiceConfig",
     "SambaShare",
@@ -330,6 +345,7 @@ __all__ = (
     "make_mapping_settings_service",
     "make_oauth_service",
     "make_rclone_service",
+    "make_samba_password_service",
     "make_samba_service",
     "make_samba_watcher",
     "make_system_settings_service",

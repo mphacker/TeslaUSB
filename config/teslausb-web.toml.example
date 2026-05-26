@@ -111,3 +111,21 @@ cloud_archive_enabled = true
 # not noisy. Flip to true ONLY after deploying a daemon that
 # actually serves the JSON envelope protocol on `paths.ipc_socket`.
 ipc_daemon_enabled = false
+
+[samba]
+# Samba daemon + watcher configuration. All keys are optional.
+# When the [samba] section is omitted entirely, every value below
+# falls back to its built-in default (see teslausb_web.config).
+#
+# When no `shares = [...]` table-array is configured, two default
+# shares are exposed: TeslaCam (rooted at `<backing_root>/TeslaCam`)
+# and Media (rooted at `<media_root>`). Both are user-authenticated
+# (no guest access) and read+write. The Linux user mapped to the
+# Samba TDB entry is set by `password_username` below.
+#
+# On the Pi the web app runs as the unprivileged `pi` user, but
+# `systemctl start smbd`, `smbpasswd -a`, and `pdbedit -L` all need
+# root. `sudo_prefix` is prepended to every subprocess invocation;
+# `pi` already has NOPASSWD: ALL via /etc/sudoers.d/010_pi-nopasswd.
+sudo_prefix = ["sudo", "-n"]
+password_username = "pi"

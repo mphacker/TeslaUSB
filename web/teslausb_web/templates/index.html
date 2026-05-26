@@ -379,21 +379,46 @@
     </details>
 
     <!-- Network Settings -->
-    <details class="settings-section">
+    <details class="settings-section" id="network-file-sharing">
         <summary>Network File Sharing</summary>
         <div class="section-content">
             <form method="post" action="{{ url_for('settings.save_network_settings') }}">
                 <p style="font-size:0.85rem; color:var(--text-secondary); margin:0 0 12px">
-                    Samba (SMB) password used when connecting to shared drives from your computer.
+                    Enable Samba (SMB) network sharing so you can browse the two USB drive
+                    storage locations from your computer over WiFi.
                 </p>
+
+                <div class="form-group" style="margin-bottom:12px; padding:12px; background-color:var(--bg-info); border:1px solid var(--border-color); border-radius:var(--radius-md,8px)">
+                    <label style="display:flex; align-items:center; gap:12px; font-size:0.95rem; min-height:44px; cursor:pointer; margin:0">
+                        <input type="checkbox" name="samba_enabled" id="samba_enabled" value="on" {% if cfg_network.samba_enabled %}checked{% endif %} style="width:22px; height:22px; flex:0 0 22px">
+                        <span><strong>Enable network file sharing (SMB)</strong></span>
+                    </label>
+                    <p style="font-size:0.8rem; color:var(--text-secondary); margin:8px 0 0 34px">
+                        When enabled, the following SMB shares are exposed on the local network:
+                    </p>
+                    <ul style="font-size:0.85rem; margin:6px 0 0 34px; padding:0; list-style:none">
+                        {% for entry in cfg_network.share_paths %}
+                            <li style="margin:2px 0"><code>{{ entry.unc }}</code> &mdash; <span style="color:var(--text-secondary)">{{ entry.name }}</span></li>
+                        {% else %}
+                            <li style="margin:2px 0; color:var(--text-secondary)">(no shares configured)</li>
+                        {% endfor %}
+                    </ul>
+                </div>
+
                 <div class="form-group" style="margin-bottom:12px">
                     <label style="font-size:0.85rem">Samba Password</label>
                     <div style="display:flex; gap:8px">
-                        <input type="password" name="samba_password" id="samba_password" value="{{ cfg_network.samba_password }}" class="settings-form-input" style="flex:1">
+                        <input type="password" name="samba_password" id="samba_password"
+                               value=""
+                               placeholder="{% if cfg_network.samba_password_set %}Leave blank to keep current password{% else %}Set a password before clients can connect{% endif %}"
+                               class="settings-form-input" style="flex:1" autocomplete="new-password">
                         <button type="button" onclick="toggleSambaPassword(this)" class="btn btn-secondary" style="padding:10px 14px; font-size:0.85rem; min-height:44px">Show</button>
                     </div>
-                    <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">Username: <code>pi</code></p>
+                    <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
+                        Username: <code>pi</code>{% if cfg_network.samba_password_set %} &middot; <span style="color:var(--success-text,#2e7d32)">password is set</span>{% else %} &middot; <span style="color:var(--warning-text,#b26a00)">no password set yet</span>{% endif %}
+                    </p>
                 </div>
+
                 <button type="submit" class="btn btn-primary" style="width:100%">Save Network Settings</button>
             </form>
         </div>

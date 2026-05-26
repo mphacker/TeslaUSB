@@ -293,16 +293,13 @@
                 <div class="advanced-toggle-panel">
                     <div class="advanced-toggle-row">
                         <div>
-                            <p class="advanced-section-title">Network sharing stub</p>
-                            <p class="advanced-help">{{ samba_stub_note }}</p>
+                            <p class="advanced-section-title">Network sharing</p>
+                            <p class="advanced-help">
+                                The enable/disable toggle and Samba password now live on the main
+                                <a href="{{ url_for('settings.index') }}#network-file-sharing">Settings</a>
+                                page under <em>Network File Sharing</em>. Current state shown above.
+                            </p>
                         </div>
-                        <label class="advanced-toggle-label" for="samba_enabled">
-                            <span>Persist desired flag</span>
-                            <span class="advanced-toggle">
-                                <input type="checkbox" id="samba_enabled" name="samba_enabled" value="on" {% if system_settings.samba_enabled %}checked{% endif %}>
-                                <span>{{ "Enabled" if system_settings.samba_enabled else "Disabled" }}</span>
-                            </span>
-                        </label>
                     </div>
                 </div>
 

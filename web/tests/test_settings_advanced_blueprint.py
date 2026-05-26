@@ -174,7 +174,7 @@ class TestIndexRoutes:
         html = response.get_data(as_text=True)
         assert response.status_code == HTTPStatus.OK
         assert "Advanced Settings" in html
-        assert "Network sharing stub" in html
+        assert "Network sharing" in html
         removed_mode_terms = (
             "mode_control",
             "current_mode",

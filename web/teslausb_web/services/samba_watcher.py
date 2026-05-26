@@ -261,7 +261,19 @@ class SambaWatcher:
 def _watched_paths(cfg: WebConfig) -> tuple[Path, ...]:
     if cfg.samba.shares:
         return tuple(share.path for share in cfg.samba.shares)
-    return (cfg.paths.backing_root / _DEFAULT_WATCH_NAME,)
+    # Mirror samba_service._default_shares: when no explicit shares are
+    # configured, both default LUNs are exposed, so both must be watched.
+    # If media_root is an ancestor of (or equal to) teslacam_path —
+    # which happens in tests that stage a single backing tree — watch
+    # only media_root because it already covers TeslaCam recursively.
+    media_root = cfg.paths.media_root or cfg.paths.backing_root
+    teslacam_path = cfg.paths.backing_root / _DEFAULT_WATCH_NAME
+    try:
+        teslacam_path.relative_to(media_root)
+    except ValueError:
+        # teslacam_path is NOT under media_root — they're disjoint trees.
+        return (teslacam_path, media_root)
+    return (teslacam_path,) if media_root == teslacam_path else (media_root,)
 
 
 def make_samba_watcher(cfg: WebConfig, cache_invalidator: CacheInvalidatorLike) -> SambaWatcher:

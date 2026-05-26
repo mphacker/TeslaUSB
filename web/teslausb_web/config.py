@@ -121,6 +121,10 @@ _DEFAULT_SAMBA_CONFIG_PATH: Path = Path("/etc/samba/smb.conf")
 _DEFAULT_SAMBA_BINARY_SMBD: Final[str] = "smbd"
 _DEFAULT_SAMBA_BINARY_SMBCONTROL: Final[str] = "smbcontrol"
 _DEFAULT_SAMBA_BINARY_SYSTEMCTL: Final[str] = "systemctl"
+_DEFAULT_SAMBA_BINARY_SMBPASSWD: Final[str] = "smbpasswd"
+_DEFAULT_SAMBA_BINARY_PDBEDIT: Final[str] = "pdbedit"
+_DEFAULT_SAMBA_PASSWORD_USERNAME: Final[str] = "pi"
+_DEFAULT_SAMBA_SUDO_PREFIX: Final[tuple[str, ...]] = ()
 _DEFAULT_SAMBA_INVALIDATE_DEBOUNCE_MS: Final[int] = 500
 _DEFAULT_SAMBA_WATCHER_POLL_INTERVAL_SECONDS: Final[float] = 1.0
 _DEFAULT_SAMBA_IGNORE_EXTENSIONS: Final[tuple[str, ...]] = (
@@ -718,6 +722,18 @@ class SambaSection:
     binary_smbd: str = _DEFAULT_SAMBA_BINARY_SMBD
     binary_smbcontrol: str = _DEFAULT_SAMBA_BINARY_SMBCONTROL
     binary_systemctl: str = _DEFAULT_SAMBA_BINARY_SYSTEMCTL
+    binary_smbpasswd: str = _DEFAULT_SAMBA_BINARY_SMBPASSWD
+    binary_pdbedit: str = _DEFAULT_SAMBA_BINARY_PDBEDIT
+    # Linux user whose Samba TDB entry is created/updated when the user
+    # changes the SMB password in the web UI. This must already exist as
+    # a Linux account (smbpasswd -a maps the Samba entry to it).
+    password_username: str = _DEFAULT_SAMBA_PASSWORD_USERNAME
+    # Prepended to every smbd/smbcontrol/systemctl/smbpasswd/pdbedit
+    # invocation. Production sets this to ("sudo", "-n") because the
+    # gunicorn worker runs as the unprivileged `pi` user but these
+    # binaries need root. Empty in tests / dev box so command
+    # assertions stay readable.
+    sudo_prefix: tuple[str, ...] = field(default_factory=lambda: _DEFAULT_SAMBA_SUDO_PREFIX)
     invalidate_debounce_ms: int = _DEFAULT_SAMBA_INVALIDATE_DEBOUNCE_MS
     watcher_poll_interval_seconds: float = _DEFAULT_SAMBA_WATCHER_POLL_INTERVAL_SECONDS
     ignore_extensions: tuple[str, ...] = field(
@@ -741,9 +757,18 @@ class SambaSection:
             ("binary_smbd", self.binary_smbd),
             ("binary_smbcontrol", self.binary_smbcontrol),
             ("binary_systemctl", self.binary_systemctl),
+            ("binary_smbpasswd", self.binary_smbpasswd),
+            ("binary_pdbedit", self.binary_pdbedit),
+            ("password_username", self.password_username),
         ):
             if not value.strip():
                 raise ConfigError(None, f"[samba] {field_name} must be non-empty")
+        for index, prefix_token in enumerate(self.sudo_prefix):
+            if not isinstance(prefix_token, str) or not prefix_token.strip():
+                raise ConfigError(
+                    None,
+                    f"[samba] sudo_prefix[{index}] must be a non-empty string",
+                )
         if self.invalidate_debounce_ms < 0:
             raise ConfigError(None, "[samba] invalidate_debounce_ms must be >= 0")
         if self.watcher_poll_interval_seconds <= 0:
@@ -1523,6 +1548,30 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
                 samba_raw,
                 "binary_systemctl",
                 _DEFAULT_SAMBA_BINARY_SYSTEMCTL,
+                source,
+            ),
+            binary_smbpasswd=_coerce_str(
+                samba_raw,
+                "binary_smbpasswd",
+                _DEFAULT_SAMBA_BINARY_SMBPASSWD,
+                source,
+            ),
+            binary_pdbedit=_coerce_str(
+                samba_raw,
+                "binary_pdbedit",
+                _DEFAULT_SAMBA_BINARY_PDBEDIT,
+                source,
+            ),
+            password_username=_coerce_str(
+                samba_raw,
+                "password_username",
+                _DEFAULT_SAMBA_PASSWORD_USERNAME,
+                source,
+            ),
+            sudo_prefix=_coerce_str_tuple(
+                samba_raw,
+                "sudo_prefix",
+                _DEFAULT_SAMBA_SUDO_PREFIX,
                 source,
             ),
             invalidate_debounce_ms=_coerce_int(

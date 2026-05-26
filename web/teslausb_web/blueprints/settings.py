@@ -38,6 +38,13 @@ from teslausb_web.services.mapping_settings_service import (
     MappingSettingsError,
     MappingSettingsService,
 )
+from teslausb_web.services.samba_password_service import (
+    SambaPasswordCommandError,
+    SambaPasswordError,
+    SambaPasswordNotInstalledError,
+    SambaPasswordService,
+    SambaPasswordValidationError,
+)
 from teslausb_web.services.system_settings_service import (
     SystemSettingsConfigError,
     SystemSettingsService,
@@ -78,6 +85,13 @@ def _get_mapping_settings_service() -> MappingSettingsService:
     return service
 
 
+def _get_samba_password_service() -> SambaPasswordService:
+    service = current_app.extensions.get("samba_password_service")
+    if not isinstance(service, SambaPasswordService):
+        raise RuntimeError("samba_password_service extension is not configured")
+    return service
+
+
 def _coerce_int_form_field(field_name: str, raw: str | None) -> int:
     if raw is None or not raw.strip():
         raise MappingSettingsError(f"{field_name} is required")
@@ -89,11 +103,6 @@ def _coerce_int_form_field(field_name: str, raw: str | None) -> int:
 
 def _redirect_to_index() -> Response:
     return cast("Response", redirect(url_for("settings.index")))
-
-
-def _stub_save(message: str) -> ResponseReturnValue:
-    flash(message, "info")
-    return _redirect_to_index()
 
 
 def _config() -> WebConfig:
@@ -240,10 +249,39 @@ def _system_info() -> dict[str, object]:
     }
 
 
+def _samba_password_set() -> bool:
+    """One pdbedit probe per request — cached on flask.g to avoid double work."""
+    from flask import g
+
+    cached = getattr(g, "_samba_password_set", None)
+    if isinstance(cached, bool):
+        return cached
+    try:
+        result = _get_samba_password_service().user_exists()
+    except (RuntimeError, SambaPasswordError) as exc:
+        logger.warning("settings dashboard samba password probe failed: %s", exc)
+        result = False
+    g._samba_password_set = result
+    return result
+
+
+def _share_paths_for_display() -> list[dict[str, str]]:
+    """UNC paths to show on the Network File Sharing card."""
+    samba_service = current_app.extensions.get("samba_service")
+    shares = getattr(getattr(samba_service, "config", None), "shares", ()) or ()
+    host = socket.gethostname() or "teslausb"
+    return [
+        {"name": share.name, "unc": f"\\\\{host}\\{share.name}"}
+        for share in shares
+    ]
+
+
 def _index_context() -> dict[str, object]:
     wifi_status, ap_status, ap_config = _wifi_context()
     mapping_service = _get_mapping_settings_service()
     mapping_snapshot = mapping_service.get_settings()
+    samba_on = _samba_on()
+    share_paths = _share_paths_for_display()
     return {
         "page": "settings",
         "auto_refresh": False,
@@ -253,9 +291,14 @@ def _index_context() -> dict[str, object]:
         "ap_status": ap_status,
         "ap_config": ap_config,
         "cfg_mapping": mapping_service.serialize_for_template(mapping_snapshot),
-        "cfg_network": {"samba_password": ""},
+        "cfg_network": {
+            "samba_password": "",
+            "samba_enabled": samba_on,
+            "samba_password_set": _samba_password_set(),
+            "share_paths": share_paths,
+        },
         "system_info": _system_info(),
-        "samba_on": _samba_on(),
+        "samba_on": samba_on,
         # Probe the live USB-gadget state (configfs UDC + both LUN
         # backing files). Returns 'present' only when the gadget is
         # actually bound to a UDC and both LUNs have backing block
@@ -265,7 +308,7 @@ def _index_context() -> dict[str, object]:
         # usb-gadget chain drops to 'unknown' and shows the orange
         # "Status Unknown" card.
         "mode_token": gadget_mode_token(),
-        "share_paths": [],
+        "share_paths": share_paths,
     }
 
 
@@ -371,7 +414,54 @@ def save_mapping_settings() -> ResponseReturnValue:
 
 @settings_dashboard_bp.route("/settings/save/network", methods=["POST"])
 def save_network_settings() -> ResponseReturnValue:
-    return _stub_save("Network settings are not yet supported in B-1")
+    """Toggle SMB sharing and (optionally) update the Samba password.
+
+    The toggle persists via SystemSettingsService — the app-factory
+    callback then starts/stops smbd. Password changes go through
+    SambaPasswordService and update only the Samba TDB, never our
+    JSON state.
+    """
+    samba_enabled = request.form.get("samba_enabled") == "on"
+    raw_password = request.form.get("samba_password", "")
+    password_provided = bool(raw_password)
+
+    if password_provided:
+        try:
+            _get_samba_password_service().set_password(raw_password)
+        except SambaPasswordValidationError as exc:
+            flash(f"Password rejected: {exc}", "error")
+            return _redirect_to_index()
+        except SambaPasswordNotInstalledError:
+            flash("Samba is not installed on this device.", "error")
+            return _redirect_to_index()
+        except (SambaPasswordCommandError, RuntimeError) as exc:
+            logger.exception("Failed to set Samba password")
+            flash(f"Failed to update Samba password: {exc}", "error")
+            return _redirect_to_index()
+
+    try:
+        settings_service = _get_system_settings_service()
+        current = settings_service.get_settings()
+        settings_service.update_settings(
+            {
+                "samba_enabled": samba_enabled,
+                "log_level": current.log_level,
+            }
+        )
+    except (RuntimeError, SystemSettingsConfigError, SystemSettingsStateError) as exc:
+        logger.exception("Failed to persist samba_enabled toggle")
+        flash(f"Failed to save Network File Sharing settings: {exc}", "error")
+        return _redirect_to_index()
+
+    share_paths = _share_paths_for_display()
+    share_summary = ", ".join(entry["unc"] for entry in share_paths) or "(no shares)"
+    state_msg = "enabled" if samba_enabled else "disabled"
+    pw_msg = " Samba password updated." if password_provided else ""
+    flash(
+        f"Network File Sharing {state_msg}. Shares: {share_summary}.{pw_msg}",
+        "success",
+    )
+    return _redirect_to_index()
 
 
 @settings_dashboard_bp.route("/api/settings/wifi/dismiss-status", methods=["POST"])

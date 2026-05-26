@@ -174,7 +174,30 @@ class TestSambaWatcherLifecycle:
             ),
         )
         built = make_samba_watcher(cfg, invalidator)
-        assert built.config.watched_paths == (tmp_path / "backing" / "TeslaCam",)
+        # media_root defaults to backing_root, which is an ancestor of
+        # backing/TeslaCam — so we watch only the ancestor (covers both).
+        assert built.config.watched_paths == (tmp_path / "backing",)
+
+    def test_factory_watches_both_default_shares_when_media_root_disjoint(
+        self,
+        tmp_path: Path,
+        invalidator: RecordingInvalidator,
+    ) -> None:
+        cfg = WebConfig(
+            web=WebSection(secret_key="x" * 32),
+            paths=PathsSection(
+                backing_root=tmp_path / "backing",
+                media_root=tmp_path / "media",
+                state_dir=tmp_path / "state",
+                ipc_socket=tmp_path / "ipc" / "worker.sock",
+                cache_invalidate_script=tmp_path / "invalidate.sh",
+            ),
+        )
+        built = make_samba_watcher(cfg, invalidator)
+        assert built.config.watched_paths == (
+            tmp_path / "backing" / "TeslaCam",
+            tmp_path / "media",
+        )
 
 
 class TestSambaWatcherEvents:

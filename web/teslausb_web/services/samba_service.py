@@ -25,6 +25,7 @@ _COMMAND_TIMEOUT_SECONDS: float = 10.0
 _STOP_TIMEOUT_SECONDS: float = 5.0
 _KILL_WAIT_SECONDS: float = 1.0
 _DEFAULT_SHARE_NAME: str = "TeslaCam"
+_DEFAULT_MEDIA_SHARE_NAME: str = "Media"
 _FILE_MODE_PUBLIC_READ: int = 0o644
 
 
@@ -107,6 +108,13 @@ class SambaServiceConfig:
     binary_smbd: str = "smbd"
     binary_smbcontrol: str = "smbcontrol"
     binary_systemctl: str = "systemctl"
+    # Command prefix prepended to every subprocess invocation. Production
+    # deploys this as ("sudo", "-n") because the gunicorn worker runs as
+    # the unprivileged `pi` user but `systemctl start smbd` needs root.
+    # Tests and dev-box CI leave this empty so command assertions stay
+    # readable. The Pi's sudoers grants `pi` NOPASSWD: ALL via
+    # /etc/sudoers.d/010_pi-nopasswd, so no policy work is needed.
+    sudo_prefix: tuple[str, ...] = ()
     command_timeout_seconds: float = _COMMAND_TIMEOUT_SECONDS
     stop_timeout_seconds: float = _STOP_TIMEOUT_SECONDS
 
@@ -135,6 +143,11 @@ class SambaServiceConfig:
             raise SambaConfigError("command_timeout_seconds must be > 0")
         if self.stop_timeout_seconds <= 0:
             raise SambaConfigError("stop_timeout_seconds must be > 0")
+        for index, prefix_token in enumerate(self.sudo_prefix):
+            if not isinstance(prefix_token, str) or not prefix_token.strip():
+                raise SambaConfigError(
+                    f"sudo_prefix[{index}] must be a non-empty string"
+                )
         seen_names: set[str] = set()
         for share in self.shares:
             if not share.name.strip():
@@ -175,13 +188,58 @@ class SambaService:
     def render_config(self) -> SambaConfigRenderResult:
         shares = self._validated_shares()
         rendered_text = self._render_smb_conf(shares)
-        _atomic_write_text(self._config.config_path, rendered_text)
+        self._install_config_text(rendered_text)
         logger.info("Rendered Samba config to %s", self._config.config_path)
         return SambaConfigRenderResult(
             config_path=self._config.config_path,
             rendered_text=rendered_text,
             shares=shares,
         )
+
+    def _install_config_text(self, text: str) -> None:
+        """Atomically write smb.conf, using sudo install(1) when needed.
+
+        The web app process typically runs as an unprivileged user that
+        cannot write into ``/etc/samba``. When ``sudo_prefix`` is
+        configured we stage the file under ``/tmp`` (writable) and then
+        invoke ``sudo install -m 0644 <tmp> <dest>`` to put it in
+        place. ``install`` is atomic on the destination filesystem.
+        """
+        target = self._config.config_path
+        if not self._config.sudo_prefix:
+            _atomic_write_text(target, text)
+            return
+        fd, staged_name = tempfile.mkstemp(
+            prefix=f".{target.name}.", suffix=".tmp", dir=tempfile.gettempdir()
+        )
+        staged_path = Path(staged_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            install_cmd = [
+                *self._config.sudo_prefix,
+                "install",
+                "-m",
+                f"0{_FILE_MODE_PUBLIC_READ:o}",
+                "-o",
+                "root",
+                "-g",
+                "root",
+                str(staged_path),
+                str(target),
+            ]
+            completed = self._run_text(install_cmd)
+            if completed.returncode != 0:
+                raise SambaError(
+                    f"failed to install Samba config to {target}: "
+                    f"{self._command_detail(completed)}"
+                )
+        except OSError as exc:
+            raise SambaError(f"failed to stage Samba config: {exc}") from exc
+        finally:
+            staged_path.unlink(missing_ok=True)
 
     def start(self) -> SambaStatus:
         with self._lock:
@@ -193,6 +251,7 @@ class SambaService:
         if systemctl_binary is not None:
             completed = self._run_text(
                 [
+                    *self._config.sudo_prefix,
                     str(systemctl_binary),
                     "start",
                     "smbd",
@@ -240,6 +299,7 @@ class SambaService:
             systemctl_binary = self._resolve_required_binary(self._config.binary_systemctl)
             completed = self._run_text(
                 [
+                    *self._config.sudo_prefix,
                     str(systemctl_binary),
                     "stop",
                     "smbd",
@@ -297,6 +357,7 @@ class SambaService:
                 )
             completed = self._run_text(
                 [
+                    *self._config.sudo_prefix,
                     str(systemctl_binary),
                     "is-active",
                     "--quiet",
@@ -394,6 +455,7 @@ class SambaService:
 
     def _start_popen(self, smbd_binary: Path) -> _ManagedProcess:
         command = [
+            *self._config.sudo_prefix,
             str(smbd_binary),
             "-FS",
             "--configfile",
@@ -417,7 +479,7 @@ class SambaService:
         smbcontrol_binary = self._resolve_binary(self._config.binary_smbcontrol)
         if smbcontrol_binary is not None:
             completed = self._run_text(
-                [str(smbcontrol_binary), "smbd", "shutdown"],
+                [*self._config.sudo_prefix, str(smbcontrol_binary), "smbd", "shutdown"],
                 timeout=min(timeout, self._config.command_timeout_seconds),
             )
             if completed.returncode != 0:
@@ -527,24 +589,41 @@ def _default_shares(cfg: WebConfig) -> tuple[SambaShare, ...]:
             )
             for share in cfg.samba.shares
         )
+    # No explicit shares configured -> expose both USB drive storage
+    # locations: the Tesla LUN under `<backing_root>/TeslaCam` and the
+    # Media LUN at the root of `paths.media_root` (which carries
+    # Music/Boombox/LightShows/etc.). Authenticated (guest_ok=False),
+    # browseable, read+write so the user can drop files onto either
+    # drive from Windows Explorer or Finder.
+    media_root = cfg.paths.media_root or cfg.paths.backing_root
     return (
         SambaShare(
             name=_DEFAULT_SHARE_NAME,
             path=cfg.paths.backing_root / _DEFAULT_SHARE_NAME,
-            comment="TeslaUSB",
+            comment="TeslaUSB Dashcam & Sentry footage",
+        ),
+        SambaShare(
+            name=_DEFAULT_MEDIA_SHARE_NAME,
+            path=media_root,
+            comment="TeslaUSB Music, Boombox & Light Shows",
         ),
     )
 
 
 def make_samba_service(cfg: WebConfig) -> SambaService:
+    media_root = cfg.paths.media_root or cfg.paths.backing_root
+    allowed_roots: tuple[Path, ...] = (cfg.paths.backing_root, cfg.paths.state_dir)
+    if media_root not in allowed_roots:
+        allowed_roots = (*allowed_roots, media_root)
     return SambaService(
         SambaServiceConfig(
             config_path=cfg.samba.config_path,
             shares=_default_shares(cfg),
-            allowed_roots=(cfg.paths.backing_root, cfg.paths.state_dir),
+            allowed_roots=allowed_roots,
             binary_smbd=cfg.samba.binary_smbd,
             binary_smbcontrol=cfg.samba.binary_smbcontrol,
             binary_systemctl=cfg.samba.binary_systemctl,
+            sudo_prefix=cfg.samba.sudo_prefix,
         )
     )
 

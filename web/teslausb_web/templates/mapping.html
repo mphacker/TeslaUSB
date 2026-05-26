@@ -869,12 +869,12 @@
     <!-- Speed Color Legend (toggleable, hidden by default) -->
     <div class="speed-legend" id="speedLegend" aria-hidden="true">
         <div class="speed-legend-title">Speed (mph)</div>
-        <div class="speed-legend-row"><span class="speed-legend-swatch speed-legend-swatch-0"></span><span>0&ndash;33</span></div>
-        <div class="speed-legend-row"><span class="speed-legend-swatch speed-legend-swatch-1"></span><span>33&ndash;67</span></div>
-        <div class="speed-legend-row"><span class="speed-legend-swatch speed-legend-swatch-2"></span><span>67&ndash;100</span></div>
-        <div class="speed-legend-row"><span class="speed-legend-swatch speed-legend-swatch-3"></span><span>100&ndash;134</span></div>
-        <div class="speed-legend-row"><span class="speed-legend-swatch speed-legend-swatch-4"></span><span>134&ndash;168</span></div>
-        <div class="speed-legend-row"><span class="speed-legend-swatch speed-legend-swatch-5"></span><span>168+</span></div>
+        <div class="speed-legend-row"><span class="speed-legend-swatch speed-legend-swatch-0"></span><span>0&ndash;15</span></div>
+        <div class="speed-legend-row"><span class="speed-legend-swatch speed-legend-swatch-1"></span><span>15&ndash;30</span></div>
+        <div class="speed-legend-row"><span class="speed-legend-swatch speed-legend-swatch-2"></span><span>30&ndash;45</span></div>
+        <div class="speed-legend-row"><span class="speed-legend-swatch speed-legend-swatch-3"></span><span>45&ndash;60</span></div>
+        <div class="speed-legend-row"><span class="speed-legend-swatch speed-legend-swatch-4"></span><span>60&ndash;75</span></div>
+        <div class="speed-legend-row"><span class="speed-legend-swatch speed-legend-swatch-5"></span><span>75+</span></div>
     </div>
 
     <!-- FAB Group (right-side floating) -->
@@ -920,6 +920,8 @@
 {{ super() }}
 <script src="{{ url_for('static', filename='vendor/leaflet/leaflet.js') }}"></script>
 <script src="{{ url_for('static', filename='vendor/leaflet/leaflet.markercluster.js') }}"></script>
+<script src="{{ url_for('static', filename='vendor/protobuf/protobuf.min.js') }}"></script>
+<script src="{{ url_for('static', filename='vendor/dashcam-mp4/dashcam-mp4.js') }}"></script>
 <script>
 const BOOTSTRAP = {{ mapping_bootstrap | tojson }};
 const LUCIDE_SPRITE = BOOTSTRAP.assets.sprite;
@@ -1156,19 +1158,28 @@ let enabledEventTypes = (function () {
 // segments, NOT one polyline per waypoint pair (which would create
 // thousands of Leaflet objects on a multi-trip day and crush the
 // Pi Zero 2 W).
-const SPEED_BUCKETS = [
-    { max: 15, color: '#440154' },   //   0-15 m/s   (~0-33 mph)   stopped/parking
-    { max: 30, color: '#3b528b' },   //  15-30 m/s   (~33-67 mph)  city
-    { max: 45, color: '#21918c' },   //  30-45 m/s   (~67-100 mph) suburban/highway
-    { max: 60, color: '#5ec962' },   //  45-60 m/s   (~100-134 mph)
-    { max: 75, color: '#fde725' },   //  60-75 m/s   (~134-168 mph)
-    { max: Infinity, color: '#fffacd' }, // 75+ m/s
+// MPH-native speed buckets. Stored telemetry is `speed_mps` but
+// the UI is mph-only (US car), so we define the cut-points in
+// mph and convert once at compare time. Granularity is chosen
+// for typical US driving (parking → residential → city → 4-lane
+// → highway → fast highway) so colour actually varies across
+// the speeds people drive at, instead of collapsing 25-75 mph
+// into a single bucket.
+const MPS_PER_MPH = 0.44704;
+const SPEED_BUCKETS_MPH = [
+    { maxMph: 15, color: '#440154' },   //   0-15 mph   parking / walking pace
+    { maxMph: 30, color: '#3b528b' },   //  15-30 mph   residential
+    { maxMph: 45, color: '#21918c' },   //  30-45 mph   city / suburban
+    { maxMph: 60, color: '#5ec962' },   //  45-60 mph   highway (lower)
+    { maxMph: 75, color: '#fde725' },   //  60-75 mph   highway
+    { maxMph: Infinity, color: '#fffacd' }, // 75+ mph
 ];
 
 function speedColor(mps) {
-    const v = (typeof mps === 'number' && Number.isFinite(mps)) ? mps : 0;
-    for (const b of SPEED_BUCKETS) if (v < b.max) return b.color;
-    return SPEED_BUCKETS[SPEED_BUCKETS.length - 1].color;
+    const v = (typeof mps === 'number' && Number.isFinite(mps)) ? Math.abs(mps) : 0;
+    const mph = v / MPS_PER_MPH;
+    for (const b of SPEED_BUCKETS_MPH) if (mph < b.maxMph) return b.color;
+    return SPEED_BUCKETS_MPH[SPEED_BUCKETS_MPH.length - 1].color;
 }
 
 // ===========================================================
@@ -2093,7 +2104,7 @@ function toggleSpeedLegend() {
 // ``currentDayData.trips`` (already includes inline waypoints, so
 // we don't fan out per-trip route fetches like the old
 // trip-by-trip view did). Speed-bucketed polylines render on a
-// shared canvas — see SPEED_BUCKETS / sharedCanvasRenderer above.
+// shared canvas — see SPEED_BUCKETS_MPH / sharedCanvasRenderer above.
 
 async function renderDay() {
     tripLayer.clearLayers();
@@ -2359,8 +2370,17 @@ function updateOverlayTelemetry(wp) {
 
     const throttle = document.getElementById('olThrottle');
     if (throttle) {
-        const accel = Math.max(0, (wp.acceleration_x || 0));
-        const pct = Math.min(100, accel * 15);
+        // Prefer the live SEI accelerator pedal position (0..1 or 0..100)
+        // when available; fall back to forward-accel proxy from DB rows.
+        let pct;
+        if (wp.accelerator_pedal_position != null) {
+            let v = wp.accelerator_pedal_position;
+            if (v <= 1.2) v *= 100;
+            pct = Math.max(0, Math.min(100, v));
+        } else {
+            const accel = Math.max(0, (wp.acceleration_x || 0));
+            pct = Math.min(100, accel * 15);
+        }
         throttle.style.setProperty('--oh-fill', `${pct}%`);
     }
 
@@ -2466,6 +2486,14 @@ function openVideoOverlay(waypoint, clickPoint, routeWps, tripId) {
                     if (wp.brake_applied === undefined) wp.brake_applied = t.brake_applied;
                     if (wp.blinker_on_left === undefined) wp.blinker_on_left = t.blinker_on_left;
                     if (wp.blinker_on_right === undefined) wp.blinker_on_right = t.blinker_on_right;
+                    if (wp.autopilot_state === undefined) wp.autopilot_state = t.autopilot_state;
+                }
+                // Refresh the HUD now that cold telemetry has merged in.
+                // Without this the initial seed render (which ran before
+                // the fetch resolved) leaves wheel/gear/AP/throttle stuck
+                // on neutral defaults until the next `timeupdate` tick.
+                if (typeof onOverlayTimeUpdate === 'function') {
+                    try { onOverlayTimeUpdate(); } catch (e) { /* HUD optional */ }
                 }
             })
             .catch(() => { /* HUD already falls back to neutral defaults */ });
@@ -2559,6 +2587,14 @@ function openVideoOverlay(waypoint, clickPoint, routeWps, tripId) {
 
     wireVideoLoadingIndicator(video);
 
+    // Kick off the live SEI download in parallel. When it completes
+    // it swaps the <video> src to a blob of the same bytes (no second
+    // download) and replaces SEI_FRAMES so onOverlayTimeUpdate drives
+    // the HUD from per-frame SEI like V1.
+    SEI_FRAMES = [];
+    loadLiveSeiForClip(waypoint.video_path,
+        Math.max(0, (waypoint.frame_offset || 0) / 36 - 2));
+
     // Seek to the event time once the browser has enough metadata
     // to know the duration.
     video.addEventListener('loadedmetadata', function onLoad() {
@@ -2578,9 +2614,27 @@ function openVideoOverlay(waypoint, clickPoint, routeWps, tripId) {
     video.addEventListener('error', function onError() {
         const rawSrc = video.getAttribute('src');
         if (!rawSrc) return;
-        if (typeof showToast === 'function') {
-            showToast('Video file not found — Tesla may have overwritten it.', 'warning');
-        }
+        // HEAD-probe the URL so we can tell "file truly gone" (404) from
+        // a transient load failure (5xx, network blip, abort). Showing
+        // "Tesla may have overwritten it" on every error is misleading.
+        fetch(rawSrc, { method: 'HEAD', cache: 'no-store' })
+            .then(function (resp) {
+                if (typeof showToast !== 'function') return;
+                if (resp.status === 404) {
+                    showToast('Video file not found — Tesla may have overwritten it.', 'warning');
+                } else if (resp.status >= 500) {
+                    showToast('Server error loading video (HTTP ' + resp.status + '). Try again.', 'warning');
+                } else if (!resp.ok) {
+                    showToast('Could not load video (HTTP ' + resp.status + ').', 'warning');
+                } else {
+                    showToast('Video failed to play. Try clicking again.', 'warning');
+                }
+            })
+            .catch(function () {
+                if (typeof showToast === 'function') {
+                    showToast('Network error loading video. Check the connection and try again.', 'warning');
+                }
+            });
     }, { once: true });
 
     // Live telemetry on timeupdate (driven by waypoints — V1 parity)
@@ -2792,23 +2846,173 @@ document.addEventListener('keydown', (e) => {
     if (header) header.style.cursor = 'grab';
 });
 
+// ---------------------------------------------------------------
+// Live SEI extraction (V1 parity)
+// ---------------------------------------------------------------
+// Per overlay-open we fetch the MP4 once, parse SEI per-frame in
+// JS using the vendored dashcam-mp4 + protobuf libraries, and drive
+// the HUD from those samples on each `timeupdate` event. The same
+// downloaded buffer is reused as a blob: URL for the <video>
+// element so we only download once.
+let SEI_FRAMES = [];        // array of { time:sec, sei:protobufMsg|null }
+let SEI_LOAD_SEQ = 0;        // bumps on every load to discard stale finishers
+let SEI_ABORT = null;        // AbortController for in-flight fetch
+let SEI_PROTO = null;        // { SeiMetadata, enumFields }
+let SEI_CURRENT_PATH = null; // server-relative video path currently loaded
+
+// Debug accessor used by Playwright probes; not relied on at runtime.
+window.__seiState = () => ({
+    frames: SEI_FRAMES.length,
+    path: SEI_CURRENT_PATH,
+    sample: SEI_FRAMES[Math.floor(SEI_FRAMES.length / 2)] || null,
+    first: SEI_FRAMES[0] || null,
+});
+
+async function ensureSeiProto() {
+    if (SEI_PROTO) return SEI_PROTO;
+    if (!window.DashcamHelpers || !window.protobuf) return null;
+    try {
+        SEI_PROTO = await window.DashcamHelpers.initProtobuf(BOOTSTRAP.assets.dashcam_proto);
+    } catch (e) {
+        console.warn('SEI proto init failed:', e);
+        SEI_PROTO = null;
+    }
+    return SEI_PROTO;
+}
+
+// Convert a decoded SEI protobuf message into a waypoint-shaped
+// object so updateOverlayTelemetry can render it directly.
+function seiToWaypointShim(sei) {
+    if (!sei) return null;
+    const enums = SEI_PROTO && SEI_PROTO.enumFields;
+    const gearName = enums && enums.gearState
+        ? enums.gearState.valuesById?.[sei.gearState]
+        : null;
+    const apName = enums && enums.autopilotState
+        ? enums.autopilotState.valuesById?.[sei.autopilotState]
+        : null;
+    return {
+        lat: sei.latitudeDeg,
+        lon: sei.longitudeDeg,
+        speed_mps: sei.vehicleSpeedMps,
+        gear: gearName,
+        steering_angle: sei.steeringWheelAngle,
+        brake_applied: !!sei.brakeApplied,
+        blinker_on_left: !!sei.blinkerOnLeft,
+        blinker_on_right: !!sei.blinkerOnRight,
+        autopilot_state: apName,
+        accelerator_pedal_position: sei.acceleratorPedalPosition,
+    };
+}
+
+// Fetch the MP4 for `videoPath` (e.g. RecentClips/...-front.mp4),
+// parse SEI per frame, swap the <video> src to a blob URL of the
+// downloaded buffer, and replace SEI_FRAMES. The supplied
+// `seekTimeSec` is restored on the new src so playback resumes from
+// the same position the streamed src was at.
+async function loadLiveSeiForClip(videoPath, seekTimeSec) {
+    // DISABLED on B-1 Pi Zero 2 W: fetching the full MP4
+    // (10-30 MB) into an ArrayBuffer alongside the gunicorn
+    // worker indexer OOMs the 512 MB device and requires a
+    // physical power-cycle. The DB-derived per-trip
+    // telemetry (lazy-loaded into trip.waypoints) drives the
+    // HUD instead, until we land worker sidecar SEI or
+    // raise sei_sample_rate. See plan.md → "LEARNING #3:
+    // Live-SEI in browser OOMs the Pi".
+    SEI_CURRENT_PATH = videoPath;
+    return;
+    /* eslint-disable no-unreachable */
+    const mySeq = ++SEI_LOAD_SEQ;
+    if (SEI_ABORT) { try { SEI_ABORT.abort(); } catch (e) {} }
+    SEI_ABORT = new AbortController();
+    const sig = SEI_ABORT.signal;
+
+    const proto = await ensureSeiProto();
+    if (mySeq !== SEI_LOAD_SEQ) return; // superseded
+    if (!proto) return;                  // libs unavailable; HUD stays empty
+
+    const url = BOOTSTRAP.view.video_stream_template.replace('__PATH__', videoPath);
+    let buffer;
+    try {
+        const resp = await fetch(url, { credentials: 'same-origin', signal: sig });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        buffer = await resp.arrayBuffer();
+    } catch (e) {
+        if (e.name === 'AbortError') return;
+        console.warn('SEI fetch failed:', e);
+        return;
+    }
+    if (mySeq !== SEI_LOAD_SEQ) return;
+
+    let frames;
+    try {
+        const mp4 = new window.DashcamMP4(buffer);
+        const config = mp4.getConfig();
+        const parsed = mp4.parseFrames(proto.SeiMetadata);
+        let t = 0;
+        frames = parsed.map((f) => {
+            const out = { time: t / 1000, sei: f.sei };
+            t += config.durations[f.index] || 33.333;
+            return out;
+        });
+    } catch (e) {
+        console.warn('SEI parse failed:', e);
+        return;
+    }
+    if (mySeq !== SEI_LOAD_SEQ) return;
+
+    SEI_FRAMES = frames;
+
+    // Swap the video element to a blob URL of the buffer we already
+    // downloaded so playback uses the same bytes (no second download).
+    const video = document.getElementById('overlayVideo');
+    if (!video) return;
+    const wasPaused = video.paused;
+    const blob = new Blob([buffer], { type: 'video/mp4' });
+    const blobUrl = URL.createObjectURL(blob);
+    const prevSrc = video.src;
+    video.src = blobUrl;
+    video.addEventListener('loadedmetadata', function onLoad() {
+        if (seekTimeSec > 0 && seekTimeSec < video.duration) {
+            video.currentTime = seekTimeSec;
+        }
+        if (!wasPaused) video.play().catch(() => {});
+        video.removeEventListener('loadedmetadata', onLoad);
+        // Free the previous blob: URL, if any.
+        if (prevSrc && prevSrc.startsWith('blob:')) {
+            try { URL.revokeObjectURL(prevSrc); } catch (e) {}
+        }
+        // Drive the HUD immediately from the SEI we just loaded.
+        onOverlayTimeUpdate();
+    }, { once: true });
+    /* eslint-enable no-unreachable */
+}
+
 function onOverlayTimeUpdate() {
     const video = document.getElementById('overlayVideo');
-    if (!video || !overlayWaypoints.length) return;
+    if (!video) return;
 
-    const currentTimeSec = video.currentTime;
-    const currentFrame = Math.round(currentTimeSec * 36);
-
-    // Find the nearest waypoint matching the CURRENT clip's base path
-    let nearest = null, minDelta = Infinity;
-    for (const wp of overlayWaypoints) {
-        if (!wp.video_path) continue;
-        if (getBasePath(wp.video_path) !== overlayBasePath) continue;
-        const delta = Math.abs((wp.frame_offset || 0) - currentFrame);
-        if (delta < minDelta) { minDelta = delta; nearest = wp; }
+    // Prefer live per-frame SEI when loaded.
+    if (SEI_FRAMES.length > 0) {
+        const t = video.currentTime;
+        // Binary search would be tidier; SEI_FRAMES is <= a few
+        // thousand entries so a linear scan is fine and matches v1.
+        let frame = null;
+        for (let i = 0; i < SEI_FRAMES.length; i++) {
+            const f = SEI_FRAMES[i];
+            const next = SEI_FRAMES[i + 1];
+            if (f.time <= t && (!next || next.time > t)) { frame = f; break; }
+        }
+        if (frame && frame.sei) {
+            updateOverlayTelemetry(seiToWaypointShim(frame.sei));
+            return;
+        }
+        // No SEI on this frame — keep last known values rather than reset.
+        return;
     }
 
-    if (nearest) updateOverlayTelemetry(nearest);
+    // Pre-SEI fallback (download still in flight): show the seed
+    // waypoint we already rendered in openVideoOverlay. Nothing to do.
 }
 
 function switchCamera(angle) {
@@ -2838,6 +3042,10 @@ function switchCamera(angle) {
         if (!wasPaused) video.play().catch(() => {});
         video.removeEventListener('loadedmetadata', onLoad);
     }, { once: true });
+
+    // Re-fetch SEI for the new camera angle (HUD still works per-frame).
+    SEI_FRAMES = [];
+    loadLiveSeiForClip(newPath, currentTime);
 }
 
 function navigateClip(direction) {
@@ -2867,6 +3075,10 @@ function navigateClip(direction) {
     if (clip.firstWaypoint) {
         updateOverlayTelemetry(clip.firstWaypoint);
     }
+
+    // Re-fetch SEI for the new clip.
+    SEI_FRAMES = [];
+    loadLiveSeiForClip(newPath, 0);
 }
 
 async function openEventVideo(tripId, videoPath, frameOffset, lat, lon) {
@@ -2922,12 +3134,18 @@ function closeVideoOverlay() {
     // telemetry fetch (started by openVideoOverlay) discards its
     // response when it returns.
     ++overlayOpenSeq;
+    // Abort any in-flight SEI download and clear per-frame state.
+    if (SEI_ABORT) { try { SEI_ABORT.abort(); } catch (e) {} SEI_ABORT = null; }
+    ++SEI_LOAD_SEQ;
+    SEI_FRAMES = [];
+    SEI_CURRENT_PATH = null;
     const existing = document.getElementById('videoOverlay');
     if (existing) {
         const video = existing.querySelector('video');
         if (video) {
             video.removeEventListener('timeupdate', onOverlayTimeUpdate);
             video.pause();
+            const prevSrc = video.src;
             // Properly abort any pending load. Setting src='' resolves to
             // the document base URL (e.g. https://host/mapping) and the
             // browser then tries to load THAT as a video, fails, and fires
@@ -2936,6 +3154,9 @@ function closeVideoOverlay() {
             // standard reset is removeAttribute('src') + load().
             video.removeAttribute('src');
             video.load();
+            if (prevSrc && prevSrc.startsWith('blob:')) {
+                try { URL.revokeObjectURL(prevSrc); } catch (e) {}
+            }
         }
         existing.remove();
     }

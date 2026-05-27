@@ -93,7 +93,7 @@ class CloudArchiveConfig:
     sync_non_event: bool = False
     sync_recent_with_telemetry: bool = False
     bwlimit_kbps: int = 0
-    cloud_reserve_gb: float = 0.0
+    cloud_reserve_gb: float = 5.0
     cloud_auto_cleanup: bool = False
     cloud_min_retention_days: int = 0
     keep_clips_until_synced: bool = True

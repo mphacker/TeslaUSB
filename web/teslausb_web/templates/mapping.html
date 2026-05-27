@@ -3092,16 +3092,22 @@ function onOverlayTimeUpdate() {
     // Filter to this clip's waypoints (sorted by frame_offset, ascending).
     // overlayWaypoints is a trip-wide list; the same array may span many
     // clips, so we cache a per-clip view to keep timeupdate O(log n).
+    // IMPORTANT: cache references to the original wp objects (NOT copies)
+    // because openVideoOverlay's lazy /api/trip/<id>/telemetry fetch
+    // merges cold cols (gear/wheel/brake/blinker/AP/accel) into those
+    // originals after this cache may already be built. We keep a parallel
+    // _ts array for the binary search so the lookup stays cheap.
     const currentPath = (overlayBasePath || '') + '-' + (overlayCurrentAngle || 'front') + '.mp4';
     if (onOverlayTimeUpdate._cachedPath !== currentPath) {
-        const filtered = overlayWaypoints
-            .filter(w => w && w.video_path === currentPath)
-            .map(w => ({ ...w, _t: ((w.frame_offset != null) ? w.frame_offset : 0) / 36 }))
-            .sort((x, y) => x._t - y._t);
+        const refs = overlayWaypoints.filter(w => w && w.video_path === currentPath);
+        refs.sort((x, y) => ((x.frame_offset || 0) - (y.frame_offset || 0)));
+        const ts = refs.map(w => (w.frame_offset || 0) / 36);
         onOverlayTimeUpdate._cachedPath = currentPath;
-        onOverlayTimeUpdate._cachedClipWps = filtered;
+        onOverlayTimeUpdate._cachedClipWps = refs;
+        onOverlayTimeUpdate._cachedClipTs = ts;
     }
     const clipWps = onOverlayTimeUpdate._cachedClipWps;
+    const clipTs = onOverlayTimeUpdate._cachedClipTs;
     if (!clipWps.length) return;
 
     const t = video.currentTime;
@@ -3109,15 +3115,17 @@ function onOverlayTimeUpdate() {
     let lo = 0, hi = clipWps.length - 1;
     while (lo < hi) {
         const mid = (lo + hi + 1) >> 1;
-        if (clipWps[mid]._t <= t) lo = mid; else hi = mid - 1;
+        if (clipTs[mid] <= t) lo = mid; else hi = mid - 1;
     }
     const a = clipWps[lo];
     const b = clipWps[lo + 1];
-    if (!b || b._t === a._t) {
+    const ta = clipTs[lo];
+    const tb = (lo + 1 < clipTs.length) ? clipTs[lo + 1] : ta;
+    if (!b || tb === ta) {
         updateOverlayTelemetry(a);
         return;
     }
-    let alpha = (t - a._t) / (b._t - a._t);
+    let alpha = (t - ta) / (tb - ta);
     if (alpha < 0) alpha = 0; else if (alpha > 1) alpha = 1;
     updateOverlayTelemetry(_interpolateWaypoint(a, b, alpha));
 }

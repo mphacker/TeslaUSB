@@ -22,6 +22,11 @@ KV_KEY_MAX_RETRY_ATTEMPTS: Final[str] = "cloud_archive.max_retry_attempts"
 KV_KEY_SYNC_RECENT_WITH_TELEMETRY: Final[str] = (
     "cloud_archive.sync_recent_with_telemetry"
 )
+KV_KEY_BWLIMIT_KBPS: Final[str] = "cloud_archive.bwlimit_kbps"
+KV_KEY_CLOUD_RESERVE_GB: Final[str] = "cloud_archive.cloud_reserve_gb"
+KV_KEY_CLOUD_AUTO_CLEANUP: Final[str] = "cloud_archive.cloud_auto_cleanup"
+KV_KEY_CLOUD_MIN_RETENTION_DAYS: Final[str] = "cloud_archive.cloud_min_retention_days"
+KV_KEY_KEEP_CLIPS_UNTIL_SYNCED: Final[str] = "cloud_archive.keep_clips_until_synced"
 
 PERSISTED_SETTING_KEYS: Final[tuple[str, ...]] = (
     KV_KEY_SYNC_FOLDERS,
@@ -29,10 +34,21 @@ PERSISTED_SETTING_KEYS: Final[tuple[str, ...]] = (
     KV_KEY_SYNC_NON_EVENT,
     KV_KEY_MAX_RETRY_ATTEMPTS,
     KV_KEY_SYNC_RECENT_WITH_TELEMETRY,
+    KV_KEY_BWLIMIT_KBPS,
+    KV_KEY_CLOUD_RESERVE_GB,
+    KV_KEY_CLOUD_AUTO_CLEANUP,
+    KV_KEY_CLOUD_MIN_RETENTION_DAYS,
+    KV_KEY_KEEP_CLIPS_UNTIL_SYNCED,
 )
 
 RETRY_MAX_ATTEMPTS_MIN: Final[int] = 1
 RETRY_MAX_ATTEMPTS_MAX: Final[int] = 20
+BWLIMIT_KBPS_MIN: Final[int] = 0
+BWLIMIT_KBPS_MAX: Final[int] = 1_000_000
+CLOUD_RESERVE_GB_MIN: Final[float] = 0.0
+CLOUD_RESERVE_GB_MAX: Final[float] = 100.0
+CLOUD_MIN_RETENTION_DAYS_MIN: Final[int] = 0
+CLOUD_MIN_RETENTION_DAYS_MAX: Final[int] = 365
 DEFAULT_WORKER_IDLE_SECONDS: Final[float] = 5.0
 DEFAULT_BACKOFF_INITIAL_SECONDS: Final[float] = 5.0
 DEFAULT_BACKOFF_MAX_SECONDS: Final[float] = 300.0
@@ -76,6 +92,11 @@ class CloudArchiveConfig:
     dead_letter_max_age_days: int = 30
     sync_non_event: bool = False
     sync_recent_with_telemetry: bool = False
+    bwlimit_kbps: int = 0
+    cloud_reserve_gb: float = 0.0
+    cloud_auto_cleanup: bool = False
+    cloud_min_retention_days: int = 0
+    keep_clips_until_synced: bool = True
 
     def __post_init__(self) -> None:
         if self.worker_idle_seconds <= 0:
@@ -139,6 +160,20 @@ def _kv_parse_str_tuple(raw: str | None) -> tuple[str, ...] | None:
     return tuple(item for item in parsed if isinstance(item, str))
 
 
+def _kv_parse_float(raw: str | None) -> float | None:
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if isinstance(parsed, bool):
+        return None
+    if isinstance(parsed, (int, float)):
+        return float(parsed)
+    return None
+
+
 def _read_sync_non_event_setting(
     config: CloudArchiveConfig,
     connection: sqlite3.Connection | None = None,
@@ -188,6 +223,55 @@ def _read_sync_recent_with_telemetry_setting(
     return value if value is not None else config.sync_recent_with_telemetry
 
 
+def _read_bwlimit_kbps_setting(
+    config: CloudArchiveConfig,
+    connection: sqlite3.Connection | None = None,
+) -> int:
+    value = _kv_parse_int(_kv_lookup_raw(connection, KV_KEY_BWLIMIT_KBPS))
+    if value is not None and BWLIMIT_KBPS_MIN <= value <= BWLIMIT_KBPS_MAX:
+        return value
+    return getattr(config, "bwlimit_kbps", 0)
+
+
+def _read_cloud_reserve_gb_setting(
+    config: CloudArchiveConfig,
+    connection: sqlite3.Connection | None = None,
+) -> float:
+    value = _kv_parse_float(_kv_lookup_raw(connection, KV_KEY_CLOUD_RESERVE_GB))
+    if value is not None and CLOUD_RESERVE_GB_MIN <= value <= CLOUD_RESERVE_GB_MAX:
+        return value
+    return config.cloud_reserve_gb
+
+
+def _read_cloud_auto_cleanup_setting(
+    config: CloudArchiveConfig,
+    connection: sqlite3.Connection | None = None,
+) -> bool:
+    value = _kv_parse_bool(_kv_lookup_raw(connection, KV_KEY_CLOUD_AUTO_CLEANUP))
+    return value if value is not None else config.cloud_auto_cleanup
+
+
+def _read_cloud_min_retention_days_setting(
+    config: CloudArchiveConfig,
+    connection: sqlite3.Connection | None = None,
+) -> int:
+    value = _kv_parse_int(_kv_lookup_raw(connection, KV_KEY_CLOUD_MIN_RETENTION_DAYS))
+    if (
+        value is not None
+        and CLOUD_MIN_RETENTION_DAYS_MIN <= value <= CLOUD_MIN_RETENTION_DAYS_MAX
+    ):
+        return value
+    return config.cloud_min_retention_days
+
+
+def _read_keep_clips_until_synced_setting(
+    config: CloudArchiveConfig,
+    connection: sqlite3.Connection | None = None,
+) -> bool:
+    value = _kv_parse_bool(_kv_lookup_raw(connection, KV_KEY_KEEP_CLIPS_UNTIL_SYNCED))
+    return value if value is not None else config.keep_clips_until_synced
+
+
 def _read_worker_idle_seconds_setting(config: CloudArchiveConfig) -> float:
     return config.worker_idle_seconds
 
@@ -229,4 +313,5 @@ def make_cloud_archive_config(cfg: WebConfig) -> CloudArchiveConfig:
         priority_folders=tuple(cfg.cloud.priority_folders),
         sync_folders=tuple(cfg.cloud.sync_folders),
         dead_letter_max_age_days=cfg.cloud.dead_letter_max_age_days,
+        bwlimit_kbps=cfg.cloud.bwlimit_kbps,
     )

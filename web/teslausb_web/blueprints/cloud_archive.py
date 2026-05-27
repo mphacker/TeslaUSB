@@ -36,6 +36,17 @@ from teslausb_web.services.cloud_archive import (
 )
 from teslausb_web.services.cloud_archive.paths import VALID_SYNC_FOLDERS
 from teslausb_web.services.cloud_archive.settings import (
+    BWLIMIT_KBPS_MAX,
+    BWLIMIT_KBPS_MIN,
+    CLOUD_MIN_RETENTION_DAYS_MAX,
+    CLOUD_MIN_RETENTION_DAYS_MIN,
+    CLOUD_RESERVE_GB_MAX,
+    CLOUD_RESERVE_GB_MIN,
+    _read_bwlimit_kbps_setting,
+    _read_cloud_auto_cleanup_setting,
+    _read_cloud_min_retention_days_setting,
+    _read_cloud_reserve_gb_setting,
+    _read_keep_clips_until_synced_setting,
     _read_priority_order_setting,
     _read_retry_max_attempts_setting,
     _read_sync_folders_setting,
@@ -115,7 +126,7 @@ class _CloudArchivePageContext:
     priority_order: tuple[str, ...]
     max_upload_mbps: int
     remote_path: str
-    cloud_reserve_gb: int
+    cloud_reserve_gb: float
     cloud_auto_cleanup: bool
     cloud_min_retention_days: int
     cloud_retry_max_attempts: int
@@ -439,6 +450,11 @@ def _page_context() -> _CloudArchivePageContext:
     live_priority: tuple[str, ...] = tuple(archive_service.config.priority_folders)
     live_retry_max: int = archive_service.config.max_retry_attempts
     live_recent_telemetry: bool = archive_service.config.sync_recent_with_telemetry
+    live_bwlimit_kbps: int = getattr(archive_service.config, "bwlimit_kbps", 0)
+    live_cloud_reserve_gb: float = archive_service.config.cloud_reserve_gb
+    live_cloud_auto_cleanup: bool = archive_service.config.cloud_auto_cleanup
+    live_cloud_min_retention_days: int = archive_service.config.cloud_min_retention_days
+    live_keep_clips_until_synced: bool = archive_service.config.keep_clips_until_synced
     try:
         credentials = oauth_service.load_credentials()
         sync_status = archive_service.get_sync_status()
@@ -455,6 +471,21 @@ def _page_context() -> _CloudArchivePageContext:
                 archive_service.config, connection
             )
             live_recent_telemetry = _read_sync_recent_with_telemetry_setting(
+                archive_service.config, connection
+            )
+            live_bwlimit_kbps = _read_bwlimit_kbps_setting(
+                archive_service.config, connection
+            )
+            live_cloud_reserve_gb = _read_cloud_reserve_gb_setting(
+                archive_service.config, connection
+            )
+            live_cloud_auto_cleanup = _read_cloud_auto_cleanup_setting(
+                archive_service.config, connection
+            )
+            live_cloud_min_retention_days = _read_cloud_min_retention_days_setting(
+                archive_service.config, connection
+            )
+            live_keep_clips_until_synced = _read_keep_clips_until_synced_setting(
                 archive_service.config, connection
             )
     except (
@@ -479,13 +510,13 @@ def _page_context() -> _CloudArchivePageContext:
         sync_enabled=cfg.features.cloud_archive_enabled,
         sync_folders=tuple(live_sync_folders),
         priority_order=tuple(live_priority),
-        max_upload_mbps=max(0, cfg.cloud.bwlimit_kbps // 1024),
+        max_upload_mbps=max(0, live_bwlimit_kbps // 1024),
         remote_path=_DEFAULT_REMOTE_PATH,
-        cloud_reserve_gb=0,
-        cloud_auto_cleanup=False,
-        cloud_min_retention_days=0,
+        cloud_reserve_gb=live_cloud_reserve_gb,
+        cloud_auto_cleanup=live_cloud_auto_cleanup,
+        cloud_min_retention_days=live_cloud_min_retention_days,
         cloud_retry_max_attempts=live_retry_max,
-        keep_clips_until_synced=True,
+        keep_clips_until_synced=live_keep_clips_until_synced,
         kept_unsynced_count=0,
         sync_recent_with_telemetry=live_recent_telemetry,
         providers=oauth_service.supported_providers(),
@@ -542,6 +573,56 @@ def save_settings() -> ResponseReturnValue:
             flash("Retry attempts must be a whole number.", "error")
             return redirect(url_for("cloud_archive.index"))
 
+    bw_raw = (request.form.get("max_upload_mbps") or "").strip()
+    bwlimit_kbps: int | None = None
+    if bw_raw:
+        try:
+            bw_mbps = int(bw_raw)
+        except ValueError:
+            flash("Bandwidth limit must be a whole number.", "error")
+            return redirect(url_for("cloud_archive.index"))
+        bwlimit_kbps = max(BWLIMIT_KBPS_MIN, min(BWLIMIT_KBPS_MAX, bw_mbps * 1024))
+
+    reserve_raw = (request.form.get("cloud_reserve_gb") or "").strip()
+    cloud_reserve_gb: float | None = None
+    if reserve_raw:
+        try:
+            cloud_reserve_gb = float(reserve_raw)
+        except ValueError:
+            flash("Cloud reserve must be a number.", "error")
+            return redirect(url_for("cloud_archive.index"))
+        if not CLOUD_RESERVE_GB_MIN <= cloud_reserve_gb <= CLOUD_RESERVE_GB_MAX:
+            flash(
+                f"Cloud reserve must be between {CLOUD_RESERVE_GB_MIN:g} "
+                f"and {CLOUD_RESERVE_GB_MAX:g} GB.",
+                "error",
+            )
+            return redirect(url_for("cloud_archive.index"))
+
+    min_retention_raw = (request.form.get("cloud_min_retention_days") or "").strip()
+    cloud_min_retention_days: int | None = None
+    if min_retention_raw:
+        try:
+            cloud_min_retention_days = int(min_retention_raw)
+        except ValueError:
+            flash("Minimum cloud retention days must be a whole number.", "error")
+            return redirect(url_for("cloud_archive.index"))
+        if not (
+            CLOUD_MIN_RETENTION_DAYS_MIN
+            <= cloud_min_retention_days
+            <= CLOUD_MIN_RETENTION_DAYS_MAX
+        ):
+            flash(
+                f"Minimum cloud retention days must be between "
+                f"{CLOUD_MIN_RETENTION_DAYS_MIN} and "
+                f"{CLOUD_MIN_RETENTION_DAYS_MAX}.",
+                "error",
+            )
+            return redirect(url_for("cloud_archive.index"))
+
+    cloud_auto_cleanup = bool(request.form.get("cloud_auto_cleanup"))
+    keep_clips_until_synced = bool(request.form.get("keep_clips_until_synced"))
+
     if sync_recent_with_telemetry and "RecentClips" not in selected_folders:
         selected_folders.append("RecentClips")
 
@@ -552,6 +633,11 @@ def save_settings() -> ResponseReturnValue:
             sync_non_event=False,
             sync_recent_with_telemetry=sync_recent_with_telemetry,
             max_retry_attempts=retry_max_attempts,
+            bwlimit_kbps=bwlimit_kbps,
+            cloud_reserve_gb=cloud_reserve_gb,
+            cloud_auto_cleanup=cloud_auto_cleanup,
+            cloud_min_retention_days=cloud_min_retention_days,
+            keep_clips_until_synced=keep_clips_until_synced,
         )
     except CloudArchiveConfigError as exc:
         flash(f"Could not save settings: {exc}", "error")

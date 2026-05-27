@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import time
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
@@ -25,6 +26,17 @@ from teslausb_web.services.cloud_archive.queue_ops import (
     retry_dead_letter,
 )
 from teslausb_web.services.cloud_archive.settings import (
+    BWLIMIT_KBPS_MAX,
+    BWLIMIT_KBPS_MIN,
+    CLOUD_MIN_RETENTION_DAYS_MAX,
+    CLOUD_MIN_RETENTION_DAYS_MIN,
+    CLOUD_RESERVE_GB_MAX,
+    CLOUD_RESERVE_GB_MIN,
+    KV_KEY_BWLIMIT_KBPS,
+    KV_KEY_CLOUD_AUTO_CLEANUP,
+    KV_KEY_CLOUD_MIN_RETENTION_DAYS,
+    KV_KEY_CLOUD_RESERVE_GB,
+    KV_KEY_KEEP_CLIPS_UNTIL_SYNCED,
     KV_KEY_MAX_RETRY_ATTEMPTS,
     KV_KEY_PRIORITY_FOLDERS,
     KV_KEY_SYNC_FOLDERS,
@@ -34,6 +46,7 @@ from teslausb_web.services.cloud_archive.settings import (
     RETRY_MAX_ATTEMPTS_MIN,
     CloudArchiveConfig,
     CloudArchiveConfigError,
+    _read_bwlimit_kbps_setting,
     _write_setting,
     make_cloud_archive_config,
 )
@@ -50,7 +63,6 @@ from teslausb_web.services.cloud_archive_queries import (
 )
 
 if TYPE_CHECKING:
-    import sqlite3
     from collections.abc import Iterator, Sequence
 
     from teslausb_web.config import WebConfig
@@ -101,7 +113,18 @@ class CloudArchiveService:
             return
         with self.open_db() as connection:
             recover_startup_state(connection)
+            self._apply_persisted_bwlimit(connection)
         self.state.startup_recovery_done = True
+
+    def _apply_persisted_bwlimit(self, connection: sqlite3.Connection) -> None:
+        setter = getattr(self.rclone_service, "set_bwlimit_kbps_override", None)
+        if not callable(setter):
+            return
+        try:
+            value = _read_bwlimit_kbps_setting(self.config, connection)
+        except (sqlite3.Error, ValueError, TypeError):  # pragma: no cover - defensive
+            return
+        setter(int(value))
 
     def start(self) -> bool:
         return self.worker.start()
@@ -185,6 +208,11 @@ class CloudArchiveService:
         sync_non_event: bool | None = None,
         max_retry_attempts: int | None = None,
         sync_recent_with_telemetry: bool | None = None,
+        bwlimit_kbps: int | None = None,
+        cloud_reserve_gb: float | None = None,
+        cloud_auto_cleanup: bool | None = None,
+        cloud_min_retention_days: int | None = None,
+        keep_clips_until_synced: bool | None = None,
     ) -> None:
         """Persist runtime overrides for user-tunable cloud archive settings."""
 
@@ -217,12 +245,53 @@ class CloudArchiveService:
             updates.append(
                 (KV_KEY_SYNC_RECENT_WITH_TELEMETRY, bool(sync_recent_with_telemetry))
             )
+        if bwlimit_kbps is not None:
+            if not BWLIMIT_KBPS_MIN <= int(bwlimit_kbps) <= BWLIMIT_KBPS_MAX:
+                raise CloudArchiveConfigError(
+                    f"bwlimit_kbps must be within "
+                    f"{BWLIMIT_KBPS_MIN}..{BWLIMIT_KBPS_MAX}"
+                )
+            updates.append((KV_KEY_BWLIMIT_KBPS, int(bwlimit_kbps)))
+        if cloud_reserve_gb is not None:
+            if not (
+                CLOUD_RESERVE_GB_MIN
+                <= float(cloud_reserve_gb)
+                <= CLOUD_RESERVE_GB_MAX
+            ):
+                raise CloudArchiveConfigError(
+                    f"cloud_reserve_gb must be within "
+                    f"{CLOUD_RESERVE_GB_MIN}..{CLOUD_RESERVE_GB_MAX}"
+                )
+            updates.append((KV_KEY_CLOUD_RESERVE_GB, float(cloud_reserve_gb)))
+        if cloud_auto_cleanup is not None:
+            updates.append((KV_KEY_CLOUD_AUTO_CLEANUP, bool(cloud_auto_cleanup)))
+        if cloud_min_retention_days is not None:
+            if not (
+                CLOUD_MIN_RETENTION_DAYS_MIN
+                <= int(cloud_min_retention_days)
+                <= CLOUD_MIN_RETENTION_DAYS_MAX
+            ):
+                raise CloudArchiveConfigError(
+                    f"cloud_min_retention_days must be within "
+                    f"{CLOUD_MIN_RETENTION_DAYS_MIN}..{CLOUD_MIN_RETENTION_DAYS_MAX}"
+                )
+            updates.append(
+                (KV_KEY_CLOUD_MIN_RETENTION_DAYS, int(cloud_min_retention_days))
+            )
+        if keep_clips_until_synced is not None:
+            updates.append(
+                (KV_KEY_KEEP_CLIPS_UNTIL_SYNCED, bool(keep_clips_until_synced))
+            )
         if not updates:
             return
         with self.open_db() as connection:
             for key, value in updates:
                 _write_setting(connection, key, value)
             connection.commit()
+        if bwlimit_kbps is not None:
+            setter = getattr(self.rclone_service, "set_bwlimit_kbps_override", None)
+            if callable(setter):
+                setter(int(bwlimit_kbps))
 
     def enqueue_live_event_from_event_json(self, event_json_paths: Sequence[str]) -> int:
         return enqueue_live_event_from_event_json(self.config, self.state, event_json_paths)

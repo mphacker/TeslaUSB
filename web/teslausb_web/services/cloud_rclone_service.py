@@ -227,6 +227,24 @@ class CloudRcloneService:
         self._active_process: subprocess.Popen[str] | None = None
         self._active_progress: RcloneTransferProgress | None = None
         self._active_cancelled = False
+        self._bwlimit_kbps_override: int | None = None
+
+    def set_bwlimit_kbps_override(self, value: int | None) -> None:
+        """Override the rclone bandwidth limit at runtime.
+
+        Pass ``None`` (or a negative value) to clear the override and fall back
+        to ``self._config.bwlimit_kbps``. Used by the cloud archive settings
+        page to apply a saved value without a service restart.
+        """
+        if value is None or value < 0:
+            self._bwlimit_kbps_override = None
+        else:
+            self._bwlimit_kbps_override = int(value)
+
+    def _effective_bwlimit_kbps(self) -> int:
+        if self._bwlimit_kbps_override is not None:
+            return self._bwlimit_kbps_override
+        return self._config.bwlimit_kbps
 
     @property
     def oauth_service(self) -> CloudOAuthService:
@@ -577,8 +595,9 @@ class CloudRcloneService:
             "--log-level",
             "INFO",
         ]
-        if self._config.bwlimit_kbps > 0:
-            command.extend(["--bwlimit", f"{self._config.bwlimit_kbps}k"])
+        bwlimit = self._effective_bwlimit_kbps()
+        if bwlimit > 0:
+            command.extend(["--bwlimit", f"{bwlimit}k"])
         command.extend([str(source_path), destination_spec])
         return command
 

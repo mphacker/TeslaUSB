@@ -69,10 +69,21 @@
         {% else %}—{% endif %}
       </dd>
 
-      <dt>Last filesystem check</dt>
+      <dt>Last offline fsck (root, boot-time)</dt>
       <dd id="sh-lastcheck">
         {% if storage_health and storage_health.last_checked_iso %}
           <time data-iso="{{ storage_health.last_checked_iso }}">{{ storage_health.last_checked_iso }}</time>
+        {% else %}—{% endif %}
+      </dd>
+
+      <dt>Online check (read-only, root)</dt>
+      <dd id="sh-onlinecheck">
+        {% if storage_health and storage_health.online_check_iso %}
+          <time data-iso="{{ storage_health.online_check_iso }}">{{ storage_health.online_check_iso }}</time>
+          {% if storage_health.online_check_status %} — {{ storage_health.online_check_status }}{% endif %}
+          {% if storage_health.online_check_message %}<br><small>{{ storage_health.online_check_message }}</small>{% endif %}
+        {% elif storage_health and storage_health.online_check_running %}
+          running…
         {% else %}—{% endif %}
       </dd>
 
@@ -92,33 +103,27 @@
     </dl>
 
     <div class="storage-health-actions" id="storage-health-actions"
-         data-schedule-url="{{ url_for('storage_health.schedule_fsck') }}">
+         data-online-check-url="{{ url_for('storage_health.trigger_online_check') }}">
       <div class="storage-health-action-row">
         <button type="button" class="btn btn-secondary"
-                id="sh-schedule-fsck"
-                {% if storage_health and storage_health.fsck_scheduled %}hidden{% endif %}>
-          Schedule filesystem check at next boot
-        </button>
-        <button type="button" class="btn btn-secondary"
-                id="sh-cancel-fsck"
-                {% if not (storage_health and storage_health.fsck_scheduled) %}hidden{% endif %}>
-          Cancel scheduled check
-        </button>
-        <span class="storage-health-action-status" id="sh-fsck-status"
-              role="status" aria-live="polite">
-          {% if storage_health and storage_health.fsck_scheduled %}
-            Filesystem check is scheduled — reboot to run it.
+                id="sh-online-check"
+                {% if storage_health and storage_health.online_check_running %}disabled{% endif %}>
+          {% if storage_health and storage_health.online_check_running %}
+            Read-only check running…
+          {% else %}
+            Run read-only check now
           {% endif %}
-        </span>
+        </button>
+        <span class="storage-health-action-status" id="sh-online-check-status"
+              role="status" aria-live="polite"></span>
       </div>
       <p class="storage-health-action-help">
-        The root filesystem is mounted; an online repair isn't possible.
-        Scheduling a check creates <code>/forcefsck</code>, which makes
-        <code>systemd-fsck</code> run <code>e2fsck&nbsp;-fy</code> on
-        every fstab filesystem at the next boot, before they're mounted
-        read-write. The check typically adds ~30&nbsp;s to boot time on
-        a healthy SD card. <strong>Reboot after scheduling</strong> for
-        the check to actually run.
+        The read-only check runs <code>e2fsck&nbsp;-nf</code> against the
+        mounted root filesystem. It makes no changes and is safe to run
+        any time, but may report false positives because metadata is in
+        flux on a read-write mount. Typically takes 30–90&nbsp;s on a
+        healthy SD card. The check also runs automatically in the
+        background at most once every 7&nbsp;days.
       </p>
     </div>
 
@@ -136,13 +141,14 @@
   if (!card) return;
   var url = card.getAttribute('data-poll-url');
   var actions = document.getElementById('storage-health-actions');
-  var scheduleUrl = actions ? actions.getAttribute('data-schedule-url') : null;
+  var onlineCheckUrl = actions ? actions.getAttribute('data-online-check-url') : null;
   var POLL_MS = 60000;
+  var FAST_POLL_MS = 5000;
+  var fastPollHandle = null;
   var dot = document.getElementById('storage-health-dot');
   var summary = document.getElementById('storage-health-summary');
-  var scheduleBtn = document.getElementById('sh-schedule-fsck');
-  var cancelBtn = document.getElementById('sh-cancel-fsck');
-  var fsckStatus = document.getElementById('sh-fsck-status');
+  var onlineCheckBtn = document.getElementById('sh-online-check');
+  var onlineCheckStatus = document.getElementById('sh-online-check-status');
 
   function setText(id, text) {
     var el = document.getElementById(id);
@@ -197,17 +203,6 @@
     el.appendChild(t);
   }
 
-  function updateActions(data) {
-    var scheduled = !!(data && data.fsck_scheduled);
-    if (scheduleBtn) scheduleBtn.hidden = scheduled;
-    if (cancelBtn) cancelBtn.hidden = !scheduled;
-    if (fsckStatus) {
-      fsckStatus.textContent = scheduled
-        ? 'Filesystem check is scheduled — reboot to run it.'
-        : '';
-    }
-  }
-
   function render(data) {
     if (!data) return;
     if (dot) {
@@ -259,7 +254,42 @@
     setTimeCell('sh-scrub', data.e2scrub_last_run_iso, data.e2scrub_last_run_iso ? 'last ran ' : '');
     setTimeCell('sh-trim', data.fstrim_last_run_iso, data.fstrim_last_run_iso ? 'last ran ' : '');
 
-    updateActions(data);
+    // Online check row + button state.
+    var onlineEl = document.getElementById('sh-onlinecheck');
+    if (onlineEl) {
+      if (data.online_check_iso) {
+        onlineEl.innerHTML = '';
+        var t = document.createElement('time');
+        t.setAttribute('data-iso', data.online_check_iso);
+        t.setAttribute('title', data.online_check_iso);
+        t.textContent = formatIsoLocal(data.online_check_iso);
+        onlineEl.appendChild(t);
+        if (data.online_check_status) {
+          onlineEl.appendChild(document.createTextNode(' — ' + data.online_check_status));
+        }
+        if (data.online_check_message) {
+          onlineEl.appendChild(document.createElement('br'));
+          var small = document.createElement('small');
+          small.textContent = data.online_check_message;
+          onlineEl.appendChild(small);
+        }
+      } else if (data.online_check_running) {
+        onlineEl.textContent = 'running…';
+      } else {
+        onlineEl.textContent = '—';
+      }
+    }
+    if (onlineCheckBtn) {
+      onlineCheckBtn.disabled = !!data.online_check_running;
+      onlineCheckBtn.textContent = data.online_check_running
+        ? 'Read-only check running…'
+        : 'Run read-only check now';
+    }
+    if (data.online_check_running) {
+      startFastPoll();
+    } else {
+      stopFastPoll();
+    }
 
     var section = document.getElementById('storage-health-section');
     if (section && data.severity && data.severity !== 'ok' && !section.open) {
@@ -275,44 +305,64 @@
       .catch(function () { /* swallow — page already shows last-known state */ });
   }
 
-  function mutate(method) {
-    if (!scheduleUrl) return;
-    var prevText = fsckStatus ? fsckStatus.textContent : '';
-    if (fsckStatus) fsckStatus.textContent = 'Working…';
-    if (scheduleBtn) scheduleBtn.disabled = true;
-    if (cancelBtn) cancelBtn.disabled = true;
-    fetch(scheduleUrl, { method: method, credentials: 'same-origin' })
+  if (onlineCheckBtn) onlineCheckBtn.addEventListener('click', function () {
+    if (!onlineCheckUrl) return;
+    onlineCheckBtn.disabled = true;
+    onlineCheckBtn.textContent = 'Starting…';
+    if (onlineCheckStatus) onlineCheckStatus.textContent = 'Starting read-only check…';
+    fetch(onlineCheckUrl, { method: 'POST', credentials: 'same-origin' })
       .then(function (r) {
-        return r.json().then(function (body) { return { ok: r.ok, body: body }; });
+        return r.json().then(function (body) { return { ok: r.ok || r.status === 202, body: body }; });
       })
       .then(function (result) {
         if (result.ok) {
-          render(result.body);
+          if (onlineCheckStatus) {
+            onlineCheckStatus.textContent = result.body && result.body.started
+              ? 'Running… this can take 30–90 s.'
+              : 'A check is already running.';
+          }
+          if (result.body && result.body.snapshot) render(result.body.snapshot);
+          startFastPoll();
         } else {
-          if (fsckStatus) {
-            fsckStatus.textContent = (result.body && result.body.error)
+          if (onlineCheckStatus) {
+            onlineCheckStatus.textContent = (result.body && result.body.error)
               ? ('Failed: ' + result.body.error)
               : 'Failed.';
           }
-          if (result.body && result.body.snapshot) render(result.body.snapshot);
+          onlineCheckBtn.disabled = false;
+          onlineCheckBtn.textContent = 'Run read-only check now';
         }
       })
-      .catch(function (err) {
-        if (fsckStatus) fsckStatus.textContent = 'Network error.';
-      })
-      .finally(function () {
-        if (scheduleBtn) scheduleBtn.disabled = false;
-        if (cancelBtn) cancelBtn.disabled = false;
-        if (!fsckStatus.textContent && prevText) fsckStatus.textContent = prevText;
+      .catch(function () {
+        if (onlineCheckStatus) onlineCheckStatus.textContent = 'Network error.';
+        onlineCheckBtn.disabled = false;
+        onlineCheckBtn.textContent = 'Run read-only check now';
       });
-  }
+  });
 
-  if (scheduleBtn) scheduleBtn.addEventListener('click', function () { mutate('POST'); });
-  if (cancelBtn) cancelBtn.addEventListener('click', function () { mutate('DELETE'); });
+  function startFastPoll() {
+    if (fastPollHandle !== null) return;
+    fastPollHandle = setInterval(poll, FAST_POLL_MS);
+  }
+  function stopFastPoll() {
+    if (fastPollHandle !== null) {
+      clearInterval(fastPollHandle);
+      fastPollHandle = null;
+    }
+    if (onlineCheckStatus && onlineCheckStatus.textContent.indexOf('Running') === 0) {
+      onlineCheckStatus.textContent = '';
+    }
+  }
 
   // Initial pass: convert server-rendered ISO strings to local-time display.
   applyLocalTimes(card);
 
+  // Kick off an immediate fetch so the "Checking…" placeholder is
+  // replaced as soon as the API responds (~tens of ms locally) rather
+  // than after the first POLL_MS tick. The server-rendered context
+  // intentionally ships storage_health=None to keep the index render
+  // path fast — this fetch is what actually hydrates the card.
+  poll();
   setInterval(poll, POLL_MS);
   document.addEventListener('visibilitychange', function () {
     if (!document.hidden) poll();

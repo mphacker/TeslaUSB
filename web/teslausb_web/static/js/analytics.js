@@ -76,7 +76,7 @@
             }
             show('drivingStatsGrid');
             hide('drivingStatsEmpty');
-            setText('dsTotalDist', data.total_distance_mi + ' mi (' + data.total_distance_km + ' km)');
+            setText('dsTotalDist', data.total_distance_mi + ' mi');
             setText('dsTotalTime', data.total_duration_hours + ' hrs');
             setText('dsTripCount', String(data.trip_count));
             setText('dsAvgSpeed', data.avg_speed_mph + ' mph');
@@ -84,7 +84,7 @@
             setText('dsFsdPct', data.fsd_usage_pct + '%');
             setText('dsEventCount', String(data.total_events));
             setText('dsWarnCount', String(data.warning_events));
-            setText('dsEvPer100', String(data.events_per_100km));
+            setText('dsEvPer100', String(data.events_per_100mi));
         } catch (err) {
             warn('failed to load driving stats', err);
         }

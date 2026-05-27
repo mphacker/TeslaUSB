@@ -460,10 +460,25 @@ struct DerivedEvent {
 }
 
 fn load_clip_rows(tx: &Transaction<'_>) -> Result<Vec<ClipRow>> {
+    // Front-only + non-NULL start guard. Belt-and-braces against
+    // any historical or future row that slips past the indexer's
+    // front filter: non-front rows replay the same physical path
+    // per camera and inflate distance ~6-11×, and NULL
+    // start_utc rows collapse into one fake mega-segment at the
+    // head of the waypoint sort order. The indexer is the
+    // primary gatekeeper (see `pick_canonical_clip` and
+    // `walk_and_record`); this WHERE clause is the last line
+    // of defense.
     let mut stmt = tx.prepare(
         "SELECT id, bucket, clip_started_utc, gps_waypoint_count
          FROM clips
-         ORDER BY COALESCE(clip_started_utc, indexed_at_utc) ASC, id ASC",
+         WHERE clip_started_utc IS NOT NULL
+           AND relative_path NOT LIKE '%-back.mp4'
+           AND relative_path NOT LIKE '%-left_repeater.mp4'
+           AND relative_path NOT LIKE '%-right_repeater.mp4'
+           AND relative_path NOT LIKE '%-left_pillar.mp4'
+           AND relative_path NOT LIKE '%-right_pillar.mp4'
+         ORDER BY clip_started_utc ASC, id ASC",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok(ClipRow {

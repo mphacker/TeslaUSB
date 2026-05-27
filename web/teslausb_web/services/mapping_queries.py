@@ -228,7 +228,7 @@ class DrivingStats:
     fsd_usage_pct: float = 0.0
     total_events: int = 0
     warning_events: int = 0
-    events_per_100km: float = 0.0
+    events_per_100mi: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -1383,8 +1383,8 @@ class MappingQueries:
             fsd_usage_pct=round(_percentage(fsd_wp, total_wp), 1),
             total_events=total_events,
             warning_events=warning_events,
-            events_per_100km=round(
-                _events_per_100km(warning_events, total_distance), 1
+            events_per_100mi=round(
+                _events_per_100mi(warning_events, total_distance * _KM_TO_MI), 1
             ),
         )
 
@@ -1427,7 +1427,7 @@ class MappingQueries:
             fsd_usage_pct=round(_percentage(fsd_waypoints, total_waypoints), 1),
             total_events=len(all_events),
             warning_events=warning_events,
-            events_per_100km=round(_events_per_100km(warning_events, total_distance), 1),
+            events_per_100mi=round(_events_per_100mi(warning_events, total_distance * _KM_TO_MI), 1),
         )
 
     def get_event_chart_data(self) -> EventChartData:
@@ -2232,10 +2232,10 @@ def _percentage(part: int, whole: int) -> float:
     return part / whole * 100.0
 
 
-def _events_per_100km(event_count: int, distance_km: float) -> float:
-    if distance_km <= 0:
+def _events_per_100mi(event_count: int, distance_mi: float) -> float:
+    if distance_mi <= 0:
         return 0.0
-    return event_count / distance_km * 100.0
+    return event_count / distance_mi * 100.0
 
 
 __all__ = (

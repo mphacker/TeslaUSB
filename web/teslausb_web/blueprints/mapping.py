@@ -265,7 +265,7 @@ def _serialize_driving_stats(stats: DrivingStats) -> dict[str, object]:
         "fsd_usage_pct": stats.fsd_usage_pct,
         "total_events": stats.total_events,
         "warning_events": stats.warning_events,
-        "events_per_100km": stats.events_per_100km,
+        "events_per_100mi": stats.events_per_100mi,
     }
 
 
@@ -471,7 +471,6 @@ def map_view() -> ResponseReturnValue:
             "sprite": url_for("static", filename="icons/lucide-sprite.svg"),
             "leaflet_icon_path": url_for("static", filename="vendor/leaflet/images/"),
             "tile_cache_sw": url_for("_tile_cache_service_worker"),
-            "dashcam_proto": url_for("static", filename="vendor/dashcam-mp4/dashcam.proto"),
         },
         "view": {
             "date": initial_date,

@@ -144,3 +144,95 @@ def test_cancel_fsck_delete_invokes_service_and_returns_fresh_snapshot(
     fake.cancel_scheduled_fsck.assert_called_once()
     data = response.get_json()
     assert data["fsck_scheduled"] is False
+
+
+def test_reboot_now_requires_confirm(app, client) -> None:
+    fake = MagicMock(spec=StorageHealthService)
+    fake.read_snapshot.return_value = StorageHealthSnapshot(severity=SEV_OK)
+    app.extensions["storage_health_service"] = fake
+
+    response = client.post("/api/storage/health/reboot-now", json={})
+
+    assert response.status_code == HTTPStatus.BAD_REQUEST
+    fake.reboot_now.assert_not_called()
+    assert "snapshot" in response.get_json()
+
+
+def test_reboot_now_invokes_service_and_returns_202(app, client) -> None:
+    fake = MagicMock(spec=StorageHealthService)
+    fake.read_snapshot.return_value = StorageHealthSnapshot(
+        severity=SEV_OK, fsck_scheduled=True
+    )
+    app.extensions["storage_health_service"] = fake
+
+    response = client.post(
+        "/api/storage/health/reboot-now", json={"confirm": True}
+    )
+
+    assert response.status_code == HTTPStatus.ACCEPTED
+    fake.reboot_now.assert_called_once()
+    data = response.get_json()
+    assert data["rebooting"] is True
+    assert "snapshot" in data
+
+
+def test_reboot_now_surfaces_runtime_error_as_500(app, client) -> None:
+    fake = MagicMock(spec=StorageHealthService)
+    fake.reboot_now.side_effect = RuntimeError("nope")
+    fake.read_snapshot.return_value = StorageHealthSnapshot(severity=SEV_OK)
+    app.extensions["storage_health_service"] = fake
+
+    response = client.post(
+        "/api/storage/health/reboot-now", json={"confirm": True}
+    )
+
+    assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
+    data = response.get_json()
+    assert "nope" in data["error"]
+    assert "snapshot" in data
+
+
+def test_online_check_post_starts_run_and_returns_202(app, client) -> None:
+    fake = MagicMock(spec=StorageHealthService)
+    fake.maybe_start_background_online_check.return_value = True
+    fake.read_snapshot.return_value = StorageHealthSnapshot(
+        severity=SEV_OK, online_check_running=True
+    )
+    app.extensions["storage_health_service"] = fake
+
+    response = client.post("/api/storage/health/online-check")
+
+    assert response.status_code == HTTPStatus.ACCEPTED
+    fake.maybe_start_background_online_check.assert_called_once_with(force=True)
+    data = response.get_json()
+    assert data["started"] is True
+    assert data["snapshot"]["online_check_running"] is True
+
+
+def test_online_check_post_reports_not_started_when_already_running(app, client) -> None:
+    fake = MagicMock(spec=StorageHealthService)
+    fake.maybe_start_background_online_check.return_value = False
+    fake.read_snapshot.return_value = StorageHealthSnapshot(
+        severity=SEV_OK, online_check_running=True
+    )
+    app.extensions["storage_health_service"] = fake
+
+    response = client.post("/api/storage/health/online-check")
+
+    assert response.status_code == HTTPStatus.ACCEPTED
+    data = response.get_json()
+    assert data["started"] is False
+
+
+def test_online_check_post_surfaces_runtime_error_as_500(app, client) -> None:
+    fake = MagicMock(spec=StorageHealthService)
+    fake.maybe_start_background_online_check.side_effect = RuntimeError("kaboom")
+    fake.read_snapshot.return_value = StorageHealthSnapshot(severity=SEV_OK)
+    app.extensions["storage_health_service"] = fake
+
+    response = client.post("/api/storage/health/online-check")
+
+    assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
+    data = response.get_json()
+    assert "kaboom" in data["error"]
+    assert "snapshot" in data

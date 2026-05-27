@@ -47,14 +47,18 @@ invocation. In tests it's empty so command assertions stay readable.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import shutil
 import subprocess
+import tempfile
+import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Protocol
+from typing import TYPE_CHECKING, Any, Final, Protocol
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -77,6 +81,27 @@ _PROBE_TIMEOUT_SECONDS: Final[float] = 4.0
 _WARN_DAYS_SINCE_FSCK: Final[int] = 180
 _WARN_MOUNT_COUNT_EXCEEDED: Final[bool] = True
 
+# Online (read-only) e2fsck cadence. The check is a read-only ``e2fsck
+# -nf`` on the live mounted root — safe to run on a mounted RW ext4
+# (the ``-n`` answers "no" to every question so nothing is modified)
+# but can produce false positives because metadata is in flux. We
+# refresh the cache lazily: if the saved result is older than
+# ``_ONLINE_CHECK_MAX_AGE_SECONDS`` a background thread is kicked off
+# from ``read_snapshot``. The "no online check in N days" severity
+# warning trips at ``_WARN_DAYS_SINCE_ONLINE_CHECK`` so a missed
+# refresh doesn't silently leave the operator blind.
+_ONLINE_CHECK_MAX_AGE_SECONDS: Final[float] = 7 * 24 * 3600.0
+_WARN_DAYS_SINCE_ONLINE_CHECK: Final[int] = 14
+# e2fsck on a few-GB ext4 on a slow SD card takes 30-90 s in
+# practice; we give it a generous ceiling so we don't false-fail.
+_ONLINE_CHECK_RUN_TIMEOUT_SECONDS: Final[float] = 600.0
+
+# Online-check status tokens — small, fixed, surfaced to the UI.
+ONLINE_CHECK_OK: Final[str] = "ok"  # rc=0: filesystem clean
+ONLINE_CHECK_WARN: Final[str] = "warn"  # rc=4: errors reported (read-only run)
+ONLINE_CHECK_ERROR: Final[str] = "error"  # rc≥8: e2fsck failed to run
+ONLINE_CHECK_UNKNOWN: Final[str] = "unknown"  # never run / cache unreadable
+
 # The kernel journal regex matches the messages mmc / block layer
 # produces on a failing SD card. The patterns are deliberately broad
 # (any ``I/O error``, any ``mmc0`` line that contains ``error``) so a
@@ -88,6 +113,13 @@ _KERNEL_ERROR_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
     re.compile(r"\bmmc(?:blk)?[0-9]+\b.*\berror\b", re.IGNORECASE),
     re.compile(r"\bBuffer I/O error\b", re.IGNORECASE),
     re.compile(r"\bEXT4-fs error\b", re.IGNORECASE),
+)
+
+# Matches ``fsck.mode=force`` as a standalone whitespace-delimited token in
+# the kernel cmdline. We strip the leading whitespace too so collapsing the
+# remaining tokens doesn't leave a double space.
+_CMDLINE_FORCE_FSCK_TOKEN: Final[re.Pattern[str]] = re.compile(
+    r"\s*\bfsck\.mode=force\b"
 )
 
 
@@ -121,7 +153,30 @@ class StorageHealthServiceConfig:
     binary_systemctl: str = "systemctl"
     binary_touch: str = "touch"
     binary_rm: str = "rm"
+    binary_install: str = "install"
+    binary_e2fsck: str = "e2fsck"
     forcefsck_sentinel: Path = Path("/forcefsck")
+    # Kernel cmdline used by U-Boot / Pi firmware. ``/boot/firmware/cmdline.txt``
+    # is the modern (post-bookworm) location; ``/boot/cmdline.txt`` is the
+    # pre-bookworm path. We probe in order and use the first that exists.
+    cmdline_paths: tuple[Path, ...] = (
+        Path("/boot/firmware/cmdline.txt"),
+        Path("/boot/cmdline.txt"),
+    )
+    # Persists across web-service restarts but lives on the root FS so the
+    # operator's choice to schedule an fsck survives a service crash. We
+    # disambiguate "armed but not yet rebooted" vs "rebooted, time to clean
+    # up" by storing the boot_id we observed at arm time and comparing
+    # against the current boot_id at startup.
+    fsck_marker_path: Path = Path("/var/lib/teslausb-web/fsck-scheduled-boot-id")
+    boot_id_path: Path = Path("/proc/sys/kernel/random/boot_id")
+    # Cached result of the periodic read-only e2fsck. Lives on the
+    # root FS so we don't lose history across web-service restarts.
+    online_check_cache_path: Path = Path(
+        "/var/lib/teslausb-web/online-check.json"
+    )
+    online_check_max_age_seconds: float = _ONLINE_CHECK_MAX_AGE_SECONDS
+    online_check_run_timeout_seconds: float = _ONLINE_CHECK_RUN_TIMEOUT_SECONDS
     sudo_prefix: tuple[str, ...] = ()
     probe_timeout_seconds: float = _PROBE_TIMEOUT_SECONDS
 
@@ -137,6 +192,8 @@ class StorageHealthServiceConfig:
             ("binary_systemctl", self.binary_systemctl),
             ("binary_touch", self.binary_touch),
             ("binary_rm", self.binary_rm),
+            ("binary_install", self.binary_install),
+            ("binary_e2fsck", self.binary_e2fsck),
             ("fstrim_timer_unit", self.fstrim_timer_unit),
             ("e2scrub_timer_unit", self.e2scrub_timer_unit),
         ):
@@ -149,6 +206,14 @@ class StorageHealthServiceConfig:
                 )
         if self.probe_timeout_seconds <= 0:
             raise ValueError("storage_health: probe_timeout_seconds must be > 0")
+        if self.online_check_max_age_seconds <= 0:
+            raise ValueError(
+                "storage_health: online_check_max_age_seconds must be > 0"
+            )
+        if self.online_check_run_timeout_seconds <= 0:
+            raise ValueError(
+                "storage_health: online_check_run_timeout_seconds must be > 0"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,6 +244,10 @@ class StorageHealthSnapshot:
     sd_card_name: str | None = None
     sd_card_manfid: str | None = None
     fsck_scheduled: bool = False
+    online_check_iso: str | None = None
+    online_check_status: str | None = None
+    online_check_message: str | None = None
+    online_check_running: bool = False
     probe_errors: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
@@ -201,6 +270,10 @@ class StorageHealthSnapshot:
             "sd_card_name": self.sd_card_name,
             "sd_card_manfid": self.sd_card_manfid,
             "fsck_scheduled": self.fsck_scheduled,
+            "online_check_iso": self.online_check_iso,
+            "online_check_status": self.online_check_status,
+            "online_check_message": self.online_check_message,
+            "online_check_running": self.online_check_running,
             "probe_errors": list(self.probe_errors),
         }
 
@@ -236,6 +309,15 @@ class StorageHealthService:
         self._sysfs_reader = (
             self._default_sysfs_reader if sysfs_reader is None else sysfs_reader
         )
+        # Background-online-check coordination. Single in-process lock
+        # — gunicorn typically runs one worker on this Pi, but even if
+        # an operator bumps that up, the worst case is two e2fsck
+        # processes briefly racing, which is harmless: e2fsck -n makes
+        # no writes and the cache file overwrite is atomic via
+        # ``install``. Last-write-wins is acceptable here.
+        self._online_check_lock = threading.Lock()
+        self._online_check_running = False
+        self._online_check_thread: threading.Thread | None = None
 
     @property
     def config(self) -> StorageHealthServiceConfig:
@@ -275,6 +357,8 @@ class StorageHealthService:
         )
         sd_name, sd_manfid = self._probe_sd_card(probe_errors)
         fsck_scheduled = self._probe_fsck_scheduled(probe_errors)
+        online_cache = self._read_online_check_cache(probe_errors)
+        online_running = self.is_online_check_running()
 
         severity, messages = self._derive_severity(
             readonly=readonly,
@@ -284,7 +368,20 @@ class StorageHealthService:
             max_mount_count=max_mount_count,
             last_checked_iso=last_checked,
             fsck_scheduled=fsck_scheduled,
+            online_check=online_cache,
+            online_check_running=online_running,
         )
+
+        # Lazy background refresh: if the cache is stale (or missing),
+        # kick off ``e2fsck -nf`` in a daemon thread. We never block
+        # the snapshot path on it. ``maybe_start_background_online_check``
+        # is itself a cheap no-op if a run is already in progress or
+        # if the cache is fresh.
+        if mount.device:
+            try:
+                self.maybe_start_background_online_check(mount.device)
+            except Exception:  # noqa: BLE001 — never block read_snapshot
+                logger.exception("storage_health: lazy online-check trigger failed")
 
         return StorageHealthSnapshot(
             severity=severity,
@@ -305,6 +402,10 @@ class StorageHealthService:
             sd_card_name=sd_name,
             sd_card_manfid=sd_manfid,
             fsck_scheduled=fsck_scheduled,
+            online_check_iso=(online_cache or {}).get("timestamp_iso"),
+            online_check_status=(online_cache or {}).get("status"),
+            online_check_message=(online_cache or {}).get("message"),
+            online_check_running=online_running,
             probe_errors=tuple(probe_errors),
         )
 
@@ -313,24 +414,496 @@ class StorageHealthService:
     # ------------------------------------------------------------------
 
     def schedule_fsck_at_next_boot(self) -> None:
-        """Create the ``/forcefsck`` sentinel.
+        """Arm a one-shot root-filesystem fsck for the next boot.
 
-        systemd-fsck@.service on Debian/Ubuntu honours this file at
-        boot and runs ``e2fsck -fy`` on every filesystem in
-        ``/etc/fstab`` before mounting them read-write. The operator
-        must then reboot to take effect — we deliberately do NOT
+        Three independent things are armed so the feature works on every
+        Pi configuration we ship:
+
+        1. ``/forcefsck`` sentinel. ``systemd-fsck@.service`` honours it
+           for **non-root** fstab entries (e.g. ``/boot/firmware``) and
+           runs ``e2fsck -fy`` / ``dosfsck -a`` before mounting them
+           read-write.
+        2. ``fsck.mode=force`` token in ``/boot/firmware/cmdline.txt``.
+           On the Raspberry Pi there is no initramfs — the kernel mounts
+           ``/`` directly from ``root=PARTUUID=…``, so the only thing
+           that can force a check of root is a kernel cmdline parameter
+           the kernel reads before mount. Without this, scheduling fsck
+           is a silent no-op for root.
+        3. A boot-id marker (``/var/lib/teslausb-web/fsck-scheduled-boot-id``)
+           that captures the current boot_id. :meth:`cleanup_after_fsck_boot`
+           uses it to detect "we've rebooted since arming → strip the
+           cmdline flag so the *next* boot is fast again".
+
+        Caller still triggers the reboot — we deliberately do NOT
         reboot for them.
         """
-        binary = self._which(self._config.binary_touch)
+        # Touch the sentinel first; if cmdline edit fails we want this
+        # to take effect for any non-root mount the operator has added.
+        self._touch_forcefsck_sentinel()
+        if self._resolve_cmdline_path() is not None:
+            self._set_cmdline_force_flag(enabled=True)
+            self._write_marker(self._current_boot_id())
+        else:
+            logger.warning(
+                "storage_health: no cmdline.txt found; root-fs fsck cannot "
+                "be armed — only non-root fstab entries will be checked."
+            )
+
+    def cancel_scheduled_fsck(self) -> None:
+        """Disarm the scheduled fsck on every channel we armed."""
+        self._remove_forcefsck_sentinel()
+        if self._resolve_cmdline_path() is not None:
+            self._set_cmdline_force_flag(enabled=False)
+        self._remove_marker()
+
+    def cleanup_after_fsck_boot(self) -> bool:
+        """Strip ``fsck.mode=force`` if we've rebooted since arming.
+
+        Called once at web-app startup. Idempotent and side-effect-free
+        when no fsck has been armed:
+
+        * No marker file → nothing to do.
+        * Marker present but ``boot_id`` matches → still pre-reboot;
+          leave everything in place.
+        * Marker present and ``boot_id`` differs → we've rebooted since
+          arming, the fsck has either already run or been skipped, and
+          we MUST strip the cmdline flag or every subsequent boot will
+          pause for an unnecessary check. Also delete the marker.
+
+        Returns True iff a cleanup was performed.
+        """
+        marker_id = self._read_marker_boot_id()
+        if marker_id is None:
+            return False
+        current_id = self._current_boot_id()
+        if current_id is not None and marker_id == current_id:
+            # Operator armed the fsck but hasn't rebooted yet. Leave
+            # cmdline and marker in place so the reboot still runs.
+            return False
+        # We've rebooted (or can't read boot_id — fail closed by
+        # cleaning up so we never accidentally pin the slow-boot flag).
+        try:
+            if self._resolve_cmdline_path() is not None:
+                self._set_cmdline_force_flag(enabled=False)
+            self._remove_marker()
+        except Exception:
+            logger.exception(
+                "storage_health: failed to clean up fsck arming after reboot"
+            )
+            return False
+        logger.info(
+            "storage_health: post-reboot cleanup removed fsck.mode=force from "
+            "cmdline.txt and cleared marker"
+        )
+        return True
+
+    def reboot_now(self) -> None:
+        """Reboot the host immediately via ``systemctl reboot``.
+
+        Paired with :meth:`schedule_fsck_at_next_boot` so the operator
+        can go from "card is overdue for an fsck" to "fsck is running"
+        in one click instead of scheduling and then manually rebooting.
+
+        ``systemctl reboot`` only signals systemd and returns
+        immediately; the actual shutdown happens asynchronously after
+        we've already returned the HTTP response. Operator-facing
+        callers must therefore expect the connection to drop shortly
+        after this call succeeds.
+        """
+        binary = self._which(self._config.binary_systemctl)
         if binary is None:
-            raise RuntimeError("touch binary not found")
+            raise RuntimeError("systemctl binary not found")
         command = [
             *self._config.sudo_prefix,
             binary,
-            str(self._config.forcefsck_sentinel),
+            "reboot",
         ]
         completed = self._run_command(
             command,
+            capture_output=True,
+            text=True,
+            timeout=self._config.probe_timeout_seconds,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(
+                f"systemctl reboot failed (rc={completed.returncode}): "
+                f"{(completed.stderr or '').strip()}"
+            )
+
+    # ------------------------------------------------------------------
+    # Online (read-only) e2fsck
+    # ------------------------------------------------------------------
+
+    def is_online_check_running(self) -> bool:
+        """Return True if a background ``e2fsck -nf`` is in progress.
+
+        Visible to the UI so the operator's "Check now" button can
+        disable itself while a run is underway, instead of queueing a
+        second run that the in-process lock would silently no-op.
+        """
+        with self._online_check_lock:
+            return self._online_check_running
+
+    def maybe_start_background_online_check(
+        self, device: str | None = None, *, force: bool = False
+    ) -> bool:
+        """Spawn an ``e2fsck -nf`` run in a daemon thread if appropriate.
+
+        Returns True iff a new run was actually started. No-op when:
+
+        * another run is already in progress (in this process), or
+        * the cached result is fresh (younger than
+          :attr:`StorageHealthServiceConfig.online_check_max_age_seconds`),
+          unless ``force=True``.
+
+        ``device`` defaults to the live root device when omitted.
+        Failures to resolve the device are logged and swallowed —
+        the lazy refresh must never break the snapshot path.
+        """
+        with self._online_check_lock:
+            if self._online_check_running:
+                return False
+            if not force and self._online_check_cache_is_fresh():
+                return False
+            self._online_check_running = True
+
+        target_device = device or self._resolve_root_device()
+        if not target_device:
+            with self._online_check_lock:
+                self._online_check_running = False
+            logger.warning(
+                "storage_health: cannot start online check — root device unknown"
+            )
+            return False
+
+        thread = threading.Thread(
+            target=self._online_check_worker,
+            args=(target_device,),
+            name="storage-health-online-check",
+            daemon=True,
+        )
+        with self._online_check_lock:
+            self._online_check_thread = thread
+        thread.start()
+        return True
+
+    def run_online_root_check(self, device: str | None = None) -> dict[str, Any]:
+        """Synchronously run ``e2fsck -nf <device>`` and return the cached dict.
+
+        Blocking — intended for tests, the on-demand endpoint's
+        background worker, and the startup refresh. Production callers
+        on a request thread should use
+        :meth:`maybe_start_background_online_check` instead.
+
+        Refuses to start if another run is already underway in this
+        process (returns the existing cache unchanged) — prevents two
+        concurrent e2fsck processes piling on the same SD card.
+        """
+        with self._online_check_lock:
+            if self._online_check_running:
+                cached = self._read_online_check_cache([])
+                if cached is not None:
+                    return cached
+                return self._online_check_record(
+                    status=ONLINE_CHECK_UNKNOWN,
+                    return_code=None,
+                    message="A read-only filesystem check is already running.",
+                    output_excerpt="",
+                )
+            self._online_check_running = True
+
+        try:
+            target = device or self._resolve_root_device()
+            if not target:
+                record = self._online_check_record(
+                    status=ONLINE_CHECK_ERROR,
+                    return_code=None,
+                    message="Could not resolve root device for e2fsck.",
+                    output_excerpt="",
+                )
+                self._write_online_check_cache(record)
+                return record
+            record = self._invoke_e2fsck(target)
+            self._write_online_check_cache(record)
+            return record
+        finally:
+            with self._online_check_lock:
+                self._online_check_running = False
+
+    def _online_check_worker(self, device: str) -> None:
+        """Thread entry point — never raises out to the runtime."""
+        try:
+            target = device or self._resolve_root_device()
+            if not target:
+                record = self._online_check_record(
+                    status=ONLINE_CHECK_ERROR,
+                    return_code=None,
+                    message="Could not resolve root device for e2fsck.",
+                    output_excerpt="",
+                )
+            else:
+                record = self._invoke_e2fsck(target)
+            self._write_online_check_cache(record)
+        except Exception:  # noqa: BLE001 — background thread
+            logger.exception("storage_health: online-check worker crashed")
+        finally:
+            with self._online_check_lock:
+                self._online_check_running = False
+
+    def _invoke_e2fsck(self, device: str) -> dict[str, Any]:
+        """Run ``e2fsck -nf`` against ``device`` and build a cache record.
+
+        ``-n`` answers "no" to every prompt (no writes), ``-f`` forces
+        a full check even if the superblock says "clean". Result codes
+        per ``e2fsck(8)``:
+
+          0  -> filesystem clean (status=ok)
+          1  -> errors corrected (impossible with -n)
+          2  -> system should reboot (also impossible with -n)
+          4  -> errors left UNcorrected (we asked it not to fix → warn)
+          8  -> operational error (couldn't run; status=error)
+         16+ -> usage / library error (status=error)
+        """
+        binary = self._which(self._config.binary_e2fsck)
+        if binary is None:
+            return self._online_check_record(
+                status=ONLINE_CHECK_ERROR,
+                return_code=None,
+                message="e2fsck binary not found on PATH.",
+                output_excerpt="",
+            )
+        command = [
+            *self._config.sudo_prefix,
+            binary,
+            "-n",
+            "-f",
+            device,
+        ]
+        try:
+            completed = self._run_command(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=self._config.online_check_run_timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return self._online_check_record(
+                status=ONLINE_CHECK_ERROR,
+                return_code=None,
+                message=(
+                    "e2fsck timed out after "
+                    f"{int(self._config.online_check_run_timeout_seconds)}s."
+                ),
+                output_excerpt="",
+            )
+        except OSError as exc:
+            return self._online_check_record(
+                status=ONLINE_CHECK_ERROR,
+                return_code=None,
+                message=f"e2fsck failed to launch: {exc}",
+                output_excerpt="",
+            )
+        rc = completed.returncode
+        stdout = (completed.stdout or "").strip()
+        stderr = (completed.stderr or "").strip()
+        excerpt = self._online_check_excerpt(stdout, stderr)
+        if rc == 0:
+            status = ONLINE_CHECK_OK
+            message = "Filesystem clean (read-only check)."
+        elif rc == 4:
+            status = ONLINE_CHECK_WARN
+            message = (
+                "Read-only check reported potential issues. "
+                "May include false positives because the filesystem is "
+                "mounted read-write. Consider an offline check from "
+                "external media."
+            )
+        else:
+            status = ONLINE_CHECK_ERROR
+            message = f"e2fsck failed (rc={rc})."
+        return self._online_check_record(
+            status=status,
+            return_code=rc,
+            message=message,
+            output_excerpt=excerpt,
+        )
+
+    @staticmethod
+    def _online_check_excerpt(stdout: str, stderr: str) -> str:
+        """Tail of combined output — enough for the UI to show context.
+
+        We keep it bounded so a chatty e2fsck run can't bloat the
+        cache file unboundedly.
+        """
+        combined = "\n".join(s for s in (stdout, stderr) if s).strip()
+        if not combined:
+            return ""
+        lines = combined.splitlines()
+        tail = lines[-20:]
+        excerpt = "\n".join(tail)
+        max_chars = 4096
+        if len(excerpt) > max_chars:
+            excerpt = excerpt[-max_chars:]
+        return excerpt
+
+    @staticmethod
+    def _online_check_record(
+        *,
+        status: str,
+        return_code: int | None,
+        message: str,
+        output_excerpt: str,
+    ) -> dict[str, Any]:
+        return {
+            "timestamp_iso": _local_iso(datetime.now()),
+            "status": status,
+            "return_code": return_code,
+            "message": message,
+            "output_excerpt": output_excerpt,
+        }
+
+    def _online_check_cache_is_fresh(self) -> bool:
+        """True if the cache file exists and is younger than the TTL."""
+        path = self._config.online_check_cache_path
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            return False
+        age = max(0.0, time.time() - mtime)
+        return age < self._config.online_check_max_age_seconds
+
+    def _read_online_check_cache(
+        self, errors: list[str]
+    ) -> dict[str, Any] | None:
+        """Return the parsed cache file, or None if missing/unreadable."""
+        path = self._config.online_check_cache_path
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            errors.append(f"online-check cache read: {exc}")
+            return None
+        try:
+            data = json.loads(raw)
+        except ValueError as exc:
+            errors.append(f"online-check cache parse: {exc}")
+            return None
+        if not isinstance(data, dict):
+            errors.append("online-check cache: not a JSON object")
+            return None
+        return data
+
+    def _write_online_check_cache(self, record: dict[str, Any]) -> None:
+        """Persist ``record`` to the cache path via sudo install (atomic-ish).
+
+        Same staging strategy as ``_write_marker`` — pi-writable tmp
+        + sudo install for permissions/atomicity.
+        """
+        binary = self._which(self._config.binary_install)
+        if binary is None:
+            logger.error(
+                "storage_health: install binary missing; cannot persist "
+                "online-check cache"
+            )
+            return
+        payload = json.dumps(record, indent=2, sort_keys=True) + "\n"
+        path = self._config.online_check_cache_path
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                delete=False,
+                dir=tempfile.gettempdir(),
+                prefix="teslausb-onlinechk.",
+                suffix=".json",
+            ) as tf:
+                tf.write(payload)
+                tf.flush()
+                tmp_path = Path(tf.name)
+        except OSError as exc:
+            logger.error("storage_health: stage online-check cache failed: %s", exc)
+            return
+        try:
+            # Make sure the parent directory exists before installing
+            # the cache file — first-run installs may not have
+            # /var/lib/teslausb-web yet.
+            mkdir = self._run_command(
+                [
+                    *self._config.sudo_prefix,
+                    binary,
+                    "-d",
+                    "-m",
+                    "0755",
+                    "-o",
+                    "root",
+                    "-g",
+                    "root",
+                    str(path.parent),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=self._config.probe_timeout_seconds,
+                check=False,
+            )
+            if mkdir.returncode != 0:
+                logger.error(
+                    "storage_health: install -d %s failed: %s",
+                    path.parent,
+                    (mkdir.stderr or "").strip(),
+                )
+                return
+            completed = self._run_command(
+                [
+                    *self._config.sudo_prefix,
+                    binary,
+                    "-m",
+                    "0644",
+                    "-o",
+                    "root",
+                    "-g",
+                    "root",
+                    str(tmp_path),
+                    str(path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=self._config.probe_timeout_seconds,
+                check=False,
+            )
+            if completed.returncode != 0:
+                logger.error(
+                    "storage_health: install %s → %s failed: %s",
+                    tmp_path,
+                    path,
+                    (completed.stderr or "").strip(),
+                )
+        finally:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _resolve_root_device(self) -> str | None:
+        """Return the block device backing the configured mount point."""
+        try:
+            mount = self._probe_mount([])
+            return mount.device
+        except Exception:  # noqa: BLE001 — never raise from a probe
+            return None
+
+    # ------------------------------------------------------------------
+    # Privileged file helpers (forcefsck sentinel, cmdline.txt, marker)
+    # ------------------------------------------------------------------
+
+    def _touch_forcefsck_sentinel(self) -> None:
+        binary = self._which(self._config.binary_touch)
+        if binary is None:
+            raise RuntimeError("touch binary not found")
+        completed = self._run_command(
+            [*self._config.sudo_prefix, binary, str(self._config.forcefsck_sentinel)],
             capture_output=True,
             text=True,
             timeout=self._config.probe_timeout_seconds,
@@ -342,19 +915,17 @@ class StorageHealthService:
                 f"{completed.returncode}): {(completed.stderr or '').strip()}"
             )
 
-    def cancel_scheduled_fsck(self) -> None:
-        """Remove the ``/forcefsck`` sentinel if it exists."""
+    def _remove_forcefsck_sentinel(self) -> None:
         binary = self._which(self._config.binary_rm)
         if binary is None:
             raise RuntimeError("rm binary not found")
-        command = [
-            *self._config.sudo_prefix,
-            binary,
-            "-f",
-            str(self._config.forcefsck_sentinel),
-        ]
         completed = self._run_command(
-            command,
+            [
+                *self._config.sudo_prefix,
+                binary,
+                "-f",
+                str(self._config.forcefsck_sentinel),
+            ],
             capture_output=True,
             text=True,
             timeout=self._config.probe_timeout_seconds,
@@ -363,6 +934,227 @@ class StorageHealthService:
         if completed.returncode != 0:
             raise RuntimeError(
                 f"rm -f {self._config.forcefsck_sentinel} failed (rc="
+                f"{completed.returncode}): {(completed.stderr or '').strip()}"
+            )
+
+    def _resolve_cmdline_path(self) -> Path | None:
+        """Return the first configured cmdline.txt that exists, or None."""
+        for candidate in self._config.cmdline_paths:
+            try:
+                if candidate.is_file():
+                    return candidate
+            except OSError:
+                continue
+        return None
+
+    def _cmdline_has_force_flag(self) -> bool:
+        path = self._resolve_cmdline_path()
+        if path is None:
+            return False
+        try:
+            return _CMDLINE_FORCE_FSCK_TOKEN.search(path.read_text()) is not None
+        except OSError as exc:
+            logger.warning("storage_health: read cmdline %s failed: %s", path, exc)
+            return False
+
+    def _set_cmdline_force_flag(self, *, enabled: bool) -> None:
+        """Atomically rewrite cmdline.txt to add/strip ``fsck.mode=force``.
+
+        Writes to a tempfile in the destination directory first (so the
+        rename is atomic within the same FS) and then invokes
+        ``install`` via sudo to put it in place with root ownership and
+        the original permission bits. Idempotent — no-op when the file
+        already reflects the desired state.
+        """
+        path = self._resolve_cmdline_path()
+        if path is None:
+            raise RuntimeError("cmdline.txt not found in any configured path")
+        try:
+            current = path.read_text()
+        except OSError as exc:
+            raise RuntimeError(f"read {path} failed: {exc}") from exc
+        # cmdline.txt is conventionally a single line; preserve the
+        # operator's trailing-newline convention.
+        trailing_nl = current.endswith("\n")
+        body = current.rstrip("\n")
+        stripped = _CMDLINE_FORCE_FSCK_TOKEN.sub("", body)
+        # Collapse any double spaces the strip may have introduced.
+        stripped = re.sub(r"[ \t]+", " ", stripped).strip()
+        if enabled:
+            new_body = stripped + " fsck.mode=force"
+        else:
+            new_body = stripped
+        new = new_body + ("\n" if trailing_nl else "")
+        if new == current:
+            return  # already in desired state
+        # Stage the new contents in the system temp dir (pi user lacks
+        # write on /boot/firmware), then let sudo install rewrite the
+        # destination atomically with respect to readers — install
+        # itself opens with O_TRUNC, so a crash mid-write could leave
+        # a partial cmdline.txt regardless of where the staging file
+        # lives. The trade-off is acceptable for a one-shot operator
+        # action; we sacrifice rename-atomicity for the ability to
+        # stage as the unprivileged user.
+        binary = self._which(self._config.binary_install)
+        if binary is None:
+            raise RuntimeError("install binary not found")
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            delete=False,
+            dir=tempfile.gettempdir(),
+            prefix="teslausb-cmdline.",
+            suffix=".new",
+        ) as tf:
+            tf.write(new)
+            tf.flush()
+            tmp_path = Path(tf.name)
+        try:
+            completed = self._run_command(
+                [
+                    *self._config.sudo_prefix,
+                    binary,
+                    "-m",
+                    "0755",
+                    "-o",
+                    "root",
+                    "-g",
+                    "root",
+                    str(tmp_path),
+                    str(path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=self._config.probe_timeout_seconds,
+                check=False,
+            )
+            if completed.returncode != 0:
+                raise RuntimeError(
+                    f"install {tmp_path} → {path} failed (rc="
+                    f"{completed.returncode}): {(completed.stderr or '').strip()}"
+                )
+        finally:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _current_boot_id(self) -> str | None:
+        try:
+            return self._config.boot_id_path.read_text().strip() or None
+        except OSError as exc:
+            logger.warning("storage_health: read boot_id failed: %s", exc)
+            return None
+
+    def _read_marker_boot_id(self) -> str | None:
+        path = self._config.fsck_marker_path
+        try:
+            if not path.is_file():
+                return None
+            return path.read_text().strip() or None
+        except OSError as exc:
+            logger.warning("storage_health: read fsck marker failed: %s", exc)
+            return None
+
+    def _write_marker(self, boot_id: str | None) -> None:
+        """Persist the boot-id under which the fsck was armed."""
+        if not boot_id:
+            # No boot_id means we can never detect "we rebooted" reliably.
+            # Skip marker creation so we don't accidentally strip the
+            # cmdline flag before the reboot happens.
+            logger.warning(
+                "storage_health: boot_id unavailable; cmdline flag will not "
+                "be auto-stripped after reboot"
+            )
+            return
+        binary = self._which(self._config.binary_install)
+        if binary is None:
+            raise RuntimeError("install binary not found")
+        path = self._config.fsck_marker_path
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            delete=False,
+            dir=tempfile.gettempdir(),
+            prefix="teslausb-fsck-marker.",
+        ) as tf:
+            tf.write(boot_id + "\n")
+            tf.flush()
+            tmp_path = Path(tf.name)
+        try:
+            # Make sure the parent directory exists (fresh installs may
+            # not have /var/lib/teslausb-web yet).
+            mkdir = self._run_command(
+                [
+                    *self._config.sudo_prefix,
+                    binary,
+                    "-d",
+                    "-m",
+                    "0755",
+                    "-o",
+                    "root",
+                    "-g",
+                    "root",
+                    str(path.parent),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=self._config.probe_timeout_seconds,
+                check=False,
+            )
+            if mkdir.returncode != 0:
+                raise RuntimeError(
+                    f"install -d {path.parent} failed (rc={mkdir.returncode}): "
+                    f"{(mkdir.stderr or '').strip()}"
+                )
+            completed = self._run_command(
+                [
+                    *self._config.sudo_prefix,
+                    binary,
+                    "-m",
+                    "0644",
+                    "-o",
+                    "root",
+                    "-g",
+                    "root",
+                    str(tmp_path),
+                    str(path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=self._config.probe_timeout_seconds,
+                check=False,
+            )
+            if completed.returncode != 0:
+                raise RuntimeError(
+                    f"install {tmp_path} → {path} failed (rc="
+                    f"{completed.returncode}): {(completed.stderr or '').strip()}"
+                )
+        finally:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _remove_marker(self) -> None:
+        binary = self._which(self._config.binary_rm)
+        if binary is None:
+            raise RuntimeError("rm binary not found")
+        completed = self._run_command(
+            [
+                *self._config.sudo_prefix,
+                binary,
+                "-f",
+                str(self._config.fsck_marker_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=self._config.probe_timeout_seconds,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(
+                f"rm -f {self._config.fsck_marker_path} failed (rc="
                 f"{completed.returncode}): {(completed.stderr or '').strip()}"
             )
 
@@ -540,12 +1332,29 @@ class StorageHealthService:
         return path.read_text(encoding="ascii", errors="replace")
 
     def _probe_fsck_scheduled(self, errors: list[str]) -> bool:
-        """Return True iff ``/forcefsck`` exists (boot-time fsck pending)."""
+        """Return True iff a one-shot fsck is armed for the next boot.
+
+        We treat *either* armed channel as scheduled so the UI reflects
+        reality regardless of which mechanism the operator (or a prior
+        version of this code) used:
+
+        * ``/forcefsck`` sentinel exists, OR
+        * ``fsck.mode=force`` is present in the kernel cmdline.
+
+        Either alone is enough to make the operator's check actually
+        run, so either alone justifies showing "scheduled" in the UI.
+        """
+        sentinel_present = False
         try:
-            return self._config.forcefsck_sentinel.exists()
+            sentinel_present = self._config.forcefsck_sentinel.exists()
         except OSError as exc:
             errors.append(f"forcefsck sentinel: {exc}")
-            return False
+        try:
+            if self._cmdline_has_force_flag():
+                return True
+        except Exception as exc:  # noqa: BLE001 — probe must never fail
+            errors.append(f"cmdline fsck flag: {exc}")
+        return sentinel_present
 
     # ------------------------------------------------------------------
     # Severity rollup
@@ -561,7 +1370,21 @@ class StorageHealthService:
         max_mount_count: int | None,
         last_checked_iso: str | None,
         fsck_scheduled: bool = False,
+        online_check: dict[str, Any] | None = None,
+        online_check_running: bool = False,
     ) -> tuple[str, list[str]]:
+        # If every probe returned None we can't claim anything honestly;
+        # callers see severity=unknown and the UI hides the badge.
+        if (
+            readonly is None
+            and fs_errors is None
+            and io_errors_24h is None
+            and last_checked_iso is None
+            and online_check is None
+            and not fsck_scheduled
+        ):
+            return SEV_UNKNOWN, ["Storage health probes returned no data."]
+
         messages: list[str] = []
         severity = SEV_OK
 
@@ -606,32 +1429,42 @@ class StorageHealthService:
                 f"maximum ({max_mount_count}); schedule an offline e2fsck."
             )
 
-        if last_checked_iso is not None and severity == SEV_OK and not fsck_scheduled:
+        # Online (read-only) check — drives a separate severity bump.
+        # We DO NOT warn on ``last_checked_iso`` age any more: on a Pi
+        # with no initramfs that timestamp can never advance, so it
+        # would warn forever no matter what the operator did. The
+        # online check advances on every successful background run.
+        online_status = (online_check or {}).get("status")
+        online_iso = (online_check or {}).get("timestamp_iso")
+        online_message = (online_check or {}).get("message")
+        if online_status == ONLINE_CHECK_WARN:
+            if severity == SEV_OK:
+                severity = SEV_WARN
+            messages.append(
+                online_message
+                or "Read-only filesystem check reported potential issues."
+            )
+        elif online_status == ONLINE_CHECK_ERROR:
+            if severity == SEV_OK:
+                severity = SEV_WARN
+            messages.append(
+                online_message or "Read-only filesystem check failed to run."
+            )
+        elif online_iso is not None and severity == SEV_OK:
             try:
-                last_checked = datetime.fromisoformat(last_checked_iso)
-                if last_checked.tzinfo is None:
-                    last_checked = last_checked.replace(tzinfo=timezone.utc)
+                last_run = datetime.fromisoformat(online_iso)
+                if last_run.tzinfo is None:
+                    last_run = last_run.replace(tzinfo=timezone.utc)
                 age_days = (
-                    datetime.now(timezone.utc) - last_checked.astimezone(timezone.utc)
+                    datetime.now(timezone.utc) - last_run.astimezone(timezone.utc)
                 ).days
-                if age_days >= _WARN_DAYS_SINCE_FSCK:
+                if age_days >= _WARN_DAYS_SINCE_ONLINE_CHECK:
                     severity = SEV_WARN
                     messages.append(
-                        f"Filesystem hasn't been fsck'd in {age_days} days."
+                        f"Read-only filesystem check hasn't run in {age_days} days."
                     )
             except ValueError:
                 pass
-
-        # If every probe returned None we can't claim "ok" honestly;
-        # callers see severity=unknown and the UI hides the badge.
-        if (
-            readonly is None
-            and fs_errors is None
-            and io_errors_24h is None
-            and last_checked_iso is None
-            and not messages
-        ):
-            return SEV_UNKNOWN, ["Storage health probes returned no data."]
 
         if severity == SEV_OK:
             messages.append("All checks passed.")
@@ -753,10 +1586,23 @@ def make_storage_health_service(cfg: WebConfig) -> StorageHealthService:
     configure their privileged-command policy in one place
     (``[samba] sudo_prefix``); the storage probes need exactly the
     same NOPASSWD policy.
+
+    On construction we opportunistically call
+    :meth:`StorageHealthService.cleanup_after_fsck_boot` — if a prior
+    process armed a one-shot root-fs fsck and we've since rebooted,
+    this strips ``fsck.mode=force`` from the kernel cmdline so the
+    *next* boot is fast again. Idempotent; safe to call every startup.
     """
-    return StorageHealthService(
+    service = StorageHealthService(
         StorageHealthServiceConfig(sudo_prefix=cfg.samba.sudo_prefix)
     )
+    try:
+        service.cleanup_after_fsck_boot()
+    except Exception:  # noqa: BLE001 — never block app startup
+        logger.exception(
+            "storage_health: cleanup_after_fsck_boot raised during startup"
+        )
+    return service
 
 
 __all__ = (

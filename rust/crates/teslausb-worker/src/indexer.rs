@@ -62,6 +62,11 @@ pub struct BootstrapSummary {
     pub skipped: u32,
     /// Clips the SEI walker could not parse.
     pub failed: u32,
+    /// Clip groups skipped because no `-front.mp4` variant was
+    /// available. Per the front-only invariant we never fall
+    /// back to a non-front sibling — the group is silently
+    /// dropped until Tesla writes the front sibling (or never).
+    pub skipped_no_front: u32,
 }
 
 /// Glue service that owns the [`Store`] and applies SEI
@@ -147,7 +152,19 @@ impl Indexer {
                 groups.entry(base).or_default().push(path);
             }
             for (_, paths) in groups {
-                let canonical = pick_canonical_clip(&paths);
+                let Some(canonical) = pick_canonical_clip(&paths) else {
+                    // Group has no front sibling. Per the
+                    // front-only invariant we never index a
+                    // non-front angle, even when its front
+                    // sibling is missing or unreadable.
+                    summary.skipped_no_front += 1;
+                    debug!(
+                        group_size = paths.len(),
+                        sample = %paths[0].display(),
+                        "bootstrap: clip group has no -front.mp4 sibling; skipping",
+                    );
+                    continue;
+                };
                 summary.seen += 1;
                 let relative = relative_to_backing_root(canonical, &self.config.backing_root);
                 if self.store.knows_clip(&relative)? {
@@ -171,6 +188,7 @@ impl Indexer {
             seen = summary.seen,
             indexed = summary.indexed,
             skipped = summary.skipped,
+            skipped_no_front = summary.skipped_no_front,
             failed = summary.failed,
             "indexer bootstrap complete",
         );
@@ -297,6 +315,20 @@ impl Indexer {
         bucket: Bucket,
         path: &Path,
     ) -> std::result::Result<(), WalkAndRecordError> {
+        // Defensive front-only guard. Both callers
+        // (`handle_event`, `bootstrap`) already filter, but
+        // routing non-front data into the store would silently
+        // re-poison trip distances (each camera's path summed
+        // sequentially adds ~11× to total km). Refuse here
+        // rather than trust upstream filters.
+        debug_assert!(
+            crate::watcher::is_front_camera_clip(path),
+            "walk_and_record called with non-front clip: {}",
+            path.display(),
+        );
+        if !crate::watcher::is_front_camera_clip(path) {
+            return Err(WalkAndRecordError::NonFront(path.to_path_buf()));
+        }
         let walk = walk_clip(path, self.config.indexer.sei_sample_rate)
             .map_err(WalkAndRecordError::Walk)?;
         let relative = relative_to_backing_root(path, &self.config.backing_root);
@@ -313,6 +345,8 @@ enum WalkAndRecordError {
     Walk(WalkError),
     #[error("{0}")]
     Store(StoreError),
+    #[error("refusing to index non-front clip: {0}")]
+    NonFront(PathBuf),
 }
 
 /// Convert an absolute clip path into the relative path the
@@ -351,25 +385,19 @@ fn clip_group_key(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
-/// Choose the canonical MP4 from a clip group. Front is preferred
-/// because it carries the GPS + SEI metadata; otherwise we fall
-/// back to whichever sibling is lexicographically first so the
-/// pick is deterministic across reboots. Caller guarantees
-/// `paths` is non-empty (groups are only created when a path is
-/// pushed).
-fn pick_canonical_clip(paths: &[PathBuf]) -> &Path {
+/// Choose the canonical MP4 from a clip group. Front is the
+/// only acceptable canonical because it carries the GPS + SEI
+/// metadata; if no front sibling exists the group is dropped
+/// entirely (returns `None`) rather than poisoning the
+/// trip-distance math with a non-front path. Bare-name files
+/// (no camera suffix, e.g. test fixtures) are treated as
+/// front, matching [`crate::watcher::is_front_camera_clip`].
+fn pick_canonical_clip(paths: &[PathBuf]) -> Option<&Path> {
     debug_assert!(!paths.is_empty(), "pick_canonical_clip on empty group");
-    if let Some(front) = paths.iter().find(|p| {
-        p.file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n.to_ascii_lowercase().ends_with("-front.mp4"))
-    }) {
-        return front;
-    }
     paths
         .iter()
-        .min_by(|a, b| a.file_name().cmp(&b.file_name()))
-        .map_or(Path::new(""), |p| p.as_path())
+        .find(|p| crate::watcher::is_front_camera_clip(p))
+        .map(PathBuf::as_path)
 }
 
 #[cfg(test)]
@@ -446,11 +474,11 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_falls_back_when_front_missing() {
-        // If a clip group is missing its -front sibling (Tesla
-        // wrote partial group on crash), we still pick a
-        // deterministic canonical so the orphan group is
-        // recoverable.
+    fn bootstrap_skips_group_when_front_missing() {
+        // Per the front-only invariant, a clip group with no
+        // -front.mp4 sibling is dropped entirely rather than
+        // falling back to a non-front angle (which would
+        // poison trip distances).
         let dir = tempfile::tempdir().unwrap();
         let cfg = make_config(dir.path());
         let recent = cfg.bucket_root(Bucket::Recent);
@@ -460,7 +488,10 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let mut indexer = Indexer::new(cfg, store);
         let s = indexer.bootstrap().unwrap();
-        assert_eq!(s.seen, 1);
+        assert_eq!(s.seen, 0, "no front sibling → not seen");
+        assert_eq!(s.indexed, 0);
+        assert_eq!(s.failed, 0);
+        assert_eq!(s.skipped_no_front, 1, "one group dropped for missing front");
     }
 
     #[test]

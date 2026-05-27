@@ -713,12 +713,18 @@ class StorageHealthService:
             status = ONLINE_CHECK_OK
             message = "Filesystem clean (read-only check)."
         elif rc == 4:
-            status = ONLINE_CHECK_WARN
+            # rc=4 means "errors found but not corrected". With `-n` against a
+            # mounted read-write filesystem this is almost always in-flight
+            # metadata the kernel hasn't flushed (block-bitmap deltas, free-count
+            # mismatches), not real corruption. Real damage shows up in the
+            # kernel-recorded ext4 error counter (Filesystem errors row) and in
+            # I/O errors — we surface those separately. Don't cry wolf here.
+            status = ONLINE_CHECK_OK
             message = (
-                "Read-only check reported potential issues. "
-                "May include false positives because the filesystem is "
-                "mounted read-write. Consider an offline check from "
-                "external media."
+                "Read-only check completed. Minor metadata mismatches against "
+                "the mounted filesystem are expected and were not treated as "
+                "errors. Kernel-recorded filesystem errors and I/O errors are "
+                "reported separately above."
             )
         else:
             status = ONLINE_CHECK_ERROR
@@ -1437,14 +1443,13 @@ class StorageHealthService:
         online_status = (online_check or {}).get("status")
         online_iso = (online_check or {}).get("timestamp_iso")
         online_message = (online_check or {}).get("message")
-        if online_status == ONLINE_CHECK_WARN:
-            if severity == SEV_OK:
-                severity = SEV_WARN
-            messages.append(
-                online_message
-                or "Read-only filesystem check reported potential issues."
-            )
-        elif online_status == ONLINE_CHECK_ERROR:
+        # ``ONLINE_CHECK_WARN`` is retained as a constant for API compatibility
+        # but ``_invoke_e2fsck`` no longer emits it: e2fsck rc=4 against a
+        # mounted RW root is dominated by false positives (in-flight metadata),
+        # so we don't escalate severity on it. Real corruption surfaces via
+        # ``fs_errors`` / ``mount_readonly`` / ``io_errors_24h`` which are
+        # evaluated above, or via rc>=8 below.
+        if online_status == ONLINE_CHECK_ERROR:
             if severity == SEV_OK:
                 severity = SEV_WARN
             messages.append(

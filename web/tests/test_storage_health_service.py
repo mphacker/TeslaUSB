@@ -862,15 +862,18 @@ def test_run_online_root_check_rc0_writes_ok_cache(tmp_path: Path) -> None:
     assert "/dev/mmcblk0p2" in e2fsck_cmds[0]
 
 
-def test_run_online_root_check_rc4_maps_to_warn(tmp_path: Path) -> None:
+def test_run_online_root_check_rc4_maps_to_ok(tmp_path: Path) -> None:
+    # rc=4 with `-n` against a mounted RW root is dominated by in-flight
+    # metadata mismatches (false positives), not real corruption. We treat
+    # it as ok and surface only kernel-recorded errors as warnings.
     service, _, _ = _build_online_service(
         tmp_path,
         e2fsck_result=_completed("Inode 12 has bad block count", returncode=4),
     )
     record = service.run_online_root_check("/dev/mmcblk0p2")
-    assert record["status"] == "warn"
+    assert record["status"] == "ok"
     assert record["return_code"] == 4
-    assert "false positives" in record["message"]
+    assert "not treated as errors" in record["message"]
 
 
 def test_run_online_root_check_rc8_maps_to_error(tmp_path: Path) -> None:
@@ -924,16 +927,31 @@ def test_maybe_start_background_online_check_force_runs_even_when_fresh(
     assert any("e2fsck" in " ".join(c) for c in invocations)
 
 
-def test_online_check_warn_status_propagates_to_severity(tmp_path: Path) -> None:
+def test_online_check_rc4_does_not_escalate_severity(tmp_path: Path) -> None:
+    # rc=4 is reclassified as ok (false-positive heavy on mounted RW root);
+    # severity must stay ok so the card doesn't cry wolf.
     service, _, cache = _build_online_service(
         tmp_path,
         e2fsck_result=_completed("issues", returncode=4),
     )
     service.run_online_root_check("/dev/mmcblk0p2")
     snap = service.read_snapshot()
-    assert snap.severity == SEV_WARN
-    assert snap.online_check_status == "warn"
+    assert snap.severity == SEV_OK
+    assert snap.online_check_status == "ok"
     assert snap.online_check_iso is not None
+
+
+def test_online_check_rc8_escalates_severity(tmp_path: Path) -> None:
+    # rc>=8 means e2fsck itself failed (operational error); that IS worth
+    # surfacing as a warn so the operator notices.
+    service, _, cache = _build_online_service(
+        tmp_path,
+        e2fsck_result=_completed("device busy", returncode=8, stderr="busy"),
+    )
+    service.run_online_root_check("/dev/mmcblk0p2")
+    snap = service.read_snapshot()
+    assert snap.severity == SEV_WARN
+    assert snap.online_check_status == "error"
 
 
 # --------------------------------------------------------------------- local TZ

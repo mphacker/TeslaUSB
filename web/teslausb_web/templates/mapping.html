@@ -2357,29 +2357,47 @@ function updateOverlayTelemetry(wp) {
     if (speedVal) speedVal.textContent = Math.round(Math.abs((wp.speed_mps || 0) * 2.237));
 
     const gear = document.getElementById('olGear');
+    let gearLetter = 'P';
     if (gear) {
         const g = (wp.gear || 'PARK').replace('GEAR_', '');
-        gear.textContent = g.charAt(0);
+        gearLetter = g.charAt(0);
+        gear.textContent = gearLetter;
     }
 
     const wheel = document.getElementById('olWheel');
     if (wheel) wheel.style.setProperty('--oh-wheel', `${wp.steering_angle || 0}deg`);
 
+    // Throttle/brake fall back to longitudinal accelerometer when Tesla
+    // didn't record driver pedal input — which is most of the time on
+    // AP/FSD, where the motor handles both regen-braking and torque
+    // and the pedal fields stay 0. accel_x in m/s² (Tesla axis: + =
+    // forward thrust, − = deceleration); a full bar maps to ±3 m/s².
+    const accelX = (typeof wp.acceleration_x === 'number') ? wp.acceleration_x : null;
+
     const brake = document.getElementById('olBrake');
-    if (brake) brake.style.setProperty('--oh-fill', wp.brake_applied ? '100%' : '0%');
+    if (brake) {
+        let pct;
+        if (wp.brake_applied) {
+            pct = 100;
+        } else if (accelX != null && accelX < -0.3) {
+            pct = Math.min(100, (-accelX) * 33);
+        } else {
+            pct = 0;
+        }
+        brake.style.setProperty('--oh-fill', `${pct}%`);
+    }
 
     const throttle = document.getElementById('olThrottle');
     if (throttle) {
-        // Prefer the live SEI accelerator pedal position (0..1 or 0..100)
-        // when available; fall back to forward-accel proxy from DB rows.
         let pct;
-        if (wp.accelerator_pedal_position != null) {
+        if (wp.accelerator_pedal_position != null && wp.accelerator_pedal_position > 0.01) {
             let v = wp.accelerator_pedal_position;
             if (v <= 1.2) v *= 100;
             pct = Math.max(0, Math.min(100, v));
+        } else if (accelX != null && accelX > 0.3) {
+            pct = Math.min(100, accelX * 33);
         } else {
-            const accel = Math.max(0, (wp.acceleration_x || 0));
-            pct = Math.min(100, accel * 15);
+            pct = 0;
         }
         throttle.style.setProperty('--oh-fill', `${pct}%`);
     }
@@ -2392,7 +2410,10 @@ function updateOverlayTelemetry(wp) {
     const ap = document.getElementById('olAP2');
     if (ap) {
         const state = wp.autopilot_state || 'NONE';
-        const engaged = ['SELF_DRIVING', 'AUTOSTEER'].includes(state);
+        // Suppress AP indicator when parked — Tesla's autopilotState
+        // can read "SELF_DRIVING" for a couple of seconds after the
+        // driver shifts to P, which looks wrong in the HUD.
+        const engaged = ['SELF_DRIVING', 'AUTOSTEER'].includes(state) && gearLetter !== 'P';
         ap.textContent = engaged ? state.replace('_', ' ') : '';
         ap.classList.toggle('active', engaged);
     }
@@ -2902,6 +2923,11 @@ function seiToWaypointShim(sei) {
         blinker_on_right: !!sei.blinkerOnRight,
         autopilot_state: apName,
         accelerator_pedal_position: sei.acceleratorPedalPosition,
+        // Longitudinal accelerometer reading. Used as a fallback
+        // for the throttle/brake bars when Tesla doesn't record
+        // driver pedal input (i.e. AP/FSD is driving — pedal
+        // fields are always 0/false even during heavy regen).
+        acceleration_x: sei.linearAccelerationMps2X,
     };
 }
 

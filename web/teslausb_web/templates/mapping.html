@@ -3090,25 +3090,29 @@ function onOverlayTimeUpdate() {
     if (!Array.isArray(overlayWaypoints) || overlayWaypoints.length === 0) return;
 
     // Filter to this clip's waypoints (sorted by frame_offset, ascending).
-    // overlayWaypoints is a trip-wide list; the same array may span many
-    // clips, so we cache a per-clip view to keep timeupdate O(log n).
+    // V1 parity: match by *base path* (camera-angle-agnostic) because
+    // waypoints in the DB are tagged on -front.mp4 only; switching to
+    // -back.mp4 etc. should still drive the HUD from the front-camera
+    // SEI for the same clip.
+    //
     // IMPORTANT: cache references to the original wp objects (NOT copies)
     // because openVideoOverlay's lazy /api/trip/<id>/telemetry fetch
     // merges cold cols (gear/wheel/brake/blinker/AP/accel) into those
     // originals after this cache may already be built. We keep a parallel
     // _ts array for the binary search so the lookup stays cheap.
-    const currentPath = (overlayBasePath || '') + '-' + (overlayCurrentAngle || 'front') + '.mp4';
-    if (onOverlayTimeUpdate._cachedPath !== currentPath) {
-        const refs = overlayWaypoints.filter(w => w && w.video_path === currentPath);
+    if (onOverlayTimeUpdate._cachedBasePath !== overlayBasePath) {
+        const refs = overlayWaypoints.filter(w =>
+            w && w.video_path && getBasePath(w.video_path) === overlayBasePath
+        );
         refs.sort((x, y) => ((x.frame_offset || 0) - (y.frame_offset || 0)));
         const ts = refs.map(w => (w.frame_offset || 0) / 36);
-        onOverlayTimeUpdate._cachedPath = currentPath;
+        onOverlayTimeUpdate._cachedBasePath = overlayBasePath;
         onOverlayTimeUpdate._cachedClipWps = refs;
         onOverlayTimeUpdate._cachedClipTs = ts;
     }
     const clipWps = onOverlayTimeUpdate._cachedClipWps;
     const clipTs = onOverlayTimeUpdate._cachedClipTs;
-    if (!clipWps.length) return;
+    if (!clipWps || !clipWps.length) return;
 
     const t = video.currentTime;
     // Binary-search for the segment containing t.
@@ -3272,8 +3276,9 @@ function closeVideoOverlay() {
     // response when it returns.
     ++overlayOpenSeq;
     _stopHudRaf();
-    onOverlayTimeUpdate._cachedPath = null;
+    onOverlayTimeUpdate._cachedBasePath = null;
     onOverlayTimeUpdate._cachedClipWps = null;
+    onOverlayTimeUpdate._cachedClipTs = null;
     // Abort any in-flight SEI download and clear per-frame state.
     if (SEI_ABORT) { try { SEI_ABORT.abort(); } catch (e) {} SEI_ABORT = null; }
     ++SEI_LOAD_SEQ;

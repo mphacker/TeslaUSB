@@ -51,6 +51,7 @@ B1_AP_SSID="TeslaUSB-AP"
 B1_AP_CONNECTION_NAME="teslausb-ap"
 B1_AP_CONNECTION_FILE="/etc/NetworkManager/system-connections/teslausb-ap.nmconnection"
 B1_AP_DISPATCHER_FILE="/etc/NetworkManager/dispatcher.d/95-teslausb-ap"
+B1_CLOUD_WAKE_DISPATCHER_FILE="/etc/NetworkManager/dispatcher.d/96-teslausb-cloud-wake"
 B1_AP_DNSMASQ_FILE="/etc/NetworkManager/dnsmasq-shared.d/teslausb-captive.conf"
 B1_WIFI_SCAN_POLKIT_FILE="/etc/polkit-1/rules.d/50-teslausb-wifi-scan.rules"
 B1_AP_SUDOERS_FILE="/etc/sudoers.d/teslausb-ap"
@@ -62,6 +63,7 @@ B1_DHCPCD_CONF="/etc/dhcpcd.conf"
 B1_NETWORK_TARGETS=(
   "${B1_AP_CONNECTION_FILE}"
   "${B1_AP_DISPATCHER_FILE}"
+  "${B1_CLOUD_WAKE_DISPATCHER_FILE}"
   "${B1_AP_DNSMASQ_FILE}"
   "${B1_WIFI_SCAN_POLKIT_FILE}"
   "${B1_AP_SUDOERS_FILE}"
@@ -77,6 +79,7 @@ B1_AP_PSK_PLACEHOLDER="__SET_VIA_TESLAUSB_WEB_TOML__"
 
 export B1_AP_SSID B1_AP_CONNECTION_NAME B1_AP_CONNECTION_FILE \
        B1_AP_DISPATCHER_FILE B1_AP_DNSMASQ_FILE B1_DHCPCD_CONF \
+       B1_CLOUD_WAKE_DISPATCHER_FILE \
        B1_WIFI_SCAN_POLKIT_FILE B1_AP_SUDOERS_FILE B1_AP_TMPFILES_FILE \
        B1_NETWORK_TARGETS B1_AP_PSK_PLACEHOLDER
 
@@ -186,6 +189,43 @@ esac
 
 exit 0
 AP_DISP
+
+read -r -d '' B1_CLOUD_WAKE_DISPATCHER_BODY <<'CLOUD_WAKE' || true
+#!/bin/sh
+# TeslaUSB B-1 cloud-sync wake dispatcher.
+#
+# When a STA WiFi connection comes up on wlan0 (or wlan1), poke the
+# local teslausb-web /cloud/api/wake endpoint so the cloud-archive
+# worker drains immediately instead of waiting for its idle-poll
+# timeout (worker_idle_seconds, default ~60s).
+#
+# Failures swallowed (|| true): a flapping wake must never wedge an
+# unrelated NM dispatch. The worst case is "the worker wakes on its
+# normal idle timer", i.e. exactly the prior behaviour.
+set -eu
+
+IFACE="${1:-}"
+ACTION="${2:-}"
+
+case "$IFACE" in
+  wlan*) ;;
+  *) exit 0 ;;
+esac
+
+[ "$ACTION" = "up" ] || exit 0
+
+# Skip our own AP coming up — that's not real internet.
+if [ "${CONNECTION_ID:-}" = "teslausb-ap" ]; then
+  exit 0
+fi
+
+curl --silent --show-error --max-time 5 \
+     --request POST \
+     --header 'X-Requested-With: XMLHttpRequest' \
+     http://127.0.0.1/cloud/api/wake >/dev/null 2>&1 || true
+
+exit 0
+CLOUD_WAKE
 
 read -r -d '' B1_AP_DNSMASQ_BODY <<'AP_DNSMASQ' || true
 # TeslaUSB B-1 captive-portal dnsmasq drop-in (Phase 6.5).
@@ -499,6 +539,13 @@ b1_step_05() {
   # 4) install dispatcher script (0755 root:root — NM dispatcher will
   #    silently skip files that aren't executable).
   _b1_install_string "${B1_AP_DISPATCHER_BODY}" "${B1_AP_DISPATCHER_FILE}" 0755 \
+    || return 1
+
+  # 4b) install cloud-sync wake dispatcher (0755). When STA WiFi comes
+  #     up the worker is poked via POST /cloud/api/wake so a drain
+  #     starts immediately instead of waiting for worker_idle_seconds.
+  _b1_install_string "${B1_CLOUD_WAKE_DISPATCHER_BODY}" \
+    "${B1_CLOUD_WAKE_DISPATCHER_FILE}" 0755 \
     || return 1
 
   # 5) install dnsmasq-shared drop-in (0644 — read by NM's bundled

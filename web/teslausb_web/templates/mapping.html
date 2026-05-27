@@ -2421,7 +2421,7 @@ function updateOverlayTelemetry(wp) {
 
 // Show a loading spinner inside the overlay stage while the video
 // element is buffering. Cleared on `playing` or `error`.
-function setOverlayLoading(isLoading) {
+function setOverlayLoading(isLoading, label) {
     const stage = document.querySelector('#videoOverlay .video-overlay-stage');
     if (!stage) return;
     let spinner = stage.querySelector('.video-overlay-spinner');
@@ -2429,10 +2429,13 @@ function setOverlayLoading(isLoading) {
         if (!spinner) {
             spinner = document.createElement('div');
             spinner.className = 'video-overlay-spinner';
-            spinner.innerHTML = '<div class="vol-spinner-ring" aria-label="Loading video"></div>';
+            spinner.innerHTML = '<div class="vol-spinner-ring" aria-label="Loading video"></div>' +
+                '<div class="vol-spinner-label" style="color:#fff;margin-top:8px;font-size:13px;text-align:center;text-shadow:0 1px 2px rgba(0,0,0,0.8);"></div>';
             stage.appendChild(spinner);
         }
         spinner.style.display = '';
+        const lbl = spinner.querySelector('.vol-spinner-label');
+        if (lbl) lbl.textContent = label || '';
     } else if (spinner) {
         spinner.remove();
     }
@@ -2598,33 +2601,19 @@ function openVideoOverlay(waypoint, clickPoint, routeWps, tripId) {
     document.body.appendChild(overlay);
     document.getElementById('overlayTitle').textContent = '🎥 ' + filename;
 
-    // Stream the video directly (V1 parity) — instant playback.
-    // The HUD gets sparse but-fast telemetry from the waypoints +
-    // the lazy DB-telemetry merge above; this avoids the 20-30 s
-    // wait that a fetch-then-blob approach would impose.
+    // V1 model: one fetch drives BOTH the <video> element (as a blob
+    // URL) and the per-frame SEI parser. The HUD is correct from frame
+    // 0 because the video element only starts loading after the bytes
+    // are in hand. Previously we set video.src = streamUrl up-front
+    // for "instant" playback and parsed SEI in parallel — that gave a
+    // 60-100 s window on flaky Pi WiFi where the HUD showed stale
+    // DB-derived data (operator-reported: "gear=P at 13 mph").
     const video = document.getElementById('overlayVideo');
-    const streamUrl = BOOTSTRAP.view.video_stream_template.replace('__PATH__', waypoint.video_path);
-    video.src = streamUrl;
-
     wireVideoLoadingIndicator(video);
 
-    // Kick off the live SEI download in parallel. When it completes
-    // it swaps the <video> src to a blob of the same bytes (no second
-    // download) and replaces SEI_FRAMES so onOverlayTimeUpdate drives
-    // the HUD from per-frame SEI like V1.
     SEI_FRAMES = [];
     loadLiveSeiForClip(waypoint.video_path,
         Math.max(0, (waypoint.frame_offset || 0) / 36 - 2));
-
-    // Seek to the event time once the browser has enough metadata
-    // to know the duration.
-    video.addEventListener('loadedmetadata', function onLoad() {
-        const seek = Math.max(0, (waypoint.frame_offset || 0) / 36 - 2);
-        if (seek > 0 && seek < video.duration) {
-            video.currentTime = seek;
-        }
-        video.removeEventListener('loadedmetadata', onLoad);
-    });
 
     // Handle video load error — file may no longer exist on disk.
     // NOTE: check the raw src ATTRIBUTE, not the .src property. The property
@@ -2665,12 +2654,16 @@ function openVideoOverlay(waypoint, clickPoint, routeWps, tripId) {
     if (hud) hud.style.display = overlayWaypoints.length > 0 ? '' : 'none';
 
     // Seed HUD from the seed waypoint immediately.
-    if (overlayWaypoints.length > 0) {
-        updateOverlayTelemetry(waypoint);
-    } else {
-        const coords = document.getElementById('olCoords');
-        if (coords) coords.textContent = `📍 ${(waypoint.lat || 0).toFixed(4)}, ${(waypoint.lon || 0).toFixed(4)}`;
-    }
+    // Seed only the coordinates from the clicked waypoint. We deliberately
+    // do NOT seed gear / speed / wheel / pedals from the DB waypoint —
+    // it can be wildly out of date for the actual video timestamp (e.g.
+    // user clicks a "parked at destination" waypoint, the clip itself
+    // shows the car still driving), and showing stale numbers for the
+    // ~few seconds it takes SEI to parse is exactly the misleading
+    // behaviour the operator flagged. HUD numbers fill in from per-frame
+    // SEI once the buffer is parsed (v1 parity).
+    const coords = document.getElementById('olCoords');
+    if (coords) coords.textContent = `📍 ${(waypoint.lat || 0).toFixed(4)}, ${(waypoint.lon || 0).toFixed(4)}`;
 
     // Draggable. Use an AbortController so we can remove all document-level
     // listeners in one shot when the overlay closes — previously these
@@ -2950,18 +2943,63 @@ async function loadLiveSeiForClip(videoPath, seekTimeSec) {
     const url = BOOTSTRAP.view.video_stream_template.replace('__PATH__', videoPath);
     let buffer;
     try {
+        setOverlayLoading(true, 'Downloading video…');
         const resp = await fetch(url, { credentials: 'same-origin', signal: sig });
-        if (!resp.ok) throw new Error('HTTP ' + resp.status);
-        buffer = await resp.arrayBuffer();
+        if (!resp.ok) {
+            if (typeof showToast === 'function') {
+                if (resp.status === 404) {
+                    showToast('Video file not found — Tesla may have overwritten it.', 'warning');
+                } else {
+                    showToast('Could not load video (HTTP ' + resp.status + ').', 'warning');
+                }
+            }
+            return;
+        }
+        // V1 parity: stream chunks so the operator gets a live progress
+        // readout. .arrayBuffer() blocks silently and on the Pi Zero 2 W
+        // a 30 MB clip can take 60-100 s over WiFi — without progress
+        // the spinner looks frozen and users assume the page is broken.
+        const total = parseInt(resp.headers.get('content-length') || '0', 10);
+        const reader = resp.body.getReader();
+        const chunks = [];
+        let loaded = 0;
+        let lastUiUpdate = 0;
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (mySeq !== SEI_LOAD_SEQ) { try { reader.cancel(); } catch (e) {} return; }
+            chunks.push(value);
+            loaded += value.length;
+            const now = performance.now();
+            if (now - lastUiUpdate > 200) {
+                lastUiUpdate = now;
+                const mb = (loaded / 1048576).toFixed(1);
+                if (total) {
+                    const totalMb = (total / 1048576).toFixed(1);
+                    const pct = Math.round((loaded / total) * 100);
+                    setOverlayLoading(true, `Downloading video… ${mb} / ${totalMb} MB (${pct}%)`);
+                } else {
+                    setOverlayLoading(true, `Downloading video… ${mb} MB`);
+                }
+            }
+        }
+        buffer = new Uint8Array(loaded);
+        let pos = 0;
+        for (const chunk of chunks) { buffer.set(chunk, pos); pos += chunk.length; }
+        buffer = buffer.buffer;
     } catch (e) {
         if (e.name === 'AbortError') return;
         console.warn('SEI fetch failed:', e);
+        if (typeof showToast === 'function') {
+            showToast('Network error loading video. Check the connection and try again.', 'warning');
+        }
         return;
     }
     if (mySeq !== SEI_LOAD_SEQ) return;
 
     let frames;
     try {
+        setOverlayLoading(true, 'Parsing video metadata…');
         const mp4 = new window.DashcamMP4(buffer);
         const config = mp4.getConfig();
         const parsed = mp4.parseFrames(proto.SeiMetadata);
@@ -2973,6 +3011,9 @@ async function loadLiveSeiForClip(videoPath, seekTimeSec) {
         });
     } catch (e) {
         console.warn('SEI parse failed:', e);
+        if (typeof showToast === 'function') {
+            showToast('Video metadata could not be parsed. Playback may not work.', 'warning');
+        }
         return;
     }
     if (mySeq !== SEI_LOAD_SEQ) return;
@@ -2988,6 +3029,7 @@ async function loadLiveSeiForClip(videoPath, seekTimeSec) {
     const blobUrl = URL.createObjectURL(blob);
     const prevSrc = video.src;
     video.src = blobUrl;
+    video.load();
     video.addEventListener('loadedmetadata', function onLoad() {
         if (seekTimeSec > 0 && seekTimeSec < video.duration) {
             video.currentTime = seekTimeSec;
@@ -3080,20 +3122,26 @@ function navigateClip(direction) {
     const video = document.getElementById('overlayVideo');
     if (!video) return;
 
-    video.src = BOOTSTRAP.view.video_stream_template.replace('__PATH__', newPath);
     wireVideoLoadingIndicator(video);
-    video.addEventListener('loadedmetadata', function onLoad() {
-        video.play().catch(() => {});
-        video.removeEventListener('loadedmetadata', onLoad);
-    }, { once: true });
+
+    // Re-fetch SEI for the new clip. For front clips, loadLiveSeiForClip
+    // also sets the <video> src to a blob of the fetched bytes (v1 parity,
+    // HUD correct from frame 0). For non-front cameras (no SEI), fall
+    // back to the streaming URL since there's no HUD to gate on.
+    SEI_FRAMES = [];
+    if (overlayCurrentAngle === 'front') {
+        loadLiveSeiForClip(newPath, 0);
+    } else {
+        video.src = BOOTSTRAP.view.video_stream_template.replace('__PATH__', newPath);
+        video.addEventListener('loadedmetadata', function onLoad() {
+            video.play().catch(() => {});
+            video.removeEventListener('loadedmetadata', onLoad);
+        }, { once: true });
+    }
 
     if (clip.firstWaypoint) {
         updateOverlayTelemetry(clip.firstWaypoint);
     }
-
-    // Re-fetch SEI for the new clip.
-    SEI_FRAMES = [];
-    loadLiveSeiForClip(newPath, 0);
 }
 
 async function openEventVideo(tripId, videoPath, frameOffset, lat, lon) {

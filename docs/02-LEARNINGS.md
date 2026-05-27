@@ -1304,3 +1304,97 @@ resolve → HTTP 206` round-trip. Charter pillar 1 ("primitive
 obsession") would have flagged `str` for both forms; a `ClipDbPath`
 + `ClipUrlPath` newtype pair would make the conversion required
 rather than implicit.
+
+## Phase 5 — Mapping overlay SEI must be SINGLE-fetch (2026-05-26)
+
+### The bug
+
+The video overlay HUD on `/mapping/` displayed gear=PARK / speed=13 mph
+while the video itself clearly showed the car driving forward toward a
+Supercharger stall. Operator-reported, reproducible on the May 23 Bay
+City clip.
+
+### The cause
+
+B-1's first port of v1's client-side SEI HUD shipped a "stream-then-swap"
+double-load:
+
+1. `openVideoOverlay` set `video.src = streamUrl` for instant
+   playback.
+2. In parallel, `loadLiveSeiForClip` called
+   `fetch(streamUrl).arrayBuffer()` and parsed SEI from the bytes.
+3. When SEI parse finished, the video src was swapped to a
+   `URL.createObjectURL(blob)` of those same bytes.
+
+On Pi Zero 2 W WiFi (brcmfmac), the SEI fetch takes 60-100 s for a 30 MB
+clip. During that window:
+
+* The video was already playing — driven by the streaming URL.
+* The HUD fell back to the clicked DB waypoint (`onOverlayTimeUpdate`
+  with empty `SEI_FRAMES`).
+* The clicked waypoint was the "parked at destination" endpoint
+  (`gear=P`), because that's the geographic point the user clicked.
+* HUD showed PARK / 13 mph for a full minute while the video played the
+  start of the clip where the car was actively driving.
+
+Worse: the Pi served the same 30 MB file *twice* (once for the
+streaming `<video>`, once for the SEI fetch), doubling RAM + WiFi
+pressure for no gain.
+
+### The fix (v1 parity)
+
+V1's `scripts/web/templates/event_player.html` (commit `b5aeeee~1`,
+`loadVideoWithCache` / `loadSEIData`) is explicit about the right
+model — the in-code comment at v1 L1237 reads:
+
+> *"In overlay mode: DON'T set video.src here - loadSEIData will fetch
+> the video, parse SEI metadata, and set video.src to a blob URL. This
+> avoids double download."*
+
+So in `web/teslausb_web/templates/mapping.html`:
+
+* `openVideoOverlay` no longer sets `video.src`. It only shows the
+  loading spinner and calls `loadLiveSeiForClip`.
+* `loadLiveSeiForClip` does ONE fetch via `response.body.getReader()`
+  (streaming, so we can show a live `X / Y MB (Z %)` label), parses
+  SEI, builds a `Blob`, sets `video.src = blobUrl` then
+  `video.load()`.
+* The HUD is no longer seeded with stale DB-waypoint numeric fields —
+  only coordinates are seeded. Numeric fields stay blank until per-frame
+  SEI drives them, so the user never sees a contradiction between video
+  and HUD.
+* `navigateClip` follows the same model for front clips; non-front
+  cameras (no Tesla SEI) keep the streaming src since there is no HUD
+  to gate on.
+* Fetch/parse failures now `showToast` directly — the `<video>`
+  element no longer sees them because its src is empty during loading.
+
+### Rules for any future SEI overlay work
+
+1. NEVER set `<video>.src` to a streaming endpoint before SEI is
+   loaded. Loading indicator on the `<video>` element is fine; an
+   empty src is fine.
+2. Use `response.body.getReader()` to stream the MP4 and update a
+   visible progress label every ~200 ms. `arrayBuffer()` blocks
+   silently for 60-100 s on Pi WiFi and the spinner looks frozen.
+3. Do NOT seed the HUD numeric fields from the clicked DB waypoint
+   before SEI loads. Seed coordinates only. The clicked waypoint is
+   chosen by geography, not by video timestamp, and is routinely off
+   by tens of seconds from what the video shows.
+4. Surface fetch/parse errors via `showToast` — the `<video>`
+   element never sees them.
+5. Non-front cameras have no Tesla SEI. Fall back to the streaming
+   URL for those (there's no HUD to gate on).
+
+### Triage checklist for "overlay HUD doesn't match video"
+
+Before blaming SEI parsing, the protobuf shim, or the Tesla data:
+
+1. Open DevTools → Network. Is the MP4 being fetched **twice**? If
+   yes, the "single-fetch" invariant is broken. Find the second
+   `video.src = streamUrl` and remove it.
+2. Is `SEI_FRAMES.length > 0` in the console? If 0, SEI hasn't
+   loaded yet — and the HUD should be BLANK, not showing stale
+   DB-waypoint data.
+3. Is `video.src` a `blob:` URL or an `http:` URL? It must be
+   `blob:` for v1-parity SEI playback.

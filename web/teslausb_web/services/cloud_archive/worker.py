@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from dataclasses import dataclass, field
@@ -13,6 +14,8 @@ from teslausb_web.services.cloud_archive.queue_ops import (
 from teslausb_web.services.cloud_archive.settings import DEFAULT_SHUTDOWN_TIMEOUT_SECONDS
 from teslausb_web.services.cloud_archive.uploader import _run_sync
 from teslausb_web.services.cloud_archive.wifi import _is_wifi_connected
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -176,7 +179,7 @@ class CloudArchiveWorker:
                     break
                 with state.lock:
                     state.wake_count += 1
-                if not self._service.config.enabled:
+                if not self._service.is_auto_sync_enabled():
                     continue
                 if self._service.oauth_service.load_credentials() is None:
                     continue
@@ -187,6 +190,14 @@ class CloudArchiveWorker:
                     state.drain_count += 1
                 try:
                     _run_sync(self._service, "auto")
+                    try:
+                        from teslausb_web.services.cloud_archive.cloud_cleanup import (
+                            run_cloud_cleanup,
+                        )
+
+                        run_cloud_cleanup(self._service)
+                    except Exception:  # pragma: no cover - defensive, never fail loop
+                        logger.exception("cloud cleanup post-drain raised")
                 finally:
                     state.cancel_event.clear()
         finally:

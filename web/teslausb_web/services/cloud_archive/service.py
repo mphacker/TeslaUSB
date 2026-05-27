@@ -32,6 +32,7 @@ from teslausb_web.services.cloud_archive.settings import (
     CLOUD_MIN_RETENTION_DAYS_MIN,
     CLOUD_RESERVE_GB_MAX,
     CLOUD_RESERVE_GB_MIN,
+    KV_KEY_AUTO_SYNC_ENABLED,
     KV_KEY_BWLIMIT_KBPS,
     KV_KEY_CLOUD_AUTO_CLEANUP,
     KV_KEY_CLOUD_MIN_RETENTION_DAYS,
@@ -39,6 +40,7 @@ from teslausb_web.services.cloud_archive.settings import (
     KV_KEY_KEEP_CLIPS_UNTIL_SYNCED,
     KV_KEY_MAX_RETRY_ATTEMPTS,
     KV_KEY_PRIORITY_FOLDERS,
+    KV_KEY_REMOTE_PATH,
     KV_KEY_SYNC_FOLDERS,
     KV_KEY_SYNC_NON_EVENT,
     KV_KEY_SYNC_RECENT_WITH_TELEMETRY,
@@ -46,7 +48,9 @@ from teslausb_web.services.cloud_archive.settings import (
     RETRY_MAX_ATTEMPTS_MIN,
     CloudArchiveConfig,
     CloudArchiveConfigError,
+    _read_auto_sync_enabled_setting,
     _read_bwlimit_kbps_setting,
+    _read_remote_path_setting,
     _write_setting,
     make_cloud_archive_config,
 )
@@ -97,6 +101,8 @@ class CloudArchiveService:
         self.state = WorkerState()
         self.worker = CloudArchiveWorker(self)
         self._monotonic = time.monotonic
+        # Live overrides that update_settings can change without a restart.
+        self._auto_sync_enabled_override: bool | None = None
 
     @contextmanager
     def open_db(self) -> Iterator[sqlite3.Connection]:
@@ -114,6 +120,8 @@ class CloudArchiveService:
         with self.open_db() as connection:
             recover_startup_state(connection)
             self._apply_persisted_bwlimit(connection)
+            self._apply_persisted_auto_sync_enabled(connection)
+            self._apply_persisted_remote_path(connection)
         self.state.startup_recovery_done = True
 
     def _apply_persisted_bwlimit(self, connection: sqlite3.Connection) -> None:
@@ -125,6 +133,29 @@ class CloudArchiveService:
         except (sqlite3.Error, ValueError, TypeError):  # pragma: no cover - defensive
             return
         setter(int(value))
+
+    def _apply_persisted_auto_sync_enabled(self, connection: sqlite3.Connection) -> None:
+        try:
+            value = _read_auto_sync_enabled_setting(self.config, connection)
+        except (sqlite3.Error, ValueError, TypeError):  # pragma: no cover - defensive
+            return
+        self._auto_sync_enabled_override = bool(value)
+
+    def _apply_persisted_remote_path(self, connection: sqlite3.Connection) -> None:
+        setter = getattr(self.rclone_service, "set_remote_path_override", None)
+        if not callable(setter):
+            return
+        try:
+            value = _read_remote_path_setting(self.config, connection)
+        except (sqlite3.Error, ValueError, TypeError):  # pragma: no cover - defensive
+            return
+        setter(value or None)
+
+    def is_auto_sync_enabled(self) -> bool:
+        """Live-evaluated auto-sync flag, honoring KV override set via the UI."""
+        if self._auto_sync_enabled_override is not None:
+            return self._auto_sync_enabled_override
+        return self.config.enabled
 
     def start(self) -> bool:
         return self.worker.start()
@@ -213,6 +244,8 @@ class CloudArchiveService:
         cloud_auto_cleanup: bool | None = None,
         cloud_min_retention_days: int | None = None,
         keep_clips_until_synced: bool | None = None,
+        enabled: bool | None = None,
+        remote_path: str | None = None,
     ) -> None:
         """Persist runtime overrides for user-tunable cloud archive settings."""
 
@@ -282,6 +315,14 @@ class CloudArchiveService:
             updates.append(
                 (KV_KEY_KEEP_CLIPS_UNTIL_SYNCED, bool(keep_clips_until_synced))
             )
+        if enabled is not None:
+            updates.append((KV_KEY_AUTO_SYNC_ENABLED, bool(enabled)))
+        normalized_remote_path: str | None = None
+        if remote_path is not None:
+            normalized_remote_path = (
+                str(remote_path).strip().replace("\\", "/").strip("/")
+            )
+            updates.append((KV_KEY_REMOTE_PATH, normalized_remote_path))
         if not updates:
             return
         with self.open_db() as connection:
@@ -292,6 +333,12 @@ class CloudArchiveService:
             setter = getattr(self.rclone_service, "set_bwlimit_kbps_override", None)
             if callable(setter):
                 setter(int(bwlimit_kbps))
+        if enabled is not None:
+            self._auto_sync_enabled_override = bool(enabled)
+        if normalized_remote_path is not None:
+            setter = getattr(self.rclone_service, "set_remote_path_override", None)
+            if callable(setter):
+                setter(normalized_remote_path or None)
 
     def enqueue_live_event_from_event_json(self, event_json_paths: Sequence[str]) -> int:
         return enqueue_live_event_from_event_json(self.config, self.state, event_json_paths)

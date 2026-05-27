@@ -13,6 +13,7 @@ import ssl
 import subprocess
 import tempfile
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Final, Protocol, cast
@@ -228,6 +229,7 @@ class CloudRcloneService:
         self._active_progress: RcloneTransferProgress | None = None
         self._active_cancelled = False
         self._bwlimit_kbps_override: int | None = None
+        self._remote_path_override: str | None = None
 
     def set_bwlimit_kbps_override(self, value: int | None) -> None:
         """Override the rclone bandwidth limit at runtime.
@@ -245,6 +247,107 @@ class CloudRcloneService:
         if self._bwlimit_kbps_override is not None:
             return self._bwlimit_kbps_override
         return self._config.bwlimit_kbps
+
+    def set_remote_path_override(self, value: str | None) -> None:
+        """Override the base remote folder prefix used for uploads."""
+        if value is None:
+            self._remote_path_override = None
+            return
+        cleaned = value.strip().replace("\\", "/").strip("/")
+        self._remote_path_override = cleaned or None
+
+    def effective_remote_path(self) -> str:
+        return self._remote_path_override or ""
+
+    def _join_remote_path(self, remote_path: str) -> str:
+        base = self.effective_remote_path()
+        suffix = remote_path.strip().replace("\\", "/").strip("/")
+        if base and suffix:
+            return f"{base}/{suffix}"
+        return base or suffix
+
+    def mkdir(self, remote_path: str) -> None:
+        """Create a folder on the remote (rclone mkdir)."""
+        remote, _credentials = self._prepare_remote()
+        clean = _validate_remote_path(remote_path)
+        if not clean:
+            raise RcloneConfigError("Remote path must not be empty")
+        spec = _remote_spec(remote.name, clean)
+        completed = self._run_rclone(
+            ["mkdir", spec],
+            timeout=self._command_timeout_seconds(),
+        )
+        if completed.returncode != 0:
+            raise self._command_error("mkdir", completed, error_type=RcloneError)
+
+    def list_files_recursive(self, remote_path: str = "") -> tuple[RcloneEntry, ...]:
+        """Recursively list files under ``remote_path``, preserving ModTime."""
+        remote, _credentials = self._prepare_remote()
+        clean = _validate_remote_path(self._join_remote_path(remote_path))
+        command = ["lsjson", "-R", "--files-only", _remote_spec(remote.name, clean)]
+        completed = self._run_rclone(command, timeout=self._command_timeout_seconds())
+        if completed.returncode != 0:
+            if _is_missing_directory(completed.stderr):
+                return ()
+            raise self._command_error("lsjson", completed, error_type=RcloneError)
+        return _parse_listing(completed.stdout, base_path=clean)
+
+    def deletefile(self, remote_path: str) -> None:
+        """Delete a single object on the remote."""
+        remote, _credentials = self._prepare_remote()
+        clean = _validate_remote_path(remote_path)
+        if not clean:
+            raise RcloneConfigError("Remote path must not be empty")
+        spec = _remote_spec(remote.name, clean)
+        completed = self._run_rclone(
+            ["deletefile", spec],
+            timeout=self._command_timeout_seconds(),
+        )
+        if completed.returncode != 0:
+            raise self._command_error("deletefile", completed, error_type=RcloneError)
+
+    def measure_upload_throughput(self, *, sample_bytes: int = 10 * 1024 * 1024) -> dict[str, float | int]:
+        """Upload a temp blob to the remote, time it, then delete the blob.
+
+        Returns a dict with ``bytes``, ``elapsed_seconds``, ``kbps`` (kilobits/s),
+        and ``suggested_bwlimit_kbps`` (~80% of measured throughput).
+        """
+        if sample_bytes <= 0:
+            raise RcloneConfigError("sample_bytes must be positive")
+        probe_dir = self._config.rclone_config_dir / "bwprobe"
+        probe_dir.mkdir(parents=True, exist_ok=True)
+        probe_file = probe_dir / "probe.bin"
+        try:
+            with open(probe_file, "wb") as handle:
+                # Zero-fill — keep deterministic and avoid /dev/urandom dependency.
+                remaining = sample_bytes
+                chunk = b"\0" * (1024 * 1024)
+                while remaining > 0:
+                    write_len = min(len(chunk), remaining)
+                    handle.write(chunk[:write_len])
+                    remaining -= write_len
+            remote_dir = self._join_remote_path(".teslausb-bwtest")
+            start = time.monotonic()
+            self.transfer(probe_file, remote_dir, operation="copy")
+            elapsed = max(time.monotonic() - start, 0.001)
+            try:
+                self.deletefile(f"{remote_dir}/{probe_file.name}")
+            except RcloneError:
+                pass
+            kbps = (sample_bytes * 8) / 1000.0 / elapsed
+            suggested = max(int(kbps * 0.8), 0)
+            return {
+                "bytes": sample_bytes,
+                "elapsed_seconds": elapsed,
+                "kbps": kbps,
+                "suggested_bwlimit_kbps": suggested,
+            }
+        finally:
+            try:
+                if probe_file.exists():
+                    probe_file.unlink()
+            except OSError:
+                pass
 
     @property
     def oauth_service(self) -> CloudOAuthService:
@@ -327,7 +430,7 @@ class CloudRcloneService:
             raise RcloneConfigError(f"Unsupported rclone transfer operation: {operation}")
         source_path = self._resolve_local_path(Path(local_path))
         remote, _credentials = self._prepare_remote()
-        destination_path = _validate_remote_path(remote_path)
+        destination_path = _validate_remote_path(self._join_remote_path(remote_path))
         destination_spec = _remote_spec(remote.name, destination_path)
         _rotate_log_file(self._config.rclone_log_path)
         command = self._build_transfer_command(

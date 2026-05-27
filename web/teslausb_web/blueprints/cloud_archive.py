@@ -42,12 +42,14 @@ from teslausb_web.services.cloud_archive.settings import (
     CLOUD_MIN_RETENTION_DAYS_MIN,
     CLOUD_RESERVE_GB_MAX,
     CLOUD_RESERVE_GB_MIN,
+    _read_auto_sync_enabled_setting,
     _read_bwlimit_kbps_setting,
     _read_cloud_auto_cleanup_setting,
     _read_cloud_min_retention_days_setting,
     _read_cloud_reserve_gb_setting,
     _read_keep_clips_until_synced_setting,
     _read_priority_order_setting,
+    _read_remote_path_setting,
     _read_retry_max_attempts_setting,
     _read_sync_folders_setting,
     _read_sync_recent_with_telemetry_setting,
@@ -84,18 +86,6 @@ _DEFAULT_STATUS_CACHE_TTL_SECONDS: Final[float] = 10.0
 _DEFAULT_REMOTE_PATH: Final[str] = ""
 _ALLOWED_EVENT_FOLDERS: Final[frozenset[str]] = frozenset(
     {"RecentClips", "SavedClips", "SentryClips"}
-)
-_UNSUPPORTED_SETTINGS_MESSAGE: Final[str] = (
-    "Cloud archive settings updates are not supported in B-1 Phase 5.14d"
-)
-_UNSUPPORTED_REMOTE_MUTATION_MESSAGE: Final[str] = (
-    "Remote folder mutations are not supported in B-1 Phase 5.14d"
-)
-_UNSUPPORTED_BANDWIDTH_MESSAGE: Final[str] = (
-    "Bandwidth test routes are not supported in B-1 Phase 5.14d"
-)
-_UNSUPPORTED_ARCHIVE_CLEANUP_MESSAGE: Final[str] = (
-    "Archive cleanup is not exposed by the B-1 cloud archive services"
 )
 _OAUTH_PROVIDER_SESSION_KEY: Final[str] = "cloud_archive_provider"
 _OAUTH_SESSION_ID_SESSION_KEY: Final[str] = "cloud_archive_oauth_session_id"
@@ -455,6 +445,8 @@ def _page_context() -> _CloudArchivePageContext:
     live_cloud_auto_cleanup: bool = archive_service.config.cloud_auto_cleanup
     live_cloud_min_retention_days: int = archive_service.config.cloud_min_retention_days
     live_keep_clips_until_synced: bool = archive_service.config.keep_clips_until_synced
+    live_auto_sync_enabled: bool = archive_service.is_auto_sync_enabled()
+    live_remote_path: str = ""
     try:
         credentials = oauth_service.load_credentials()
         sync_status = archive_service.get_sync_status()
@@ -488,6 +480,12 @@ def _page_context() -> _CloudArchivePageContext:
             live_keep_clips_until_synced = _read_keep_clips_until_synced_setting(
                 archive_service.config, connection
             )
+            live_auto_sync_enabled = _read_auto_sync_enabled_setting(
+                archive_service.config, connection
+            )
+            live_remote_path = _read_remote_path_setting(
+                archive_service.config, connection
+            )
     except (
         CloudArchiveConfigError,
         CloudArchiveDBError,
@@ -507,11 +505,11 @@ def _page_context() -> _CloudArchivePageContext:
         provider="" if credentials is None else credentials.provider,
         provider_connected=credentials is not None,
         token_expiry=None if credentials is None else credentials.expires_at,
-        sync_enabled=cfg.features.cloud_archive_enabled,
+        sync_enabled=live_auto_sync_enabled,
         sync_folders=tuple(live_sync_folders),
         priority_order=tuple(live_priority),
         max_upload_mbps=max(0, live_bwlimit_kbps // 1024),
-        remote_path=_DEFAULT_REMOTE_PATH,
+        remote_path=live_remote_path,
         cloud_reserve_gb=live_cloud_reserve_gb,
         cloud_auto_cleanup=live_cloud_auto_cleanup,
         cloud_min_retention_days=live_cloud_min_retention_days,
@@ -522,10 +520,6 @@ def _page_context() -> _CloudArchivePageContext:
         providers=oauth_service.supported_providers(),
         pending_authorization=_pending_authorization_dict(oauth_service),
     )
-
-
-def _unsupported_mutation(message: str) -> ResponseReturnValue:
-    return _cloud_response(success=False, message=message, status=HTTPStatus.NOT_IMPLEMENTED)
 
 
 @cloud_archive_bp.before_request
@@ -844,9 +838,13 @@ def api_storage_usage() -> ResponseReturnValue:
         stats: RcloneStats = _get_rclone_service().get_stats(_request_str("path"))
     except (RcloneConfigError, ValueError) as exc:
         return _handle_request_error(exc)
-    except (OAuthError, RcloneError, RuntimeError):
-        return jsonify({}), HTTPStatus.INTERNAL_SERVER_ERROR
-    return jsonify(_json_ready(asdict(stats)))
+    except (OAuthError, RcloneError, RuntimeError) as exc:
+        logger.debug("cloud storage_usage unavailable: %s", exc)
+        return jsonify({"available": False, "reason": str(exc)})
+    payload = _json_ready(asdict(stats))
+    if isinstance(payload, dict):
+        payload["available"] = True
+    return jsonify(payload)
 
 
 @cloud_archive_bp.route("/api/browse")
@@ -864,17 +862,68 @@ def api_browse_folders() -> ResponseReturnValue:
 
 @cloud_archive_bp.route("/api/mkdir", methods=["POST"])
 def api_create_folder() -> ResponseReturnValue:
-    return _unsupported_mutation(_UNSUPPORTED_REMOTE_MUTATION_MESSAGE)
+    path = _request_str("path")
+    if not path:
+        return jsonify({"success": False, "message": "Missing path."}), HTTPStatus.BAD_REQUEST
+    try:
+        _get_rclone_service().mkdir(path)
+    except (RcloneConfigError, ValueError) as exc:
+        return _handle_request_error(exc)
+    except (OAuthError, RcloneError, RuntimeError) as exc:
+        return _handle_service_error(exc)
+    _invalidate_caches(current_app)
+    return jsonify({"success": True, "message": f"Created {path}", "path": path})
 
 
 @cloud_archive_bp.route("/api/set_remote_path", methods=["POST"])
 def api_set_remote_path() -> ResponseReturnValue:
-    return _unsupported_mutation(_UNSUPPORTED_REMOTE_MUTATION_MESSAGE)
+    raw_path = _request_str("path")
+    cleaned = raw_path.strip().replace("\\", "/").strip("/")
+    if not cleaned and raw_path.strip():
+        return (
+            jsonify({"success": False, "message": "Invalid path."}),
+            HTTPStatus.BAD_REQUEST,
+        )
+    try:
+        _get_archive_service().update_settings(remote_path=cleaned)
+    except CloudArchiveConfigError as exc:
+        return _handle_request_error(exc)
+    except (CloudArchiveDBError, CloudArchiveError, RuntimeError) as exc:
+        return _handle_service_error(exc)
+    _invalidate_caches(current_app)
+    return jsonify({"success": True, "message": "Remote folder updated.", "path": cleaned})
 
 
 @cloud_archive_bp.route("/api/toggle_sync", methods=["POST"])
 def api_toggle_sync() -> ResponseReturnValue:
-    return _unsupported_mutation(_UNSUPPORTED_SETTINGS_MESSAGE)
+    payload = _json_payload()
+    raw = payload.get("enabled") if isinstance(payload, dict) else None
+    if raw is None:
+        raw = request.form.get("enabled")
+    if isinstance(raw, bool):
+        enabled = raw
+    elif isinstance(raw, str):
+        enabled = raw.strip().lower() in {"1", "true", "yes", "on"}
+    elif isinstance(raw, (int, float)):
+        enabled = bool(raw)
+    else:
+        return (
+            jsonify({"success": False, "message": "Missing 'enabled' flag."}),
+            HTTPStatus.BAD_REQUEST,
+        )
+    try:
+        service = _get_archive_service()
+        service.update_settings(enabled=enabled)
+    except CloudArchiveConfigError as exc:
+        return _handle_request_error(exc)
+    except (CloudArchiveDBError, CloudArchiveError, RuntimeError) as exc:
+        return _handle_service_error(exc)
+    if enabled:
+        # Wake the worker so it can start a drain immediately rather than
+        # waiting for the polling-loop timeout.
+        service.wake()
+    _invalidate_caches(current_app)
+    return jsonify({"success": True, "enabled": enabled})
 
 
 @cloud_archive_bp.route("/api/sync_status_batch", methods=["POST"])
@@ -997,7 +1046,22 @@ def api_dead_letters_delete() -> ResponseReturnValue:
 
 @cloud_archive_bp.route("/api/archive_cleanup", methods=["POST"])
 def api_archive_cleanup() -> ResponseReturnValue:
-    return _unsupported_mutation(_UNSUPPORTED_ARCHIVE_CLEANUP_MESSAGE)
+    from teslausb_web.services.cloud_archive.cloud_cleanup import run_cloud_cleanup
+
+    try:
+        result = run_cloud_cleanup(_get_archive_service())
+    except (OAuthError, RcloneError, RuntimeError) as exc:
+        return _handle_service_error(exc)
+    _invalidate_caches(current_app)
+    return jsonify(
+        {
+            "success": True,
+            "triggered": result.triggered,
+            "deleted_count": result.deleted_count,
+            "bytes_freed": result.bytes_freed,
+            "reason": result.reason,
+        }
+    )
 
 
 @cloud_archive_bp.route("/api/archive_file", methods=["POST"])
@@ -1048,17 +1112,51 @@ def api_archive_cancel() -> ResponseReturnValue:
 
 @cloud_archive_bp.route("/api/bandwidth_test", methods=["POST"])
 def api_bandwidth_test() -> ResponseReturnValue:
-    return _unsupported_mutation(_UNSUPPORTED_BANDWIDTH_MESSAGE)
+    payload = _json_payload() if request.is_json else {}
+    raw_mb = payload.get("megabytes") if isinstance(payload, dict) else None
+    try:
+        megabytes = float(raw_mb) if raw_mb is not None else 10.0
+    except (TypeError, ValueError):
+        megabytes = 10.0
+    megabytes = max(1.0, min(megabytes, 50.0))
+    sample_bytes = int(megabytes * 1024 * 1024)
+    try:
+        measurement = _get_rclone_service().measure_upload_throughput(
+            sample_bytes=sample_bytes
+        )
+    except (RcloneConfigError, ValueError) as exc:
+        return _handle_request_error(exc)
+    except (OAuthError, RcloneError, RuntimeError) as exc:
+        return _handle_service_error(exc)
+    return jsonify({"success": True, **measurement})
 
 
 @cloud_archive_bp.route("/api/bandwidth_test/status")
 def api_bandwidth_test_status() -> ResponseReturnValue:
-    return jsonify({"running": False, "supported": False})
+    return jsonify({"running": False, "supported": True})
 
 
 @cloud_archive_bp.route("/api/bandwidth_test/apply", methods=["POST"])
 def api_bandwidth_test_apply() -> ResponseReturnValue:
-    return _unsupported_mutation(_UNSUPPORTED_BANDWIDTH_MESSAGE)
+    payload = _json_payload()
+    raw = payload.get("bwlimit_kbps") if isinstance(payload, dict) else None
+    if raw is None:
+        raw = payload.get("kbps") if isinstance(payload, dict) else None
+    try:
+        kbps = int(raw)
+    except (TypeError, ValueError):
+        return (
+            jsonify({"success": False, "message": "Missing or invalid bwlimit_kbps."}),
+            HTTPStatus.BAD_REQUEST,
+        )
+    try:
+        _get_archive_service().update_settings(bwlimit_kbps=kbps)
+    except CloudArchiveConfigError as exc:
+        return _handle_request_error(exc)
+    except (CloudArchiveDBError, CloudArchiveError, RuntimeError) as exc:
+        return _handle_service_error(exc)
+    _invalidate_caches(current_app)
+    return jsonify({"success": True, "bwlimit_kbps": kbps})
 
 
 __all__ = ("cloud_archive_bp",)

@@ -27,6 +27,8 @@ KV_KEY_CLOUD_RESERVE_GB: Final[str] = "cloud_archive.cloud_reserve_gb"
 KV_KEY_CLOUD_AUTO_CLEANUP: Final[str] = "cloud_archive.cloud_auto_cleanup"
 KV_KEY_CLOUD_MIN_RETENTION_DAYS: Final[str] = "cloud_archive.cloud_min_retention_days"
 KV_KEY_KEEP_CLIPS_UNTIL_SYNCED: Final[str] = "cloud_archive.keep_clips_until_synced"
+KV_KEY_AUTO_SYNC_ENABLED: Final[str] = "cloud_archive.auto_sync_enabled"
+KV_KEY_REMOTE_PATH: Final[str] = "cloud_archive.remote_path"
 
 PERSISTED_SETTING_KEYS: Final[tuple[str, ...]] = (
     KV_KEY_SYNC_FOLDERS,
@@ -39,6 +41,8 @@ PERSISTED_SETTING_KEYS: Final[tuple[str, ...]] = (
     KV_KEY_CLOUD_AUTO_CLEANUP,
     KV_KEY_CLOUD_MIN_RETENTION_DAYS,
     KV_KEY_KEEP_CLIPS_UNTIL_SYNCED,
+    KV_KEY_AUTO_SYNC_ENABLED,
+    KV_KEY_REMOTE_PATH,
 )
 
 RETRY_MAX_ATTEMPTS_MIN: Final[int] = 1
@@ -270,6 +274,30 @@ def _read_keep_clips_until_synced_setting(
 ) -> bool:
     value = _kv_parse_bool(_kv_lookup_raw(connection, KV_KEY_KEEP_CLIPS_UNTIL_SYNCED))
     return value if value is not None else config.keep_clips_until_synced
+
+
+def _read_auto_sync_enabled_setting(
+    config: CloudArchiveConfig,
+    connection: sqlite3.Connection | None = None,
+) -> bool:
+    value = _kv_parse_bool(_kv_lookup_raw(connection, KV_KEY_AUTO_SYNC_ENABLED))
+    return value if value is not None else config.enabled
+
+
+def _read_remote_path_setting(
+    config: CloudArchiveConfig,
+    connection: sqlite3.Connection | None = None,
+) -> str:
+    raw = _kv_lookup_raw(connection, KV_KEY_REMOTE_PATH)
+    if raw is None:
+        return ""
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return ""
+    if isinstance(parsed, str):
+        return parsed.strip().replace("\\", "/").strip("/")
+    return ""
 
 
 def _read_worker_idle_seconds_setting(config: CloudArchiveConfig) -> float:

@@ -678,8 +678,9 @@ def test_api_storage_usage_returns_empty_payload_on_runtime_error(
 ) -> None:
     with patch.object(rclone_service, "get_stats", side_effect=RuntimeError("boom")):
         response = client.get("/cloud/api/storage_usage")
-    assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
-    assert response.get_json() == {}
+    assert response.status_code == HTTPStatus.OK
+    payload = response.get_json()
+    assert payload == {"available": False, "reason": "boom"}
 
 
 def test_api_browse_returns_directory_names(
@@ -709,19 +710,54 @@ def test_api_browse_rejects_invalid_path(
     assert response.get_json()["error"] == "bad path"
 
 
-def test_api_mkdir_is_not_implemented(client: FlaskClient) -> None:
-    response = client.post("/cloud/api/mkdir", headers=_XHR)
-    assert response.status_code == HTTPStatus.NOT_IMPLEMENTED
+def test_api_mkdir_rejects_missing_path(client: FlaskClient) -> None:
+    response = client.post("/cloud/api/mkdir", headers=_XHR, json={})
+    assert response.status_code == HTTPStatus.BAD_REQUEST
 
 
-def test_api_set_remote_path_is_not_implemented(client: FlaskClient) -> None:
-    response = client.post("/cloud/api/set_remote_path", headers=_XHR)
-    assert response.status_code == HTTPStatus.NOT_IMPLEMENTED
+def test_api_mkdir_invokes_rclone(
+    client: FlaskClient, rclone_service: CloudRcloneService
+) -> None:
+    with patch.object(rclone_service, "mkdir", return_value=None) as mock_mkdir:
+        response = client.post(
+            "/cloud/api/mkdir", headers=_XHR, json={"path": "MyCar/Sentry"}
+        )
+    assert response.status_code == HTTPStatus.OK
+    assert response.get_json()["path"] == "MyCar/Sentry"
+    mock_mkdir.assert_called_once_with("MyCar/Sentry")
 
 
-def test_api_toggle_sync_is_not_implemented(client: FlaskClient) -> None:
-    response = client.post("/cloud/api/toggle_sync", headers=_XHR)
-    assert response.status_code == HTTPStatus.NOT_IMPLEMENTED
+def test_api_set_remote_path_persists_value(
+    client: FlaskClient, rclone_service: CloudRcloneService
+) -> None:
+    response = client.post(
+        "/cloud/api/set_remote_path", headers=_XHR, json={"path": " MyCar/Sentry/ "}
+    )
+    assert response.status_code == HTTPStatus.OK
+    payload = response.get_json()
+    assert payload["success"] is True
+    assert payload["path"] == "MyCar/Sentry"
+
+
+def test_api_toggle_sync_requires_enabled_flag(client: FlaskClient) -> None:
+    response = client.post("/cloud/api/toggle_sync", headers=_XHR, json={})
+    assert response.status_code == HTTPStatus.BAD_REQUEST
+
+
+def test_api_toggle_sync_updates_state(client: FlaskClient, app: Flask) -> None:
+    response = client.post(
+        "/cloud/api/toggle_sync", headers=_XHR, json={"enabled": False}
+    )
+    assert response.status_code == HTTPStatus.OK
+    payload = response.get_json()
+    assert payload["enabled"] is False
+    service = app.extensions["cloud_archive_service"]
+    assert service.is_auto_sync_enabled() is False
+    response = client.post(
+        "/cloud/api/toggle_sync", headers=_XHR, json={"enabled": True}
+    )
+    assert response.status_code == HTTPStatus.OK
+    assert service.is_auto_sync_enabled() is True
 
 
 def test_api_sync_status_batch_returns_statuses(client: FlaskClient, app: Flask) -> None:
@@ -873,9 +909,27 @@ def test_api_dead_letters_delete_supports_delete_method(
     invalidator.schedule.assert_called_once_with()
 
 
-def test_api_archive_cleanup_is_not_implemented(client: FlaskClient) -> None:
+def test_api_archive_cleanup_runs_cleanup(
+    client: FlaskClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from teslausb_web.services.cloud_archive import cloud_cleanup as cc
+
+    def _fake(_service: object) -> cc.CloudCleanupResult:
+        return cc.CloudCleanupResult(
+            triggered=True, deleted_count=3, bytes_freed=4096, reason="ok"
+        )
+
+    monkeypatch.setattr(cc, "run_cloud_cleanup", _fake)
     response = client.post("/cloud/api/archive_cleanup", headers=_XHR)
-    assert response.status_code == HTTPStatus.NOT_IMPLEMENTED
+    assert response.status_code == HTTPStatus.OK
+    body = response.get_json()
+    assert body == {
+        "success": True,
+        "triggered": True,
+        "deleted_count": 3,
+        "bytes_freed": 4096,
+        "reason": "ok",
+    }
 
 
 def test_api_archive_file_transfers_event_and_invalidates(
@@ -948,17 +1002,51 @@ def test_api_archive_cancel_invalidates_when_transfer_cancelled(
     invalidator.schedule.assert_called_once_with()
 
 
-def test_api_bandwidth_test_is_not_implemented(client: FlaskClient) -> None:
-    response = client.post("/cloud/api/bandwidth_test", headers=_XHR)
-    assert response.status_code == HTTPStatus.NOT_IMPLEMENTED
+def test_api_bandwidth_test_returns_measurement(
+    client: FlaskClient, monkeypatch: pytest.MonkeyPatch, app: Flask
+) -> None:
+    rclone = app.extensions["cloud_rclone_service"]
+    monkeypatch.setattr(
+        rclone,
+        "measure_upload_throughput",
+        lambda *, sample_bytes: {
+            "bytes": sample_bytes,
+            "elapsed_seconds": 1.0,
+            "kbps": (sample_bytes * 8) / 1000.0,
+            "suggested_bwlimit_kbps": int((sample_bytes * 8) / 1000.0 * 0.8),
+        },
+        raising=False,
+    )
+    response = client.post(
+        "/cloud/api/bandwidth_test",
+        json={"megabytes": 1},
+        headers=_XHR,
+    )
+    assert response.status_code == HTTPStatus.OK
+    body = response.get_json()
+    assert body["success"] is True
+    assert body["bytes"] == 1024 * 1024
+    assert body["kbps"] > 0
 
 
-def test_api_bandwidth_test_status_returns_supported_false(client: FlaskClient) -> None:
+def test_api_bandwidth_test_status_returns_supported_true(client: FlaskClient) -> None:
     response = client.get("/cloud/api/bandwidth_test/status")
     assert response.status_code == HTTPStatus.OK
-    assert response.get_json() == {"running": False, "supported": False}
+    assert response.get_json() == {"running": False, "supported": True}
 
 
-def test_api_bandwidth_test_apply_is_not_implemented(client: FlaskClient) -> None:
-    response = client.post("/cloud/api/bandwidth_test/apply", headers=_XHR)
-    assert response.status_code == HTTPStatus.NOT_IMPLEMENTED
+def test_api_bandwidth_test_apply_rejects_missing_kbps(client: FlaskClient) -> None:
+    response = client.post("/cloud/api/bandwidth_test/apply", json={}, headers=_XHR)
+    assert response.status_code == HTTPStatus.BAD_REQUEST
+
+
+def test_api_bandwidth_test_apply_persists_value(
+    client: FlaskClient, archive_service: CloudArchiveService
+) -> None:
+    response = client.post(
+        "/cloud/api/bandwidth_test/apply",
+        json={"bwlimit_kbps": 2048},
+        headers=_XHR,
+    )
+    assert response.status_code == HTTPStatus.OK
+    assert response.get_json() == {"success": True, "bwlimit_kbps": 2048}

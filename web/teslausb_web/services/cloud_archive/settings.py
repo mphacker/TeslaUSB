@@ -71,7 +71,7 @@ class CloudArchiveConfig:
     backoff_max_seconds: float = DEFAULT_BACKOFF_MAX_SECONDS
     max_retry_attempts: int = 5
     wifi_check_required: bool = True
-    priority_folders: tuple[str, ...] = ("SavedClips", "SentryClips")
+    priority_folders: tuple[str, ...] = ("SavedClips", "SentryClips", "RecentClips")
     sync_folders: tuple[str, ...] = ("SavedClips", "SentryClips", "RecentClips")
     dead_letter_max_age_days: int = 30
     sync_non_event: bool = False
@@ -160,7 +160,14 @@ def _read_priority_order_setting(
     connection: sqlite3.Connection | None = None,
 ) -> tuple[str, ...]:
     value = _kv_parse_str_tuple(_kv_lookup_raw(connection, KV_KEY_PRIORITY_FOLDERS))
-    return value if value is not None else config.priority_folders
+    base = value if value is not None else config.priority_folders
+    # Ensure every valid sync folder has a position; append any newly-added
+    # folders (e.g. RecentClips on devices that saved priority before it
+    # existed) at the end so the UI always shows the full priority list.
+    from teslausb_web.services.cloud_archive.paths import VALID_SYNC_FOLDERS
+
+    missing = tuple(f for f in VALID_SYNC_FOLDERS if f not in base)
+    return base + missing if missing else base
 
 
 def _read_retry_max_attempts_setting(

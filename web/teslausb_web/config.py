@@ -170,6 +170,7 @@ _DEFAULT_CLOUD_WIFI_CHECK_REQUIRED: Final[bool] = True
 _DEFAULT_CLOUD_PRIORITY_FOLDERS: Final[tuple[str, ...]] = (
     "SentryClips",
     "SavedClips",
+    "RecentClips",
 )
 _DEFAULT_CLOUD_SYNC_FOLDERS: Final[tuple[str, ...]] = (
     "SentryClips",

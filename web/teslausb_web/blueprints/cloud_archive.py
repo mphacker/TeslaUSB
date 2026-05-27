@@ -39,7 +39,6 @@ from teslausb_web.services.cloud_archive.settings import (
     _read_priority_order_setting,
     _read_retry_max_attempts_setting,
     _read_sync_folders_setting,
-    _read_sync_non_event_setting,
     _read_sync_recent_with_telemetry_setting,
 )
 from teslausb_web.services.cloud_oauth_service import (
@@ -117,7 +116,6 @@ class _CloudArchivePageContext:
     max_upload_mbps: int
     remote_path: str
     cloud_reserve_gb: int
-    sync_non_event_videos: bool
     cloud_auto_cleanup: bool
     cloud_min_retention_days: int
     cloud_retry_max_attempts: int
@@ -439,7 +437,6 @@ def _page_context() -> _CloudArchivePageContext:
     sync_history: tuple[SyncHistoryEntry, ...] = ()
     live_sync_folders: tuple[str, ...] = tuple(archive_service.config.sync_folders)
     live_priority: tuple[str, ...] = tuple(archive_service.config.priority_folders)
-    live_sync_non_event: bool = archive_service.config.sync_non_event
     live_retry_max: int = archive_service.config.max_retry_attempts
     live_recent_telemetry: bool = archive_service.config.sync_recent_with_telemetry
     try:
@@ -452,9 +449,6 @@ def _page_context() -> _CloudArchivePageContext:
                 archive_service.config, connection
             )
             live_priority = _read_priority_order_setting(
-                archive_service.config, connection
-            )
-            live_sync_non_event = _read_sync_non_event_setting(
                 archive_service.config, connection
             )
             live_retry_max = _read_retry_max_attempts_setting(
@@ -488,7 +482,6 @@ def _page_context() -> _CloudArchivePageContext:
         max_upload_mbps=max(0, cfg.cloud.bwlimit_kbps // 1024),
         remote_path=_DEFAULT_REMOTE_PATH,
         cloud_reserve_gb=0,
-        sync_non_event_videos=live_sync_non_event,
         cloud_auto_cleanup=False,
         cloud_min_retention_days=0,
         cloud_retry_max_attempts=live_retry_max,
@@ -538,7 +531,6 @@ def save_settings() -> ResponseReturnValue:
             if folder and folder in VALID_SYNC_FOLDERS and folder not in priority_folders:
                 priority_folders.append(folder)
 
-    sync_non_event = bool(request.form.get("sync_non_event_videos"))
     sync_recent_with_telemetry = bool(request.form.get("sync_recent_with_telemetry"))
 
     retry_raw = (request.form.get("cloud_retry_max_attempts") or "").strip()
@@ -557,7 +549,7 @@ def save_settings() -> ResponseReturnValue:
         archive_service.update_settings(
             sync_folders=tuple(selected_folders),
             priority_folders=tuple(priority_folders) if priority_folders else None,
-            sync_non_event=sync_non_event,
+            sync_non_event=False,
             sync_recent_with_telemetry=sync_recent_with_telemetry,
             max_retry_attempts=retry_max_attempts,
         )

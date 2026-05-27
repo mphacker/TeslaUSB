@@ -62,7 +62,11 @@ def test_kv_overrides_take_precedence_over_config_defaults(tmp_path: Path) -> No
             "RecentClips",
             "SavedClips",
         )
-        assert _read_priority_order_setting(config, connection) == ("SavedClips",)
+        assert _read_priority_order_setting(config, connection) == (
+            "SavedClips",
+            "SentryClips",
+            "RecentClips",
+        )
         assert _read_sync_non_event_setting(config, connection) is True
         assert _read_retry_max_attempts_setting(config, connection) == 12
         assert _read_sync_recent_with_telemetry_setting(config, connection) is True
@@ -75,7 +79,11 @@ def test_kv_missing_falls_back_to_config_defaults(tmp_path: Path) -> None:
     connection = _make_connection()
     try:
         assert _read_sync_folders_setting(config, connection) == config.sync_folders
-        assert _read_priority_order_setting(config, connection) == config.priority_folders
+        assert _read_priority_order_setting(config, connection) == (
+            "SentryClips",
+            "SavedClips",
+            "RecentClips",
+        )
         assert _read_sync_non_event_setting(config, connection) is False
         assert _read_retry_max_attempts_setting(config, connection) == 5
         assert _read_sync_recent_with_telemetry_setting(config, connection) is False

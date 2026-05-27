@@ -342,7 +342,6 @@ def test_save_settings_persists_and_redirects(
         data={
             "sync_folders": ["SentryClips", "SavedClips"],
             "priority_order": "SavedClips,SentryClips",
-            "sync_non_event_videos": "on",
             "sync_recent_with_telemetry": "1",
             "cloud_retry_max_attempts": "7",
         },
@@ -362,8 +361,8 @@ def test_save_settings_persists_and_redirects(
         )
         assert _read_priority_order_setting(
             archive_service.config, connection
-        ) == ("SavedClips", "SentryClips")
-        assert _read_sync_non_event_setting(archive_service.config, connection) is True
+        ) == ("SavedClips", "SentryClips", "RecentClips")
+        assert _read_sync_non_event_setting(archive_service.config, connection) is False
         assert (
             _read_sync_recent_with_telemetry_setting(archive_service.config, connection)
             is True

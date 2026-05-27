@@ -555,10 +555,6 @@
 
                 {# Advanced sync options #}
                 <div style="margin-bottom: var(--space-3);">
-                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer; margin-bottom:8px">
-                        <input type="checkbox" name="sync_non_event_videos" {% if sync_non_event_videos %}checked{% endif %}>
-                        <span>Sync event folders even without events or geolocation</span>
-                    </label>
                     <label style="display:flex; align-items:center; gap:8px; cursor:not-allowed; margin-bottom:8px; opacity:0.55">
                         <input type="checkbox" name="cloud_auto_cleanup" {% if cloud_auto_cleanup %}checked{% endif %} disabled>
                         <span>Auto-delete old cloud videos when storage is low <em style="color: var(--text-muted); font-weight:400">(coming soon)</em></span>

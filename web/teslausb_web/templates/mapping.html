@@ -2685,13 +2685,21 @@ function openVideoOverlay(waypoint, clickPoint, routeWps, tripId) {
         video.removeEventListener('loadedmetadata', onLoad);
     });
 
-    // Handle video load error — file may no longer exist on disk.
+    // Handle video load error — file may no longer exist on disk, OR the
+    // browser aborted/timed-out a Range request mid-stream (common on
+    // flaky Wi-Fi to the Pi). We try a HEAD probe to disambiguate; if the
+    // server can still serve the file we silently reassign video.src once
+    // before bothering the operator with a toast — most transient stream
+    // errors recover cleanly on a fresh request.
+    //
     // NOTE: check the raw src ATTRIBUTE, not the .src property. The property
     // resolves an empty/missing attribute against the document base URL
     // (e.g. https://host/mapping), which is non-empty and would slip past a
     // .src-based guard, surfacing a false "video not found" toast when the
     // overlay is closed or the element is detached mid-load.
-    video.addEventListener('error', function onError() {
+    let videoErrorRetries = 0;
+    const VIDEO_ERROR_MAX_RETRIES = 1;
+    function onVideoError() {
         const rawSrc = video.getAttribute('src');
         if (!rawSrc) return;
         // HEAD-probe the URL so we can tell "file truly gone" (404) from
@@ -2699,6 +2707,25 @@ function openVideoOverlay(waypoint, clickPoint, routeWps, tripId) {
         // "Tesla may have overwritten it" on every error is misleading.
         fetch(rawSrc, { method: 'HEAD', cache: 'no-store' })
             .then(function (resp) {
+                if (resp.ok && videoErrorRetries < VIDEO_ERROR_MAX_RETRIES) {
+                    // Server can still serve it — the browser just aborted
+                    // a Range request mid-stream. Retry silently once by
+                    // forcing a fresh load on the same URL.
+                    videoErrorRetries++;
+                    video.addEventListener('error', onVideoError, { once: true });
+                    try { video.pause(); } catch (e) { /* ignore */ }
+                    video.removeAttribute('src');
+                    video.load();
+                    // Small backoff so the failed TCP connection is fully
+                    // torn down before we reissue the same Range.
+                    setTimeout(function () {
+                        if (video.isConnected) {
+                            video.src = rawSrc;
+                            video.load();
+                        }
+                    }, 250);
+                    return;
+                }
                 if (typeof showToast !== 'function') return;
                 if (resp.status === 404) {
                     showToast('Video file not found — Tesla may have overwritten it.', 'warning');
@@ -2715,7 +2742,8 @@ function openVideoOverlay(waypoint, clickPoint, routeWps, tripId) {
                     showToast('Network error loading video. Check the connection and try again.', 'warning');
                 }
             });
-    }, { once: true });
+    }
+    video.addEventListener('error', onVideoError, { once: true });
 
     // Live telemetry: timeupdate fires when scrubbed/paused; rAF drives
     // smooth interpolation while playing.

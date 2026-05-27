@@ -24,6 +24,7 @@ from teslausb_web.services.cloud_archive.settings import (
     _read_priority_order_setting,
     _read_sync_folders_setting,
     _read_sync_non_event_setting,
+    _read_sync_recent_with_telemetry_setting,
 )
 
 logger = logging.getLogger(__name__)
@@ -118,12 +119,46 @@ def _is_path_skipped(connection: sqlite3.Connection | None, relative_path: str) 
     return row is not None
 
 
+def _discover_recent_telemetry_candidates(
+    recent_folder: Path,
+    geo_hits: frozenset[str],
+    connection: sqlite3.Connection | None,
+) -> list[EventCandidate]:
+    candidates: list[EventCandidate] = []
+    if not recent_folder.is_dir():
+        return candidates
+    for child in sorted(recent_folder.iterdir()):
+        if not child.is_file() or child.suffix.lower() not in {".mp4", ".ts"}:
+            continue
+        name = child.name
+        timestamp_match = _TIMESTAMP_RE.match(name)
+        timestamp_key = timestamp_match.group(0) if timestamp_match is not None else None
+        if name not in geo_hits and (timestamp_key is None or timestamp_key not in geo_hits):
+            continue
+        relative_path = canonical_cloud_path(f"RecentClips/{name}")
+        if _is_path_skipped(connection, relative_path):
+            continue
+        try:
+            size_bytes = child.stat().st_size
+        except OSError:
+            continue
+        candidates.append(
+            EventCandidate(
+                local_path=child,
+                relative_path=relative_path,
+                size_bytes=size_bytes,
+                score=100,
+            )
+        )
+    return candidates
+
+
 def _discover_events(
     config: CloudArchiveConfig,
     connection: sqlite3.Connection | None = None,
 ) -> tuple[EventCandidate, ...]:
-    sync_folders = _normalize_folder_list(_read_sync_folders_setting(config))
-    priority_order = _normalize_folder_list(_read_priority_order_setting(config))
+    sync_folders = _normalize_folder_list(_read_sync_folders_setting(config, connection))
+    priority_order = _normalize_folder_list(_read_priority_order_setting(config, connection))
     geo_hits = _load_geo_hits(config.mapping_db_path)
     candidates: list[EventCandidate] = []
     for folder in sync_folders:
@@ -151,7 +186,17 @@ def _discover_events(
                     score=_score_event_priority(child, geo_hits),
                 )
             )
-    if not _read_sync_non_event_setting(config):
+    if (
+        "RecentClips" in sync_folders
+        and _read_sync_recent_with_telemetry_setting(config, connection)
+        and geo_hits is not None
+    ):
+        candidates.extend(
+            _discover_recent_telemetry_candidates(
+                config.teslacam_path / "RecentClips", geo_hits, connection
+            )
+        )
+    if not _read_sync_non_event_setting(config, connection):
         candidates = [
             candidate for candidate in candidates if candidate.score < _SYNC_NON_EVENT_SCORE_LIMIT
         ]

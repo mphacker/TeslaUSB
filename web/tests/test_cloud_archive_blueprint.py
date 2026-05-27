@@ -334,10 +334,43 @@ def test_mode_awareness_strings_are_absent_from_blueprint() -> None:
         assert forbidden not in source
 
 
-def test_save_settings_returns_not_implemented_json(client: FlaskClient) -> None:
-    response = client.post("/cloud/settings", headers=_XHR)
-    assert response.status_code == HTTPStatus.NOT_IMPLEMENTED
-    assert "not supported" in response.get_json()["message"]
+def test_save_settings_persists_and_redirects(
+    client: FlaskClient, archive_service: CloudArchiveService
+) -> None:
+    response = client.post(
+        "/cloud/settings",
+        data={
+            "sync_folders": ["SentryClips", "SavedClips"],
+            "priority_order": "SavedClips,SentryClips",
+            "sync_non_event_videos": "on",
+            "sync_recent_with_telemetry": "1",
+            "cloud_retry_max_attempts": "7",
+        },
+    )
+    assert response.status_code in (HTTPStatus.FOUND, HTTPStatus.SEE_OTHER)
+    with archive_service.open_db() as connection:
+        from teslausb_web.services.cloud_archive.settings import (
+            _read_priority_order_setting,
+            _read_retry_max_attempts_setting,
+            _read_sync_folders_setting,
+            _read_sync_non_event_setting,
+            _read_sync_recent_with_telemetry_setting,
+        )
+
+        assert "RecentClips" in _read_sync_folders_setting(
+            archive_service.config, connection
+        )
+        assert _read_priority_order_setting(
+            archive_service.config, connection
+        ) == ("SavedClips", "SentryClips")
+        assert _read_sync_non_event_setting(archive_service.config, connection) is True
+        assert (
+            _read_sync_recent_with_telemetry_setting(archive_service.config, connection)
+            is True
+        )
+        assert (
+            _read_retry_max_attempts_setting(archive_service.config, connection) == 7
+        )
 
 
 def test_api_sync_now_success_invalidates_once(

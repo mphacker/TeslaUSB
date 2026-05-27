@@ -6,6 +6,10 @@ import time
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
+from teslausb_web.services.cloud_archive.paths import (
+    VALID_SYNC_FOLDERS,
+    _normalize_folder_list,
+)
 from teslausb_web.services.cloud_archive.pipeline import (
     ShadowTelemetry,
     enqueue_live_event_from_event_json,
@@ -21,7 +25,16 @@ from teslausb_web.services.cloud_archive.queue_ops import (
     retry_dead_letter,
 )
 from teslausb_web.services.cloud_archive.settings import (
+    KV_KEY_MAX_RETRY_ATTEMPTS,
+    KV_KEY_PRIORITY_FOLDERS,
+    KV_KEY_SYNC_FOLDERS,
+    KV_KEY_SYNC_NON_EVENT,
+    KV_KEY_SYNC_RECENT_WITH_TELEMETRY,
+    RETRY_MAX_ATTEMPTS_MAX,
+    RETRY_MAX_ATTEMPTS_MIN,
     CloudArchiveConfig,
+    CloudArchiveConfigError,
+    _write_setting,
     make_cloud_archive_config,
 )
 from teslausb_web.services.cloud_archive.worker import CloudArchiveWorker, WorkerState
@@ -163,6 +176,53 @@ class CloudArchiveService:
 
     def delete_dead_letter(self, file_path: str | None = None) -> int:
         return delete_dead_letter(self.config, file_path)
+
+    def update_settings(
+        self,
+        *,
+        sync_folders: tuple[str, ...] | None = None,
+        priority_folders: tuple[str, ...] | None = None,
+        sync_non_event: bool | None = None,
+        max_retry_attempts: int | None = None,
+        sync_recent_with_telemetry: bool | None = None,
+    ) -> None:
+        """Persist runtime overrides for user-tunable cloud archive settings."""
+
+        updates: list[tuple[str, object]] = []
+        if sync_folders is not None:
+            normalized = _normalize_folder_list(sync_folders)
+            updates.append((KV_KEY_SYNC_FOLDERS, list(normalized)))
+        if priority_folders is not None:
+            normalized = _normalize_folder_list(priority_folders)
+            for folder in normalized:
+                if folder not in VALID_SYNC_FOLDERS:
+                    raise CloudArchiveConfigError(
+                        f"unknown folder in priority list: {folder!r}"
+                    )
+            updates.append((KV_KEY_PRIORITY_FOLDERS, list(normalized)))
+        if sync_non_event is not None:
+            updates.append((KV_KEY_SYNC_NON_EVENT, bool(sync_non_event)))
+        if max_retry_attempts is not None:
+            if not (
+                RETRY_MAX_ATTEMPTS_MIN
+                <= int(max_retry_attempts)
+                <= RETRY_MAX_ATTEMPTS_MAX
+            ):
+                raise CloudArchiveConfigError(
+                    f"max_retry_attempts must be within "
+                    f"{RETRY_MAX_ATTEMPTS_MIN}..{RETRY_MAX_ATTEMPTS_MAX}"
+                )
+            updates.append((KV_KEY_MAX_RETRY_ATTEMPTS, int(max_retry_attempts)))
+        if sync_recent_with_telemetry is not None:
+            updates.append(
+                (KV_KEY_SYNC_RECENT_WITH_TELEMETRY, bool(sync_recent_with_telemetry))
+            )
+        if not updates:
+            return
+        with self.open_db() as connection:
+            for key, value in updates:
+                _write_setting(connection, key, value)
+            connection.commit()
 
     def enqueue_live_event_from_event_json(self, event_json_paths: Sequence[str]) -> int:
         return enqueue_live_event_from_event_json(self.config, self.state, event_json_paths)

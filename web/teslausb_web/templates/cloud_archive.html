@@ -438,7 +438,8 @@
                 <strong style="color: var(--text-primary);">How sync works:</strong>
                 <ul style="margin: 6px 0 0; padding-left: 18px;">
                     <li><strong>Automatic:</strong> Starts syncing whenever WiFi connects</li>
-                    <li><strong>Events:</strong> Syncs Sentry and Saved event folders (RecentClips itself is skipped because Tesla rotates it hourly)</li>
+                    <li><strong>Events:</strong> Syncs Sentry and Saved event folders by default</li>
+                    <li><strong>Recent (telemetry):</strong> Optionally syncs RecentClips files when the vehicle was moving (GPS/SEI data was recorded for the clip)</li>
                     <li><strong>Oldest first:</strong> Within each folder, preserves the most at-risk clips first</li>
                     <li><strong>Skip existing:</strong> Files already on cloud storage are never re-uploaded</li>
                     <li><strong>Manual:</strong> Click &ldquo;Sync Now&rdquo; at any time</li>
@@ -471,6 +472,16 @@
                             </span>
                         </label>
                         {% endfor %}
+                        <label style="display: flex; align-items: flex-start; gap: var(--space-2); padding: 8px; border-radius: var(--radius-md); cursor: pointer; transition: background var(--transition-fast);"
+                               onmouseover="this.style.background='var(--bg-hover)'" onmouseout="this.style.background='transparent'">
+                            <input type="checkbox" name="sync_recent_with_telemetry" value="1"
+                                   {% if sync_recent_with_telemetry %}checked{% endif %}
+                                   style="width: 18px; height: 18px; cursor: pointer; accent-color: var(--btn-success-bg); margin-top: 2px;">
+                            <span style="display: flex; flex-direction: column; gap: 2px;">
+                                <span style="color: var(--text-primary); font-size: 15px; font-weight: 500;">RecentClips (only clips with GPS/SEI data)</span>
+                                <span style="color: var(--text-muted); font-size: var(--text-xs);">Sync continuous-recording clips when the vehicle was moving or generated telemetry — clips with no recorded waypoints are skipped.</span>
+                            </span>
+                        </label>
                     </div>
                 </div>
 
@@ -498,37 +509,29 @@
                            value="{{ priority_order|join(',') }}">
                 </div>
 
-                {# Bandwidth limit #}
-                <div style="margin-bottom: var(--space-4);">
+                {# Bandwidth limit — UI only, no backend wiring yet. #}
+                <div style="margin-bottom: var(--space-4); opacity: 0.55;">
                     <label for="bwSlider" style="display: block; margin-bottom: var(--space-2); font-weight: 600; color: var(--text-primary);">
                         Bandwidth limit: <span id="bwValue" style="font-weight: 400;">{{ max_upload_mbps }} Mbps</span>
                     </label>
                     <div style="display:flex; align-items:center; gap:12px;">
                         <input type="range" id="bwSlider" name="max_upload_mbps"
-                               min="1" max="50" step="1" value="{{ max_upload_mbps }}"
-                               oninput="document.getElementById('bwValue').textContent = this.value + ' Mbps'"
-                               style="flex:1; max-width: 360px; cursor: pointer; accent-color: var(--btn-primary-bg);">
-                        <button type="button" onclick="runBandwidthTest()" id="bwTestBtn"
-                                class="btn btn-secondary" style="padding:6px 12px; font-size:0.8rem; white-space:nowrap;">
-                            Auto-Detect
-                        </button>
+                               min="1" max="50" step="1" value="{{ max_upload_mbps }}" disabled
+                               style="flex:1; max-width: 360px; cursor: not-allowed; accent-color: var(--btn-primary-bg);">
                     </div>
-                    <div style="display: flex; justify-content: space-between; max-width: 360px; font-size: var(--text-xs); color: var(--text-muted);">
-                        <span>1 Mbps</span>
-                        <span>50 Mbps</span>
-                    </div>
-                    <div id="bwTestResults" style="display:none; margin-top:8px; padding:10px; background:var(--bg-secondary); border-radius:8px; font-size:0.85rem;">
-                    </div>
+                    <p style="font-size: var(--text-xs); color: var(--text-muted); margin:4px 0 0">
+                        Coming soon &mdash; bandwidth shaping is configured via <code>[cloud] bwlimit_kbps</code> in <code>teslausb-web.toml</code> for now.
+                    </p>
                 </div>
 
-                {# Cloud storage reserve #}
-                <div style="margin-bottom: var(--space-4);">
+                {# Cloud storage reserve — UI only, no backend wiring yet. #}
+                <div style="margin-bottom: var(--space-4); opacity: 0.55;">
                     <label style="display: block; margin-bottom: var(--space-2); font-weight: 600; color: var(--text-primary);">
                         Cloud storage reserve (GB)
                     </label>
-                    <input type="number" name="cloud_reserve_gb" value="{{ cloud_reserve_gb }}" min="0" max="100" step="0.5"
-                           style="width:120px; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary);">
-                    <p style="font-size: var(--text-xs); color: var(--text-muted); margin:4px 0 0">Keep this much free on cloud — sync stops before filling to 100%.</p>
+                    <input type="number" name="cloud_reserve_gb" value="{{ cloud_reserve_gb }}" min="0" max="100" step="0.5" disabled
+                           style="width:120px; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary); cursor: not-allowed;">
+                    <p style="font-size: var(--text-xs); color: var(--text-muted); margin:4px 0 0">Coming soon &mdash; reserve enforcement is not implemented yet.</p>
                 </div>
 
                 {# Phase 2.6 — bulk cloud sync retry cap. Default 5,
@@ -554,11 +557,11 @@
                 <div style="margin-bottom: var(--space-3);">
                     <label style="display:flex; align-items:center; gap:8px; cursor:pointer; margin-bottom:8px">
                         <input type="checkbox" name="sync_non_event_videos" {% if sync_non_event_videos %}checked{% endif %}>
-                        <span>Sync videos without events or geolocation</span>
+                        <span>Sync event folders even without events or geolocation</span>
                     </label>
-                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer; margin-bottom:8px">
-                        <input type="checkbox" name="cloud_auto_cleanup" {% if cloud_auto_cleanup %}checked{% endif %}>
-                        <span>Auto-delete old cloud videos when storage is low</span>
+                    <label style="display:flex; align-items:center; gap:8px; cursor:not-allowed; margin-bottom:8px; opacity:0.55">
+                        <input type="checkbox" name="cloud_auto_cleanup" {% if cloud_auto_cleanup %}checked{% endif %} disabled>
+                        <span>Auto-delete old cloud videos when storage is low <em style="color: var(--text-muted); font-weight:400">(coming soon)</em></span>
                     </label>
                 </div>
 
@@ -570,41 +573,24 @@
                    delete clips past their retention age until they have
                    been confirmed uploaded to the cloud — protecting
                    un-uploaded footage during long WiFi outages. #}
-                <div style="margin-bottom: var(--space-4); padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-secondary);">
-                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer; margin-bottom:8px {% if not provider_connected %}opacity: 0.55; cursor: not-allowed{% endif %}">
+                <div style="margin-bottom: var(--space-4); padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-secondary); opacity: 0.55;">
+                    <label style="display:flex; align-items:center; gap:8px; cursor: not-allowed; margin-bottom:8px">
                         <input type="checkbox" name="keep_clips_until_synced"
-                               {% if keep_clips_until_synced %}checked{% endif %}
-                               {% if not provider_connected %}disabled{% endif %}>
-                        <span style="font-weight: 600; color: var(--text-primary);">Keep clips until backed up to cloud</span>
+                               {% if keep_clips_until_synced %}checked{% endif %} disabled>
+                        <span style="font-weight: 600; color: var(--text-primary);">Keep clips until backed up to cloud <em style="color: var(--text-muted); font-weight:400">(coming soon)</em></span>
                     </label>
-                    {% if not provider_connected %}
-                        <p style="font-size: var(--text-xs); color: var(--text-muted); margin: 4px 0 0;">
-                            <em>Cloud sync not configured</em> &mdash; this setting only takes effect once a provider is connected above.
-                        </p>
-                    {% elif keep_clips_until_synced %}
-                        <p style="font-size: var(--text-xs); color: var(--text-muted); margin: 4px 0 0;">
-                            Old clips that haven't finished uploading will not be deleted, even past the retention age.
-                        </p>
-                    {% else %}
-                        <p style="font-size: var(--text-xs); color: var(--msg-warning-text); margin: 4px 0 0;">
-                            <svg class="nav-icon" aria-hidden="true" style="width: 14px; height: 14px; vertical-align: -2px;"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-alert-triangle"></use></svg>
-                            Clips will be deleted at the retention age even if they haven't been backed up yet &mdash; <em>risk of losing un-uploaded footage</em>.
-                        </p>
-                    {% endif %}
-                    {% if kept_unsynced_count and kept_unsynced_count > 0 %}
-                        <p style="font-size: var(--text-xs); color: var(--text-secondary); margin: 8px 0 0;">
-                            <strong>{{ kept_unsynced_count }}</strong> clip{{ '' if kept_unsynced_count == 1 else 's' }} currently kept past the retention age, awaiting upload.
-                        </p>
-                    {% endif %}
+                    <p style="font-size: var(--text-xs); color: var(--text-muted); margin: 4px 0 0;">
+                        Retention integration with cloud sync is not yet implemented &mdash; configure retention via the Settings page for now.
+                    </p>
                 </div>
 
-                <div style="margin-bottom: var(--space-4);">
+                <div style="margin-bottom: var(--space-4); opacity: 0.55;">
                     <label style="display: block; margin-bottom: var(--space-2); font-weight: 600; color: var(--text-primary);">
                         Minimum cloud retention (days)
                     </label>
-                    <input type="number" name="cloud_min_retention_days" value="{{ cloud_min_retention_days }}" min="1" max="365"
-                           style="width:120px; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary);">
-                    <p style="font-size: var(--text-xs); color: var(--text-muted); margin:4px 0 0">Auto-cleanup won't delete videos newer than this.</p>
+                    <input type="number" name="cloud_min_retention_days" value="{{ cloud_min_retention_days }}" min="1" max="365" disabled
+                           style="width:120px; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary); cursor: not-allowed;">
+                    <p style="font-size: var(--text-xs); color: var(--text-muted); margin:4px 0 0">Coming soon &mdash; cloud-side auto-cleanup is not implemented yet.</p>
                 </div>
 
                 <button type="submit" class="edit-btn" style="padding: 8px 20px; font-size: 14px; margin-top: var(--space-3);">Save Settings</button>

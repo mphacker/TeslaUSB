@@ -19,7 +19,11 @@ from teslausb_web.services.cloud_archive.pipeline import (
     _shadow_compare_cloud_picks,
 )
 from teslausb_web.services.cloud_archive.reconcile import _reconcile_with_remote
-from teslausb_web.services.cloud_archive.settings import CloudArchiveError, CloudArchiveStateError
+from teslausb_web.services.cloud_archive.settings import (
+    CloudArchiveError,
+    CloudArchiveStateError,
+    _read_retry_max_attempts_setting,
+)
 
 if TYPE_CHECKING:
     import sqlite3
@@ -276,7 +280,7 @@ def _mark_failed_upload_and_retry_state(
             connection,
             candidate.relative_path,
             error_message,
-            service.config.max_retry_attempts,
+            _read_retry_max_attempts_setting(service.config, connection),
         )
         connection.commit()
     _dual_write_pipeline_cloud_synced_state(

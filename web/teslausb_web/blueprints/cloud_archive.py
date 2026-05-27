@@ -34,6 +34,14 @@ from teslausb_web.services.cloud_archive import (
     SyncStatus,
     make_cloud_archive_queries,
 )
+from teslausb_web.services.cloud_archive.paths import VALID_SYNC_FOLDERS
+from teslausb_web.services.cloud_archive.settings import (
+    _read_priority_order_setting,
+    _read_retry_max_attempts_setting,
+    _read_sync_folders_setting,
+    _read_sync_non_event_setting,
+    _read_sync_recent_with_telemetry_setting,
+)
 from teslausb_web.services.cloud_oauth_service import (
     CloudOAuthService,
     DisconnectResult,
@@ -115,6 +123,7 @@ class _CloudArchivePageContext:
     cloud_retry_max_attempts: int
     keep_clips_until_synced: bool
     kept_unsynced_count: int
+    sync_recent_with_telemetry: bool
     providers: tuple[str, ...]
     pending_authorization: dict[str, object] | None
 
@@ -428,11 +437,32 @@ def _page_context() -> _CloudArchivePageContext:
     sync_status = _empty_sync_status()
     sync_stats = _empty_sync_stats()
     sync_history: tuple[SyncHistoryEntry, ...] = ()
+    live_sync_folders: tuple[str, ...] = tuple(archive_service.config.sync_folders)
+    live_priority: tuple[str, ...] = tuple(archive_service.config.priority_folders)
+    live_sync_non_event: bool = archive_service.config.sync_non_event
+    live_retry_max: int = archive_service.config.max_retry_attempts
+    live_recent_telemetry: bool = archive_service.config.sync_recent_with_telemetry
     try:
         credentials = oauth_service.load_credentials()
         sync_status = archive_service.get_sync_status()
         sync_stats = archive_service.get_sync_stats()
         sync_history = _get_queries().get_sync_history(_DEFAULT_HISTORY_LIMIT)
+        with archive_service.open_db() as connection:
+            live_sync_folders = _read_sync_folders_setting(
+                archive_service.config, connection
+            )
+            live_priority = _read_priority_order_setting(
+                archive_service.config, connection
+            )
+            live_sync_non_event = _read_sync_non_event_setting(
+                archive_service.config, connection
+            )
+            live_retry_max = _read_retry_max_attempts_setting(
+                archive_service.config, connection
+            )
+            live_recent_telemetry = _read_sync_recent_with_telemetry_setting(
+                archive_service.config, connection
+            )
     except (
         CloudArchiveConfigError,
         CloudArchiveDBError,
@@ -453,17 +483,18 @@ def _page_context() -> _CloudArchivePageContext:
         provider_connected=credentials is not None,
         token_expiry=None if credentials is None else credentials.expires_at,
         sync_enabled=cfg.features.cloud_archive_enabled,
-        sync_folders=tuple(cfg.cloud.sync_folders),
-        priority_order=tuple(cfg.cloud.priority_folders),
+        sync_folders=tuple(live_sync_folders),
+        priority_order=tuple(live_priority),
         max_upload_mbps=max(0, cfg.cloud.bwlimit_kbps // 1024),
         remote_path=_DEFAULT_REMOTE_PATH,
         cloud_reserve_gb=0,
-        sync_non_event_videos=archive_service.config.sync_non_event,
+        sync_non_event_videos=live_sync_non_event,
         cloud_auto_cleanup=False,
         cloud_min_retention_days=0,
-        cloud_retry_max_attempts=archive_service.config.max_retry_attempts,
+        cloud_retry_max_attempts=live_retry_max,
         keep_clips_until_synced=True,
         kept_unsynced_count=0,
+        sync_recent_with_telemetry=live_recent_telemetry,
         providers=oauth_service.supported_providers(),
         pending_authorization=_pending_authorization_dict(oauth_service),
     )
@@ -490,7 +521,57 @@ def index() -> ResponseReturnValue:
 
 @cloud_archive_bp.route("/settings", methods=["POST"])
 def save_settings() -> ResponseReturnValue:
-    return _unsupported_mutation(_UNSUPPORTED_SETTINGS_MESSAGE)
+    archive_service = _get_archive_service()
+
+    raw_folders = request.form.getlist("sync_folders")
+    selected_folders: list[str] = []
+    for value in raw_folders:
+        folder = (value or "").strip()
+        if folder and folder in VALID_SYNC_FOLDERS and folder not in selected_folders:
+            selected_folders.append(folder)
+
+    raw_priority = (request.form.get("priority_order") or "").strip()
+    priority_folders: list[str] = []
+    if raw_priority:
+        for value in raw_priority.split(","):
+            folder = value.strip()
+            if folder and folder in VALID_SYNC_FOLDERS and folder not in priority_folders:
+                priority_folders.append(folder)
+
+    sync_non_event = bool(request.form.get("sync_non_event_videos"))
+    sync_recent_with_telemetry = bool(request.form.get("sync_recent_with_telemetry"))
+
+    retry_raw = (request.form.get("cloud_retry_max_attempts") or "").strip()
+    retry_max_attempts: int | None = None
+    if retry_raw:
+        try:
+            retry_max_attempts = int(retry_raw)
+        except ValueError:
+            flash("Retry attempts must be a whole number.", "error")
+            return redirect(url_for("cloud_archive.index"))
+
+    if sync_recent_with_telemetry and "RecentClips" not in selected_folders:
+        selected_folders.append("RecentClips")
+
+    try:
+        archive_service.update_settings(
+            sync_folders=tuple(selected_folders),
+            priority_folders=tuple(priority_folders) if priority_folders else None,
+            sync_non_event=sync_non_event,
+            sync_recent_with_telemetry=sync_recent_with_telemetry,
+            max_retry_attempts=retry_max_attempts,
+        )
+    except CloudArchiveConfigError as exc:
+        flash(f"Could not save settings: {exc}", "error")
+        return redirect(url_for("cloud_archive.index"))
+    except (CloudArchiveDBError, CloudArchiveError) as exc:
+        logger.warning("cloud archive settings persistence failed: %s", exc)
+        flash("Could not save settings — see logs for details.", "error")
+        return redirect(url_for("cloud_archive.index"))
+
+    archive_service.wake()
+    flash("Cloud sync settings saved.", "success")
+    return redirect(url_for("cloud_archive.index"))
 
 
 @cloud_archive_bp.route("/api/sync_now", methods=["POST"])

@@ -107,3 +107,89 @@ def test_score_event_priority_without_event_json_is_lower_priority(tmp_path: Pat
     )
     score = _score_event_priority(event_dir)
     assert score >= NO_EVENT_SCORE_THRESHOLD
+
+
+def _make_recent_clip(teslacam: Path, name: str) -> Path:
+    folder = teslacam / "RecentClips"
+    folder.mkdir(parents=True, exist_ok=True)
+    file_path = folder / name
+    file_path.write_bytes(b"video")
+    return file_path
+
+
+def _make_mapping_db_with_waypoint(db_path: Path, video_path: str) -> None:
+    connection = sqlite3.connect(str(db_path))
+    try:
+        connection.execute(
+            "CREATE TABLE waypoints (id INTEGER PRIMARY KEY, video_path TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO waypoints (video_path) VALUES (?)", (video_path,)
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def test_discover_events_picks_up_recent_clips_with_telemetry(tmp_path: Path) -> None:
+    teslacam = tmp_path / "TeslaCam"
+    _make_recent_clip(teslacam, "2026-02-01_10-00-00-front.mp4")
+    _make_recent_clip(teslacam, "2026-02-01_10-01-00-front.mp4")
+    mapping_db = tmp_path / "mapping.db"
+    _make_mapping_db_with_waypoint(
+        mapping_db, "RecentClips/2026-02-01_10-00-00-front.mp4"
+    )
+    config = _make_config(
+        tmp_path,
+        teslacam,
+        mapping_db_path=mapping_db,
+        sync_folders=("SentryClips", "SavedClips", "RecentClips"),
+        sync_recent_with_telemetry=True,
+        sync_non_event=False,
+    )
+
+    events = _discover_events(config)
+
+    paths = [event.relative_path for event in events]
+    assert "RecentClips/2026-02-01_10-00-00-front.mp4" in paths
+    assert "RecentClips/2026-02-01_10-01-00-front.mp4" not in paths
+
+
+def test_discover_events_skips_recent_clips_when_telemetry_toggle_off(
+    tmp_path: Path,
+) -> None:
+    teslacam = tmp_path / "TeslaCam"
+    _make_recent_clip(teslacam, "2026-02-01_10-00-00-front.mp4")
+    mapping_db = tmp_path / "mapping.db"
+    _make_mapping_db_with_waypoint(
+        mapping_db, "RecentClips/2026-02-01_10-00-00-front.mp4"
+    )
+    config = _make_config(
+        tmp_path,
+        teslacam,
+        mapping_db_path=mapping_db,
+        sync_folders=("SentryClips", "SavedClips", "RecentClips"),
+        sync_recent_with_telemetry=False,
+    )
+
+    assert _discover_events(config) == ()
+
+
+def test_discover_events_skips_recent_clips_without_recentclips_in_sync_folders(
+    tmp_path: Path,
+) -> None:
+    teslacam = tmp_path / "TeslaCam"
+    _make_recent_clip(teslacam, "2026-02-01_10-00-00-front.mp4")
+    mapping_db = tmp_path / "mapping.db"
+    _make_mapping_db_with_waypoint(
+        mapping_db, "RecentClips/2026-02-01_10-00-00-front.mp4"
+    )
+    config = _make_config(
+        tmp_path,
+        teslacam,
+        mapping_db_path=mapping_db,
+        sync_folders=("SentryClips", "SavedClips"),
+        sync_recent_with_telemetry=True,
+    )
+
+    assert _discover_events(config) == ()

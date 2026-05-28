@@ -130,3 +130,135 @@ LUN at LUN 1 is operator-managed.
 | Sweep never frees enough space | `journalctl -u teslausb-worker -g cleanup_sweep -n 20`. If `target_reached=false` even with last-resort tier, raise `os_reserve_gb` or shrink the LUN |
 | Tesla reports "drive needs formatting" after grow | Expected on exFAT grow; either format from the Tesla touchscreen or run `mkfs.exfat` from the Pi |
 | Worker keeps logging "storage_config load failed" | The file is malformed or unreadable. Sweep is skipped — restore from `.bak` and `systemctl restart teslausb-worker` |
+
+## WiFi stability stack (BCM43436 SDIO)
+
+The Pi Zero 2 W on-board WiFi chip (BCM43436) firmware deadlocks
+under sustained TX (typical trigger: a cloud sync running rclone
+for more than a few minutes). The kernel keeps running so the
+hardware watchdog never trips, but `wlan0` stops passing packets.
+Signatures in `dmesg`: `brcmfmac: ... HT Avail request error: -5`
+and `brcmf_proto_bcdc_query_dcmd ... err=-110`.
+
+Before the stack landed, the device rebooted every ~30 min while
+v1's blunt "3-min-no-ping ⇒ reboot" watchdog kicked. The stack
+keeps the device on the air at full throughput and only reboots
+as last resort. See **ADR-0022 — WiFi stability stack** for the
+full design rationale.
+
+### What `setup-lib/12-wifi-stability.sh` installs
+
+| File | Purpose |
+|------|---------|
+| `/etc/NetworkManager/conf.d/10-teslausb-no-powersave.conf` | `[connection] wifi.powersave = 2` (off) — global default for every new NM profile. Stops the chip dropping into PS_POLL where the firmware lockup is reproducible. |
+| `/etc/modprobe.d/brcmfmac.conf` | `options brcmfmac roamoff=1 feature_disable=0x82000` — disables in-driver roaming (races our captive-portal dispatcher) and the offloaded PNO/SCAN_V2 engines (silently wedge under load). Takes effect at next module load (next boot, or `nmcli radio wifi off && modprobe -r brcmfmac && modprobe brcmfmac && nmcli radio wifi on`). |
+| `/usr/local/sbin/wifi-watchdog.sh` | Escalation-ladder recovery script (see below). |
+| `/etc/systemd/system/wifi-watchdog.service` | `Type=oneshot`, `OOMScoreAdjust=-900`, `Nice=-5`, IO realtime — survives memory pressure. |
+| `/etc/systemd/system/wifi-watchdog.timer` | 30 s tick (`OnUnitActiveSec=30s`). Enabled + started by `setup-lib/10-activate.sh`. |
+
+Source artifacts live under `deploy/wifi-stability/` for review.
+
+### `wifi-watchdog.sh` escalation ladder
+
+Health check each tick: ping the default gateway from
+`ip route get 1.1.1.1`. State file: `/run/teslausb/wifi-watchdog.state`
+(format: `<fail_count> <healthy_ticks>`). Heavy actions fire only
+on an **exact** fail-count match so recovery passes don't repeat
+the action.
+
+| Fail count | Action |
+|------------|--------|
+| 1 | Soft log — no recovery yet (could be a one-tick blip). |
+| **2** | Touch `/run/teslausb/uploads_paused` (uploader's cool-down loop sees it within 1.5 s and yields). `nmcli device disconnect wlan0 && nmcli device connect wlan0`. |
+| 3 | Pause held; log only. |
+| **4** | `modprobe -r brcmfmac && modprobe brcmfmac` (re-applies `roamoff` and `feature_disable`). |
+| 5 | Pause held; log only. |
+| **6** | `ip link set wlan0 down && ip link set wlan0 up`. |
+| 7–9 | Pause held; log only. |
+| **10** | `reboot` (last resort — never gets here if ladder works). |
+
+After **2 consecutive healthy ticks**, the pause flag is removed
+and `fail_count` resets to 0. Operators can manually clear:
+`sudo rm -f /run/teslausb/uploads_paused`.
+
+### Uploader cooperation (`web/teslausb_web/services/cloud_archive/uploader.py`)
+
+The cloud-archive uploader checks `/run/teslausb/uploads_paused`
+at the top of every candidate in `_drain_once`. When present:
+sleep `PAUSE_FLAG_BACKOFF_SECONDS` (15 s) and `continue`. Between
+every two successful uploads it also waits
+`INTER_FILE_COOLDOWN_SECONDS` (1.5 s) so the WiFi chip catches
+its breath.
+
+### Polite rclone subprocess (`cloud_rclone_service.py`)
+
+Every `rclone` invocation gets:
+
+- `--transfers 1 --checkers 1 --tpslimit 4 --buffer-size 4M --use-mmap --low-level-retries 3` appended after the bwlimit logic.
+- `preexec_fn=_lower_rclone_priority` on the `Popen` — runs
+  `os.nice(19)` + raw `ioprio_set(2, IOPRIO_CLASS_IDLE, 7)` via
+  ctypes in the forked child. The command list itself is left
+  untouched so `test_transfer_copy_builds_expected_command`
+  keeps passing.
+
+### `teslausb-web.service` resource caps (`setup-lib/04-units.sh`)
+
+The web/upload unit has hard caps so it can never starve SSH:
+
+```ini
+MemoryHigh=300M
+MemoryMax=400M
+OOMPolicy=stop           # critical OOM ⇒ unit dies, watchdog reboots
+TasksMax=128
+CPUWeight=80
+IOWeight=80
+```
+
+`OOMPolicy=stop` is deliberate — per the operator directive
+*"any critical OOM does reboot the device. It is critical that
+the device never fully loses wifi or SSH capabilities"*, we'd
+rather lose the web tier and let the system watchdog reboot
+than let a runaway upload thread eat the box.
+
+### Verification after a fresh install
+
+```bash
+# Module options actually loaded
+cat /sys/module/brcmfmac/parameters/roamoff               # → 1
+# (feature_disable is accepted by the kernel but not exposed in sysfs;
+#  presence is verified by the ABSENCE of "unknown parameter" in dmesg)
+sudo dmesg | grep -i "brcmfmac.*unknown parameter"        # → empty
+
+# NM powersave applied
+sudo iw dev wlan0 get power_save                           # → off
+nmcli -t -f 802-11-wireless.powersave connection show <profile>  # → 2
+
+# Watchdog ticking
+systemctl is-active wifi-watchdog.timer                    # → active
+sudo journalctl -u wifi-watchdog.service --since "5 min ago" | grep healthy
+
+# Upload caps live
+systemctl show teslausb-web.service -p MemoryMax,OOMPolicy,TasksMax
+#   MemoryMax=419430400 OOMPolicy=stop TasksMax=128
+```
+
+### Common operator actions
+
+| Action | Command |
+|--------|---------|
+| Manually pause all uploads (e.g. during a road trip) | `sudo touch /run/teslausb/uploads_paused` |
+| Resume | `sudo rm -f /run/teslausb/uploads_paused` |
+| Tail the watchdog | `sudo journalctl -u wifi-watchdog.service -f` |
+| Force-reload `brcmfmac` (drops WiFi ~15 s — only via console or with a dead-man timer) | `sudo systemd-run --on-active=180 --unit=b1-deadman /sbin/reboot && sudo nohup sh -c 'sleep 2; nmcli radio wifi off; sleep 2; modprobe -r brcmfmac; sleep 2; modprobe brcmfmac; sleep 3; nmcli radio wifi on' >/tmp/reload.log 2>&1 &` |
+| Watch uploader cool-down honouring the pause flag | `sudo journalctl -u teslausb-web -g "uploads_paused\|cool-down"` |
+
+> **CRLF gotcha for hand-editing on Windows.** Files under
+> `deploy/wifi-stability/` MUST stay LF (`.gitattributes`
+> enforces this). If you ever `scp` them from a Windows
+> working tree that has been touched by an editor with CRLF
+> defaults, the shebang on `wifi-watchdog.sh` will fail to
+> resolve (`env: 'bash\r': No such file or directory`) and
+> `brcmfmac.conf` will be silently ignored by `libkmod`
+> (`ignoring bad line starting with '\r'`). Always install
+> via `setup-lib/12-wifi-stability.sh` (it `cp`s from a fresh
+> git-checked-out repo on the Pi where autocrlf is off).

@@ -34,6 +34,10 @@ B1_RUNTIME_PACKAGES=(
   watchdog         # hardware watchdog daemon (6.7)
   dnsmasq-base     # AP-mode DHCP/DNS (6.5)
   hostapd          # AP-mode WiFi (6.5)
+  iw               # `iw dev wlan0 ...` used by 05-network.sh, 02-users.sh
+                   # sudoers, and operator runbook (6.12 wifi-stability)
+                   # to apply NM powersave-off without an SSH-dropping
+                   # reconnect.
 )
 export B1_RUNTIME_PACKAGES
 

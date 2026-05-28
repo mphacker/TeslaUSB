@@ -94,6 +94,13 @@ Steps (sourced from setup-lib/<NN>-<name>.sh in numeric order):
                       teslafat-{0,1}.toml configs, nbd-attach@.service,
                       usb-gadget.service, teslausb-{gadget-up,gadget-down,
                       present-usb,hide-usb} wrapper scripts.
+  12  wifi-stability  Install BCM43436 SDIO WiFi stability stack: NM
+                      `wifi.powersave=2` drop-in, `brcmfmac` modprobe
+                      options (roamoff=1, feature_disable=0x82000), and
+                      the `wifi-watchdog.{sh,service,timer}` graduated
+                      recovery ladder (pause uploads → reload brcmfmac
+                      → bounce link → reboot). See docs/06-OPERATIONS.md
+                      "WiFi stability stack" and ADR-0010.
 
 Exit codes:
   0  success (or dry-run completed)

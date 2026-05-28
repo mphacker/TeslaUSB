@@ -197,13 +197,20 @@ class CloudArchiveQueries:
                 ).fetchone()[0]
             )
 
-    def get_sync_queue(self) -> tuple[QueueItem, ...]:
+    def get_sync_queue(
+        self, limit: int | None = None
+    ) -> tuple[QueueItem, ...]:
+        sql = (
+            "SELECT file_path, file_size, status, retry_count, last_error, priority "
+            "FROM cloud_synced_files WHERE status IN ('queued', 'pending', 'uploading') "
+            "ORDER BY priority DESC, id ASC"
+        )
+        params: tuple[object, ...] = ()
+        if limit is not None and limit > 0:
+            sql += " LIMIT ?"
+            params = (int(limit),)
         with open_db(self._config.db_path) as connection:
-            rows = connection.execute(
-                "SELECT file_path, file_size, status, retry_count, last_error, priority "
-                "FROM cloud_synced_files WHERE status IN ('queued', 'pending', 'uploading') "
-                "ORDER BY priority DESC, id ASC"
-            ).fetchall()
+            rows = connection.execute(sql, params).fetchall()
         return tuple(
             QueueItem(
                 file_path=str(row["file_path"]),
@@ -215,6 +222,21 @@ class CloudArchiveQueries:
             )
             for row in rows
         )
+
+    def count_sync_queue(self) -> tuple[int, int]:
+        """Return (total_active, priority_active) — cheap aggregate for the
+        queue badge so the UI can show full counts even when ``get_sync_queue``
+        is called with a render-cap ``limit``."""
+        with open_db(self._config.db_path) as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS total, "
+                "SUM(CASE WHEN priority > 0 THEN 1 ELSE 0 END) AS priority_count "
+                "FROM cloud_synced_files "
+                "WHERE status IN ('queued', 'pending', 'uploading')"
+            ).fetchone()
+        total = int(row["total"] or 0) if row is not None else 0
+        priority_count = int(row["priority_count"] or 0) if row is not None else 0
+        return total, priority_count
 
 
 def make_cloud_archive_queries(

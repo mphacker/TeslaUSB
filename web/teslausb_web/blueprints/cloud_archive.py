@@ -1044,12 +1044,28 @@ def api_queue_event() -> ResponseReturnValue:
 
 @cloud_archive_bp.route("/api/queue")
 def api_queue() -> ResponseReturnValue:
+    # UI renders at most QUEUE_RENDER_LIMIT (100) rows; capping the SQL
+    # response server-side keeps the polling payload small (~30 KB instead
+    # of 160 KB+ at 1k-row backlogs) so the queue panel updates inside the
+    # 5 s polling cadence on slow wifi instead of stalling for ~30 s.
     try:
-        queue = _get_queries().get_sync_queue()
+        limit_raw = request.args.get("limit", default="200")
+        try:
+            limit = max(1, min(int(limit_raw), 1000))
+        except (TypeError, ValueError):
+            limit = 200
+        queries = _get_queries()
+        queue = queries.get_sync_queue(limit=limit)
+        total, priority_total = queries.count_sync_queue()
     except (CloudArchiveDBError, RuntimeError) as exc:
         logger.warning("cloud queue fetch failed: %s", exc)
-        return jsonify({"queue": [], "error": str(exc)})
-    return jsonify({"queue": [asdict(item) for item in queue]})
+        return jsonify({"queue": [], "total": 0, "priority_total": 0, "error": str(exc)})
+    return jsonify({
+        "queue": [asdict(item) for item in queue],
+        "total": total,
+        "priority_total": priority_total,
+        "limit": limit,
+    })
 
 
 @cloud_archive_bp.route("/api/queue/remove", methods=["POST"])

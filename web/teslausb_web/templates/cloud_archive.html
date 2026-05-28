@@ -2014,28 +2014,32 @@
         var badge = document.getElementById('queueBadge');
         var clearBtn = document.getElementById('clearQueueBtn');
         try {
-            var resp = await fetch('{{ url_for("cloud_archive.api_queue") }}', {
+            var resp = await fetch('{{ url_for("cloud_archive.api_queue") }}?limit=100', {
                 headers: { 'X-Requested-With': 'XMLHttpRequest' }
             });
             var data = await resp.json();
             var queue = data.queue || [];
+            // ``total`` and ``priority_total`` reflect ALL active rows
+            // (the SQL is capped to ``limit`` for payload size, so use the
+            // server-supplied aggregates for the badge, not the local
+            // ``queue.length``).
+            var total = (typeof data.total === 'number') ? data.total : queue.length;
+            var priorityCount = (typeof data.priority_total === 'number')
+                ? data.priority_total
+                : queue.reduce(function(n, it){ return n + ((it.priority || 0) > 0 ? 1 : 0); }, 0);
 
             if (badge) {
-                if (queue.length > 0) {
-                    var priorityCount = 0;
-                    for (var i = 0; i < queue.length; i++) {
-                        if ((queue[i].priority || 0) > 0) priorityCount++;
-                    }
+                if (total > 0) {
                     badge.textContent = priorityCount > 0
-                        ? queue.length + ' (' + priorityCount + ' priority)'
-                        : queue.length;
+                        ? total + ' (' + priorityCount + ' priority)'
+                        : total;
                     badge.style.display = '';
                 } else {
                     badge.style.display = 'none';
                 }
             }
             if (clearBtn) {
-                clearBtn.style.display = queue.length > 0 ? '' : 'none';
+                clearBtn.style.display = total > 0 ? '' : 'none';
             }
 
             if (queue.length === 0) {
@@ -2049,7 +2053,7 @@
             // out of scope for this UI.
             var QUEUE_RENDER_LIMIT = 100;
             var visible = queue.slice(0, QUEUE_RENDER_LIMIT);
-            var truncated = queue.length - visible.length;
+            var truncated = Math.max(0, total - visible.length);
 
             var html = '<div style="display: flex; flex-direction: column; gap: var(--space-2);">';
             visible.forEach(function(item) {
@@ -2074,7 +2078,7 @@
             });
             html += '</div>';
             if (truncated > 0) {
-                html += '<div style="margin-top: var(--space-3); padding: 8px; text-align: center; font-size: var(--text-xs); color: var(--text-muted); border-top: 1px solid var(--border-color);">Showing first ' + visible.length + ' of ' + queue.length + ' queued files. ' + truncated + ' more will sync in order.</div>';
+                html += '<div style="margin-top: var(--space-3); padding: 8px; text-align: center; font-size: var(--text-xs); color: var(--text-muted); border-top: 1px solid var(--border-color);">Showing first ' + visible.length + ' of ' + total + ' queued files. ' + truncated + ' more will sync in order.</div>';
             }
             content.innerHTML = html;
         } catch(e) {

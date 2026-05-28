@@ -8,6 +8,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import ssl
 import tempfile
@@ -280,6 +281,71 @@ class CloudOAuthService:
             _write_json_atomically(self._config.credentials_path, _credentials_to_json(credentials))
             _delete_file(self._config.oauth_state_path)
         logger.info("Stored OAuth credentials for %s", provider.key)
+        return credentials
+
+    def import_rclone_token(self, provider_key: str, token_text: str) -> OAuthCredentials:
+        """Persist credentials produced out-of-band by ``rclone authorize``.
+
+        The OneDrive / Google Drive / Dropbox flows in the UI ask the
+        operator to run ``rclone authorize "<provider>"`` on a desktop
+        and paste the resulting JSON blob into the form. That blob has
+        the shape ``{"access_token":..., "token_type":..., "refresh_token":..., "expiry":...}``
+        — same fields ``_rclone_token_json`` later writes back into
+        rclone.conf. Without this importer the form silently fell
+        through to a new PKCE flow that the JS reported as success but
+        which never actually persisted credentials.
+
+        Raises ``OAuthError`` on malformed input or unsupported provider.
+        """
+        metadata = _provider_for(provider_key)
+        text = (token_text or "").strip()
+        if not text:
+            raise OAuthError("Empty rclone token")
+        # `rclone authorize` wraps the JSON between paste markers
+        # (`---> {...} <---End paste`) so users typically copy the
+        # entire block. Strip the markers if present — v1 accepted
+        # both forms and we should too.
+        marker_match = re.search(r"--->\s*(\{.*?\})\s*<---End paste", text, re.DOTALL)
+        if marker_match:
+            text = marker_match.group(1).strip()
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise OAuthError(
+                "Could not parse rclone token. Copy the entire JSON object "
+                f"from `rclone authorize`, including the curly braces ({exc.msg})."
+            ) from exc
+        if not isinstance(payload, dict):
+            raise OAuthError("rclone token must be a JSON object")
+        access_token = _string_or_default(payload.get("access_token"), default="").strip()
+        if not access_token:
+            raise OAuthError("rclone token is missing access_token")
+        refresh_token = _string_or_default(payload.get("refresh_token"), default="").strip()
+        token_type = _string_or_default(payload.get("token_type"), default="Bearer").strip() or "Bearer"
+        raw_expiry = _string_or_default(payload.get("expiry"), default="").strip()
+        if not raw_expiry:
+            raw_expiry = _string_or_default(payload.get("expires_at"), default="").strip()
+        if raw_expiry:
+            expires_at = _datetime_to_json(_parse_datetime(raw_expiry))
+        else:
+            # rclone occasionally emits tokens with no expiry (long-
+            # lived refresh tokens); persist a far-future placeholder
+            # so refresh_if_needed treats them as valid until they
+            # actually 401 on use.
+            expires_at = _datetime_to_json(_utc_now().replace(year=_utc_now().year + 10))
+        scope = _optional_string(payload.get("scope"))
+        credentials = OAuthCredentials(
+            provider=metadata.key,
+            access_token=access_token,
+            refresh_token=refresh_token,
+            token_type=token_type,
+            expires_at=expires_at,
+            scope=scope,
+        )
+        with self._lock:
+            _write_json_atomically(self._config.credentials_path, _credentials_to_json(credentials))
+            _delete_file(self._config.oauth_state_path)
+        logger.info("Imported rclone token for %s", metadata.key)
         return credentials
 
     def load_credentials(self) -> OAuthCredentials | None:

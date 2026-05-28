@@ -108,6 +108,69 @@ def test_start_authorization_rejects_unknown_provider(tmp_path: Path) -> None:
         service.start_authorization("box")
 
 
+def test_import_rclone_token_persists_raw_json(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    token = json.dumps(
+        {
+            "access_token": "abc123",
+            "token_type": "Bearer",
+            "refresh_token": "refresh-xyz",
+            "expiry": "2030-01-01T00:00:00Z",
+        }
+    )
+    creds = service.import_rclone_token("onedrive", token)
+    assert creds.provider == "onedrive"
+    assert creds.access_token == "abc123"
+    assert creds.refresh_token == "refresh-xyz"
+    on_disk = json.loads((tmp_path / "credentials.json").read_text(encoding="utf-8"))
+    assert on_disk["provider"] == "onedrive"
+    assert on_disk["access_token"] == "abc123"
+
+
+def test_import_rclone_token_strips_paste_markers(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    pasted = (
+        '---> {"access_token":"tok","token_type":"Bearer",'
+        '"refresh_token":"r","expiry":"2030-06-01T12:00:00Z"} <---End paste'
+    )
+    creds = service.import_rclone_token("google-drive", pasted)
+    assert creds.access_token == "tok"
+    assert creds.provider == "google-drive"
+
+
+def test_import_rclone_token_without_expiry_uses_sentinel(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    token = json.dumps({"access_token": "t", "token_type": "Bearer"})
+    creds = service.import_rclone_token("dropbox", token)
+    assert creds.access_token == "t"
+    # Sentinel should be a far-future date so refresh logic treats it as valid.
+    assert creds.expires_at.startswith("20")
+
+
+def test_import_rclone_token_rejects_empty_input(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    with pytest.raises(OAuthError, match="Empty rclone token"):
+        service.import_rclone_token("onedrive", "")
+
+
+def test_import_rclone_token_rejects_missing_access_token(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    with pytest.raises(OAuthError, match="missing access_token"):
+        service.import_rclone_token("onedrive", json.dumps({"token_type": "Bearer"}))
+
+
+def test_import_rclone_token_rejects_malformed_json(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    with pytest.raises(OAuthError, match="Could not parse"):
+        service.import_rclone_token("onedrive", "not-json")
+
+
+def test_import_rclone_token_rejects_unknown_provider(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    with pytest.raises(OAuthError):
+        service.import_rclone_token("box", json.dumps({"access_token": "a"}))
+
+
 def test_get_pending_authorization_round_trips_from_disk(tmp_path: Path) -> None:
     service = _service(tmp_path)
     started = service.start_authorization("onedrive")

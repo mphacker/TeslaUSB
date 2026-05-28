@@ -774,6 +774,32 @@ def api_connect_provider() -> ResponseReturnValue:
             session_id=session_id,
             redirect_payload=redirect_payload,
         )
+    # Operator pasted the JSON blob from `rclone authorize "<provider>"`.
+    # This is the documented "How to connect" flow in the UI — before
+    # this branch existed the request silently fell through to
+    # start_authorization, which returned {success:true,
+    # authorization_url:...}; the JS only checked .success and reported
+    # "Connected!", but nothing was actually persisted.
+    rclone_token = _request_str("token", "rclone_token")
+    if rclone_token:
+        try:
+            provider = _provider_from_request(oauth_service)
+            credentials = oauth_service.import_rclone_token(provider, rclone_token)
+        except CloudArchiveRequestError as exc:
+            return _handle_request_error(exc)
+        except (OAuthError, RuntimeError) as exc:
+            return _handle_service_error(exc)
+        session[_OAUTH_PROVIDER_SESSION_KEY] = credentials.provider
+        session.pop(_OAUTH_SESSION_ID_SESSION_KEY, None)
+        _invalidate_caches(current_app)
+        return jsonify(
+            {
+                "success": True,
+                "message": "Connected successfully.",
+                "provider": credentials.provider,
+                "token_expiry": credentials.expires_at,
+            }
+        )
     try:
         provider = _provider_from_request(oauth_service)
         started = oauth_service.start_authorization(provider)

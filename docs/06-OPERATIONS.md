@@ -171,7 +171,7 @@ the action.
 | 1 | Soft log — no recovery yet (could be a one-tick blip). |
 | **2** | Touch `/run/teslausb/uploads_paused` (uploader's cool-down loop sees it within 1.5 s and yields). `nmcli device disconnect wlan0 && nmcli device connect wlan0`. |
 | 3 | Pause held; log only. |
-| **4** | `modprobe -r brcmfmac && modprobe brcmfmac` (re-applies `roamoff` and `feature_disable`). |
+| **4** | `brcmfmac` SDIO unbind/bind via `/sys/bus/sdio/drivers/brcmfmac/{unbind,bind}` (resets firmware without needing the module idle). NM connection is brought down then back up around the reset. Falls back to `modprobe -r brcmfmac && modprobe brcmfmac` if the SDIO node is not found. (Re-applies `roamoff` and `feature_disable`.) |
 | 5 | Pause held; log only. |
 | **6** | `ip link set wlan0 down && ip link set wlan0 up`. |
 | 7–9 | Pause held; log only. |

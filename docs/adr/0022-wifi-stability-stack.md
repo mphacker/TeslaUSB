@@ -62,7 +62,13 @@ an escalation ladder (see `docs/06-OPERATIONS.md` for the table).
 recovery in progress does not re-trigger the same action. Tiers:
 
 - **2** — set `/run/teslausb/uploads_paused` + `nmcli device down/up`.
-- **4** — `modprobe -r brcmfmac && modprobe brcmfmac`.
+- **4** — `brcmfmac` SDIO unbind/bind (resets firmware without
+  unloading the module; falls back to `modprobe -r/modprobe` if
+  the `/sys/bus/sdio/drivers/brcmfmac/<mmcX:YYYY:Z>` node is not
+  found). NM connection is brought down first then back up so the
+  device is idle during the reset. `modprobe -r brcmfmac` alone
+  fails with "Module is in use" when NM still holds the device —
+  this exact failure caused the 2026-05-28 14:50 tier-10 reboot.
 - **6** — `ip link set wlan0 down/up`.
 - **10** — `reboot`.
 

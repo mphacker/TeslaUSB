@@ -19,7 +19,10 @@
 #   fail  0 ..  1   ping fail count <2          : do nothing
 #   fail  2         pause uploads (touch ${PAUSE_FILE}) + nmcli down/up
 #   fail  3         (in cool-down, no new action)
-#   fail  4         rmmod brcmfmac; sleep 2; modprobe brcmfmac
+#   fail  4         brcmfmac SDIO unbind/bind (resets firmware
+#                   without unloading the module — works even when
+#                   NetworkManager still references it; falls back
+#                   to rmmod/modprobe if SDIO node not found)
 #   fail  5         (in cool-down)
 #   fail  6         ip link set wlan0 down; sleep 1; ip link set wlan0 up
 #   fail  7 ..  9   (in cool-down)
@@ -145,11 +148,76 @@ case "${fail_count}" in
         done
     ;;
   "${TIER_BRCMFMAC_RELOAD}")
-    log "TIER ${fail_count}: reload brcmfmac module"
+    log "TIER ${fail_count}: reset brcmfmac firmware (SDIO unbind/bind)"
     : > "${PAUSE_FILE}"
-    modprobe -r brcmfmac 2>&1 | logger -t "${LOG_TAG}" || true
+
+    # Bring NM's wlan0 connection(s) down so the driver/device is
+    # idle before we yank it. `modprobe -r brcmfmac` fails with
+    # "Module is in use" when NM still has a handle on the device,
+    # which is exactly the failure mode that triggered the
+    # 2026-05-28 14:50 tier-10 reboot. SDIO unbind/bind avoids that
+    # problem, but bringing the link down first is still polite.
+    nmcli -t -f NAME,DEVICE connection show --active 2>/dev/null \
+      | awk -F: '$2=="wlan0" {print $1}' \
+      | while read -r conn; do
+          [[ -n "${conn}" ]] || continue
+          log "  nmcli connection down '${conn}'"
+          nmcli connection down "${conn}" >/dev/null 2>&1 || true
+        done
+    ip link set wlan0 down 2>/dev/null || true
+
+    # Preferred path: SDIO unbind/bind. The brcmfmac driver registers
+    # itself under /sys/bus/sdio/drivers/brcmfmac as a directory whose
+    # entries look like "mmc1:0001:1". Writing that name to ./unbind
+    # detaches the firmware regardless of refcount, then writing it to
+    # ./bind re-probes and reloads firmware — same effect as a module
+    # reload but it does NOT require the module to be idle.
+    sdio_dev=""
+    if [[ -d /sys/bus/sdio/drivers/brcmfmac ]]; then
+      sdio_dev="$(find /sys/bus/sdio/drivers/brcmfmac -mindepth 1 -maxdepth 1 \
+                   -name 'mmc*' -printf '%f\n' 2>/dev/null | head -n1)"
+    fi
+
+    reset_ok=false
+    if [[ -n "${sdio_dev}" ]]; then
+      log "  SDIO unbind ${sdio_dev}"
+      if printf '%s' "${sdio_dev}" \
+            > /sys/bus/sdio/drivers/brcmfmac/unbind 2>/dev/null; then
+        sleep 2
+        log "  SDIO bind   ${sdio_dev}"
+        if printf '%s' "${sdio_dev}" \
+              > /sys/bus/sdio/drivers/brcmfmac/bind 2>/dev/null; then
+          reset_ok=true
+        else
+          log "  SDIO bind failed for ${sdio_dev}"
+        fi
+      else
+        log "  SDIO unbind failed for ${sdio_dev} — will try modprobe"
+      fi
+    else
+      log "  no SDIO brcmfmac device found — will try modprobe"
+    fi
+
+    # Fallback: full module reload. Will only succeed if the link-down
+    # above was enough to release the module; otherwise it's a no-op
+    # and we'll escalate to tier 6 / 10 on the next ticks.
+    if ! ${reset_ok}; then
+      modprobe -r brcmfmac 2>&1 | logger -t "${LOG_TAG}" || true
+      sleep 2
+      modprobe   brcmfmac 2>&1 | logger -t "${LOG_TAG}" || true
+    fi
+
+    # Bring NM's connection back so it can re-associate. NM will
+    # often auto-reconnect when wlan0 reappears, but an explicit
+    # `connection up` cuts the recovery window noticeably.
     sleep 2
-    modprobe   brcmfmac 2>&1 | logger -t "${LOG_TAG}" || true
+    nmcli -t -f NAME,DEVICE connection show 2>/dev/null \
+      | awk -F: '$2=="wlan0" {print $1}' \
+      | while read -r conn; do
+          [[ -n "${conn}" ]] || continue
+          log "  nmcli connection up   '${conn}'"
+          nmcli connection up "${conn}" >/dev/null 2>&1 || true
+        done
     ;;
   "${TIER_LINK_BOUNCE}")
     log "TIER ${fail_count}: ip link bounce wlan0"

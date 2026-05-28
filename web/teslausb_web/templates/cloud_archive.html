@@ -571,14 +571,14 @@
                    delete clips past their retention age until they have
                    been confirmed uploaded to the cloud — protecting
                    un-uploaded footage during long WiFi outages. #}
-                <div style="margin-bottom: var(--space-4); padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-secondary);">
+                <div style="margin-bottom: var(--space-3);">
                     <label style="display:flex; align-items:center; gap:8px; cursor:pointer; margin-bottom:8px">
                         <input type="checkbox" name="keep_clips_until_synced" value="1"
                                {% if keep_clips_until_synced %}checked{% endif %}>
-                        <span style="font-weight: 600; color: var(--text-primary);">Keep clips until backed up to cloud</span>
+                        <span>Keep clips until backed up to cloud</span>
                     </label>
-                    <p style="font-size: var(--text-xs); color: var(--text-muted); margin: 4px 0 0;">
-                        When on, the cleanup worker keeps clips that haven&rsquo;t finished uploading, even if they&rsquo;ve aged past the local retention window. Skipped clips are visible in the worker journal as <code>kept_unsynced</code>.
+                    <p style="font-size: var(--text-xs); color: var(--text-muted); margin:0 0 0 24px">
+                        Requires a connected cloud provider. Only clips with GPS or SEI telemetry are protected &mdash; videos with no telemetry are eligible for cleanup regardless of upload state. Skipped clips appear in the worker journal as <code>kept_unsynced</code>.
                     </p>
                 </div>
 

@@ -509,22 +509,6 @@
                            value="{{ priority_order|join(',') }}">
                 </div>
 
-                {# Bandwidth limit — saved value is applied live to rclone. #}
-                <div style="margin-bottom: var(--space-4);">
-                    <label for="bwSlider" style="display: block; margin-bottom: var(--space-2); font-weight: 600; color: var(--text-primary);">
-                        Bandwidth limit: <span id="bwValue" style="font-weight: 400;">{% if max_upload_mbps > 0 %}{{ max_upload_mbps }} Mbps{% else %}unlimited{% endif %}</span>
-                    </label>
-                    <div style="display:flex; align-items:center; gap:12px;">
-                        <input type="range" id="bwSlider" name="max_upload_mbps"
-                               min="0" max="50" step="1" value="{{ max_upload_mbps }}"
-                               oninput="document.getElementById('bwValue').textContent = this.value > 0 ? this.value + ' Mbps' : 'unlimited';"
-                               style="flex:1; max-width: 360px; accent-color: var(--btn-primary-bg);">
-                    </div>
-                    <p style="font-size: var(--text-xs); color: var(--text-muted); margin:4px 0 0">
-                        0 = unlimited. Applied to rclone immediately when saved &mdash; no restart needed.
-                    </p>
-                </div>
-
                 {# Cloud storage reserve — enforced by run_cloud_cleanup after every drain. #}
                 <div style="margin-bottom: var(--space-4);">
                     <label style="display: block; margin-bottom: var(--space-2); font-weight: 600; color: var(--text-primary);">
@@ -2157,89 +2141,5 @@
 
 
 })();
-
-// Bandwidth Test (global scope for onclick handlers)
-function _bwEscape(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
-
-async function runBandwidthTest() {
-    var btn = document.getElementById('bwTestBtn');
-    var results = document.getElementById('bwTestResults');
-    btn.disabled = true;
-    btn.textContent = 'Testing…';
-    results.style.display = 'block';
-    results.innerHTML = '<p>Starting bandwidth test — this takes 1-2 minutes…</p>';
-
-    try {
-        var resp = await fetch('{{ url_for("cloud_archive.api_bandwidth_test") }}', {method: 'POST'});
-        var data = await resp.json();
-        if (!data.success) {
-            results.innerHTML = '<p style="color:var(--error-text);">' + _bwEscape(data.message) + '</p>';
-            btn.disabled = false;
-            btn.textContent = 'Auto-Detect';
-            return;
-        }
-        // Poll for results
-        var pollTimer = setInterval(async function() {
-            try {
-                var r = await fetch('{{ url_for("cloud_archive.api_bandwidth_test_status") }}');
-                var s = await r.json();
-                if (s.running) {
-                    results.innerHTML = '<p>' + _bwEscape(s.progress || 'Testing…') + '</p>';
-                } else {
-                    clearInterval(pollTimer);
-                    btn.disabled = false;
-                    btn.textContent = 'Auto-Detect';
-                    if (s.error) {
-                        results.innerHTML = '<p style="color:var(--error-text);">Error: ' + _bwEscape(s.error) + '</p>';
-                        return;
-                    }
-                    // Show results table
-                    var html = '<table style="width:100%;font-size:0.8rem;border-collapse:collapse;">';
-                    html += '<tr style="border-bottom:1px solid var(--border);"><th style="text-align:left;padding:4px;">Speed</th><th>Actual</th><th>Latency</th><th>Memory</th><th>Load</th><th>Status</th></tr>';
-                    (s.results || []).forEach(function(r) {
-                        var color = r.status === 'ok' ? 'var(--accent-success)' : 'var(--error-text)';
-                        html += '<tr style="border-bottom:1px solid var(--border);">';
-                        html += '<td style="padding:4px;">' + r.mbps + ' Mbps</td>';
-                        html += '<td style="padding:4px;text-align:center;">' + (r.actual_mbps || '—') + '</td>';
-                        html += '<td style="padding:4px;text-align:center;">' + (r.web_latency ? r.web_latency + 's' : '—') + '</td>';
-                        html += '<td style="padding:4px;text-align:center;">' + (r.free_memory_mb ? Math.round(r.free_memory_mb) + ' MB' : '—') + '</td>';
-                        html += '<td style="padding:4px;text-align:center;">' + (r.load_avg || '—') + '</td>';
-                        html += '<td style="padding:4px;text-align:center;color:' + color + ';">' + r.status + '</td>';
-                        html += '</tr>';
-                    });
-                    html += '</table>';
-                    if (s.recommended_mbps) {
-                        html += '<div style="margin-top:8px;display:flex;align-items:center;gap:8px;">';
-                        html += '<strong>Recommended: ' + s.recommended_mbps + ' Mbps</strong>';
-                        html += '<button type="button" onclick="applyBandwidth()" class="btn btn-primary" style="padding:4px 12px;font-size:0.8rem;">Apply</button>';
-                        html += '</div>';
-                    }
-                    results.innerHTML = html;
-                }
-            } catch(e) { /* keep polling */ }
-        }, 3000);
-    } catch(e) {
-        results.innerHTML = '<p style="color:var(--error-text);">Failed to start test</p>';
-        btn.disabled = false;
-        btn.textContent = 'Auto-Detect';
-    }
-}
-
-async function applyBandwidth() {
-    try {
-        var resp = await fetch('{{ url_for("cloud_archive.api_bandwidth_test_apply") }}', {method: 'POST'});
-        var data = await resp.json();
-        if (data.success) {
-            var status = await (await fetch('{{ url_for("cloud_archive.api_bandwidth_test_status") }}')).json();
-            var slider = document.getElementById('bwSlider');
-            var label = document.getElementById('bwValue');
-            if (slider && status.recommended_mbps) {
-                slider.value = status.recommended_mbps;
-                label.textContent = status.recommended_mbps + ' Mbps';
-            }
-            if (typeof showToast === 'function') showToast('Bandwidth updated to ' + status.recommended_mbps + ' Mbps', 'success');
-        }
-    } catch(e) { /* ignore */ }
-}
 </script>
 {% endblock %}

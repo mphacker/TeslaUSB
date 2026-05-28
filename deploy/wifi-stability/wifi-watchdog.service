@@ -1,0 +1,39 @@
+# /etc/systemd/system/wifi-watchdog.service
+#
+# Oneshot wrapper around /usr/local/sbin/wifi-watchdog.sh, driven
+# by wifi-watchdog.timer. Each timer tick fires this service, which
+# runs one iteration of the escalation ladder and exits.
+#
+# Installed by setup-lib/12-wifi-stability.sh.
+
+[Unit]
+Description=TeslaUSB WiFi watchdog (BCM43436 SDIO lockup recovery)
+Documentation=https://github.com/mphacker/TeslaUSB
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/wifi-watchdog.sh
+
+# The watchdog itself must never be the thing that gets OOM-killed.
+OOMScoreAdjust=-900
+
+# Never starve the watchdog of CPU.
+Nice=-5
+IOSchedulingClass=realtime
+IOSchedulingPriority=4
+
+# Lock the script down — it only needs to ping, run nmcli/modprobe/
+# ip, and write /run/teslausb/. No need for network sockets it
+# doesn't open itself, no need for full filesystem write access.
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/run/teslausb /run/log
+PrivateTmp=yes
+NoNewPrivileges=no
+# (NoNewPrivileges must be 'no' because modprobe + nmcli need
+# their setuid/cap paths.)
+
+[Install]
+WantedBy=multi-user.target

@@ -13,7 +13,7 @@ import ssl
 import subprocess
 import tempfile
 import threading
-import time
+
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Final, Protocol, cast
@@ -313,49 +313,6 @@ class CloudRcloneService:
         if completed.returncode != 0:
             raise self._command_error("deletefile", completed, error_type=RcloneError)
 
-    def measure_upload_throughput(self, *, sample_bytes: int = 10 * 1024 * 1024) -> dict[str, float | int]:
-        """Upload a temp blob to the remote, time it, then delete the blob.
-
-        Returns a dict with ``bytes``, ``elapsed_seconds``, ``kbps`` (kilobits/s),
-        and ``suggested_bwlimit_kbps`` (~80% of measured throughput).
-        """
-        if sample_bytes <= 0:
-            raise RcloneConfigError("sample_bytes must be positive")
-        probe_dir = self._config.rclone_config_dir / "bwprobe"
-        probe_dir.mkdir(parents=True, exist_ok=True)
-        probe_file = probe_dir / "probe.bin"
-        try:
-            with open(probe_file, "wb") as handle:
-                # Zero-fill — keep deterministic and avoid /dev/urandom dependency.
-                remaining = sample_bytes
-                chunk = b"\0" * (1024 * 1024)
-                while remaining > 0:
-                    write_len = min(len(chunk), remaining)
-                    handle.write(chunk[:write_len])
-                    remaining -= write_len
-            remote_file = f".teslausb-bwtest/{probe_file.name}"
-            start = time.monotonic()
-            self.transfer(probe_file, remote_file, operation="copy")
-            elapsed = max(time.monotonic() - start, 0.001)
-            try:
-                self.deletefile(self._join_remote_path(remote_file))
-            except RcloneError:
-                pass
-            kbps = (sample_bytes * 8) / 1000.0 / elapsed
-            suggested = max(int(kbps * 0.8), 0)
-            return {
-                "bytes": sample_bytes,
-                "elapsed_seconds": elapsed,
-                "kbps": kbps,
-                "suggested_bwlimit_kbps": suggested,
-            }
-        finally:
-            try:
-                if probe_file.exists():
-                    probe_file.unlink()
-            except OSError:
-                pass
-
     @property
     def oauth_service(self) -> CloudOAuthService:
         return self._oauth_service
@@ -459,6 +416,7 @@ class CloudRcloneService:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
+                    preexec_fn=_lower_rclone_priority,
                 )
             except FileNotFoundError as exc:
                 raise RcloneNotInstalledError(
@@ -774,6 +732,23 @@ class CloudRcloneService:
         bwlimit = self._effective_bwlimit_kbps()
         if bwlimit > 0:
             command.extend(["--bwlimit", f"{bwlimit}k"])
+        # Polite flags for the BCM43436 SDIO WiFi chip on the Pi
+        # Zero 2 W. Sustained, fully parallel TX from rclone reliably
+        # wedges the brcmfmac firmware (`HT Avail request error`,
+        # `err=-110`) — single-stream, low-buffer, throttled API
+        # calls keep the chip in a happy regime even on long upload
+        # runs. See deploy/wifi-stability/wifi-watchdog.sh for the
+        # recovery side of this contract.
+        command.extend(
+            [
+                "--transfers", "1",
+                "--checkers", "1",
+                "--tpslimit", "4",
+                "--buffer-size", "4M",
+                "--use-mmap",
+                "--low-level-retries", "3",
+            ]
+        )
         command.extend([str(source_path), destination_spec])
         return command
 
@@ -1119,6 +1094,47 @@ def _write_text_atomically(path: Path, content: str) -> None:
 def _best_effort_fsync(file_descriptor: int) -> None:
     with contextlib.suppress(OSError):
         os.fsync(file_descriptor)
+
+
+def _lower_rclone_priority() -> None:
+    """preexec_fn for the rclone child: drop CPU + I/O priority.
+
+    Runs in the forked child between fork() and execve(). Lowering
+    priority here (rather than reniceing the parent gunicorn) keeps
+    the HTTP-serving threads at default priority — only the heavy
+    rclone subprocess gets pushed to the back of the run-queue.
+
+    Best-effort: any OSError is swallowed so a hardened sandbox
+    that forbids setpriority/ioprio_set never blocks an upload.
+    """
+    # CPU: bump nice to +19 (lowest). os.nice is portable; on the Pi
+    # this asks the scheduler to give us CPU only when nothing else
+    # wants it.
+    with contextlib.suppress(OSError):
+        os.nice(19)
+    # I/O: ask the kernel for the idle ioprio class via the raw
+    # ioprio_set(2) syscall. Constants:
+    #   which=1 (IOPRIO_WHO_PROCESS), who=0 (this process)
+    #   class=3 (IDLE) packed into bits 13..15.
+    # We use the syscall directly because Python stdlib has no
+    # ionice equivalent. SYS_ioprio_set differs per arch:
+    #   x86_64=251, arm/arm64 (and Pi)=30/289 — but Pi userspace
+    #   actually runs as arm/arm64 with syscall 30 (arm32) or 30
+    #   (arm64). To stay portable AND safe we use ctypes only if
+    #   syscall() is available, and silently no-op otherwise.
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        # IOPRIO_CLASS_IDLE = 3 in the high bits.
+        ioprio = (3 << 13)
+        # Try the most common arches; first non-EINVAL wins.
+        for sys_no in (251, 289, 30):
+            rc = libc.syscall(sys_no, 1, 0, ioprio)
+            if rc == 0:
+                break
+    except Exception:  # noqa: BLE001 — preexec must never raise
+        pass
 
 
 def _warn_windows_permissions_once() -> None:

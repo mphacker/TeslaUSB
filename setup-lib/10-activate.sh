@@ -79,6 +79,7 @@ B1_ENABLE_UNITS=(
   nginx.service
   NetworkManager.service
   watchdog.service
+  wifi-watchdog.timer
 )
 export B1_ENABLE_UNITS
 
@@ -104,6 +105,7 @@ B1_START_ORDER=(
   cloud-archive.service
   gadget-recovery.service
   watchdog.service
+  wifi-watchdog.timer
 )
 export B1_START_ORDER
 

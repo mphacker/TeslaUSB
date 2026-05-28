@@ -1,4 +1,4 @@
-export function createArchiveController({ bootstrap, fetchJson, postJson, formatDateTime, notify }) {
+export function createArchiveController({ bootstrap, fetchJson, postJson, notify }) {
     const archiveForm = document.getElementById("cloudArchiveForm");
     const archiveFolder = document.getElementById("cloudArchiveFolder");
     const archiveEvent = document.getElementById("cloudArchiveEvent");
@@ -11,12 +11,6 @@ export function createArchiveController({ bootstrap, fetchJson, postJson, format
     const archiveProgressMeta = document.getElementById("cloudArchiveProgressMeta");
     const cleanupButton = document.getElementById("cloudArchiveCleanupButton");
     const cleanupStatus = document.getElementById("cloudArchiveCleanupStatus");
-    const bandwidthConfigured = document.getElementById("cloudBandwidthConfigured");
-    const bandwidthSuggested = document.getElementById("cloudBandwidthSuggested");
-    const bandwidthStatusValue = document.getElementById("cloudBandwidthStatusValue");
-    const bandwidthStatus = document.getElementById("cloudBandwidthStatus");
-    const bandwidthRunButton = document.getElementById("cloudBandwidthRunButton");
-    const bandwidthApplyButton = document.getElementById("cloudBandwidthApplyButton");
 
     function setBusy(button, busy, busyText) {
         if (!(button instanceof HTMLButtonElement)) {
@@ -133,52 +127,6 @@ export function createArchiveController({ bootstrap, fetchJson, postJson, format
         }
     }
 
-    async function refreshBandwidthStatus() {
-        try {
-            const payload = await fetchJson(bootstrap.urls.bandwidthTestStatus);
-            if (bandwidthConfigured) {
-                bandwidthConfigured.textContent = `${bootstrap.maxUploadMbps || 0} Mbps`;
-            }
-            if (bandwidthSuggested) {
-                bandwidthSuggested.textContent = payload.recommended_mbps ? `${payload.recommended_mbps} Mbps` : "Unavailable";
-            }
-            if (bandwidthStatusValue) {
-                bandwidthStatusValue.textContent = payload.running ? "Running" : payload.supported ? "Ready" : "Unsupported";
-            }
-            if (bandwidthStatus) {
-                bandwidthStatus.textContent = payload.progress || (payload.supported ? `Last checked ${formatDateTime(new Date().toISOString())}.` : "Bandwidth routes report unsupported in Phase 5.14d.");
-            }
-        } catch (error) {
-            notify(error.message, "warning");
-        }
-    }
-
-    async function runBandwidthTest() {
-        setBusy(bandwidthRunButton, true, "Running");
-        try {
-            const payload = await postJson(bootstrap.urls.bandwidthTest, {});
-            notify(payload.message || "Bandwidth test started.", payload.success ? "success" : "warning");
-            await refreshBandwidthStatus();
-        } catch (error) {
-            notify(error.message, "warning");
-        } finally {
-            setBusy(bandwidthRunButton, false);
-        }
-    }
-
-    async function applyBandwidthPreset() {
-        setBusy(bandwidthApplyButton, true, "Applying");
-        try {
-            const payload = await postJson(bootstrap.urls.bandwidthTestApply, {});
-            notify(payload.message || "Bandwidth preset applied.", payload.success ? "success" : "warning");
-            await refreshBandwidthStatus();
-        } catch (error) {
-            notify(error.message, "warning");
-        } finally {
-            setBusy(bandwidthApplyButton, false);
-        }
-    }
-
     return {
         init() {
             archiveForm?.addEventListener("submit", (event) => {
@@ -193,14 +141,7 @@ export function createArchiveController({ bootstrap, fetchJson, postJson, format
             cleanupButton?.addEventListener("click", () => {
                 void runCleanup();
             });
-            bandwidthRunButton?.addEventListener("click", () => {
-                void runBandwidthTest();
-            });
-            bandwidthApplyButton?.addEventListener("click", () => {
-                void applyBandwidthPreset();
-            });
             void refreshArchiveStatus();
-            void refreshBandwidthStatus();
             window.setInterval(() => {
                 void refreshArchiveStatus();
             }, 4000);

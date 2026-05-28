@@ -36,12 +36,9 @@ from teslausb_web.services.cloud_archive import (
 )
 from teslausb_web.services.cloud_archive.paths import VALID_SYNC_FOLDERS
 from teslausb_web.services.cloud_archive.settings import (
-    BWLIMIT_KBPS_MAX,
-    BWLIMIT_KBPS_MIN,
     CLOUD_RESERVE_GB_MAX,
     CLOUD_RESERVE_GB_MIN,
     _read_auto_sync_enabled_setting,
-    _read_bwlimit_kbps_setting,
     _read_cloud_auto_cleanup_setting,
     _read_cloud_reserve_gb_setting,
     _read_keep_clips_until_synced_setting,
@@ -115,7 +112,6 @@ class _CloudArchivePageContext:
     sync_enabled: bool
     sync_folders: tuple[str, ...]
     priority_order: tuple[str, ...]
-    max_upload_mbps: int
     remote_path: str
     cloud_reserve_gb: float
     cloud_auto_cleanup: bool
@@ -462,7 +458,6 @@ def _page_context() -> _CloudArchivePageContext:
     live_priority: tuple[str, ...] = tuple(archive_service.config.priority_folders)
     live_retry_max: int = archive_service.config.max_retry_attempts
     live_recent_telemetry: bool = archive_service.config.sync_recent_with_telemetry
-    live_bwlimit_kbps: int = getattr(archive_service.config, "bwlimit_kbps", 0)
     live_cloud_reserve_gb: float = archive_service.config.cloud_reserve_gb
     live_cloud_auto_cleanup: bool = archive_service.config.cloud_auto_cleanup
     live_keep_clips_until_synced: bool = archive_service.config.keep_clips_until_synced
@@ -488,9 +483,6 @@ def _page_context() -> _CloudArchivePageContext:
                 archive_service.config, connection
             )
             live_recent_telemetry = _read_sync_recent_with_telemetry_setting(
-                archive_service.config, connection
-            )
-            live_bwlimit_kbps = _read_bwlimit_kbps_setting(
                 archive_service.config, connection
             )
             live_cloud_reserve_gb = _read_cloud_reserve_gb_setting(
@@ -538,7 +530,6 @@ def _page_context() -> _CloudArchivePageContext:
         sync_enabled=live_auto_sync_enabled,
         sync_folders=tuple(live_sync_folders),
         priority_order=tuple(live_priority),
-        max_upload_mbps=max(0, live_bwlimit_kbps // 1024),
         remote_path=live_remote_path,
         cloud_reserve_gb=live_cloud_reserve_gb,
         cloud_auto_cleanup=live_cloud_auto_cleanup,
@@ -597,14 +588,10 @@ def save_settings() -> ResponseReturnValue:
             return redirect(url_for("cloud_archive.index"))
 
     bw_raw = (request.form.get("max_upload_mbps") or "").strip()
-    bwlimit_kbps: int | None = None
     if bw_raw:
-        try:
-            bw_mbps = int(bw_raw)
-        except ValueError:
-            flash("Bandwidth limit must be a whole number.", "error")
-            return redirect(url_for("cloud_archive.index"))
-        bwlimit_kbps = max(BWLIMIT_KBPS_MIN, min(BWLIMIT_KBPS_MAX, bw_mbps * 1024))
+        logger.debug(
+            "ignoring legacy max_upload_mbps form field: %r (UI removed)", bw_raw
+        )
 
     reserve_raw = (request.form.get("cloud_reserve_gb") or "").strip()
     cloud_reserve_gb: float | None = None
@@ -635,7 +622,6 @@ def save_settings() -> ResponseReturnValue:
             sync_non_event=False,
             sync_recent_with_telemetry=sync_recent_with_telemetry,
             max_retry_attempts=retry_max_attempts,
-            bwlimit_kbps=bwlimit_kbps,
             cloud_reserve_gb=cloud_reserve_gb,
             cloud_auto_cleanup=cloud_auto_cleanup,
             keep_clips_until_synced=keep_clips_until_synced,
@@ -1231,55 +1217,6 @@ def api_archive_cancel() -> ResponseReturnValue:
             "message": "Archive cancelled" if cancelled else "No archive in progress",
         }
     )
-
-
-@cloud_archive_bp.route("/api/bandwidth_test", methods=["POST"])
-def api_bandwidth_test() -> ResponseReturnValue:
-    payload = _json_payload() if request.is_json else {}
-    raw_mb = payload.get("megabytes") if isinstance(payload, dict) else None
-    try:
-        megabytes = float(raw_mb) if raw_mb is not None else 10.0
-    except (TypeError, ValueError):
-        megabytes = 10.0
-    megabytes = max(1.0, min(megabytes, 50.0))
-    sample_bytes = int(megabytes * 1024 * 1024)
-    try:
-        measurement = _get_rclone_service().measure_upload_throughput(
-            sample_bytes=sample_bytes
-        )
-    except (RcloneConfigError, ValueError) as exc:
-        return _handle_request_error(exc)
-    except (OAuthError, RcloneError, RuntimeError) as exc:
-        return _handle_service_error(exc)
-    return jsonify({"success": True, **measurement})
-
-
-@cloud_archive_bp.route("/api/bandwidth_test/status")
-def api_bandwidth_test_status() -> ResponseReturnValue:
-    return jsonify({"running": False, "supported": True})
-
-
-@cloud_archive_bp.route("/api/bandwidth_test/apply", methods=["POST"])
-def api_bandwidth_test_apply() -> ResponseReturnValue:
-    payload = _json_payload()
-    raw = payload.get("bwlimit_kbps") if isinstance(payload, dict) else None
-    if raw is None:
-        raw = payload.get("kbps") if isinstance(payload, dict) else None
-    try:
-        kbps = int(raw)
-    except (TypeError, ValueError):
-        return (
-            jsonify({"success": False, "message": "Missing or invalid bwlimit_kbps."}),
-            HTTPStatus.BAD_REQUEST,
-        )
-    try:
-        _get_archive_service().update_settings(bwlimit_kbps=kbps)
-    except CloudArchiveConfigError as exc:
-        return _handle_request_error(exc)
-    except (CloudArchiveDBError, CloudArchiveError, RuntimeError) as exc:
-        return _handle_service_error(exc)
-    _invalidate_caches(current_app)
-    return jsonify({"success": True, "bwlimit_kbps": kbps})
 
 
 __all__ = ("cloud_archive_bp",)

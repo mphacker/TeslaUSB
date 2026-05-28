@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -40,6 +41,37 @@ if TYPE_CHECKING:
     from teslausb_web.services.cloud_rclone_service import CloudRcloneService
 
 _RANDOM = SystemRandom()
+
+# WiFi-watchdog → uploader contract. While this file exists,
+# wifi-watchdog.sh has decided the BCM43436 SDIO chip is wedged or
+# wedging and we should NOT spawn new rclone subprocesses. The
+# watchdog removes the file after 2 consecutive healthy ticks.
+# Path mirrors deploy/wifi-stability/wifi-watchdog.sh::PAUSE_FILE.
+_UPLOADS_PAUSED_FLAG = "/run/teslausb/uploads_paused"
+
+# Inter-file cool-down (seconds). Sustained back-to-back rclone runs
+# (especially on small files where one finishes within ~1 s) keep
+# the SDIO bus at near-100% utilisation. A short interruptible sleep
+# between candidates lets the chip drain its TX queue and the kernel
+# service its housekeeping interrupts, dramatically reducing
+# brcmfmac firmware-lockup probability without measurably hurting
+# bulk throughput on typical 35 MB clips.
+INTER_FILE_COOLDOWN_SECONDS = 1.5
+
+# How long to back off when the pause flag is observed mid-drain
+# before re-checking. Long enough to let the watchdog complete its
+# soft-recovery escalation, short enough that we resume promptly
+# when WiFi returns. Interruptible via stop_event.
+PAUSE_FLAG_BACKOFF_SECONDS = 15.0
+
+
+def _uploads_paused() -> bool:
+    """Return True iff wifi-watchdog has asked us to stop uploading."""
+    try:
+        return os.path.exists(_UPLOADS_PAUSED_FLAG)
+    except OSError:
+        return False
+
 
 
 class UploadFailedError(CloudArchiveError):
@@ -492,6 +524,21 @@ def _drain_once(service: CloudArchiveService, trigger: str) -> bool:
             if service.state.stop_event.is_set() or service.state.cancel_event.is_set():
                 break
 
+            # WiFi-stability gate. wifi-watchdog.sh sets this flag
+            # when the BCM43436 chip is degrading; spawning a new
+            # rclone here would (a) make the lockup worse and
+            # (b) almost certainly fail mid-stream and re-queue.
+            # Back off briefly and re-check; the flag clears once
+            # the watchdog observes a healthy gateway tick.
+            if _uploads_paused():
+                logger.info(
+                    "cloud sync: pausing — %s present (wifi-watchdog tier hit)",
+                    _UPLOADS_PAUSED_FLAG,
+                )
+                if _wait_with_events(service, PAUSE_FLAG_BACKOFF_SECONDS):
+                    break
+                continue
+
             # Per-candidate reserve gate. Only applies when the backend
             # reports free space and a reserve is configured.
             if (
@@ -524,6 +571,11 @@ def _drain_once(service: CloudArchiveService, trigger: str) -> bool:
                 bytes_transferred += result.bytes_transferred
                 if running_free is not None:
                     running_free = max(0, running_free - result.bytes_transferred)
+                # Inter-file cool-down — let the SDIO bus breathe
+                # before the next rclone subprocess. Interruptible
+                # via stop_event so `systemctl stop` is still crisp.
+                if _wait_with_events(service, INTER_FILE_COOLDOWN_SECONDS):
+                    break
                 continue
             if result.status == "failed" and _wait_with_events(
                 service,

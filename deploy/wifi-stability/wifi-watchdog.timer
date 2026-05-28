@@ -1,0 +1,20 @@
+# /etc/systemd/system/wifi-watchdog.timer
+#
+# Fires wifi-watchdog.service every 30 s. AccuracySec=1s keeps the
+# tick crisp so the escalation ladder responds in under a minute
+# at the lower tiers (tier 2 fires at ~60 s of failed pings).
+#
+# Installed by setup-lib/12-wifi-stability.sh.
+
+[Unit]
+Description=TeslaUSB WiFi watchdog (30 s tick)
+Documentation=https://github.com/mphacker/TeslaUSB
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+AccuracySec=1s
+Unit=wifi-watchdog.service
+
+[Install]
+WantedBy=timers.target

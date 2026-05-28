@@ -148,6 +148,32 @@ TimeoutStopSec=45s
 Restart=on-failure
 RestartSec=5s
 
+# --- Resource caps (Pi Zero 2 W, 512 MiB RAM) -----------------------
+# The web process hosts the cloud-archive uploader as a background
+# thread, so it can spike memory when rclone is running. MemoryHigh
+# applies soft pressure (throttling allocation, swapping) BEFORE
+# MemoryMax triggers the kernel OOM killer. We deliberately keep
+# OOMPolicy=stop (not `continue`) so a hard OOM still tears the unit
+# down — combined with Restart=on-failure that produces a clean
+# restart cycle, and combined with wifi-watchdog.service that
+# produces a reboot path if even the restart fails.
+#
+#   Operator: User input: "any critical OOM does reboot the device.
+#   It is critical that the device never fully loses wifi or SSH
+#   capabilities."
+MemoryHigh=300M
+MemoryMax=400M
+OOMPolicy=stop
+TasksMax=128
+
+# Make the web process a polite I/O citizen RELATIVE to other
+# cgroups, without slowing the gunicorn workers serving HTTP. The
+# heavy rclone subprocess is renice'd separately inside the Python
+# uploader (see cloud_rclone_service._build_transfer_command) so the
+# HTTP-serving threads stay at default priority.
+CPUWeight=80
+IOWeight=80
+
 [Install]
 WantedBy=multi-user.target
 WEB_UNIT

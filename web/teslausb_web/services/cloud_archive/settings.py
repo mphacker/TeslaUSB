@@ -47,6 +47,12 @@ RETRY_MAX_ATTEMPTS_MIN: Final[int] = 1
 RETRY_MAX_ATTEMPTS_MAX: Final[int] = 20
 BWLIMIT_KBPS_MIN: Final[int] = 0
 BWLIMIT_KBPS_MAX: Final[int] = 1_000_000
+DEFAULT_BWLIMIT_KBPS: Final[int] = 8192
+"""8 Mbps (~1 MB/s). The Pi Zero 2 W's BCM43436 SDIO WiFi chip locks up
+under sustained higher-throughput uploads (see
+``/usr/local/sbin/wifi-watchdog.sh``), forcing the wifi-watchdog to
+reboot the device every ~30 min. 8 Mbps keeps the chip stable while
+still draining a typical day of clips overnight."""
 CLOUD_RESERVE_GB_MIN: Final[float] = 0.0
 CLOUD_RESERVE_GB_MAX: Final[float] = 100.0
 DEFAULT_WORKER_IDLE_SECONDS: Final[float] = 5.0
@@ -242,10 +248,20 @@ def _read_bwlimit_kbps_setting(
     config: CloudArchiveConfig,
     connection: sqlite3.Connection | None = None,
 ) -> int:
+    """Return the active upload bandwidth cap in kbps.
+
+    Falls back to :data:`DEFAULT_BWLIMIT_KBPS` whenever the persisted
+    setting is missing, out of range, or explicitly zero. Zero means
+    "unlimited" historically — but unlimited overruns the Pi's WiFi
+    chip and reboots the device, so we never honor it now.
+    """
     value = _kv_parse_int(_kv_lookup_raw(connection, KV_KEY_BWLIMIT_KBPS))
-    if value is not None and BWLIMIT_KBPS_MIN <= value <= BWLIMIT_KBPS_MAX:
+    if value is not None and BWLIMIT_KBPS_MIN < value <= BWLIMIT_KBPS_MAX:
         return value
-    return getattr(config, "bwlimit_kbps", 0)
+    configured = getattr(config, "bwlimit_kbps", 0)
+    if configured and BWLIMIT_KBPS_MIN < configured <= BWLIMIT_KBPS_MAX:
+        return configured
+    return DEFAULT_BWLIMIT_KBPS
 
 
 def _read_cloud_reserve_gb_setting(

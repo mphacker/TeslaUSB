@@ -120,11 +120,43 @@ def _make_recent_clip(teslacam: Path, name: str) -> Path:
 def _make_mapping_db_with_waypoint(db_path: Path, video_path: str) -> None:
     connection = sqlite3.connect(str(db_path))
     try:
-        connection.execute(
-            "CREATE TABLE waypoints (id INTEGER PRIMARY KEY, video_path TEXT)"
+        connection.executescript(
+            """
+            CREATE TABLE clips (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                relative_path TEXT NOT NULL UNIQUE,
+                bucket TEXT NOT NULL,
+                clip_started_utc INTEGER,
+                indexed_at_utc INTEGER NOT NULL,
+                waypoint_count INTEGER NOT NULL DEFAULT 0,
+                gps_waypoint_count INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE waypoints (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                clip_id INTEGER NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
+                frame_index INTEGER NOT NULL,
+                timestamp_ms REAL NOT NULL,
+                latitude_deg REAL NOT NULL,
+                longitude_deg REAL NOT NULL,
+                speed_mps REAL NOT NULL,
+                heading_deg REAL NOT NULL,
+                brake_applied INTEGER NOT NULL DEFAULT 0,
+                blinker_on_left INTEGER NOT NULL DEFAULT 0,
+                blinker_on_right INTEGER NOT NULL DEFAULT 0
+            );
+            """
         )
+        cursor = connection.execute(
+            "INSERT INTO clips (relative_path, bucket, indexed_at_utc, "
+            "waypoint_count, gps_waypoint_count) VALUES (?, 'recent', 0, 1, 1)",
+            (video_path,),
+        )
+        clip_id = cursor.lastrowid
         connection.execute(
-            "INSERT INTO waypoints (video_path) VALUES (?)", (video_path,)
+            "INSERT INTO waypoints (clip_id, frame_index, timestamp_ms, "
+            "latitude_deg, longitude_deg, speed_mps, heading_deg) "
+            "VALUES (?, 0, 0, 0, 0, 0, 0)",
+            (clip_id,),
         )
         connection.commit()
     finally:

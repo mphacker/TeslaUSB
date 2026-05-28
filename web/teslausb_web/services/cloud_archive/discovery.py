@@ -41,6 +41,23 @@ class EventCandidate:
 
 
 def _load_geo_hits(mapping_db_path: Path | None) -> frozenset[str] | None:
+    """Return basenames + timestamp prefixes of indexed clips that carry telemetry.
+
+    Reads the Rust-managed mapping DB (``index.sqlite3``) which has the schema::
+
+        clips(id, relative_path, bucket, waypoint_count, gps_waypoint_count, ...)
+        waypoints(id, clip_id REFERENCES clips, latitude_deg, longitude_deg, ...)
+
+    A clip with ``waypoint_count > 0`` carries SEI-derived telemetry (gear,
+    steering, brake, accel, and — when the vehicle had a GPS fix — lat/lon).
+    The cleanup-side keep filter and the cloud RecentClips picker treat the
+    presence of any waypoint as "this clip is interesting"; clips without
+    SEI/GPS data are continuous-recording filler.
+
+    Returns ``None`` only when the DB is missing or unreadable, so callers
+    can distinguish "no telemetry data at all" (empty set) from "couldn't
+    open the index" (None disables the telemetry-aware code path entirely).
+    """
     if mapping_db_path is None or not mapping_db_path.is_file():
         return None
     try:
@@ -49,9 +66,10 @@ def _load_geo_hits(mapping_db_path: Path | None) -> frozenset[str] | None:
         return None
     try:
         rows = connection.execute(
-            "SELECT DISTINCT video_path FROM waypoints WHERE video_path IS NOT NULL"
+            "SELECT relative_path FROM clips WHERE waypoint_count > 0"
         ).fetchall()
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        logger.warning("cloud discovery: could not read mapping clips index: %s", exc)
         return None
     finally:
         connection.close()

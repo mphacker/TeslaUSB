@@ -333,12 +333,12 @@ class CloudRcloneService:
                     write_len = min(len(chunk), remaining)
                     handle.write(chunk[:write_len])
                     remaining -= write_len
-            remote_dir = self._join_remote_path(".teslausb-bwtest")
+            remote_file = f".teslausb-bwtest/{probe_file.name}"
             start = time.monotonic()
-            self.transfer(probe_file, remote_dir, operation="copy")
+            self.transfer(probe_file, remote_file, operation="copy")
             elapsed = max(time.monotonic() - start, 0.001)
             try:
-                self.deletefile(f"{remote_dir}/{probe_file.name}")
+                self.deletefile(self._join_remote_path(remote_file))
             except RcloneError:
                 pass
             kbps = (sample_bytes * 8) / 1000.0 / elapsed
@@ -543,7 +543,7 @@ class CloudRcloneService:
 
     def _list(self, *, remote_path: str, files_only: bool) -> RcloneListing:
         remote, _credentials = self._prepare_remote()
-        clean_remote_path = _validate_remote_path(remote_path)
+        clean_remote_path = _validate_remote_path(self._join_remote_path(remote_path))
         command = ["lsjson", "--no-modtime"]
         if files_only:
             command.append("--files-only")
@@ -750,13 +750,19 @@ class CloudRcloneService:
         destination_spec: str,
     ) -> list[str]:
         binary_path = self._resolve_binary_path()
+        # rclone `copy` / `move` treat DEST as a directory, so passing
+        # `dest/foo.mp4` puts the file at `dest/foo.mp4/foo.mp4`. We always
+        # transfer one file at a time with the full destination path, so
+        # use the exact-path variants (`copyto` / `moveto`). `sync` operates
+        # on directories and stays as-is.
+        subcommand = {"copy": "copyto", "move": "moveto"}.get(operation, operation)
         command = [
             str(binary_path),
             "--config",
             str(self.config_file_path),
             "--retries",
             str(self._config.retries),
-            operation,
+            subcommand,
             "--stats",
             "1s",
             "--stats-one-line",

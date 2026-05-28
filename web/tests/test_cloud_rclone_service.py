@@ -481,6 +481,23 @@ def test_list_files_uses_files_only_flag(tmp_path: Path) -> None:
     assert "teslausb:clips" in command
 
 
+def test_list_directory_honors_remote_path_override(tmp_path: Path) -> None:
+    service, _oauth_service_obj, _source_root, _state_root, binary_path = _service(tmp_path)
+    service.set_remote_path_override("TeslaUSB")
+    with (
+        patch(
+            "teslausb_web.services.cloud_rclone_service.shutil.which", return_value=str(binary_path)
+        ),
+        patch("subprocess.run", return_value=_completed(stdout="[]")) as mock_run,
+    ):
+        service.list_directory("SentryClips")
+    command = mock_run.call_args.args[0]
+    # Reconcile lists each event-folder relative to the configured destination;
+    # without the join, it would query the wrong remote root and miss every
+    # already-uploaded clip.
+    assert "teslausb:TeslaUSB/SentryClips" in command
+
+
 def test_list_directory_returns_empty_when_remote_path_missing(tmp_path: Path) -> None:
     service, _oauth_service_obj, _source_root, _state_root, binary_path = _service(tmp_path)
     with (
@@ -577,16 +594,35 @@ def test_transfer_copy_builds_expected_command(tmp_path: Path) -> None:
         ),
         patch("subprocess.Popen", return_value=fake_process) as mock_popen,
     ):
-        result = service.transfer(source_root / "clip.mp4", "archive/folder", operation="copy")
+        result = service.transfer(source_root / "clip.mp4", "archive/folder/clip.mp4", operation="copy")
     command = mock_popen.call_args.args[0]
     assert command[0] == str(binary_path)
     assert "--bwlimit" in command
     assert "512k" in command
     assert command[command.index("--retries") + 1] == "7"
+    # `copy` must be translated to `copyto` so the file lands at the exact
+    # destination path instead of inside a `<filename>/` wrapper folder.
+    assert "copyto" in command
+    assert "copy" not in [c for c in command if c == "copy"]
     assert command[-2] == str((source_root / "clip.mp4").resolve())
-    assert command[-1] == "teslausb:archive/folder"
+    assert command[-1] == "teslausb:archive/folder/clip.mp4"
     assert result.progress is not None
     assert result.progress.percent == 100.0
+
+
+def test_transfer_move_uses_moveto_subcommand(tmp_path: Path) -> None:
+    service, _oauth_service_obj, source_root, _state_root, binary_path = _service(tmp_path)
+    fake_process = _FakePopen(stderr_text="Transferred: 1 MiB / 1 MiB, 100%, 1 MiB/s, ETA 0s\n")
+    with (
+        patch(
+            "teslausb_web.services.cloud_rclone_service.shutil.which", return_value=str(binary_path)
+        ),
+        patch("subprocess.Popen", return_value=fake_process) as mock_popen,
+    ):
+        service.transfer(source_root / "clip.mp4", "archive/folder/clip.mp4", operation="move")
+    command = mock_popen.call_args.args[0]
+    assert "moveto" in command
+    assert "move" not in [c for c in command if c == "move"]
 
 
 def test_transfer_sync_builds_sync_command(tmp_path: Path) -> None:

@@ -146,5 +146,12 @@ def recover_interrupted_uploads(config: CloudArchiveConfig) -> int:
         rowcount = connection.execute(
             "UPDATE cloud_synced_files SET status = 'pending' WHERE status = 'uploading'"
         ).rowcount
+        connection.execute(
+            "UPDATE cloud_sync_sessions SET status = 'interrupted', "
+            "ended_at = ?, error_msg = COALESCE(error_msg, "
+            "'Worker stopped before session finished') "
+            "WHERE status = 'running' AND ended_at IS NULL",
+            (datetime.now(UTC).isoformat(),),
+        )
         connection.commit()
     return rowcount

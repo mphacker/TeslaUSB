@@ -610,16 +610,29 @@ class CloudRcloneService:
             return False
 
     def _load_fresh_credentials(self) -> OAuthCredentials:
+        from teslausb_web.services.cloud_oauth_service import TokenRefreshError
+
         try:
             credentials = self._oauth_service.load_credentials()
-            if credentials is None:
-                raise RcloneAuthError("No stored OAuth credentials")
+        except Exception as exc:
+            raise RcloneAuthError(str(exc)) from exc
+        if credentials is None:
+            raise RcloneAuthError("No stored OAuth credentials")
+        try:
             refreshed = self._oauth_service.refresh_if_needed(provider=credentials.provider)
+            return refreshed.credentials if refreshed.credentials is not None else credentials
+        except TokenRefreshError as exc:
+            logger.warning(
+                "Preemptive OAuth refresh failed for %s (%s); trusting rclone "
+                "to refresh on demand using its embedded client credentials.",
+                credentials.provider,
+                exc,
+            )
+            return credentials
         except Exception as exc:
             if isinstance(exc, RcloneAuthError):
                 raise
             raise RcloneAuthError(str(exc)) from exc
-        return refreshed.credentials if refreshed.credentials is not None else credentials
 
     def _render_config_text(
         self,
@@ -638,6 +651,13 @@ class CloudRcloneService:
                 credentials,
                 timeout=self._command_timeout_seconds(),
             )
+            if not drive_id:
+                drive_id = _read_cached_drive_id(self.config_file_path)
+                if drive_id:
+                    logger.info(
+                        "Reusing cached OneDrive drive_id from existing "
+                        "rclone.conf because Graph discovery failed."
+                    )
             if not drive_id:
                 raise RcloneAuthError(
                     "Could not reach Microsoft Graph to identify the OneDrive "
@@ -964,6 +984,22 @@ def _render_generic_config_text(record: dict[str, str]) -> str:
     from teslausb_web.services.cloud_generic_remote_service import render_conf_body
 
     return render_conf_body(record, remote_name=_RCLONE_REMOTE_NAME)
+
+
+def _read_cached_drive_id(config_path: Path) -> str | None:
+    """Return the previously-rendered OneDrive drive_id from rclone.conf, if any."""
+    try:
+        text = config_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if line.startswith("drive_id"):
+            _, _, value = line.partition("=")
+            value = value.strip()
+            if value:
+                return value
+    return None
 
 
 def _discover_onedrive_drive_id(

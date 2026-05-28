@@ -150,16 +150,25 @@ def _prepare_drain(
             raise CloudArchiveStateError("Failed to create sync session")
         session_id = int(cursor.lastrowid)
         connection.commit()
-        _reconcile_with_remote(connection, service.rclone_service)
-        candidates = _discover_events(service.config, connection)
-        _enqueue_events_to_pipeline_batch(service.config.mapping_db_path, candidates)
-        pipeline_candidates = _peek_pipeline_cloud_pending(service.config.mapping_db_path)
-        legacy_first = candidates[0].relative_path if candidates else None
-        _shadow_compare_cloud_picks(
-            service.state,
-            legacy_path=legacy_first,
-            pipeline_candidates=pipeline_candidates,
-        )
+        try:
+            _reconcile_with_remote(connection, service.rclone_service)
+            candidates = _discover_events(service.config, connection)
+            _enqueue_events_to_pipeline_batch(service.config.mapping_db_path, candidates)
+            pipeline_candidates = _peek_pipeline_cloud_pending(service.config.mapping_db_path)
+            legacy_first = candidates[0].relative_path if candidates else None
+            _shadow_compare_cloud_picks(
+                service.state,
+                legacy_path=legacy_first,
+                pipeline_candidates=pipeline_candidates,
+            )
+        except Exception as exc:
+            connection.execute(
+                "UPDATE cloud_sync_sessions SET status = 'failed', "
+                "ended_at = ?, error_msg = ? WHERE id = ?",
+                (datetime.now(UTC).isoformat(), str(exc), session_id),
+            )
+            connection.commit()
+            raise
     service.state.set_totals(candidates)
     return session_id, candidates
 

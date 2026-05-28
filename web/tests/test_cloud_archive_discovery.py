@@ -4,8 +4,16 @@ import json
 import sqlite3
 from typing import TYPE_CHECKING
 
-from teslausb_web.services.cloud_archive.discovery import _discover_events, _score_event_priority
+from teslausb_web.services.cloud_archive.discovery import (
+    _candidate_priority,
+    _discover_events,
+    _load_hard_brake_hits,
+    _score_event_priority,
+)
 from teslausb_web.services.cloud_archive.settings import (
+    CLOUD_PRIORITY_BULK,
+    CLOUD_PRIORITY_HARSH_BRAKE,
+    CLOUD_PRIORITY_LIVE_EVENT,
     NO_EVENT_SCORE_THRESHOLD,
     CloudArchiveConfig,
 )
@@ -225,3 +233,85 @@ def test_discover_events_skips_recent_clips_without_recentclips_in_sync_folders(
     )
 
     assert _discover_events(config) == ()
+
+def _make_mapping_db_with_hard_brake(db_path, video_path: str) -> None:
+    import sqlite3
+    connection = sqlite3.connect(str(db_path))
+    try:
+        connection.executescript(
+            """
+            CREATE TABLE clips (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                relative_path TEXT NOT NULL UNIQUE,
+                bucket TEXT NOT NULL,
+                indexed_at_utc INTEGER NOT NULL
+            );
+            CREATE TABLE detected_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                clip_id INTEGER NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
+                event_type TEXT NOT NULL,
+                severity REAL,
+                timestamp_utc INTEGER NOT NULL
+            );
+            """
+        )
+        cursor = connection.execute(
+            "INSERT INTO clips (relative_path, bucket, indexed_at_utc) VALUES (?, 'recent', 0)",
+            (video_path,),
+        )
+        clip_id = cursor.lastrowid
+        connection.execute(
+            "INSERT INTO detected_events (clip_id, event_type, severity, timestamp_utc) "
+            "VALUES (?, 'harsh_braking', -4.5, 0)",
+            (clip_id,),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def test_load_hard_brake_hits_returns_basename_and_timestamp(tmp_path) -> None:
+    mapping_db = tmp_path / "mapping.db"
+    _make_mapping_db_with_hard_brake(
+        mapping_db, "RecentClips/2026-03-01_12-00-00-front.mp4"
+    )
+    hits = _load_hard_brake_hits(mapping_db)
+    assert hits is not None
+    assert "2026-03-01_12-00-00-front.mp4" in hits
+    assert "2026-03-01_12-00-00" in hits
+
+
+def test_load_hard_brake_hits_returns_none_when_table_missing(tmp_path) -> None:
+    mapping_db = tmp_path / "mapping.db"
+    import sqlite3
+    sqlite3.connect(str(mapping_db)).close()  # empty DB, no detected_events
+    assert _load_hard_brake_hits(mapping_db) is None
+
+
+def test_candidate_priority_decision_matrix() -> None:
+    hits = frozenset({"2026-03-01_12-00-00-front.mp4", "2026-03-01_12-00-00"})
+    # Sentry and Saved are always priority regardless of hits set.
+    assert _candidate_priority("SentryClips/2026-03-01_12-00-00", hits) == CLOUD_PRIORITY_LIVE_EVENT
+    assert _candidate_priority("SavedClips/2026-03-01_12-00-00", hits) == CLOUD_PRIORITY_LIVE_EVENT
+    assert _candidate_priority("SentryClips/2026-03-01_12-00-00", None) == CLOUD_PRIORITY_LIVE_EVENT
+    # RecentClips matching basename or timestamp -> priority.
+    assert (
+        _candidate_priority("RecentClips/2026-03-01_12-00-00-front.mp4", hits)
+        == CLOUD_PRIORITY_HARSH_BRAKE
+    )
+    assert (
+        _candidate_priority("RecentClips/2026-03-01_12-00-00-rear.mp4", hits)
+        == CLOUD_PRIORITY_HARSH_BRAKE
+    )
+    # RecentClips without a hit -> bulk priority.
+    assert (
+        _candidate_priority("RecentClips/2099-01-01_00-00-00-front.mp4", hits)
+        == CLOUD_PRIORITY_BULK
+    )
+    # Hits=None disables hard-brake bump entirely.
+    assert (
+        _candidate_priority("RecentClips/2026-03-01_12-00-00-front.mp4", None)
+        == CLOUD_PRIORITY_BULK
+    )
+
+

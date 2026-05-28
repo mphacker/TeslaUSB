@@ -2053,7 +2053,13 @@
 
             if (badge) {
                 if (queue.length > 0) {
-                    badge.textContent = queue.length;
+                    var priorityCount = 0;
+                    for (var i = 0; i < queue.length; i++) {
+                        if ((queue[i].priority || 0) > 0) priorityCount++;
+                    }
+                    badge.textContent = priorityCount > 0
+                        ? queue.length + ' (' + priorityCount + ' priority)'
+                        : queue.length;
                     badge.style.display = '';
                 } else {
                     badge.style.display = 'none';
@@ -2083,9 +2089,12 @@
                 var size = item.file_size ? formatBytes(item.file_size) : '';
                 var statusLabel = item.status || 'queued';
                 var statusColor = statusLabel === 'uploading' ? 'var(--msg-info-text)' : 'var(--text-secondary)';
+                var priorityBadge = (item.priority || 0) > 0
+                    ? '<span style="display: inline-block; margin-right: 6px; padding: 1px 6px; border-radius: var(--radius-full); font-size: var(--text-xs); font-weight: 600; background: var(--msg-warning-bg, #fef3c7); color: var(--msg-warning-text, #92400e);" title="Priority event — uploads ahead of bulk backlog">PRIORITY</span>'
+                    : '';
                 html += '<div style="display: flex; align-items: center; gap: var(--space-2); padding: 8px; border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-secondary);">' +
                     '<div style="flex: 1; min-width: 0;">' +
-                        '<div style="font-size: var(--text-sm); color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">' + safeName + '</div>' +
+                        '<div style="font-size: var(--text-sm); color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">' + priorityBadge + safeName + '</div>' +
                         '<div style="font-size: var(--text-xs); color: var(--text-muted);">' + size + ' &middot; <span style="color:' + statusColor + ';">' + statusLabel + '</span>' +
                         (item.retry_count > 0 ? ' &middot; retries: ' + item.retry_count : '') + '</div>' +
                     '</div>';

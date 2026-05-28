@@ -161,15 +161,36 @@ def _prepopulate_queue(
             candidate.relative_path,
             candidate.size_bytes,
             queued_at,
+            candidate.priority,
         )
         for candidate in candidates
     ]
+    # INSERT OR IGNORE preserves the priority of any row that already
+    # exists in another status (e.g. an in-flight 'uploading' row keeps
+    # its earlier priority). For brand-new pending rows we record the
+    # priority computed by discovery so the uploader's ORDER BY can
+    # surface live events ahead of the bulk backlog.
     connection.executemany(
         "INSERT OR IGNORE INTO cloud_synced_files ("
-        "file_path, file_size, status, retry_count, last_error, added_at"
-        ") VALUES (?, ?, 'pending', 0, NULL, ?)",
+        "file_path, file_size, status, retry_count, last_error, added_at, priority"
+        ") VALUES (?, ?, 'pending', 0, NULL, ?, ?)",
         rows,
     )
+    # If a candidate already has a 'pending' row with the default
+    # priority=0 but discovery now says it's high-priority (e.g. the
+    # Rust materializer flagged a hard brake on a clip we'd already
+    # queued bulk), lift the priority so it jumps the queue.
+    priority_upgrades = [
+        (candidate.priority, candidate.relative_path)
+        for candidate in candidates
+        if candidate.priority > 0
+    ]
+    if priority_upgrades:
+        connection.executemany(
+            "UPDATE cloud_synced_files SET priority = ? "
+            "WHERE file_path = ? AND status = 'pending' AND priority < ?",
+            [(priority, path, priority) for priority, path in priority_upgrades],
+        )
     connection.commit()
 
 

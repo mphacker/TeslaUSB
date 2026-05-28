@@ -87,3 +87,32 @@ def test_retry_dead_letter_and_recover_interrupted_uploads(tmp_path: Path) -> No
 
     assert retried == 1
     assert recovered == 1
+
+def test_get_sync_queue_orders_priority_before_bulk(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    with open_db(config.db_path) as connection:
+        connection.execute(
+            "INSERT INTO cloud_synced_files (file_path, file_size, status, "
+            "retry_count, last_error, added_at, priority) "
+            "VALUES ('RecentClips/bulk-1.mp4', 100, 'pending', 0, NULL, '2026-01-01T00:00:00Z', 0)"
+        )
+        connection.execute(
+            "INSERT INTO cloud_synced_files (file_path, file_size, status, "
+            "retry_count, last_error, added_at, priority) "
+            "VALUES ('SentryClips/event-1.mp4', 200, 'pending', 0, NULL, '2026-01-01T01:00:00Z', 10)"
+        )
+        connection.execute(
+            "INSERT INTO cloud_synced_files (file_path, file_size, status, "
+            "retry_count, last_error, added_at, priority) "
+            "VALUES ('RecentClips/bulk-2.mp4', 100, 'pending', 0, NULL, '2026-01-01T02:00:00Z', 0)"
+        )
+        connection.commit()
+    queries = CloudArchiveQueries(CloudArchiveQueriesConfig(db_path=config.db_path))
+    items = queries.get_sync_queue()
+    paths = [item.file_path for item in items]
+    assert paths[0] == "SentryClips/event-1.mp4"
+    assert items[0].priority == 10
+    assert items[1].priority == 0
+    assert items[2].priority == 0
+
+

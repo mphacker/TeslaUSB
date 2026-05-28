@@ -57,6 +57,22 @@ DEFAULT_PIPELINE_BATCH_SIZE: Final[int] = 32
 NO_EVENT_SCORE_THRESHOLD: Final[int] = 200
 FOLDER_PRIORITY_MULTIPLIER: Final[int] = 1_000
 
+# Per-row upload priority stored on ``cloud_synced_files.priority``.
+# Higher value uploads sooner. Lives here (rather than in pipeline.py)
+# because both the discovery layer and the queue API need to read it
+# without circularly importing the pipeline batch module.
+CLOUD_PRIORITY_BULK: Final[int] = 0
+CLOUD_PRIORITY_LIVE_EVENT: Final[int] = 10
+CLOUD_PRIORITY_HARSH_BRAKE: Final[int] = 10
+
+# ``detected_events.event_type`` values that count as a "hard brake"
+# for queue-priority purposes. The Rust materializer emits
+# ``harsh_braking`` for acceleration_x < -4.0 m/s² (~0.4 g, the
+# industry-standard hard-brake threshold) and ``emergency_braking``
+# for < -7.0 m/s² (supersedes harsh). Either flavour earns a
+# RecentClips clip a queue-jump on the next sync cycle.
+HARD_BRAKE_EVENT_TYPES: Final[tuple[str, ...]] = ("harsh_braking", "emergency_braking")
+
 
 class CloudArchiveError(RuntimeError):
     """Base error raised by the cloud archive domain."""

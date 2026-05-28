@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 CLOUD_MODULE: Final[str] = "cloud_archive"
-CLOUD_SCHEMA_VERSION: Final[int] = 5
+CLOUD_SCHEMA_VERSION: Final[int] = 6
 MIGRATE_STATUS_PRIORITY: Final[dict[str, int]] = {
     "synced": 5,
     "dead_letter": 4,
@@ -35,6 +35,7 @@ MIGRATE_STATUS_PRIORITY: Final[dict[str, int]] = {
 _SCHEMA_VERSION_CANONICALIZE_PATHS: Final[int] = 2
 _SCHEMA_VERSION_PREVIOUS_LAST_ERROR: Final[int] = 3
 _SCHEMA_VERSION_DROP_LIVE_EVENT_QUEUE: Final[int] = 4
+_SCHEMA_VERSION_ADD_PRIORITY_COLUMN: Final[int] = 6
 
 _SCHEMA_SQL: Final[str] = """
 CREATE TABLE IF NOT EXISTS module_versions (
@@ -54,7 +55,8 @@ CREATE TABLE IF NOT EXISTS cloud_synced_files (
     synced_at TEXT,
     retry_count INTEGER DEFAULT 0,
     last_error TEXT,
-    previous_last_error TEXT
+    previous_last_error TEXT,
+    priority INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS cloud_sync_sessions (
@@ -200,6 +202,23 @@ def _migrate_drop_live_event_queue_v4(
     connection.execute("DROP TABLE IF EXISTS live_event_queue")
 
 
+def _migrate_add_priority_column_v6(connection: sqlite3.Connection) -> None:
+    """Add ``priority`` column to ``cloud_synced_files`` (v5 → v6).
+
+    Higher values upload sooner. Existing rows keep the SQL default of
+    ``0`` (bulk) so the next discovery pass can lift live-event /
+    hard-brake clips above the backlog without rewriting history.
+    """
+    if not _column_exists(connection, "cloud_synced_files", "priority"):
+        connection.execute(
+            "ALTER TABLE cloud_synced_files ADD COLUMN priority INTEGER NOT NULL DEFAULT 0"
+        )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_cloud_synced_priority "
+        "ON cloud_synced_files(priority DESC, id ASC)"
+    )
+
+
 def _apply_pending_migrations(
     connection: sqlite3.Connection,
     config: CloudArchiveDBConfig,
@@ -216,6 +235,8 @@ def _apply_pending_migrations(
         _migrate_add_previous_last_error_v3(connection)
     if current_version < _SCHEMA_VERSION_DROP_LIVE_EVENT_QUEUE:
         _migrate_drop_live_event_queue_v4(connection, config.mapping_db_path)
+    if current_version < _SCHEMA_VERSION_ADD_PRIORITY_COLUMN:
+        _migrate_add_priority_column_v6(connection)
     connection.execute(
         "INSERT OR REPLACE INTO module_versions (module, version, updated_at) VALUES (?, ?, ?)",
         (CLOUD_MODULE, CLOUD_SCHEMA_VERSION, datetime.now(UTC).isoformat()),

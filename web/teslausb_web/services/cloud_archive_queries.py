@@ -53,6 +53,7 @@ class QueueItem:
     status: str
     retry_count: int
     last_error: str | None
+    priority: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,9 +200,9 @@ class CloudArchiveQueries:
     def get_sync_queue(self) -> tuple[QueueItem, ...]:
         with open_db(self._config.db_path) as connection:
             rows = connection.execute(
-                "SELECT file_path, file_size, status, retry_count, last_error "
+                "SELECT file_path, file_size, status, retry_count, last_error, priority "
                 "FROM cloud_synced_files WHERE status IN ('queued', 'pending', 'uploading') "
-                "ORDER BY id ASC"
+                "ORDER BY priority DESC, id ASC"
             ).fetchall()
         return tuple(
             QueueItem(
@@ -210,6 +211,7 @@ class CloudArchiveQueries:
                 status=str(row["status"]),
                 retry_count=int(row["retry_count"] or 0),
                 last_error=row["last_error"],
+                priority=int(row["priority"] or 0),
             )
             for row in rows
         )

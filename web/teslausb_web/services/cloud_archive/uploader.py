@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from random import SystemRandom
@@ -132,6 +133,46 @@ def _backoff_seconds(service: CloudArchiveService, retry_count: int) -> float:
     return float(min(service.config.backoff_max_seconds, base + float(_RANDOM.random())))
 
 
+def _prepopulate_queue(
+    connection: sqlite3.Connection,
+    candidates: tuple[EventCandidate, ...],
+) -> None:
+    """Insert a ``pending`` row in ``cloud_synced_files`` for every candidate.
+
+    Without this the queue UI only ever sees the single in-flight file,
+    because the per-file ``INSERT … status='uploading'`` in
+    :func:`_mark_candidate_uploading` is the only thing that materialises a
+    row. Operators reported "queue shows nothing" with 200+ telemetry-bearing
+    RecentClips waiting. Pre-populating gives an honest backlog and makes
+    "remove from queue" / "clear queue" actually have something to act on.
+
+    ``INSERT OR IGNORE`` keeps existing rows untouched — already-uploading,
+    already-synced and dead-lettered files keep their current status; the
+    discovery layer already filters synced / dead_letter out of ``candidates``,
+    and an interrupted 'uploading' row is left alone (it will be flipped back
+    to 'pending' the next time it is processed or by
+    :func:`recover_interrupted_uploads` on the next worker start).
+    """
+    if not candidates:
+        return
+    queued_at = datetime.now(UTC).isoformat()
+    rows = [
+        (
+            candidate.relative_path,
+            candidate.size_bytes,
+            queued_at,
+        )
+        for candidate in candidates
+    ]
+    connection.executemany(
+        "INSERT OR IGNORE INTO cloud_synced_files ("
+        "file_path, file_size, status, retry_count, last_error, added_at"
+        ") VALUES (?, ?, 'pending', 0, NULL, ?)",
+        rows,
+    )
+    connection.commit()
+
+
 def _prepare_drain(
     service: CloudArchiveService,
     trigger: str,
@@ -153,6 +194,7 @@ def _prepare_drain(
         try:
             _reconcile_with_remote(connection, service.rclone_service)
             candidates = _discover_events(service.config, connection)
+            _prepopulate_queue(connection, candidates)
             _enqueue_events_to_pipeline_batch(service.config.mapping_db_path, candidates)
             pipeline_candidates = _peek_pipeline_cloud_pending(service.config.mapping_db_path)
             legacy_first = candidates[0].relative_path if candidates else None

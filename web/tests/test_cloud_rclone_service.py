@@ -353,7 +353,7 @@ def test_render_config_adds_onedrive_drive_id_when_available(tmp_path: Path) -> 
     assert "drive_id = drive-123" in config_text
 
 
-def test_render_config_omits_onedrive_drive_id_when_lookup_fails(tmp_path: Path) -> None:
+def test_render_config_raises_when_onedrive_drive_id_lookup_fails(tmp_path: Path) -> None:
     service, _oauth_service_obj, _source_root, _state_root, binary_path = _service(
         tmp_path, provider="onedrive"
     )
@@ -365,10 +365,12 @@ def test_render_config_omits_onedrive_drive_id_when_lookup_fails(tmp_path: Path)
             "teslausb_web.services.cloud_rclone_service.urlopen",
             side_effect=OSError("boom"),
         ),
+        pytest.raises(RcloneAuthError, match="OneDrive"),
     ):
         service.render_config()
-    config_text = service.config_file_path.read_text(encoding="utf-8")
-    assert "drive_id =" not in config_text
+    assert not service.config_file_path.exists() or "drive_id =" not in service.config_file_path.read_text(
+        encoding="utf-8"
+    )
 
 
 def test_render_config_raises_without_credentials(tmp_path: Path) -> None:

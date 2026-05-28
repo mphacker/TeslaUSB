@@ -638,8 +638,13 @@ class CloudRcloneService:
                 credentials,
                 timeout=self._command_timeout_seconds(),
             )
-            if drive_id:
-                lines.append(f"drive_id = {drive_id}")
+            if not drive_id:
+                raise RcloneAuthError(
+                    "Could not reach Microsoft Graph to identify the OneDrive "
+                    "drive. Check the Pi's internet connection and click "
+                    "Connect again."
+                )
+            lines.append(f"drive_id = {drive_id}")
         return "\n".join(lines) + "\n"
 
     def _run_rclone(
@@ -965,32 +970,50 @@ def _discover_onedrive_drive_id(
     credentials: OAuthCredentials,
     *,
     timeout: float,
+    attempts: int = 3,
 ) -> str | None:
-    request = Request(  # noqa: S310 - constant HTTPS Graph endpoint
-        _GRAPH_DRIVE_URL,
-        headers={"Authorization": f"Bearer {credentials.access_token}"},
-    )
-    try:
-        response = cast(
-            "_ReadableResponse",
-            urlopen(  # noqa: S310  # nosec B310 - constant HTTPS Graph endpoint
-                request,
-                timeout=timeout,
-                context=ssl.create_default_context(),
-            ),
+    last_error: str | None = None
+    for attempt in range(1, max(1, attempts) + 1):
+        request = Request(  # noqa: S310 - constant HTTPS Graph endpoint
+            _GRAPH_DRIVE_URL,
+            headers={"Authorization": f"Bearer {credentials.access_token}"},
         )
-        with contextlib.closing(response):
-            payload: object = json.loads(response.read().decode("utf-8"))
-    except (HTTPError, URLError, OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        logger.warning("Could not discover OneDrive drive_id: %s", exc)
-        return None
-    if not isinstance(payload, dict):
-        logger.warning("Could not discover OneDrive drive_id: response was not a JSON object")
-        return None
-    drive_id = payload.get("id")
-    if not isinstance(drive_id, str) or not drive_id.strip():
-        return None
-    return drive_id.strip()
+        try:
+            response = cast(
+                "_ReadableResponse",
+                urlopen(  # noqa: S310  # nosec B310 - constant HTTPS Graph endpoint
+                    request,
+                    timeout=timeout,
+                    context=ssl.create_default_context(),
+                ),
+            )
+            with contextlib.closing(response):
+                payload: object = json.loads(response.read().decode("utf-8"))
+        except (HTTPError, URLError, OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            last_error = str(exc)
+            logger.warning(
+                "Could not discover OneDrive drive_id (attempt %d/%d): %s",
+                attempt,
+                attempts,
+                exc,
+            )
+            continue
+        if not isinstance(payload, dict):
+            logger.warning(
+                "Could not discover OneDrive drive_id: response was not a JSON object"
+            )
+            return None
+        drive_id = payload.get("id")
+        if not isinstance(drive_id, str) or not drive_id.strip():
+            return None
+        return drive_id.strip()
+    if last_error is not None:
+        logger.warning(
+            "Giving up OneDrive drive_id discovery after %d attempts: %s",
+            attempts,
+            last_error,
+        )
+    return None
 
 
 def _rotate_log_file(path: Path) -> None:

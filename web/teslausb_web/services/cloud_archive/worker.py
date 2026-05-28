@@ -189,7 +189,10 @@ class CloudArchiveWorker:
                 with state.lock:
                     state.drain_count += 1
                 try:
-                    _run_sync(self._service, "auto")
+                    try:
+                        _run_sync(self._service, "auto")
+                    except Exception:  # noqa: BLE001 - keep worker alive across drain failures
+                        logger.exception("cloud sync drain raised; worker will continue")
                     try:
                         from teslausb_web.services.cloud_archive.cloud_cleanup import (
                             run_cloud_cleanup,

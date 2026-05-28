@@ -473,10 +473,6 @@ def _register_cloud_archive_services(
     if cfg.features.cloud_archive_enabled:
         archive_svc.start()
 
-    @app.teardown_appcontext
-    def _shutdown_cloud_archive(_exc: BaseException | None) -> None:
-        archive_svc.shutdown(timeout=5.0)
-
     atexit.register(archive_svc.shutdown)
     app.extensions["cloud_archive_service_finalizer"] = weakref.finalize(
         app,

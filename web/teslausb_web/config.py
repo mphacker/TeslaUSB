@@ -161,7 +161,7 @@ _DEFAULT_CLOUD_RCLONE_LOG_PATH: Path = (
 )
 _DEFAULT_CLOUD_ARCHIVE_DB_NAME: Final[str] = "cloud_sync.db"
 _DEFAULT_CLOUD_ARCHIVE_DB_PATH: Path = _DEFAULT_STATE_DIR / _DEFAULT_CLOUD_ARCHIVE_DB_NAME
-_DEFAULT_CLOUD_TESLACAM_PATH: Path = _DEFAULT_BACKING_ROOT
+_DEFAULT_CLOUD_TESLACAM_PATH: Path = _DEFAULT_BACKING_ROOT / "TeslaCam"
 _DEFAULT_CLOUD_WORKER_IDLE_SECONDS: Final[float] = 300.0
 _DEFAULT_CLOUD_BACKOFF_INITIAL_SECONDS: Final[float] = 60.0
 _DEFAULT_CLOUD_BACKOFF_MAX_SECONDS: Final[float] = 300.0
@@ -1713,7 +1713,7 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
             teslacam_path=_coerce_path(
                 cloud_raw,
                 "teslacam_path",
-                paths_section.backing_root,
+                paths_section.backing_root / "TeslaCam",
                 source,
             ),
             worker_idle_seconds=_coerce_float(

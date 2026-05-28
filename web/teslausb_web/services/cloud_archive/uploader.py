@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from random import SystemRandom
 from typing import TYPE_CHECKING, Protocol
+
+logger = logging.getLogger(__name__)
 
 from teslausb_web.services.cloud_archive.discovery import EventCandidate, _discover_events
 from teslausb_web.services.cloud_archive.kv import KV_KEY_LAST_SUCCESSFUL_SYNC, kv_set

@@ -525,14 +525,14 @@
                     </p>
                 </div>
 
-                {# Cloud storage reserve — persisted; cloud-side cleanup enforcement is a follow-up. #}
+                {# Cloud storage reserve — enforced by run_cloud_cleanup after every drain. #}
                 <div style="margin-bottom: var(--space-4);">
                     <label style="display: block; margin-bottom: var(--space-2); font-weight: 600; color: var(--text-primary);">
                         Cloud storage reserve (GB)
                     </label>
                     <input type="number" name="cloud_reserve_gb" value="{{ cloud_reserve_gb }}" min="0" max="100" step="0.5"
                            style="width:120px; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary); color:var(--text-primary);">
-                    <p style="font-size: var(--text-xs); color: var(--text-muted); margin:4px 0 0">Saved now. Reserve enforcement (auto-cleanup) ships in a follow-up.</p>
+                    <p style="font-size: var(--text-xs); color: var(--text-muted); margin:4px 0 0">When &ldquo;Auto-delete old cloud videos&rdquo; is on, the sweeper keeps at least this much free space on the remote.</p>
                 </div>
 
                 {# Phase 2.6 — bulk cloud sync retry cap. Default 5,
@@ -560,7 +560,7 @@
                         <input type="checkbox" name="cloud_auto_cleanup" value="1" {% if cloud_auto_cleanup %}checked{% endif %}>
                         <span>Auto-delete old cloud videos when storage is low</span>
                     </label>
-                    <p style="font-size: var(--text-xs); color: var(--text-muted); margin:0 0 0 24px">Saved now. Cloud-side cleanup ships in a follow-up.</p>
+                    <p style="font-size: var(--text-xs); color: var(--text-muted); margin:0 0 0 24px">Deletes the oldest cloud objects past the minimum retention until the reserve is met. Runs after every sync drain.</p>
                 </div>
 
                 {# Phase 1 item 1.3 — retention-respects-cloud toggle.
@@ -578,7 +578,7 @@
                         <span style="font-weight: 600; color: var(--text-primary);">Keep clips until backed up to cloud</span>
                     </label>
                     <p style="font-size: var(--text-xs); color: var(--text-muted); margin: 4px 0 0;">
-                        Saved now. Retention service integration ships in a follow-up &mdash; until then, configure SD-card retention via the Settings page.
+                        Saved now. SD-card retention enforcement runs in the Rust cleanup worker; this toggle is honored once that worker is taught to read it (tracked in the B-1 plan).
                     </p>
                 </div>
 
@@ -588,7 +588,7 @@
                     </label>
                     <input type="number" name="cloud_min_retention_days" value="{{ cloud_min_retention_days }}" min="0" max="365"
                            style="width:120px; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary); color:var(--text-primary);">
-                    <p style="font-size: var(--text-xs); color: var(--text-muted); margin:4px 0 0">0 = keep forever. Saved now. Cloud-side auto-cleanup ships in a follow-up.</p>
+                    <p style="font-size: var(--text-xs); color: var(--text-muted); margin:4px 0 0">0 = keep forever. The cloud-side auto-cleanup will not delete objects younger than this.</p>
                 </div>
 
                 <button type="submit" class="edit-btn" style="padding: 8px 20px; font-size: 14px; margin-top: var(--space-3);">Save Settings</button>

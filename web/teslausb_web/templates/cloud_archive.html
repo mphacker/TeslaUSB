@@ -578,7 +578,7 @@
                         <span style="font-weight: 600; color: var(--text-primary);">Keep clips until backed up to cloud</span>
                     </label>
                     <p style="font-size: var(--text-xs); color: var(--text-muted); margin: 4px 0 0;">
-                        Saved now. SD-card retention enforcement runs in the Rust cleanup worker; this toggle is honored once that worker is taught to read it (tracked in the B-1 plan).
+                        When on, the cleanup worker keeps clips that haven&rsquo;t finished uploading, even if they&rsquo;ve aged past the local retention window. Skipped clips are visible in the worker journal as <code>kept_unsynced</code>.
                     </p>
                 </div>
 

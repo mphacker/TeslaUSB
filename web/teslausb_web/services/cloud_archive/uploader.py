@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Protocol
 logger = logging.getLogger(__name__)
 
 from teslausb_web.services.cloud_archive.discovery import EventCandidate, _discover_events
+from teslausb_web.services.cloud_archive.integrity import purge_broken_videos
 from teslausb_web.services.cloud_archive.kv import KV_KEY_LAST_SUCCESSFUL_SYNC, kv_set
 from teslausb_web.services.cloud_archive.pipeline import (
     PipelineCloudSyncedRecord,
@@ -27,6 +28,7 @@ from teslausb_web.services.cloud_archive.settings import (
     CloudArchiveError,
     CloudArchiveStateError,
     _read_retry_max_attempts_setting,
+    _read_sync_folders_setting,
 )
 
 if TYPE_CHECKING:
@@ -194,6 +196,50 @@ def _prepopulate_queue(
     connection.commit()
 
 
+def _purge_broken_videos_for_drain(service: CloudArchiveService) -> None:
+    """Delete idle MP4s that are missing a ``moov`` box before discovery runs.
+
+    Tesla writes the index atom at file close — a clip that has none
+    will never play (the device probably rebooted mid-write), wastes
+    retention budget, and would only burn cloud bandwidth if synced.
+    Files modified within the in-use threshold are left alone so we
+    never race the in-vehicle writer.
+
+    Failures here are logged and swallowed so a transient I/O issue
+    can't break the entire drain cycle.
+    """
+    try:
+        with service.open_db() as connection:
+            folders = _read_sync_folders_setting(service.config, connection)
+        report = purge_broken_videos(service.config.teslacam_path, folders)
+    except Exception as exc:
+        logger.warning("integrity: purge pass raised %s", exc)
+        return
+    if not report.deleted_paths:
+        return
+    # Drop any queue rows that point at files we just deleted so the
+    # uploader doesn't try to ``copyto`` a missing source.
+    relative_paths = []
+    for deleted in report.deleted_paths:
+        try:
+            rel = deleted.relative_to(service.config.teslacam_path)
+        except ValueError:
+            continue
+        relative_paths.append(str(rel).replace("\\", "/"))
+    if not relative_paths:
+        return
+    try:
+        with service.open_db() as connection:
+            connection.executemany(
+                "DELETE FROM cloud_synced_files "
+                "WHERE file_path = ? AND status IN ('pending', 'uploading')",
+                [(rel,) for rel in relative_paths],
+            )
+            connection.commit()
+    except sqlite3.Error as exc:
+        logger.warning("integrity: failed to evict broken-video queue rows: %s", exc)
+
+
 def _prepare_drain(
     service: CloudArchiveService,
     trigger: str,
@@ -214,6 +260,7 @@ def _prepare_drain(
         connection.commit()
         try:
             _reconcile_with_remote(connection, service.rclone_service)
+            _purge_broken_videos_for_drain(service)
             candidates = _discover_events(service.config, connection)
             _prepopulate_queue(connection, candidates)
             _enqueue_events_to_pipeline_batch(service.config.mapping_db_path, candidates)

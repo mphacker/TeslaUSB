@@ -882,11 +882,12 @@ def test_api_queue_event_surfaces_runtime_error(
     assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
 
 
-def test_api_queue_returns_raw_queue_list(client: FlaskClient, app: Flask) -> None:
+def test_api_queue_returns_queue_envelope(client: FlaskClient, app: Flask) -> None:
     _seed_queue_row(app, "SentryClips/item", "queued")
     response = client.get("/cloud/api/queue")
     assert response.status_code == HTTPStatus.OK
-    assert response.get_json()[0]["file_path"] == "SentryClips/item"
+    payload = response.get_json()
+    assert payload["queue"][0]["file_path"] == "SentryClips/item"
 
 
 def test_api_queue_returns_error_wrapper_on_failure(client: FlaskClient, app: Flask) -> None:

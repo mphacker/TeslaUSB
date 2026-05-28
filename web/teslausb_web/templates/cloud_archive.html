@@ -2068,8 +2068,16 @@
                 return;
             }
 
+            // Cap rendered rows to keep the Pi-side DOM responsive (<2s render).
+            // Full backlog is still reachable via the badge count and the
+            // Clear Queue button; per-file management for huge backlogs is
+            // out of scope for this UI.
+            var QUEUE_RENDER_LIMIT = 100;
+            var visible = queue.slice(0, QUEUE_RENDER_LIMIT);
+            var truncated = queue.length - visible.length;
+
             var html = '<div style="display: flex; flex-direction: column; gap: var(--space-2);">';
-            queue.forEach(function(item) {
+            visible.forEach(function(item) {
                 var fname = item.file_path.split('/').pop();
                 var safeName = fname.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
                 var size = item.file_size ? formatBytes(item.file_size) : '';
@@ -2087,6 +2095,9 @@
                 html += '</div>';
             });
             html += '</div>';
+            if (truncated > 0) {
+                html += '<div style="margin-top: var(--space-3); padding: 8px; text-align: center; font-size: var(--text-xs); color: var(--text-muted); border-top: 1px solid var(--border-color);">Showing first ' + visible.length + ' of ' + queue.length + ' queued files. ' + truncated + ' more will sync in order.</div>';
+            }
             content.innerHTML = html;
         } catch(e) {
             content.innerHTML = '<div style="text-align: center; padding: var(--space-4); color: var(--error-text);">Failed to load queue</div>';

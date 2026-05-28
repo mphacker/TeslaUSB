@@ -1095,7 +1095,7 @@ def api_queue() -> ResponseReturnValue:
     except (CloudArchiveDBError, RuntimeError) as exc:
         logger.warning("cloud queue fetch failed: %s", exc)
         return jsonify({"queue": [], "error": str(exc)})
-    return jsonify([asdict(item) for item in queue])
+    return jsonify({"queue": [asdict(item) for item in queue]})
 
 
 @cloud_archive_bp.route("/api/queue/remove", methods=["POST"])

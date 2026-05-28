@@ -806,29 +806,51 @@
        Sync status polling
        =================================================================== */
 
-    var pollInterval = null;
+    var pollTimer = null;
     var isSyncing = {{ 'true' if sync_status.running else 'false' }};
+    var POLL_FAST_MS = 2000;
+    var POLL_IDLE_MS = 5000;
+    var lastRunning = isSyncing;
 
     function startPolling() {
-        if (pollInterval) return;
-        pollInterval = setInterval(async function() {
+        if (pollTimer) return;
+        var tick = async function() {
+            var nextDelay = POLL_IDLE_MS;
             try {
                 var resp = await fetch('{{ url_for("cloud_archive.api_status") }}');
-                if (!resp.ok) return;
-                var data = await resp.json();
-                updateStatusCard(data.status || {}, data.stats || {});
-                updateStatCounters(data.stats || {});
-                if (!(data.status && data.status.running)) {
-                    stopPolling();
+                if (resp.ok) {
+                    var data = await resp.json();
+                    var status = data.status || {};
+                    updateStatusCard(status, data.stats || {});
+                    updateStatCounters(data.stats || {});
+                    var nowRunning = Boolean(status.running);
+                    nextDelay = nowRunning ? POLL_FAST_MS : POLL_IDLE_MS;
+                    if (lastRunning && !nowRunning && typeof loadHistory === 'function') {
+                        try { loadHistory(); } catch (e) { /* best-effort */ }
+                    }
+                    lastRunning = nowRunning;
                 }
             } catch (e) {
                 /* network error — keep polling */
             }
-        }, 10000);
+            pollTimer = setTimeout(tick, nextDelay);
+        };
+        pollTimer = setTimeout(tick, POLL_IDLE_MS);
     }
 
     function stopPolling() {
-        if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+        if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+    }
+
+    var queuePollTimer = null;
+    function startQueuePolling() {
+        if (queuePollTimer) return;
+        var qtick = async function() {
+            try { if (typeof window.refreshQueue === 'function') await window.refreshQueue(); }
+            catch (e) { /* keep polling */ }
+            queuePollTimer = setTimeout(qtick, POLL_IDLE_MS);
+        };
+        queuePollTimer = setTimeout(qtick, POLL_IDLE_MS);
     }
 
     /* ===================================================================
@@ -1932,9 +1954,11 @@
     document.addEventListener('DOMContentLoaded', function() {
         formatTimestamps();
         if (isSyncing) startPolling();
+        startPolling();  // poll always; idempotent
         startArchivePoll();
         loadStorageUsage();
         refreshQueue();
+        startQueuePolling();
     });
 
     /* Load cloud storage usage */

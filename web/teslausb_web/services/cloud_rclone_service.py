@@ -996,7 +996,19 @@ def _read_cached_drive_id(config_path: Path) -> str | None:
     """Return the previously-rendered OneDrive drive_id from rclone.conf, if any."""
     try:
         text = config_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+    except (OSError, UnicodeDecodeError) as exc:
+        # A common failure mode here is the conf having been rewritten by a
+        # manual `sudo rclone ...` invocation, which leaves it owned by root
+        # with 0o600 so the gunicorn (pi) process can no longer read it.
+        # Log loudly so this doesn't silently masquerade as a Graph outage.
+        logger.warning(
+            "Could not read cached OneDrive drive_id from %s: %s. "
+            "Check that the file is owned/readable by the web service user "
+            "(commonly: sudo chown pi:pi %s).",
+            config_path,
+            exc,
+            config_path,
+        )
         return None
     for raw_line in text.splitlines():
         line = raw_line.strip()

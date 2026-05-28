@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from re import Pattern
@@ -309,6 +309,30 @@ def _discover_events(
         candidates = [
             candidate for candidate in candidates if candidate.score < _SYNC_NON_EVENT_SCORE_LIMIT
         ]
+    # Reconcile against any already-recorded priority in cloud_synced_files
+    # so that previously-classified live/harsh-brake clips don't get
+    # silently demoted when the upstream signal (hard_brake_hits,
+    # geo_hits) is transiently empty or changes. The DB row is the
+    # durable record of "we previously decided this was priority"; we
+    # take the max so a one-shot signal-loss can't strand items at the
+    # bottom of a long bulk queue.
+    if connection is not None and candidates:
+        try:
+            rows = connection.execute(
+                "SELECT file_path, priority FROM cloud_synced_files "
+                "WHERE status IN ('pending', 'uploading') AND priority > 0"
+            ).fetchall()
+        except sqlite3.Error as exc:
+            logger.debug("priority reconcile read failed (non-fatal): %s", exc)
+            rows = []
+        db_priority: dict[str, int] = {
+            str(row[0]): int(row[1]) for row in rows if row and row[0] is not None
+        }
+        if db_priority:
+            candidates = [
+                replace(c, priority=max(c.priority, db_priority.get(c.relative_path, 0)))
+                for c in candidates
+            ]
     candidates.sort(
         key=lambda candidate: (
             # Highest priority first (negate so ASC sort puts it on top).

@@ -58,6 +58,33 @@ def test_service_start_and_shutdown_worker(tmp_path: Path) -> None:
     assert service.stop(timeout=2.0) is True
 
 
+def test_service_start_restores_persisted_remote_path(tmp_path: Path) -> None:
+    """Regression: after a service restart, the persisted remote_path KV must be
+    re-applied to the rclone service so transfers land at <override>/<path>
+    instead of at the remote root.
+    """
+    from teslausb_web.services.cloud_archive.settings import (
+        KV_KEY_REMOTE_PATH,
+        _write_setting,
+    )
+
+    config = _make_config(tmp_path)
+    with open_db(config.db_path) as connection:
+        _write_setting(connection, KV_KEY_REMOTE_PATH, "TeslaUSB")
+        connection.commit()
+
+    rclone = MagicMock()
+    service = CloudArchiveService(
+        config=config, rclone_service=rclone, oauth_service=MagicMock()
+    )
+
+    try:
+        assert service.start() is True
+        rclone.set_remote_path_override.assert_called_with("TeslaUSB")
+    finally:
+        service.stop(timeout=2.0)
+
+
 def test_make_cloud_archive_service_accepts_cloud_config(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     with open_db(config.db_path):

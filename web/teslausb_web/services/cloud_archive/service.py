@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -62,6 +63,8 @@ from teslausb_web.services.cloud_archive_queries import (
     CloudArchiveQueriesConfig,
     make_cloud_archive_queries,
 )
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -155,7 +158,24 @@ class CloudArchiveService:
         return self.config.enabled
 
     def start(self) -> bool:
+        self._restore_persisted_settings()
         return self.worker.start()
+
+    def _restore_persisted_settings(self) -> None:
+        """Re-apply persisted KV settings (remote_path, bwlimit, auto-sync) to the running process.
+
+        Called once per service startup so a restart of teslausb-web doesn't
+        silently revert the user's last settings to defaults. Distinct from
+        ``ensure_startup_recovery`` which is gated on ``startup_recovery_done``
+        and also runs the worker's interrupted-upload recovery.
+        """
+        try:
+            with self.open_db() as connection:
+                self._apply_persisted_bwlimit(connection)
+                self._apply_persisted_auto_sync_enabled(connection)
+                self._apply_persisted_remote_path(connection)
+        except sqlite3.Error:  # pragma: no cover - defensive, never block worker start
+            logger.exception("Failed to restore persisted cloud archive settings")
 
     def stop(self, timeout: float = 5.0) -> bool:
         return self.worker.stop(timeout)

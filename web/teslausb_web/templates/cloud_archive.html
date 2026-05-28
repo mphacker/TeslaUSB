@@ -186,20 +186,8 @@
             </div>
             {% endif %}
 
-            {# ---- Auto-sync toggle ---- #}
-            <div style="margin-top: var(--space-4); border-top: 1px solid var(--border-primary); padding-top: var(--space-3);">
-                <div style="display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap;">
-                    <strong style="color: var(--text-primary); font-size: var(--text-sm);">Automatic sync:</strong>
-                    <label style="display: inline-flex; align-items: center; cursor: pointer; gap: 8px;">
-                        <input type="checkbox" id="syncEnabledToggle" {% if sync_enabled %}checked{% endif %}
-                               onchange="toggleSyncEnabled(this.checked)"
-                               style="width: 18px; height: 18px; accent-color: var(--accent-success);">
-                        <span id="syncEnabledLabel" style="font-size: var(--text-sm); color: var(--text-secondary);">
-                            {{ 'Enabled — syncs automatically when WiFi connects' if sync_enabled else 'Disabled — provider stays connected, no auto-sync' }}
-                        </span>
-                    </label>
-                </div>
-            </div>
+            {# Auto-sync runs continuously when WiFi is up and a provider is
+               configured — there is intentionally no on/off toggle. #}
 
             {# ---- Sync destination folder ---- #}
             <div style="margin-top: var(--space-3);">
@@ -1806,33 +1794,6 @@
     function _escapeAttr(s) {
         return s.replace(/'/g, "\\'").replace(/\\/g, '\\\\');
     }
-
-    window.toggleSyncEnabled = async function(enabled) {
-        try {
-            var resp = await fetch('{{ url_for("cloud_archive.api_toggle_sync") }}', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-                body: JSON.stringify({ enabled: enabled })
-            });
-            var data = await resp.json();
-            if (data.success) {
-                var label = document.getElementById('syncEnabledLabel');
-                if (label) label.textContent = enabled
-                    ? 'Enabled \u2014 syncs automatically when WiFi connects'
-                    : 'Disabled \u2014 provider stays connected, no auto-sync';
-                showToast('Auto-sync ' + (enabled ? 'enabled' : 'disabled') + '.', 'success');
-            } else {
-                showToast(data.message || 'Failed to update.', 'error');
-                /* Revert checkbox */
-                var cb = document.getElementById('syncEnabledToggle');
-                if (cb) cb.checked = !enabled;
-            }
-        } catch (e) {
-            showToast('Network error.', 'error');
-            var cb = document.getElementById('syncEnabledToggle');
-            if (cb) cb.checked = !enabled;
-        }
-    };
 
     window.toggleCredSecret = function(btn) {
         var field = document.getElementById('credSecret');

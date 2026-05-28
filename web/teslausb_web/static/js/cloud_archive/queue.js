@@ -1,4 +1,4 @@
-export function createQueueController({ bootstrap, fetchJson, postJson, formatBytes, notify }) {
+export function createQueueController({ bootstrap, fetchJson, postJson, formatBytes, notify, state }) {
     const queueForm = document.getElementById("cloudQueueForm");
     const queueFolder = document.getElementById("cloudQueueFolder");
     const queueEvent = document.getElementById("cloudQueueEvent");
@@ -86,19 +86,25 @@ export function createQueueController({ bootstrap, fetchJson, postJson, formatBy
             </article>`).join("");
     }
 
-    async function refreshQueue() {
-        setBusy(queueRefreshButton, true, "Loading");
+    async function refreshQueue({ silent = false } = {}) {
+        if (!silent) {
+            setBusy(queueRefreshButton, true, "Loading");
+        }
         try {
             const payload = await fetchJson(bootstrap.urls.queue);
             const items = queuePayloadToItems(payload);
             renderQueue(items);
             if (queueStatus) {
-                queueStatus.textContent = items.length ? `${items.length} item(s) queued.` : "Queue contents load after the first refresh.";
+                queueStatus.textContent = items.length ? `${items.length} item(s) queued.` : "Queue is empty.";
             }
         } catch (error) {
-            notify(error.message, "error");
+            if (!silent) {
+                notify(error.message, "error");
+            }
         } finally {
-            setBusy(queueRefreshButton, false);
+            if (!silent) {
+                setBusy(queueRefreshButton, false);
+            }
         }
     }
 
@@ -257,6 +263,28 @@ export function createQueueController({ bootstrap, fetchJson, postJson, formatBy
             });
             void refreshQueue();
             void refreshDeadLetters();
+
+            // Live-refresh the queue panel so additions/removals/drains
+            // appear without the operator having to click "Refresh".
+            // Fast cadence (3 s) while a drain is running so items
+            // disappear as soon as they upload; slower cadence (10 s)
+            // when idle so we don't beat on the DB.
+            const fastIntervalMs = 3000;
+            const idleIntervalMs = 10000;
+            let scheduled = null;
+            const tick = async () => {
+                await refreshQueue({ silent: true });
+                const delay = state && state.syncStatus && state.syncStatus.running
+                    ? fastIntervalMs
+                    : idleIntervalMs;
+                scheduled = window.setTimeout(tick, delay);
+            };
+            scheduled = window.setTimeout(tick, idleIntervalMs);
+            window.addEventListener("beforeunload", () => {
+                if (scheduled !== null) {
+                    window.clearTimeout(scheduled);
+                }
+            });
         },
     };
 }

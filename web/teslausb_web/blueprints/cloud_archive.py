@@ -1003,38 +1003,6 @@ def api_set_remote_path() -> ResponseReturnValue:
     return jsonify({"success": True, "message": "Remote folder updated.", "path": cleaned})
 
 
-@cloud_archive_bp.route("/api/toggle_sync", methods=["POST"])
-def api_toggle_sync() -> ResponseReturnValue:
-    payload = _json_payload()
-    raw = payload.get("enabled") if isinstance(payload, dict) else None
-    if raw is None:
-        raw = request.form.get("enabled")
-    if isinstance(raw, bool):
-        enabled = raw
-    elif isinstance(raw, str):
-        enabled = raw.strip().lower() in {"1", "true", "yes", "on"}
-    elif isinstance(raw, (int, float)):
-        enabled = bool(raw)
-    else:
-        return (
-            jsonify({"success": False, "message": "Missing 'enabled' flag."}),
-            HTTPStatus.BAD_REQUEST,
-        )
-    try:
-        service = _get_archive_service()
-        service.update_settings(enabled=enabled)
-    except CloudArchiveConfigError as exc:
-        return _handle_request_error(exc)
-    except (CloudArchiveDBError, CloudArchiveError, RuntimeError) as exc:
-        return _handle_service_error(exc)
-    if enabled:
-        # Wake the worker so it can start a drain immediately rather than
-        # waiting for the polling-loop timeout.
-        service.wake()
-    _invalidate_caches(current_app)
-    return jsonify({"success": True, "enabled": enabled})
-
-
 @cloud_archive_bp.route("/api/sync_status_batch", methods=["POST"])
 def api_sync_status_batch() -> ResponseReturnValue:
     payload = _json_payload()

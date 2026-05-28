@@ -179,14 +179,27 @@ export function createSyncControlController({ bootstrap, fetchJson, postJson, fo
         historyShell?.classList.toggle("is-populated", hasRows);
     }
 
-    async function refreshStatus() {
+    let lastRunning = false;
+
+    async function refreshStatus({ silent = false } = {}) {
         try {
             const payload = await fetchJson(bootstrap.urls.status);
-            updateStatus(payload.status || {});
+            const status = payload.status || {};
+            const nowRunning = Boolean(status.running);
+            updateStatus(status);
             updateStats(payload.stats || {}, payload.shadow || {});
             state.provider = state.provider || bootstrap.provider || "";
+            // When the worker transitions out of a drain, refresh the
+            // history so the just-finished run shows up without the
+            // operator having to click anything.
+            if (lastRunning && !nowRunning) {
+                void refreshHistory();
+            }
+            lastRunning = nowRunning;
         } catch (error) {
-            notify(error.message, "warning");
+            if (!silent) {
+                notify(error.message, "warning");
+            }
         }
     }
 
@@ -291,9 +304,28 @@ export function createSyncControlController({ bootstrap, fetchJson, postJson, fo
             historyLimit?.addEventListener("change", () => {
                 void refreshHistory();
             });
-            window.setInterval(() => {
-                void refreshStatus();
-            }, 10000);
+            // Dynamic poll cadence: fast (2 s) while a drain is
+            // running so the progress bar feels live; slower (5 s)
+            // when idle so we don't hammer the Pi or the SDIO WiFi
+            // chip with empty status calls. The `silent` flag keeps
+            // transient network blips from spamming toasts during
+            // a long auto-sync.
+            const fastIntervalMs = 2000;
+            const idleIntervalMs = 5000;
+            let scheduled = null;
+            const tick = async () => {
+                await refreshStatus({ silent: true });
+                const delay = state.syncStatus && state.syncStatus.running
+                    ? fastIntervalMs
+                    : idleIntervalMs;
+                scheduled = window.setTimeout(tick, delay);
+            };
+            scheduled = window.setTimeout(tick, idleIntervalMs);
+            window.addEventListener("beforeunload", () => {
+                if (scheduled !== null) {
+                    window.clearTimeout(scheduled);
+                }
+            });
         },
     };
 }

@@ -47,12 +47,18 @@ RETRY_MAX_ATTEMPTS_MIN: Final[int] = 1
 RETRY_MAX_ATTEMPTS_MAX: Final[int] = 20
 BWLIMIT_KBPS_MIN: Final[int] = 0
 BWLIMIT_KBPS_MAX: Final[int] = 1_000_000
-DEFAULT_BWLIMIT_KBPS: Final[int] = 8192
-"""8 Mbps (~1 MB/s). The Pi Zero 2 W's BCM43436 SDIO WiFi chip locks up
-under sustained higher-throughput uploads (see
-``/usr/local/sbin/wifi-watchdog.sh``), forcing the wifi-watchdog to
-reboot the device every ~30 min. 8 Mbps keeps the chip stable while
-still draining a typical day of clips overnight."""
+DEFAULT_BWLIMIT_KBPS: Final[int] = 0
+"""``0`` = unlimited. The cloud sync no longer caps bandwidth.
+
+The Pi Zero 2 W's BCM43436 SDIO WiFi chip *will* lock up under
+fully-unthrottled uploads, but we now rely on a different defence:
+the wifi-watchdog (``/usr/local/sbin/wifi-watchdog.sh``) pauses the
+uploader via ``/run/teslausb/uploads_paused`` the moment the link
+shows symptoms, and the rclone command keeps ``--transfers 1``,
+``--checkers 1`` and ``--tpslimit 4`` so it stays a single polite
+stream even at unlimited bytes-per-second. The systemd resource
+caps on ``teslausb-web.service`` keep the web tier responsive
+regardless. See ADR-0022 and ``docs/06-OPERATIONS.md``."""
 CLOUD_RESERVE_GB_MIN: Final[float] = 0.0
 CLOUD_RESERVE_GB_MAX: Final[float] = 100.0
 DEFAULT_WORKER_IDLE_SECONDS: Final[float] = 5.0
@@ -250,13 +256,15 @@ def _read_bwlimit_kbps_setting(
 ) -> int:
     """Return the active upload bandwidth cap in kbps.
 
-    Falls back to :data:`DEFAULT_BWLIMIT_KBPS` whenever the persisted
-    setting is missing, out of range, or explicitly zero. Zero means
-    "unlimited" historically — but unlimited overruns the Pi's WiFi
-    chip and reboots the device, so we never honor it now.
+    ``0`` means "unlimited" — the cloud sync no longer caps bandwidth
+    by default. Other protections (polite rclone flags, wifi-watchdog
+    pause flag, systemd resource caps) keep the device stable. Any
+    persisted positive value within range is still honored so an
+    operator can dial back manually via the database if a hot-spot
+    or weak link makes uncapped uploads misbehave.
     """
     value = _kv_parse_int(_kv_lookup_raw(connection, KV_KEY_BWLIMIT_KBPS))
-    if value is not None and BWLIMIT_KBPS_MIN < value <= BWLIMIT_KBPS_MAX:
+    if value is not None and BWLIMIT_KBPS_MIN <= value <= BWLIMIT_KBPS_MAX:
         return value
     configured = getattr(config, "bwlimit_kbps", 0)
     if configured and BWLIMIT_KBPS_MIN < configured <= BWLIMIT_KBPS_MAX:

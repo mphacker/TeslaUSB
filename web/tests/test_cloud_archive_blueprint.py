@@ -811,24 +811,23 @@ def test_api_set_remote_path_persists_value(
     assert payload["path"] == "MyCar/Sentry"
 
 
-def test_api_toggle_sync_requires_enabled_flag(client: FlaskClient) -> None:
-    response = client.post("/cloud/api/toggle_sync", headers=_XHR, json={})
-    assert response.status_code == HTTPStatus.BAD_REQUEST
+def test_api_toggle_sync_endpoint_removed(client: FlaskClient) -> None:
+    """The /api/toggle_sync route was removed when auto-sync went always-on.
+
+    Auto-sync now runs continuously whenever WiFi is up and a provider
+    is configured (operator directive, 2026-05-28). Verify the legacy
+    endpoint is gone so we don't ship a half-wired UI.
+    """
+    response = client.post("/cloud/api/toggle_sync", headers=_XHR, json={"enabled": False})
+    assert response.status_code == HTTPStatus.NOT_FOUND
 
 
-def test_api_toggle_sync_updates_state(client: FlaskClient, app: Flask) -> None:
-    response = client.post(
-        "/cloud/api/toggle_sync", headers=_XHR, json={"enabled": False}
-    )
-    assert response.status_code == HTTPStatus.OK
-    payload = response.get_json()
-    assert payload["enabled"] is False
+def test_auto_sync_is_always_enabled(app: Flask) -> None:
+    """``is_auto_sync_enabled`` returns ``True`` regardless of KV state."""
     service = app.extensions["cloud_archive_service"]
-    assert service.is_auto_sync_enabled() is False
-    response = client.post(
-        "/cloud/api/toggle_sync", headers=_XHR, json={"enabled": True}
-    )
-    assert response.status_code == HTTPStatus.OK
+    service.update_settings(enabled=False)
+    assert service.is_auto_sync_enabled() is True
+    service.update_settings(enabled=True)
     assert service.is_auto_sync_enabled() is True
 
 

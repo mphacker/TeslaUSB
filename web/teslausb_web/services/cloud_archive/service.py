@@ -152,10 +152,17 @@ class CloudArchiveService:
         setter(value or None)
 
     def is_auto_sync_enabled(self) -> bool:
-        """Live-evaluated auto-sync flag, honoring KV override set via the UI."""
-        if self._auto_sync_enabled_override is not None:
-            return self._auto_sync_enabled_override
-        return self.config.enabled
+        """Auto-sync is always on.
+
+        The device drains the cloud queue any time WiFi is up and a
+        provider is configured. There is intentionally no operator
+        toggle: queued clips must reach the cloud as quickly as
+        possible (per operator directive, 2026-05-28). The
+        ``_auto_sync_enabled_override`` attribute is retained for
+        backward compatibility with persisted KV state and tests but
+        is ignored at runtime.
+        """
+        return True
 
     def start(self) -> bool:
         self._restore_persisted_settings()

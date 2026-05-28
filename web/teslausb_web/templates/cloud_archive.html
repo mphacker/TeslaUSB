@@ -582,15 +582,6 @@
                     </p>
                 </div>
 
-                <div style="margin-bottom: var(--space-4);">
-                    <label style="display: block; margin-bottom: var(--space-2); font-weight: 600; color: var(--text-primary);">
-                        Minimum cloud retention (days)
-                    </label>
-                    <input type="number" name="cloud_min_retention_days" value="{{ cloud_min_retention_days }}" min="0" max="365"
-                           style="width:120px; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary); color:var(--text-primary);">
-                    <p style="font-size: var(--text-xs); color: var(--text-muted); margin:4px 0 0">0 = keep forever. The cloud-side auto-cleanup will not delete objects younger than this.</p>
-                </div>
-
                 <button type="submit" class="edit-btn" style="padding: 8px 20px; font-size: 14px; margin-top: var(--space-3);">Save Settings</button>
             </form>
         </div>

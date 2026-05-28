@@ -28,14 +28,11 @@ from teslausb_web.services.cloud_archive.queue_ops import (
 from teslausb_web.services.cloud_archive.settings import (
     BWLIMIT_KBPS_MAX,
     BWLIMIT_KBPS_MIN,
-    CLOUD_MIN_RETENTION_DAYS_MAX,
-    CLOUD_MIN_RETENTION_DAYS_MIN,
     CLOUD_RESERVE_GB_MAX,
     CLOUD_RESERVE_GB_MIN,
     KV_KEY_AUTO_SYNC_ENABLED,
     KV_KEY_BWLIMIT_KBPS,
     KV_KEY_CLOUD_AUTO_CLEANUP,
-    KV_KEY_CLOUD_MIN_RETENTION_DAYS,
     KV_KEY_CLOUD_RESERVE_GB,
     KV_KEY_KEEP_CLIPS_UNTIL_SYNCED,
     KV_KEY_MAX_RETRY_ATTEMPTS,
@@ -242,7 +239,6 @@ class CloudArchiveService:
         bwlimit_kbps: int | None = None,
         cloud_reserve_gb: float | None = None,
         cloud_auto_cleanup: bool | None = None,
-        cloud_min_retention_days: int | None = None,
         keep_clips_until_synced: bool | None = None,
         enabled: bool | None = None,
         remote_path: str | None = None,
@@ -298,19 +294,6 @@ class CloudArchiveService:
             updates.append((KV_KEY_CLOUD_RESERVE_GB, float(cloud_reserve_gb)))
         if cloud_auto_cleanup is not None:
             updates.append((KV_KEY_CLOUD_AUTO_CLEANUP, bool(cloud_auto_cleanup)))
-        if cloud_min_retention_days is not None:
-            if not (
-                CLOUD_MIN_RETENTION_DAYS_MIN
-                <= int(cloud_min_retention_days)
-                <= CLOUD_MIN_RETENTION_DAYS_MAX
-            ):
-                raise CloudArchiveConfigError(
-                    f"cloud_min_retention_days must be within "
-                    f"{CLOUD_MIN_RETENTION_DAYS_MIN}..{CLOUD_MIN_RETENTION_DAYS_MAX}"
-                )
-            updates.append(
-                (KV_KEY_CLOUD_MIN_RETENTION_DAYS, int(cloud_min_retention_days))
-            )
         if keep_clips_until_synced is not None:
             updates.append(
                 (KV_KEY_KEEP_CLIPS_UNTIL_SYNCED, bool(keep_clips_until_synced))

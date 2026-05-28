@@ -344,9 +344,55 @@ def _drain_once(service: CloudArchiveService, trigger: str) -> bool:
         session_id, candidates = _prepare_drain(service, trigger)
         if not candidates:
             return False
+
+        # Pre-flight: refuse to upload bytes that would push the remote
+        # below the configured reserve. Runs cleanup on-demand if
+        # auto-cleanup is enabled. Failures fall open (allow upload).
+        from teslausb_web.services.cloud_archive.cloud_cleanup import (
+            ensure_remote_headroom,
+        )
+
+        total_bytes = sum(max(0, c.size_bytes) for c in candidates)
+        guard = ensure_remote_headroom(service, total_bytes)
+        running_free: int | None = guard.free_bytes
+        reserve_bytes = guard.reserve_bytes
+        if not guard.ok:
+            logger.info(
+                "cloud sync: reserve tight upfront "
+                "(free=%s reserve=%s needed=%s reason=%s); will gate per file",
+                guard.free_bytes,
+                reserve_bytes,
+                total_bytes,
+                guard.reason,
+            )
+
         for candidate in candidates:
             if service.state.stop_event.is_set() or service.state.cancel_event.is_set():
                 break
+
+            # Per-candidate reserve gate. Only applies when the backend
+            # reports free space and a reserve is configured.
+            if (
+                running_free is not None
+                and reserve_bytes > 0
+                and candidate.size_bytes > 0
+                and running_free - candidate.size_bytes < reserve_bytes
+            ):
+                sub_guard = ensure_remote_headroom(service, candidate.size_bytes)
+                if sub_guard.free_bytes is not None:
+                    running_free = sub_guard.free_bytes
+                if not sub_guard.ok:
+                    logger.warning(
+                        "cloud sync: stopping drain — uploading %s (%d bytes) "
+                        "would breach reserve (free=%s reserve=%s reason=%s)",
+                        candidate.relative_path,
+                        candidate.size_bytes,
+                        running_free,
+                        reserve_bytes,
+                        sub_guard.reason,
+                    )
+                    break
+
             service.state.set_current(candidate)
             result = _process_candidate_upload(service, candidate)
             if result.cancelled:
@@ -354,6 +400,8 @@ def _drain_once(service: CloudArchiveService, trigger: str) -> bool:
             if result.success:
                 files_synced += 1
                 bytes_transferred += result.bytes_transferred
+                if running_free is not None:
+                    running_free = max(0, running_free - result.bytes_transferred)
                 continue
             if result.status == "failed" and _wait_with_events(
                 service,

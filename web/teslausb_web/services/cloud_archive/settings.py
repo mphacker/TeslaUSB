@@ -25,7 +25,6 @@ KV_KEY_SYNC_RECENT_WITH_TELEMETRY: Final[str] = (
 KV_KEY_BWLIMIT_KBPS: Final[str] = "cloud_archive.bwlimit_kbps"
 KV_KEY_CLOUD_RESERVE_GB: Final[str] = "cloud_archive.cloud_reserve_gb"
 KV_KEY_CLOUD_AUTO_CLEANUP: Final[str] = "cloud_archive.cloud_auto_cleanup"
-KV_KEY_CLOUD_MIN_RETENTION_DAYS: Final[str] = "cloud_archive.cloud_min_retention_days"
 KV_KEY_KEEP_CLIPS_UNTIL_SYNCED: Final[str] = "cloud_archive.keep_clips_until_synced"
 KV_KEY_AUTO_SYNC_ENABLED: Final[str] = "cloud_archive.auto_sync_enabled"
 KV_KEY_REMOTE_PATH: Final[str] = "cloud_archive.remote_path"
@@ -39,7 +38,6 @@ PERSISTED_SETTING_KEYS: Final[tuple[str, ...]] = (
     KV_KEY_BWLIMIT_KBPS,
     KV_KEY_CLOUD_RESERVE_GB,
     KV_KEY_CLOUD_AUTO_CLEANUP,
-    KV_KEY_CLOUD_MIN_RETENTION_DAYS,
     KV_KEY_KEEP_CLIPS_UNTIL_SYNCED,
     KV_KEY_AUTO_SYNC_ENABLED,
     KV_KEY_REMOTE_PATH,
@@ -51,8 +49,6 @@ BWLIMIT_KBPS_MIN: Final[int] = 0
 BWLIMIT_KBPS_MAX: Final[int] = 1_000_000
 CLOUD_RESERVE_GB_MIN: Final[float] = 0.0
 CLOUD_RESERVE_GB_MAX: Final[float] = 100.0
-CLOUD_MIN_RETENTION_DAYS_MIN: Final[int] = 0
-CLOUD_MIN_RETENTION_DAYS_MAX: Final[int] = 365
 DEFAULT_WORKER_IDLE_SECONDS: Final[float] = 5.0
 DEFAULT_BACKOFF_INITIAL_SECONDS: Final[float] = 5.0
 DEFAULT_BACKOFF_MAX_SECONDS: Final[float] = 300.0
@@ -99,7 +95,6 @@ class CloudArchiveConfig:
     bwlimit_kbps: int = 0
     cloud_reserve_gb: float = 5.0
     cloud_auto_cleanup: bool = False
-    cloud_min_retention_days: int = 0
     keep_clips_until_synced: bool = True
 
     def __post_init__(self) -> None:
@@ -253,19 +248,6 @@ def _read_cloud_auto_cleanup_setting(
 ) -> bool:
     value = _kv_parse_bool(_kv_lookup_raw(connection, KV_KEY_CLOUD_AUTO_CLEANUP))
     return value if value is not None else config.cloud_auto_cleanup
-
-
-def _read_cloud_min_retention_days_setting(
-    config: CloudArchiveConfig,
-    connection: sqlite3.Connection | None = None,
-) -> int:
-    value = _kv_parse_int(_kv_lookup_raw(connection, KV_KEY_CLOUD_MIN_RETENTION_DAYS))
-    if (
-        value is not None
-        and CLOUD_MIN_RETENTION_DAYS_MIN <= value <= CLOUD_MIN_RETENTION_DAYS_MAX
-    ):
-        return value
-    return config.cloud_min_retention_days
 
 
 def _read_keep_clips_until_synced_setting(

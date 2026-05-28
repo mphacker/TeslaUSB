@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
     from teslausb_web.config import WebConfig
+    from teslausb_web.services.cloud_generic_remote_service import GenericRemoteService
     from teslausb_web.services.cloud_oauth_service import CloudOAuthService, OAuthCredentials
 
 logger = logging.getLogger(__name__)
@@ -220,10 +221,16 @@ class RcloneTransferResult:
 class CloudRcloneService:
     """Render OAuth-backed rclone configs and execute rclone subprocesses."""
 
-    def __init__(self, config: RcloneServiceConfig, oauth_service: CloudOAuthService) -> None:
+    def __init__(
+        self,
+        config: RcloneServiceConfig,
+        oauth_service: CloudOAuthService,
+        generic_remote_service: "GenericRemoteService | None" = None,
+    ) -> None:
         config.validate()
         self._config = config
         self._oauth_service = oauth_service
+        self._generic_remote_service = generic_remote_service
         self._lock = threading.RLock()
         self._active_process: subprocess.Popen[str] | None = None
         self._active_progress: RcloneTransferProgress | None = None
@@ -549,7 +556,24 @@ class CloudRcloneService:
         entries = _parse_listing(completed.stdout, base_path=clean_remote_path)
         return RcloneListing(remote=remote, path=clean_remote_path, entries=entries)
 
-    def _prepare_remote(self) -> tuple[RcloneRemote, OAuthCredentials]:
+    def _prepare_remote(self) -> tuple[RcloneRemote, OAuthCredentials | None]:
+        # Generic (non-OAuth) remotes — S3, B2, Wasabi, SFTP, WebDAV,
+        # SMB, FTP, Azure Blob, Swift — take precedence. The operator
+        # explicitly saved one, so use it over any stale OAuth blob.
+        if self._generic_remote_service is not None:
+            generic_record = self._generic_remote_service.load()
+            if generic_record is not None:
+                backend = generic_record.get("type", "")
+                config_text = _render_generic_config_text(generic_record)
+                _write_text_atomically(self.config_file_path, config_text)
+                remote = RcloneRemote(
+                    name=_RCLONE_REMOTE_NAME,
+                    provider=f"generic:{backend}",
+                    backend=backend,
+                    root=f"{_RCLONE_REMOTE_NAME}:",
+                    config_path=self.config_file_path,
+                )
+                return remote, None
         credentials = self._load_fresh_credentials()
         provider = credentials.provider
         try:
@@ -566,6 +590,24 @@ class CloudRcloneService:
             config_path=self.config_file_path,
         )
         return remote, credentials
+
+    def has_configured_remote(self) -> bool:
+        """Return True iff either an OAuth or a generic rclone remote is saved.
+
+        This is the lightweight predicate the cloud-archive worker uses to
+        decide whether to attempt a sync drain. It performs no subprocess
+        work and tolerates missing credential files (returns ``False``).
+        """
+        if self._generic_remote_service is not None:
+            try:
+                if self._generic_remote_service.load() is not None:
+                    return True
+            except Exception:  # pragma: no cover - defensive
+                pass
+        try:
+            return self._oauth_service.load_credentials() is not None
+        except Exception:  # pragma: no cover - defensive
+            return False
 
     def _load_fresh_credentials(self) -> OAuthCredentials:
         try:
@@ -907,6 +949,18 @@ def _rclone_token_json(credentials: OAuthCredentials) -> str:
     return json.dumps(payload, sort_keys=True)
 
 
+def _render_generic_config_text(record: dict[str, str]) -> str:
+    """Render a stored generic-remote dict as the rclone.conf body.
+
+    Delegates to :func:`cloud_generic_remote_service.render_conf_body`
+    so the format stays in lock-step with the storage layer. Imported
+    locally to avoid a hard import cycle at module load.
+    """
+    from teslausb_web.services.cloud_generic_remote_service import render_conf_body
+
+    return render_conf_body(record, remote_name=_RCLONE_REMOTE_NAME)
+
+
 def _discover_onedrive_drive_id(
     credentials: OAuthCredentials,
     *,
@@ -1013,8 +1067,15 @@ def _kill_process(process: subprocess.Popen[str]) -> None:
 def make_rclone_service(
     cfg: WebConfig,
     oauth_service: CloudOAuthService,
+    generic_remote_service: "GenericRemoteService | None" = None,
 ) -> CloudRcloneService:
     """Build an rclone service rooted at the configured cloud state paths."""
+    if generic_remote_service is None:
+        from teslausb_web.services.cloud_generic_remote_service import (
+            make_generic_remote_service,
+        )
+
+        generic_remote_service = make_generic_remote_service(cfg)
     return CloudRcloneService(
         RcloneServiceConfig(
             rclone_config_dir=cfg.cloud.rclone_config_path,
@@ -1026,6 +1087,7 @@ def make_rclone_service(
             retries=cfg.cloud.retries,
         ),
         oauth_service,
+        generic_remote_service=generic_remote_service,
     )
 
 

@@ -597,6 +597,78 @@ def test_api_disconnect_returns_result(
     invalidator.schedule.assert_called_once_with()
 
 
+def test_api_connect_generic_form_persists_remote(
+    client: FlaskClient, app: Flask, oauth_service: CloudOAuthService, invalidator
+) -> None:
+    invalidator.schedule = MagicMock()
+    generic = app.extensions["cloud_generic_remote_service"]
+    response = client.post(
+        "/cloud/api/connect",
+        json={
+            "provider": "generic",
+            "rclone_type": "s3",
+            "fields": {
+                "provider": "Other",
+                "access_key_id": "AK",
+                "secret_access_key": "SK",
+            },
+            "obscure_keys": [],
+        },
+        headers=_XHR,
+    )
+    assert response.status_code == HTTPStatus.OK, response.get_data(as_text=True)
+    body = response.get_json()
+    assert body["success"] is True
+    assert body["provider"] == "generic:s3"
+    record = generic.load()
+    assert record is not None
+    assert record["type"] == "s3"
+    assert record["secret_access_key"] == "SK"
+    invalidator.schedule.assert_called_once_with()
+
+
+def test_api_connect_generic_config_block_persists_remote(
+    client: FlaskClient, app: Flask
+) -> None:
+    generic = app.extensions["cloud_generic_remote_service"]
+    block = "[my-nas]\ntype = sftp\nhost = nas.local\nuser = pi\npass = obscured\n"
+    response = client.post(
+        "/cloud/api/connect",
+        json={"provider": "generic", "config_block": block},
+        headers=_XHR,
+    )
+    assert response.status_code == HTTPStatus.OK, response.get_data(as_text=True)
+    record = generic.load()
+    assert record is not None
+    assert record["type"] == "sftp"
+    assert record["host"] == "nas.local"
+
+
+def test_api_connect_generic_rejects_bad_type(client: FlaskClient) -> None:
+    response = client.post(
+        "/cloud/api/connect",
+        json={"provider": "generic", "rclone_type": "bogus", "fields": {}},
+        headers=_XHR,
+    )
+    assert response.status_code == HTTPStatus.BAD_REQUEST
+
+
+def test_api_disconnect_also_clears_generic_remote(
+    client: FlaskClient, app: Flask, oauth_service: CloudOAuthService
+) -> None:
+    generic = app.extensions["cloud_generic_remote_service"]
+    generic.import_form("s3", {"access_key_id": "AK", "secret_access_key": "SK"})
+    assert generic.load() is not None
+    with patch.object(
+        oauth_service,
+        "disconnect",
+        return_value=MagicMock(disconnected=True, revoked=False, message="ok"),
+    ):
+        response = client.post("/cloud/api/disconnect", headers=_XHR)
+    assert response.status_code == HTTPStatus.OK
+    assert generic.load() is None
+
+
 def test_api_test_connection_success(
     client: FlaskClient, rclone_service: CloudRcloneService
 ) -> None:

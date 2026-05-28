@@ -60,6 +60,10 @@ from teslausb_web.services.cloud_oauth_service import (
     OAuthCredentials,
     OAuthError,
 )
+from teslausb_web.services.cloud_generic_remote_service import (
+    GenericRemoteError,
+    GenericRemoteService,
+)
 from teslausb_web.services.cloud_rclone_service import (
     CloudRcloneService,
     RcloneConfigError,
@@ -171,6 +175,13 @@ def _get_rclone_service() -> CloudRcloneService:
     service = current_app.extensions["cloud_rclone_service"]
     if not isinstance(service, CloudRcloneService):
         raise RuntimeError("cloud_rclone_service extension is not configured")
+    return service
+
+
+def _get_generic_remote_service() -> GenericRemoteService:
+    service = current_app.extensions.get("cloud_generic_remote_service")
+    if not isinstance(service, GenericRemoteService):
+        raise RuntimeError("cloud_generic_remote_service extension is not configured")
     return service
 
 
@@ -404,12 +415,26 @@ def _connection_status_dto() -> _ConnectionStatusDto:
     oauth_service = _get_oauth_service()
     rclone_service = _get_rclone_service()
     credentials = oauth_service.load_credentials()
+    generic_record: dict[str, str] | None = None
+    try:
+        generic_record = _get_generic_remote_service().load()
+    except RuntimeError:
+        generic_record = None
     remote: dict[str, object] | None = None
+    has_remote = credentials is not None or generic_record is not None
+    if has_remote:
+        try:
+            remote = asdict(rclone_service.render_config())
+        except (OAuthError, RcloneError, RuntimeError) as exc:
+            logger.debug("connection_status remote render skipped: %s", exc)
+    provider_label: str | None = None
     if credentials is not None:
-        remote = asdict(rclone_service.render_config())
+        provider_label = credentials.provider
+    elif generic_record is not None:
+        provider_label = f"generic:{generic_record.get('type', '')}"
     return _ConnectionStatusDto(
-        connected=credentials is not None,
-        provider=None if credentials is None else credentials.provider,
+        connected=has_remote,
+        provider=provider_label,
         token_expiry=None if credentials is None else credentials.expires_at,
         remote=remote,
         pending_authorization=_pending_authorization_dict(oauth_service),
@@ -433,6 +458,7 @@ def _page_context() -> _CloudArchivePageContext:
     oauth_service = _get_oauth_service()
     archive_service = _get_archive_service()
     credentials: OAuthCredentials | None = None
+    generic_record: dict[str, str] | None = None
     sync_status = _empty_sync_status()
     sync_stats = _empty_sync_stats()
     sync_history: tuple[SyncHistoryEntry, ...] = ()
@@ -449,6 +475,10 @@ def _page_context() -> _CloudArchivePageContext:
     live_remote_path: str = ""
     try:
         credentials = oauth_service.load_credentials()
+        try:
+            generic_record = _get_generic_remote_service().load()
+        except RuntimeError:
+            generic_record = None
         sync_status = archive_service.get_sync_status()
         sync_stats = archive_service.get_sync_stats()
         sync_history = _get_queries().get_sync_history(_DEFAULT_HISTORY_LIMIT)
@@ -502,8 +532,16 @@ def _page_context() -> _CloudArchivePageContext:
         sync_status=asdict(sync_status),
         sync_stats=asdict(sync_stats),
         sync_history=[asdict(entry) for entry in sync_history],
-        provider="" if credentials is None else credentials.provider,
-        provider_connected=credentials is not None,
+        provider=(
+            ""
+            if credentials is None and generic_record is None
+            else (
+                credentials.provider
+                if credentials is not None
+                else f"generic:{generic_record.get('type', '') if generic_record else ''}"
+            )
+        ),
+        provider_connected=credentials is not None or generic_record is not None,
         token_expiry=None if credentials is None else credentials.expires_at,
         sync_enabled=live_auto_sync_enabled,
         sync_folders=tuple(live_sync_folders),
@@ -774,6 +812,16 @@ def api_connect_provider() -> ResponseReturnValue:
             session_id=session_id,
             redirect_payload=redirect_payload,
         )
+    # Generic (non-OAuth) rclone remote — S3 / B2 / Wasabi / SFTP /
+    # WebDAV / SMB / FTP / Azure Blob / Swift. The UI sends one of:
+    #   {provider:'generic', rclone_type:..., fields:{...}, obscure_keys:[...]}
+    #   {provider:'generic', config_block:'[my-nas]\ntype=sftp\n...'}
+    # Either shape persists to cloud_generic_remote.json; the rclone
+    # service then renders the conf body from that record at use time.
+    payload = _json_payload()
+    provider_field = str(payload.get("provider") or "").strip().lower()
+    if provider_field == "generic":
+        return _connect_generic_provider(payload)
     # Operator pasted the JSON blob from `rclone authorize "<provider>"`.
     # This is the documented "How to connect" flow in the UI — before
     # this branch existed the request silently fell through to
@@ -789,6 +837,12 @@ def api_connect_provider() -> ResponseReturnValue:
             return _handle_request_error(exc)
         except (OAuthError, RuntimeError) as exc:
             return _handle_service_error(exc)
+        # Importing OAuth credentials replaces any prior generic remote;
+        # the device can only target one cloud destination at a time.
+        try:
+            _get_generic_remote_service().clear()
+        except GenericRemoteError as exc:
+            logger.debug("could not clear stale generic remote: %s", exc)
         session[_OAUTH_PROVIDER_SESSION_KEY] = credentials.provider
         session.pop(_OAUTH_SESSION_ID_SESSION_KEY, None)
         _invalidate_caches(current_app)
@@ -815,6 +869,74 @@ def api_connect_provider() -> ResponseReturnValue:
     return redirect(started.authorization_url)
 
 
+def _connect_generic_provider(payload: dict[str, object]) -> ResponseReturnValue:
+    """Persist a generic-rclone connection from either UI shape.
+
+    Form shape: ``{provider:'generic', rclone_type:'s3', fields:{...},
+    obscure_keys:[...]}``. Paste shape: ``{provider:'generic',
+    config_block:'[my-nas]\\ntype=sftp\\n...'}``. On success the device
+    is treated as connected (``provider_connected=True``); the OAuth
+    credentials file is cleared so the rclone service uses the new
+    generic remote.
+    """
+    generic_service = _get_generic_remote_service()
+    config_block = str(payload.get("config_block") or "").strip()
+    rclone_type = str(payload.get("rclone_type") or "").strip().lower()
+    try:
+        if config_block:
+            record = generic_service.import_config_block(config_block, source="paste")
+        elif rclone_type:
+            raw_fields = payload.get("fields")
+            if not isinstance(raw_fields, dict):
+                raise GenericRemoteError("fields must be a JSON object")
+            obscure_value = payload.get("obscure_keys")
+            obscure_keys: list[str] | None
+            if obscure_value is None:
+                obscure_keys = None
+            elif isinstance(obscure_value, list):
+                obscure_keys = [str(entry) for entry in obscure_value]
+            else:
+                raise GenericRemoteError("obscure_keys must be a JSON array")
+            record = generic_service.import_form(
+                rclone_type,
+                {str(k): v for k, v in raw_fields.items()},
+                obscure_keys=obscure_keys,
+                source="form",
+            )
+        else:
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "message": (
+                            "Provide either a config_block or a rclone_type "
+                            "with fields for a generic remote."
+                        ),
+                    }
+                ),
+                HTTPStatus.BAD_REQUEST,
+            )
+    except GenericRemoteError as exc:
+        return jsonify({"success": False, "message": str(exc)}), HTTPStatus.BAD_REQUEST
+    # A new generic remote replaces any prior OAuth credentials so the
+    # rclone service always uses the most recently configured backend.
+    try:
+        _get_oauth_service().disconnect()
+    except (OAuthError, RuntimeError) as exc:
+        logger.debug("could not clear stale OAuth credentials: %s", exc)
+    session[_OAUTH_PROVIDER_SESSION_KEY] = f"generic:{record.get('type', '')}"
+    session.pop(_OAUTH_SESSION_ID_SESSION_KEY, None)
+    _invalidate_caches(current_app)
+    return jsonify(
+        {
+            "success": True,
+            "message": "Connected successfully.",
+            "provider": f"generic:{record.get('type', '')}",
+            "rclone_type": record.get("type", ""),
+        }
+    )
+
+
 @cloud_archive_bp.route("/api/disconnect", methods=["POST"])
 def api_disconnect_provider() -> ResponseReturnValue:
     try:
@@ -822,6 +944,12 @@ def api_disconnect_provider() -> ResponseReturnValue:
         result: DisconnectResult = _get_oauth_service().disconnect(provider=provider)
     except (OAuthError, RuntimeError) as exc:
         return _handle_service_error(exc)
+    # Also clear any generic-remote record so the device is fully
+    # disconnected. Disconnect is a single "forget everything" action.
+    try:
+        _get_generic_remote_service().clear()
+    except (GenericRemoteError, RuntimeError) as exc:
+        logger.debug("could not clear generic remote on disconnect: %s", exc)
     session.pop(_OAUTH_PROVIDER_SESSION_KEY, None)
     session.pop(_OAUTH_SESSION_ID_SESSION_KEY, None)
     _invalidate_caches(current_app)

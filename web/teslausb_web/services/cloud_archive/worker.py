@@ -181,7 +181,7 @@ class CloudArchiveWorker:
                     state.wake_count += 1
                 if not self._service.is_auto_sync_enabled():
                     continue
-                if self._service.oauth_service.load_credentials() is None:
+                if not self._service.rclone_service.has_configured_remote():
                     continue
                 if self._service.config.wifi_check_required and not self._wifi_checker():
                     state.stop_event.wait(timeout=self._service.config.backoff_initial_seconds)
@@ -236,7 +236,7 @@ class CloudArchiveWorker:
         self._service.state.wake_event.set()
 
     def start_sync(self, trigger: str = "manual") -> tuple[bool, str]:
-        if self._service.oauth_service.load_credentials() is None:
+        if not self._service.rclone_service.has_configured_remote():
             return False, "No cloud provider configured"
         self.start()
         self.wake()

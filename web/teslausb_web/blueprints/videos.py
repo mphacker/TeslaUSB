@@ -380,22 +380,29 @@ def event_player(folder: str, event_name: str) -> ResponseReturnValue:
 def _cloud_provider_connected() -> bool:
     """Best-effort probe of the cloud provider state.
 
-    ``CloudOAuthService.load_credentials()`` returns ``None`` when no
-    provider has been authorised — that's the closest analogue to
-    v1's ``cloud_provider_connected`` flag. Errors degrade to
-    ``False`` so the template never sees an exception.
+    Returns ``True`` when either OAuth credentials (Drive/Dropbox/
+    OneDrive) or a generic rclone remote (S3/B2/Wasabi/SFTP/...) is
+    configured. Errors degrade to ``False`` so the template never sees
+    an exception.
     """
     svc = current_app.extensions.get("cloud_oauth_service")
-    if svc is None:
-        return False
-    loader = getattr(svc, "load_credentials", None)
-    if loader is None:
-        return False
-    try:
-        return loader() is not None
-    except (OSError, RuntimeError, ValueError) as exc:
-        logger.debug("_cloud_provider_connected: probe failed: %s", exc)
-        return False
+    if svc is not None:
+        loader = getattr(svc, "load_credentials", None)
+        if loader is not None:
+            try:
+                if loader() is not None:
+                    return True
+            except (OSError, RuntimeError, ValueError) as exc:
+                logger.debug("_cloud_provider_connected: oauth probe failed: %s", exc)
+    generic = current_app.extensions.get("cloud_generic_remote_service")
+    if generic is not None:
+        gloader = getattr(generic, "load", None)
+        if gloader is not None:
+            try:
+                return gloader() is not None
+            except (OSError, RuntimeError, ValueError) as exc:
+                logger.debug("_cloud_provider_connected: generic probe failed: %s", exc)
+    return False
 
 
 def _serialise_event_for_template(details: object) -> dict[str, object] | None:

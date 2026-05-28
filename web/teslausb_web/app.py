@@ -450,7 +450,15 @@ def _register_cloud_rclone_services(app: Flask, cfg: WebConfig) -> None:
     oauth_service = app.extensions.get("cloud_oauth_service")
     if not isinstance(oauth_service, CloudOAuthService):
         raise RuntimeError("cloud_oauth_service must be registered before cloud_rclone_service")
-    app.extensions["cloud_rclone_service"] = make_rclone_service(cfg, oauth_service)
+    from teslausb_web.services.cloud_generic_remote_service import (
+        make_generic_remote_service,
+    )
+
+    generic_remote_service = make_generic_remote_service(cfg)
+    app.extensions["cloud_generic_remote_service"] = generic_remote_service
+    app.extensions["cloud_rclone_service"] = make_rclone_service(
+        cfg, oauth_service, generic_remote_service
+    )
 
 
 def _register_cloud_archive_services(

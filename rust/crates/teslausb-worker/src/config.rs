@@ -77,6 +77,17 @@ pub struct Config {
     #[serde(default = "default_cloud_archive_db_path")]
     pub cloud_archive_db_path: PathBuf,
 
+    /// Path to the OAuth credentials JSON written by the web
+    /// app when the operator connects a cloud provider
+    /// (`/var/lib/teslausb/cloud_oauth_credentials.json` by
+    /// default). The cleanup sweep treats the
+    /// `keep_clips_until_synced` toggle as a no-op when this
+    /// file is absent: with no provider configured, there is
+    /// no working upload pipeline to wait for and the toggle
+    /// must not pin the LUN at 100% full.
+    #[serde(default = "default_cloud_credentials_path")]
+    pub cloud_credentials_path: PathBuf,
+
     /// Indexer configuration.
     #[serde(default)]
     pub indexer: IndexerConfig,
@@ -191,6 +202,10 @@ fn default_cloud_archive_db_path() -> PathBuf {
     PathBuf::from("/var/lib/teslausb/cloud_sync.db")
 }
 
+fn default_cloud_credentials_path() -> PathBuf {
+    PathBuf::from("/var/lib/teslausb/cloud_oauth_credentials.json")
+}
+
 const fn default_sei_sample_rate() -> u32 {
     DEFAULT_SEI_SAMPLE_RATE
 }
@@ -260,6 +275,10 @@ impl Config {
         ensure!(
             !self.cloud_archive_db_path.as_os_str().is_empty(),
             "cloud_archive_db_path must not be empty",
+        );
+        ensure!(
+            !self.cloud_credentials_path.as_os_str().is_empty(),
+            "cloud_credentials_path must not be empty",
         );
         ensure!(
             self.cleanup.retention_days <= RETENTION_DAYS_MAX,

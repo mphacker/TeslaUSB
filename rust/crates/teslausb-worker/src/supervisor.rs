@@ -406,7 +406,10 @@ async fn steady_state_linux(
                 // each tick (read-only sqlite query, <1 ms on the
                 // Pi) so the operator can flip the toggle without
                 // restarting the worker.
-                let keep_filter = match KeepFilter::load(&config.cloud_archive_db_path) {
+                let keep_filter = match KeepFilter::load(
+                    &config.cloud_archive_db_path,
+                    &config.cloud_credentials_path,
+                ) {
                     Ok(f) => f,
                     Err(e) => {
                         warn!(

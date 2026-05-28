@@ -41,6 +41,8 @@ use rusqlite::{Connection, OpenFlags};
 use thiserror::Error;
 use tracing::{debug, warn};
 
+use crate::store::ClipRecord;
+
 /// Canonical cloud-path roots. Mirrors `KNOWN_CLOUD_ROOTS` in
 /// `web/teslausb_web/services/cloud_archive/paths.py`.
 const KNOWN_CLOUD_ROOTS: &[&str] = &[
@@ -102,15 +104,32 @@ impl KeepFilter {
     /// missing — operators who have not configured cloud sync
     /// have no upload state to honor.
     ///
+    /// `cloud_credentials_path` is the OAuth credentials file
+    /// the web app writes when a cloud provider is connected.
+    /// When that file is absent the filter is also forced
+    /// disabled: with no provider, nothing will ever transition
+    /// to `synced` and honoring the toggle would pin the LUN at
+    /// 100% full forever.
+    ///
     /// # Errors
     ///
     /// Returns `Err` only on a SQLite-level failure (corrupt
     /// db, schema mismatch). Missing-file is non-fatal.
-    pub fn load(cloud_db_path: &Path) -> Result<Self, KeepFilterError> {
+    pub fn load(
+        cloud_db_path: &Path,
+        cloud_credentials_path: &Path,
+    ) -> Result<Self, KeepFilterError> {
         if !cloud_db_path.exists() {
             debug!(
                 path = %cloud_db_path.display(),
                 "cloud_keep: cloud db absent; filter disabled",
+            );
+            return Ok(Self::disabled());
+        }
+        if !cloud_credentials_path.exists() {
+            debug!(
+                path = %cloud_credentials_path.display(),
+                "cloud_keep: no cloud provider connected; filter disabled",
             );
             return Ok(Self::disabled());
         }
@@ -150,12 +169,20 @@ impl KeepFilter {
 
     /// `true` when the sweep must skip this clip because its
     /// upload is still in flight.
+    ///
+    /// Clips without any waypoint metadata (no SEI, no GPS)
+    /// are never kept: they carry no operator-meaningful
+    /// telemetry and are not worth pinning storage for, even
+    /// mid-upload.
     #[must_use]
-    pub fn should_keep(&self, relative_path: &Path) -> bool {
+    pub fn should_keep(&self, clip: &ClipRecord) -> bool {
         if !self.enabled {
             return false;
         }
-        let Some(canonical) = canonical_cloud_path(relative_path) else {
+        if clip.waypoint_count == 0 {
+            return false;
+        }
+        let Some(canonical) = canonical_cloud_path(&clip.relative_path) else {
             return false;
         };
         self.in_flight.contains(&canonical)
@@ -309,10 +336,29 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+    use crate::store::Bucket;
+
+    fn mk_clip(relative_path: &str, waypoint_count: u32) -> ClipRecord {
+        ClipRecord {
+            id: 1,
+            relative_path: PathBuf::from(relative_path),
+            bucket: Bucket::Recent,
+            clip_started_utc: None,
+            indexed_at_utc: 0,
+            waypoint_count,
+            gps_waypoint_count: 0,
+        }
+    }
 
     fn open_seeded_db(toggle: Option<&str>, in_flight: &[(&str, &str)]) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cloud_sync.db");
+        // Touch a placeholder credentials file so the loader does
+        // not short-circuit to disabled. Tests that want the
+        // disabled-without-provider behavior should call
+        // `load(...)` with a missing path explicitly.
+        let creds = dir.path().join("cloud_oauth_credentials.json");
+        std::fs::write(&creds, "{}").unwrap();
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
             "CREATE TABLE cloud_archive_meta (key TEXT PRIMARY KEY, value TEXT); \
@@ -336,12 +382,34 @@ mod tests {
         dir
     }
 
+    fn creds_path(dir: &tempfile::TempDir) -> PathBuf {
+        dir.path().join("cloud_oauth_credentials.json")
+    }
+
     #[test]
     fn load_returns_disabled_when_db_missing() {
-        let f = KeepFilter::load(Path::new("/nonexistent/cloud_sync.db")).unwrap();
+        let f = KeepFilter::load(
+            Path::new("/nonexistent/cloud_sync.db"),
+            Path::new("/nonexistent/creds.json"),
+        )
+        .unwrap();
         assert!(!f.enabled);
         assert_eq!(f.in_flight_len(), 0);
-        assert!(!f.should_keep(Path::new("TeslaCam/RecentClips/x.mp4")));
+        assert!(!f.should_keep(&mk_clip("TeslaCam/RecentClips/x.mp4", 5)));
+    }
+
+    #[test]
+    fn load_returns_disabled_when_credentials_missing() {
+        let dir = open_seeded_db(Some("1"), &[("RecentClips/x.mp4", "pending")]);
+        // Delete the placeholder credentials file the helper drops in.
+        std::fs::remove_file(creds_path(&dir)).unwrap();
+        let f = KeepFilter::load(
+            &dir.path().join("cloud_sync.db"),
+            &creds_path(&dir),
+        )
+        .unwrap();
+        assert!(!f.enabled);
+        assert!(!f.should_keep(&mk_clip("TeslaCam/RecentClips/x.mp4", 5)));
     }
 
     #[test]
@@ -350,7 +418,7 @@ mod tests {
             None,
             &[("RecentClips/x.mp4", "pending")],
         );
-        let f = KeepFilter::load(&dir.path().join("cloud_sync.db")).unwrap();
+        let f = KeepFilter::load(&dir.path().join("cloud_sync.db"), &creds_path(&dir)).unwrap();
         assert!(f.enabled);
         assert_eq!(f.in_flight_len(), 1);
     }
@@ -361,9 +429,9 @@ mod tests {
             Some("0"),
             &[("RecentClips/x.mp4", "pending")],
         );
-        let f = KeepFilter::load(&dir.path().join("cloud_sync.db")).unwrap();
+        let f = KeepFilter::load(&dir.path().join("cloud_sync.db"), &creds_path(&dir)).unwrap();
         assert!(!f.enabled);
-        assert!(!f.should_keep(Path::new("TeslaCam/RecentClips/x.mp4")));
+        assert!(!f.should_keep(&mk_clip("TeslaCam/RecentClips/x.mp4", 5)));
     }
 
     #[test]
@@ -376,16 +444,33 @@ mod tests {
                 ("SavedClips/synced.mp4", "synced"), // filtered out
             ],
         );
-        let f = KeepFilter::load(&dir.path().join("cloud_sync.db")).unwrap();
+        let f = KeepFilter::load(&dir.path().join("cloud_sync.db"), &creds_path(&dir)).unwrap();
         assert!(f.enabled);
         assert_eq!(f.in_flight_len(), 2);
         // Worker rows include the TeslaCam/ prefix.
-        assert!(f.should_keep(Path::new("TeslaCam/RecentClips/in_flight.mp4")));
-        assert!(f.should_keep(Path::new(
-            "TeslaCam/SentryClips/2026-05-28_event/front.mp4"
+        assert!(f.should_keep(&mk_clip("TeslaCam/RecentClips/in_flight.mp4", 3)));
+        assert!(f.should_keep(&mk_clip(
+            "TeslaCam/SentryClips/2026-05-28_event/front.mp4",
+            7,
         )));
-        assert!(!f.should_keep(Path::new("TeslaCam/SavedClips/synced.mp4")));
-        assert!(!f.should_keep(Path::new("TeslaCam/RecentClips/never_uploaded.mp4")));
+        assert!(!f.should_keep(&mk_clip("TeslaCam/SavedClips/synced.mp4", 9)));
+        assert!(!f.should_keep(&mk_clip("TeslaCam/RecentClips/never_uploaded.mp4", 1)));
+    }
+
+    #[test]
+    fn should_keep_skips_clip_without_waypoints() {
+        // An in-flight clip with no SEI/GPS waypoints is not
+        // worth pinning storage for, even mid-upload — the
+        // operator only cares about clips with telemetry.
+        let dir = open_seeded_db(
+            Some("1"),
+            &[("RecentClips/in_flight.mp4", "pending")],
+        );
+        let f = KeepFilter::load(&dir.path().join("cloud_sync.db"), &creds_path(&dir)).unwrap();
+        assert!(f.enabled);
+        assert!(!f.should_keep(&mk_clip("TeslaCam/RecentClips/in_flight.mp4", 0)));
+        // Same path but with waypoints is kept.
+        assert!(f.should_keep(&mk_clip("TeslaCam/RecentClips/in_flight.mp4", 1)));
     }
 
     #[test]

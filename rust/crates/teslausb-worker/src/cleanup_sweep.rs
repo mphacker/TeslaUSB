@@ -439,7 +439,7 @@ fn build_plan(
     // Closure: drops `clip` from the plan when its cloud upload
     // is still in flight, otherwise yields it back.
     let mut filter_clip = |clip: ClipRecord| -> Option<ClipRecord> {
-        if keep_filter.should_keep(&clip.relative_path) {
+        if keep_filter.should_keep(&clip) {
             debug!(
                 path = %clip.relative_path.display(),
                 "sweep_to_target: keeping clip until cloud upload completes",

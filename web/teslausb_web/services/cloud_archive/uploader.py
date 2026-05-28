@@ -272,6 +272,27 @@ def _purge_broken_videos_for_drain(service: CloudArchiveService) -> None:
         logger.warning("integrity: failed to evict broken-video queue rows: %s", exc)
 
 
+def _higher_priority_pending(
+    service: CloudArchiveService,
+    current_priority: int,
+) -> bool:
+    """Return True if a pending row with priority strictly greater than
+    ``current_priority`` exists. Used by the drain loop to pre-empt
+    long bulk drains when a live-event clip arrives.
+    """
+    try:
+        with service.open_db() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM cloud_synced_files "
+                "WHERE status = 'pending' AND priority > ? LIMIT 1",
+                (current_priority,),
+            ).fetchone()
+    except sqlite3.Error as exc:
+        logger.debug("priority pre-emption check failed (non-fatal): %s", exc)
+        return False
+    return row is not None
+
+
 def _prepare_drain(
     service: CloudArchiveService,
     trigger: str,
@@ -522,6 +543,22 @@ def _drain_once(service: CloudArchiveService, trigger: str) -> bool:
 
         for candidate in candidates:
             if service.state.stop_event.is_set() or service.state.cancel_event.is_set():
+                break
+
+            # Priority pre-emption. The candidate list is frozen at
+            # drain start, but new high-priority events (live-event
+            # telemetry hits, harsh-brake clips) can arrive while a
+            # long bulk drain is in progress. If one is sitting
+            # pending in the DB with a priority higher than the row
+            # we're about to upload, break out so the worker's next
+            # iteration re-discovers and orders priority items first.
+            if _higher_priority_pending(service, candidate.priority):
+                logger.info(
+                    "cloud sync: pre-empting bulk drain — higher-priority "
+                    "pending row found (current candidate priority=%d)",
+                    candidate.priority,
+                )
+                service.state.wake_event.set()
                 break
 
             # WiFi-stability gate. wifi-watchdog.sh sets this flag

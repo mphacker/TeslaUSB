@@ -8,6 +8,7 @@ import pytest
 from teslausb_web.services.cloud_archive.uploader import (
     UploadFailedError,
     UploadResult,
+    _higher_priority_pending,
     _mark_upload_failure,
     upload_path_via_rclone,
 )
@@ -63,3 +64,33 @@ def test_mark_upload_failure_dead_letters_after_retry_limit(tmp_path: Path) -> N
 
     assert result.dead_lettered is True
     assert result.status == "dead_letter"
+
+
+def test_higher_priority_pending_detects_priority_row(tmp_path: Path) -> None:
+    db_path = tmp_path / "cloud.db"
+    with open_db(db_path) as connection:
+        connection.executemany(
+            "INSERT INTO cloud_synced_files (file_path, status, priority) VALUES (?, ?, ?)",
+            [
+                ("RecentClips/bulk1", "pending", 0),
+                ("RecentClips/priority1", "pending", 10),
+                ("RecentClips/already_synced", "synced", 10),
+            ],
+        )
+        connection.commit()
+
+    service = MagicMock()
+    service.open_db.return_value.__enter__.return_value = open_db(db_path).__enter__()
+    # Simpler: stub open_db to actually open the file.
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _opener():
+        with open_db(db_path) as conn:
+            yield conn
+
+    service.open_db = _opener
+
+    assert _higher_priority_pending(service, current_priority=0) is True
+    assert _higher_priority_pending(service, current_priority=10) is False
+    assert _higher_priority_pending(service, current_priority=20) is False

@@ -25,6 +25,7 @@
 
 pub mod cleanup;
 pub mod cleanup_sweep;
+pub mod cloud_keep;
 pub mod config;
 pub mod indexer;
 pub mod lun_pressure;

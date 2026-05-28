@@ -67,6 +67,16 @@ pub struct Config {
     #[serde(default = "default_mapping_overrides_path")]
     pub mapping_overrides_path: PathBuf,
 
+    /// Path to the Python-managed cloud-archive SQLite database
+    /// (`/var/lib/teslausb/cloud_sync.db` by default). The
+    /// cleanup sweep opens this read-only to honor the
+    /// `keep_clips_until_synced` operator toggle and skip clips
+    /// whose upload is still in flight. When the file is
+    /// absent (operator has not configured cloud sync), the
+    /// sweep behaves exactly as it did before.
+    #[serde(default = "default_cloud_archive_db_path")]
+    pub cloud_archive_db_path: PathBuf,
+
     /// Indexer configuration.
     #[serde(default)]
     pub indexer: IndexerConfig,
@@ -177,6 +187,10 @@ fn default_mapping_overrides_path() -> PathBuf {
     PathBuf::from("/var/lib/teslausb/mapping_settings.json")
 }
 
+fn default_cloud_archive_db_path() -> PathBuf {
+    PathBuf::from("/var/lib/teslausb/cloud_sync.db")
+}
+
 const fn default_sei_sample_rate() -> u32 {
     DEFAULT_SEI_SAMPLE_RATE
 }
@@ -242,6 +256,10 @@ impl Config {
         ensure!(
             !self.mapping_overrides_path.as_os_str().is_empty(),
             "mapping_overrides_path must not be empty",
+        );
+        ensure!(
+            !self.cloud_archive_db_path.as_os_str().is_empty(),
+            "cloud_archive_db_path must not be empty",
         );
         ensure!(
             self.cleanup.retention_days <= RETENTION_DAYS_MAX,

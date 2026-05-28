@@ -47,6 +47,7 @@ use std::time::SystemTime;
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
+use crate::cloud_keep::KeepFilter;
 use crate::lun_pressure::{lun_free_pct, lun_used_bytes};
 use crate::storage_config::{StorageConfig, TARGET_FREE_PCT_MAX};
 use crate::store::{Bucket, ClipRecord, Store, StoreError};
@@ -149,6 +150,11 @@ pub struct SweepSummary {
     /// Tier-C deletions made as a LAST-RESORT after A+B+age-C
     /// were exhausted and the free target was still unmet.
     pub deleted_tier_c_last_resort: u32,
+    /// Clips the sweep would otherwise have deleted but skipped
+    /// because their cloud-side upload is still in flight and
+    /// the operator has `keep_clips_until_synced` ON. Diagnostic
+    /// only — does not contribute to `total_deleted`.
+    pub kept_unsynced: u32,
     /// Per-clip failures (unlink errors etc.). Non-fatal.
     pub failed: u32,
     /// `true` if the sweep stopped because the free target was
@@ -191,6 +197,7 @@ pub fn sweep_to_target(
     storage_config: &StorageConfig,
     lun_size_bytes: u64,
     now_unix_s: i64,
+    keep_filter: &KeepFilter,
 ) -> Result<SweepSummary, SweepError> {
     if lun_size_bytes == 0 {
         // No usable LUN size — supervisor could not load the
@@ -217,7 +224,8 @@ pub fn sweep_to_target(
         return Ok(summary);
     }
 
-    let plan = build_plan(store, storage_config, now_unix_s)?;
+    let (plan, kept_unsynced) = build_plan(store, storage_config, now_unix_s, keep_filter)?;
+    summary.kept_unsynced = kept_unsynced;
     let mut deletes_since_recheck: u32 = 0;
     let mut current_free = initial_free;
 
@@ -292,6 +300,7 @@ pub fn sweep_to_target(
         tier_b = summary.deleted_tier_b,
         tier_c_age = summary.deleted_tier_c_age,
         tier_c_last = summary.deleted_tier_c_last_resort,
+        kept_unsynced = summary.kept_unsynced,
         failed = summary.failed,
         target_reached = summary.target_reached,
         "sweep_to_target complete",
@@ -309,13 +318,21 @@ pub fn sweep_to_target_now(
     backing_root: &Path,
     storage_config: &StorageConfig,
     lun_size_bytes: u64,
+    keep_filter: &KeepFilter,
 ) -> Result<SweepSummary, SweepError> {
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_err(|_| SweepError::ClockBeforeEpoch)?
         .as_secs();
     let now_i64 = i64::try_from(now).unwrap_or(i64::MAX);
-    let summary = sweep_to_target(store, backing_root, storage_config, lun_size_bytes, now_i64)?;
+    let summary = sweep_to_target(
+        store,
+        backing_root,
+        storage_config,
+        lun_size_bytes,
+        now_i64,
+        keep_filter,
+    )?;
     debug!("sweep_to_target_now: pass complete");
     Ok(summary)
 }
@@ -414,13 +431,31 @@ fn build_plan(
     store: &Store,
     storage_config: &StorageConfig,
     now_unix_s: i64,
-) -> Result<SweepPlan, SweepError> {
+    keep_filter: &KeepFilter,
+) -> Result<(SweepPlan, u32), SweepError> {
     let mut plan = SweepPlan::default();
+    let mut kept_unsynced: u32 = 0;
+
+    // Closure: drops `clip` from the plan when its cloud upload
+    // is still in flight, otherwise yields it back.
+    let mut filter_clip = |clip: ClipRecord| -> Option<ClipRecord> {
+        if keep_filter.should_keep(&clip.relative_path) {
+            debug!(
+                path = %clip.relative_path.display(),
+                "sweep_to_target: keeping clip until cloud upload completes",
+            );
+            kept_unsynced = kept_unsynced.saturating_add(1);
+            None
+        } else {
+            Some(clip)
+        }
+    };
 
     let recent = store.list_clips_in_bucket_older_than(Bucket::Recent, i64::MAX)?;
     let preserve = storage_config.cleanup.preserve_with_gps;
     let (tier_a, tier_b): (Vec<_>, Vec<_>) = recent
         .into_iter()
+        .filter_map(&mut filter_clip)
         .partition(|c| classify_clip(c, preserve) == CleanupTier::A);
     for clip in tier_a {
         plan.priority.push(PlanEntry {
@@ -438,7 +473,7 @@ fn build_plan(
     // SavedClips: no age gate. Always priority Tier C, walked
     // oldest-first.
     let saved = store.list_clips_in_bucket_older_than(Bucket::Saved, i64::MAX)?;
-    for clip in saved {
+    for clip in saved.into_iter().filter_map(&mut filter_clip) {
         plan.priority.push(PlanEntry {
             clip,
             kind: PlanKind::TierCAge,
@@ -451,10 +486,12 @@ fn build_plan(
     let sentry_all = store.list_clips_in_bucket_older_than(Bucket::Sentry, i64::MAX)?;
     let max_age_days = storage_config.cleanup.sentry_max_age_days;
     if max_age_days == 0 {
-        plan.last_resort.extend(sentry_all);
+        for clip in sentry_all.into_iter().filter_map(&mut filter_clip) {
+            plan.last_resort.push(clip);
+        }
     } else {
         let cutoff = sentry_age_cutoff(now_unix_s, max_age_days);
-        for clip in sentry_all {
+        for clip in sentry_all.into_iter().filter_map(&mut filter_clip) {
             let age_anchor = clip.clip_started_utc.unwrap_or(clip.indexed_at_utc);
             if age_anchor < cutoff {
                 plan.priority.push(PlanEntry {
@@ -467,7 +504,7 @@ fn build_plan(
         }
     }
 
-    Ok(plan)
+    Ok((plan, kept_unsynced))
 }
 
 fn bump_deleted(summary: &mut SweepSummary, kind: PlanKind) {
@@ -713,9 +750,10 @@ mod tests {
         // performs on an empty store.
         let store = Store::open_in_memory().unwrap();
         let cfg = storage(5, 0);
-        let plan = build_plan(&store, &cfg, 0).unwrap();
+        let (plan, kept) = build_plan(&store, &cfg, 0, &KeepFilter::disabled()).unwrap();
         assert!(plan.priority.is_empty());
         assert!(plan.last_resort.is_empty());
+        assert_eq!(kept, 0);
     }
 
     #[test]
@@ -726,7 +764,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open_in_memory().unwrap();
         let cfg = storage(5, 0);
-        let s = sweep_to_target(&store, dir.path(), &cfg, 0, 1_000).unwrap();
+        let s = sweep_to_target(
+            &store,
+            dir.path(),
+            &cfg,
+            0,
+            1_000,
+            &KeepFilter::disabled(),
+        )
+        .unwrap();
         assert_eq!(s, SweepSummary::default());
     }
 
@@ -737,7 +783,15 @@ mod tests {
         std::fs::write(dir.path().join("dummy.mp4"), vec![0u8; 4096]).unwrap();
         let store = Store::open_in_memory().unwrap();
         let cfg = storage(5, 0);
-        let s = sweep_to_target(&store, dir.path(), &cfg, 1u64 << 30, 1_000).unwrap();
+        let s = sweep_to_target(
+            &store,
+            dir.path(),
+            &cfg,
+            1u64 << 30,
+            1_000,
+            &KeepFilter::disabled(),
+        )
+        .unwrap();
         assert!(s.target_reached);
         assert_eq!(s.total_deleted(), 0);
         assert!(s.initial_free_pct >= 5.0);

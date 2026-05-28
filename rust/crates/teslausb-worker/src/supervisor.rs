@@ -45,6 +45,8 @@ use tracing::{error, info};
 use crate::cleanup::Cleanup;
 #[cfg(target_os = "linux")]
 use crate::cleanup_sweep;
+#[cfg(target_os = "linux")]
+use crate::cloud_keep::{self, KeepFilter};
 use crate::config::Config;
 use crate::indexer::Indexer;
 #[cfg(target_os = "linux")]
@@ -399,24 +401,52 @@ async fn steady_state_linux(
                 // Re-uses the storage_cfg / lun_bytes snapshot
                 // computed above so all three phases of this tick
                 // agree on what the LUN looks like.
+                //
+                // The cloud-archive KeepFilter is loaded fresh
+                // each tick (read-only sqlite query, <1 ms on the
+                // Pi) so the operator can flip the toggle without
+                // restarting the worker.
+                let keep_filter = match KeepFilter::load(&config.cloud_archive_db_path) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        warn!(
+                            path = %config.cloud_archive_db_path.display(),
+                            error = %e,
+                            "cleanup_sweep: KeepFilter load failed; proceeding without cloud-sync protection",
+                        );
+                        KeepFilter::disabled()
+                    }
+                };
                 match cleanup_sweep::sweep_to_target_now(
                     indexer.store(),
                     &config.backing_root,
                     &storage_cfg,
                     lun_bytes,
+                    &keep_filter,
                 ) {
-                    Ok(s) => info!(
-                        deleted_tier_a = s.deleted_tier_a,
-                        deleted_tier_b = s.deleted_tier_b,
-                        deleted_tier_c_age = s.deleted_tier_c_age,
-                        deleted_tier_c_last_resort = s.deleted_tier_c_last_resort,
-                        failed = s.failed,
-                        initial_free_pct = s.initial_free_pct,
-                        final_free_pct = s.final_free_pct,
-                        target_pct = s.target_pct,
-                        target_reached = s.target_reached,
-                        "cleanup_sweep tick complete",
-                    ),
+                    Ok(s) => {
+                        info!(
+                            deleted_tier_a = s.deleted_tier_a,
+                            deleted_tier_b = s.deleted_tier_b,
+                            deleted_tier_c_age = s.deleted_tier_c_age,
+                            deleted_tier_c_last_resort = s.deleted_tier_c_last_resort,
+                            kept_unsynced = s.kept_unsynced,
+                            failed = s.failed,
+                            initial_free_pct = s.initial_free_pct,
+                            final_free_pct = s.final_free_pct,
+                            target_pct = s.target_pct,
+                            target_reached = s.target_reached,
+                            "cleanup_sweep tick complete",
+                        );
+                        // Surface the kept-unsynced counter back
+                        // to the cloud archive KV store so the
+                        // web UI can show "X clips kept pending
+                        // upload" without re-walking the index.
+                        cloud_keep::record_last_kept_count(
+                            &config.cloud_archive_db_path,
+                            s.kept_unsynced,
+                        );
+                    }
                     Err(e) => warn!(error = %e, "cleanup_sweep tick failed (non-fatal)"),
                 }
                 // Phase O — materialise tick. Rebuilds

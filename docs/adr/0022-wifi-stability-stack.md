@@ -186,3 +186,93 @@ One dead-man reboot fired during deploy when the manual
 dead-man is for; the device came back clean with all module
 options live. The boot-time modprobe (not the live reload) is
 the canonical path for applying these options after install.
+
+## Addendum — deadlock-prevention hardening
+
+**Status:** Accepted (software complete; pending hardware soak).
+**Context:** A post-deploy investigation found a HARD failure class
+the original stack could not handle, plus a single point of failure
+in the watchdog itself. The operator's overriding priority is
+*prevention* over reboot ("rebooting at the wrong time could cause
+loss of critical video").
+
+### Two failure classes (refined)
+
+- **Soft lockup** (`bcdc_msg -110` / `HT Avail` class): the SDIO host
+  is still releasable, so the tier-4 unbind/bind recovers it
+  **reboot-free**.
+- **Hard backplane wedge** (observed 2026-05-28: `RXHEADER FAILED
+  -110` → `failed backplane access` → `mmc1: Timeout waiting for
+  hardware interrupt`): `brcmf_sdio_dataworker` parks in
+  uninterruptible **D-state** holding the SDIO host mutex.
+  `timeout`/SIGKILL are ignored until the kernel call returns; the
+  tier-4 unbind write blocks on the same mutex; `WL_REG_ON` sits
+  behind the VideoCore GPIO expander (not Linux-toggleable) and
+  `rfkill` is not exposed. **No reboot-free cure exists on this
+  hardware.** Worse, the wedged write held the watchdog's `flock`,
+  and because the service was `Type=oneshot` with no timeout and the
+  timer used `OnUnitActiveSec`, tiers 6/10 never fired — WiFi stayed
+  dead until the *car* power-cut the Pi (the worst outcome for the
+  exFAT image).
+
+Causes ruled out on this device: undervoltage (`get_throttled=0x0`),
+stale firmware (already Dec-2024 build), roaming/PNO/scan (already
+disabled).
+
+### Changes
+
+1. **Un-freezable recovery ladder** (`wifi-watchdog.sh` +
+   `wifi-watchdog.service`). Tier-4 unbind/bind and the modprobe
+   fallback are wrapped in `timeout`; the service gained
+   `TimeoutStartSec=90` so a *killable* hung tick is reaped and the
+   timer re-fires. This closes the soft-hang freeze.
+
+2. **Independent safe-reboot dead-man.** On entering tier 4, BEFORE
+   touching the SDIO bus, the watchdog arms a transient
+   `systemd-run --on-active=180 --unit=wifi-safe-reboot` that runs
+   the safe-reboot script. It is a separate process with no SDIO
+   dependency, so it fires and recovers the device even when the
+   watchdog itself is frozen in D-state. A solidly-healthy tick
+   (`fail==0` and the release window) cancels it; gating on a clean
+   fail count stops a flapping chip from dodging the last resort
+   forever.
+
+3. **Safe reboot** (new `/usr/local/sbin/wifi-safe-reboot.sh`). Makes
+   the unavoidable last-resort reboot *safe for video*: bounded wait
+   for a TeslaCAM write-idle gap → clean USB eject via
+   `teslausb-hide-usb` (the dwc2 UDC is independent of the wedged
+   WiFi SDIO bus, so it works mid-wedge; the car finalizes its clip)
+   → `sync` → `systemctl reboot` (ordered teardown) with
+   `/sbin/reboot` and sysrq fallbacks so a stuck systemd can never
+   strand the device offline. This upgrades Pillar 5 from "reboot" to
+   "reboot without losing the in-flight clip".
+
+4. **Adaptive throttle (the previously-deferred `s2-adaptive`).** The
+   watchdog now raises an EARLY-WARNING advisory
+   `/run/teslausb/wifi_degraded` at `fail==1` or elevated ping RTT
+   (`DEGRADED_RTT_MS`), one tier below the hard `uploads_paused`. The
+   cloud-archive uploader honours it by *throttling* (not stopping):
+   a longer inter-file cooldown (`DEGRADED_INTER_FILE_COOLDOWN_SECONDS`)
+   and a gentler bandwidth cap applied via the new
+   `CloudRcloneService.set_degraded_bwlimit_kbps`, which **composes
+   with** (takes the more-restrictive of) the settings-page bwlimit
+   override rather than clobbering it. The aim is to shed SDIO load
+   *before* the chip wedges.
+
+5. **Control-path churn reduction** (new
+   `/etc/NetworkManager/conf.d/15-teslausb-wifi-churn.conf`). Scoped
+   to wifi devices only: `ipv6.method=ignore` (removes the periodic
+   `_brcmf_set_multicast_list` iovars from IPv6 ND/MLD — the device is
+   reached over IPv4 only) and `wifi.scan-rand-mac-address=no`
+   (drops a set-MAC iovar per scan). Scanning itself is left enabled
+   so re-association after a recovery still works.
+
+### Deliberately NOT done
+
+- **Lowering the SDIO clock 50→25 MHz** (`s?-sdioclk`): there is no
+  clean `config.txt` knob for the on-board WiFi SDIO
+  (`mmcnr@7e300000`); the generic `dtoverlay=sdio` is for header-pin
+  SDIO, so this needs a custom DT overlay fragment. It is boot-critical
+  and the payoff is only probabilistic (bus-timing-class wedges only),
+  so it is **deferred** pending evidence the software work is
+  insufficient.

@@ -638,6 +638,44 @@ def test_transfer_sync_builds_sync_command(tmp_path: Path) -> None:
     assert "sync" in mock_popen.call_args.args[0]
 
 
+def test_degraded_bwlimit_composes_with_config_and_override(tmp_path: Path) -> None:
+    """The wifi-watchdog degraded cap must win only when more restrictive,
+    and must never clobber the settings-page override."""
+    service, *_ = _service(tmp_path, bwlimit_kbps=512)
+
+    # No degraded cap → falls back to config / override.
+    assert service._effective_bwlimit_kbps() == 512
+
+    # Degraded cap higher than config → config stays (more restrictive wins).
+    service.set_degraded_bwlimit_kbps(1024)
+    assert service._effective_bwlimit_kbps() == 512
+
+    # Degraded cap lower than config → degraded wins.
+    service.set_degraded_bwlimit_kbps(256)
+    assert service._effective_bwlimit_kbps() == 256
+
+    # Settings-page override is still honoured and still composes.
+    service.set_bwlimit_kbps_override(128)
+    assert service._effective_bwlimit_kbps() == 128
+    service.set_bwlimit_kbps_override(2048)
+    assert service._effective_bwlimit_kbps() == 256  # degraded still lower
+
+    # Clearing the degraded cap restores the override; the override is intact.
+    service.set_degraded_bwlimit_kbps(None)
+    assert service._effective_bwlimit_kbps() == 2048
+
+
+def test_degraded_bwlimit_caps_unlimited_config(tmp_path: Path) -> None:
+    """With an unlimited (0) base, the degraded cap applies directly."""
+    service, *_ = _service(tmp_path, bwlimit_kbps=0)
+    assert service._effective_bwlimit_kbps() == 0
+    service.set_degraded_bwlimit_kbps(1024)
+    assert service._effective_bwlimit_kbps() == 1024
+    # Negative clears it, same contract as the settings override.
+    service.set_degraded_bwlimit_kbps(-1)
+    assert service._effective_bwlimit_kbps() == 0
+
+
 def test_transfer_reports_progress_callback(tmp_path: Path) -> None:
     service, _oauth_service_obj, source_root, _state_root, binary_path = _service(tmp_path)
     fake_process = _FakePopen(

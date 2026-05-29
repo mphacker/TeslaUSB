@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # uninstall-lib/12-wifi-stability.sh — reverses setup-lib/12-wifi-stability.sh.
 #
-# Removes the BCM43436 SDIO WiFi stability stack. The five files
+# Removes the BCM43436 SDIO WiFi stability stack. The seven files
 # laid down by 6.12 are all OURS (no operator data), so we remove
 # them unconditionally with or without --purge.
 #
@@ -47,8 +47,10 @@ b1_undo_12() {
   _b1_rm_if_exists_12 "${B1_WIFI_WATCHDOG_TIMER}"
   _b1_rm_if_exists_12 "${B1_WIFI_WATCHDOG_UNIT}"
   _b1_rm_if_exists_12 "${B1_WIFI_WATCHDOG_SCRIPT}"
+  _b1_rm_if_exists_12 "${B1_WIFI_SAFE_REBOOT_SCRIPT}"
   _b1_rm_if_exists_12 "${B1_BRCMFMAC_CONF}"
   _b1_rm_if_exists_12 "${B1_NM_POWERSAVE_CONF}"
+  _b1_rm_if_exists_12 "${B1_NM_WIFI_CHURN_CONF}"
 
   if [[ "${TESLAUSB_DRY_RUN:-0}" != "1" ]]; then
     b1_run systemctl daemon-reload

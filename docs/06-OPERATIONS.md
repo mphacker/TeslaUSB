@@ -153,8 +153,10 @@ full design rationale.
 | `/etc/NetworkManager/conf.d/10-teslausb-no-powersave.conf` | `[connection] wifi.powersave = 2` (off) — global default for every new NM profile. Stops the chip dropping into PS_POLL where the firmware lockup is reproducible. |
 | `/etc/modprobe.d/brcmfmac.conf` | `options brcmfmac roamoff=1 feature_disable=0x82000` — disables in-driver roaming (races our captive-portal dispatcher) and the offloaded PNO/SCAN_V2 engines (silently wedge under load). Takes effect at next module load (next boot, or `nmcli radio wifi off && modprobe -r brcmfmac && modprobe brcmfmac && nmcli radio wifi on`). |
 | `/usr/local/sbin/wifi-watchdog.sh` | Escalation-ladder recovery script (see below). |
-| `/etc/systemd/system/wifi-watchdog.service` | `Type=oneshot`, `OOMScoreAdjust=-900`, `Nice=-5`, IO realtime — survives memory pressure. |
+| `/usr/local/sbin/wifi-safe-reboot.sh` | Last-resort recovery for a HARD SDIO wedge: waits for a TeslaCAM write-idle gap, cleanly ejects the USB gadget (`teslausb-hide-usb`), `sync`s, then reboots — so the unavoidable reboot never truncates the in-flight clip. Invoked by the watchdog's tier 10 and by the independent dead-man it arms at tier 4. |
+| `/etc/systemd/system/wifi-watchdog.service` | `Type=oneshot`, `TimeoutStartSec=90` (reaps a killable hung tick so the timer re-fires), `OOMScoreAdjust=-900`, `Nice=-5`, IO realtime — survives memory pressure. |
 | `/etc/systemd/system/wifi-watchdog.timer` | 30 s tick (`OnUnitActiveSec=30s`). Enabled + started by `setup-lib/10-activate.sh`. |
+| `/etc/NetworkManager/conf.d/15-teslausb-wifi-churn.conf` | Control-path churn reduction (wifi only): `ipv6.method=ignore` (kills periodic IPv6 ND/MLD multicast iovars) + `wifi.scan-rand-mac-address=no` (drops a set-MAC iovar per scan). Scanning stays enabled so re-association after a recovery still works. |
 
 Source artifacts live under `deploy/wifi-stability/` for review.
 
@@ -168,18 +170,21 @@ the action.
 
 | Fail count | Action |
 |------------|--------|
-| 1 | Soft log — no recovery yet (could be a one-tick blip). |
+| 1 | Soft log — no recovery yet (could be a one-tick blip). Raises `/run/teslausb/wifi_degraded` so the uploader throttles early (see below). Also raised on elevated ping RTT even at fail 0. |
 | **2** | Touch `/run/teslausb/uploads_paused` (uploader's cool-down loop sees it within 1.5 s and yields). `nmcli device disconnect wlan0 && nmcli device connect wlan0`. |
 | 3 | Pause held; log only. |
-| **4** | `brcmfmac` SDIO unbind/bind via `/sys/bus/sdio/drivers/brcmfmac/{unbind,bind}` (resets firmware without needing the module idle). NM connection is brought down then back up around the reset. Falls back to `modprobe -r brcmfmac && modprobe brcmfmac` if the SDIO node is not found. (Re-applies `roamoff` and `feature_disable`.) |
+| **4** | Arms the independent **safe-reboot dead-man** (`systemd-run --on-active=180 --unit=wifi-safe-reboot`) BEFORE touching SDIO, so a hard D-state wedge that freezes this script still recovers. Then `brcmfmac` SDIO unbind/bind via `/sys/bus/sdio/drivers/brcmfmac/{unbind,bind}` (writes wrapped in `timeout`), resetting firmware without needing the module idle. NM connection is brought down then back up around the reset. Falls back to `modprobe -r brcmfmac && modprobe brcmfmac` if the SDIO node is not found. (Re-applies `roamoff` and `feature_disable`.) |
 | 5 | Pause held; log only. |
 | **6** | `ip link set wlan0 down && ip link set wlan0 up`. |
 | 7–9 | Pause held; log only. |
-| **10** | `reboot` (last resort — never gets here if ladder works). |
+| **10** | Safe reboot via `wifi-safe-reboot.sh` (quiesces the USB gadget first; plain `systemctl reboot` if the script is missing) — last resort, never gets here if the ladder works. |
 
 After **2 consecutive healthy ticks**, the pause flag is removed
 and `fail_count` resets to 0. Operators can manually clear:
-`sudo rm -f /run/teslausb/uploads_paused`.
+`sudo rm -f /run/teslausb/uploads_paused`. The safe-reboot dead-man
+is cancelled once WiFi is solidly healthy (`fail==0` + the release
+window); gating on a clean fail count stops a flapping chip from
+dodging the last resort forever.
 
 ### Uploader cooperation (`web/teslausb_web/services/cloud_archive/uploader.py`)
 
@@ -189,6 +194,17 @@ sleep `PAUSE_FLAG_BACKOFF_SECONDS` (15 s) and `continue`. Between
 every two successful uploads it also waits
 `INTER_FILE_COOLDOWN_SECONDS` (1.5 s) so the WiFi chip catches
 its breath.
+
+It also honours the softer, earlier `/run/teslausb/wifi_degraded`
+advisory: while present it keeps uploading but **throttles** —
+the inter-file cooldown widens to
+`DEGRADED_INTER_FILE_COOLDOWN_SECONDS` (6 s) and rclone is capped
+to `DEGRADED_BWLIMIT_KBPS` (1 MB/s) via
+`CloudRcloneService.set_degraded_bwlimit_kbps`, which composes
+with (never clobbers) the settings-page bwlimit override by taking
+the more-restrictive value. The throttle is cleared when the flag
+clears and is never leaked past a drain. This sheds SDIO load
+*before* the chip wedges.
 
 ### Polite rclone subprocess (`cloud_rclone_service.py`)
 
@@ -248,7 +264,9 @@ systemctl show teslausb-web.service -p MemoryMax,OOMPolicy,TasksMax
 |--------|---------|
 | Manually pause all uploads (e.g. during a road trip) | `sudo touch /run/teslausb/uploads_paused` |
 | Resume | `sudo rm -f /run/teslausb/uploads_paused` |
+| Check if the watchdog is currently throttling uploads | `ls -l /run/teslausb/wifi_degraded /run/teslausb/uploads_paused 2>/dev/null` |
 | Tail the watchdog | `sudo journalctl -u wifi-watchdog.service -f` |
+| Tail a safe-reboot (last-resort) event | `sudo journalctl -t wifi-safe-reboot -f` |
 | Force-reload `brcmfmac` (drops WiFi ~15 s — only via console or with a dead-man timer) | `sudo systemd-run --on-active=180 --unit=b1-deadman /sbin/reboot && sudo nohup sh -c 'sleep 2; nmcli radio wifi off; sleep 2; modprobe -r brcmfmac; sleep 2; modprobe brcmfmac; sleep 3; nmcli radio wifi on' >/tmp/reload.log 2>&1 &` |
 | Watch uploader cool-down honouring the pause flag | `sudo journalctl -u teslausb-web -g "uploads_paused\|cool-down"` |
 

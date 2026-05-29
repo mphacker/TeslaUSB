@@ -16,6 +16,16 @@ Wants=NetworkManager.service
 Type=oneshot
 ExecStart=/usr/local/sbin/wifi-watchdog.sh
 
+# A wedged tick must never run forever. Type=oneshot defaults to an
+# INFINITE start timeout, which is exactly how the 2026-05-28 hard
+# SDIO wedge froze the ladder: the tier-4 unbind blocked, the script
+# held its flock, the service never went inactive, and the timer
+# (OnUnitActiveSec) therefore never re-fired. TimeoutStartSec makes
+# systemd reap a killable hang so the timer re-fires. A true D-state
+# hang can't be killed even by SIGKILL — that case is covered by the
+# independent safe-reboot dead-man the script arms at tier 4.
+TimeoutStartSec=90
+
 # The watchdog itself must never be the thing that gets OOM-killed.
 OOMScoreAdjust=-900
 

@@ -8,6 +8,11 @@
 #      WiFi chip never enters the low-power state that wedges its
 #      firmware under sustained TX load.
 #
+#   1b) /etc/NetworkManager/conf.d/15-teslausb-wifi-churn.conf
+#      Trims periodic SDIO control-path traffic (disables IPv6 +
+#      per-scan MAC randomization on wifi) to widen the margin before
+#      a firmware lockup. Scoped to wifi devices only.
+#
 #   2) /etc/modprobe.d/brcmfmac.conf
 #      Disables in-driver roaming + offloaded scan engines that are
 #      known to trigger the BCM43436 firmware lockup (HT Avail
@@ -23,6 +28,13 @@
 #   4) /etc/systemd/system/wifi-watchdog.service
 #   5) /etc/systemd/system/wifi-watchdog.timer
 #      systemd timer (30 s tick) + oneshot service wrapping (3).
+#
+#   6) /usr/local/sbin/wifi-safe-reboot.sh
+#      Last-resort recovery for a HARD SDIO wedge: quiesces the USB
+#      gadget (write-idle wait → clean eject → sync) before rebooting
+#      so the unavoidable reboot never loses video. Invoked by (3)
+#      directly and by the independent dead-man (3) arms on entering
+#      tier 4 — so recovery fires even if (3) is itself frozen.
 #
 # Like the rest of Phase 6, this step is purely a file-install step.
 # It does NOT restart NetworkManager, reload modprobe state, or
@@ -53,6 +65,9 @@ B1_WIFI_STAB_SRC="${B1_REPO_ROOT_12}/deploy/wifi-stability"
 B1_NM_POWERSAVE_CONF="/etc/NetworkManager/conf.d/10-teslausb-no-powersave.conf"
 export B1_NM_POWERSAVE_CONF
 
+B1_NM_WIFI_CHURN_CONF="/etc/NetworkManager/conf.d/15-teslausb-wifi-churn.conf"
+export B1_NM_WIFI_CHURN_CONF
+
 B1_BRCMFMAC_CONF="/etc/modprobe.d/brcmfmac.conf"
 export B1_BRCMFMAC_CONF
 
@@ -64,6 +79,9 @@ export B1_WIFI_WATCHDOG_UNIT
 
 B1_WIFI_WATCHDOG_TIMER="/etc/systemd/system/wifi-watchdog.timer"
 export B1_WIFI_WATCHDOG_TIMER
+
+B1_WIFI_SAFE_REBOOT_SCRIPT="/usr/local/sbin/wifi-safe-reboot.sh"
+export B1_WIFI_SAFE_REBOOT_SCRIPT
 
 # --------------------------------------------------------------------
 # Helpers
@@ -133,6 +151,13 @@ b1_step_12() {
     0644 \
     changed
 
+  # 1b) NetworkManager control-path churn reduction drop-in.
+  _b1_12_install_file \
+    "${B1_WIFI_STAB_SRC}/15-teslausb-wifi-churn.conf" \
+    "${B1_NM_WIFI_CHURN_CONF}" \
+    0644 \
+    changed
+
   # 2) brcmfmac module options.
   b1_run mkdir -p -- "$(dirname "${B1_BRCMFMAC_CONF}")"
   _b1_12_install_file \
@@ -161,6 +186,14 @@ b1_step_12() {
     "${B1_WIFI_STAB_SRC}/wifi-watchdog.timer" \
     "${B1_WIFI_WATCHDOG_TIMER}" \
     0644 \
+    changed
+
+  # 6) wifi-safe-reboot script (executable).
+  b1_run mkdir -p -- "$(dirname "${B1_WIFI_SAFE_REBOOT_SCRIPT}")"
+  _b1_12_install_file \
+    "${B1_WIFI_STAB_SRC}/wifi-safe-reboot.sh" \
+    "${B1_WIFI_SAFE_REBOOT_SCRIPT}" \
+    0755 \
     changed
 
   # daemon-reload only on actual change. We deliberately do NOT

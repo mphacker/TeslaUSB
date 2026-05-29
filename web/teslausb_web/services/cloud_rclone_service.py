@@ -236,6 +236,7 @@ class CloudRcloneService:
         self._active_progress: RcloneTransferProgress | None = None
         self._active_cancelled = False
         self._bwlimit_kbps_override: int | None = None
+        self._degraded_bwlimit_kbps: int | None = None
         self._remote_path_override: str | None = None
 
     def set_bwlimit_kbps_override(self, value: int | None) -> None:
@@ -250,10 +251,35 @@ class CloudRcloneService:
         else:
             self._bwlimit_kbps_override = int(value)
 
+    def set_degraded_bwlimit_kbps(self, value: int | None) -> None:
+        """Apply a transient, more-restrictive cap from the WiFi watchdog.
+
+        Driven by the cloud-archive uploader when wifi-watchdog.sh raises
+        ``/run/teslausb/wifi_degraded`` (the BCM43436 SDIO chip is congesting
+        but not yet wedged). This COMPOSES with — it does not clobber — the
+        settings-page value set via :meth:`set_bwlimit_kbps_override`: the
+        effective limit is the more restrictive of the two. Pass ``None`` (or
+        a negative value) to clear it once WiFi recovers.
+        """
+        if value is None or value < 0:
+            self._degraded_bwlimit_kbps = None
+        else:
+            self._degraded_bwlimit_kbps = int(value)
+
     def _effective_bwlimit_kbps(self) -> int:
-        if self._bwlimit_kbps_override is not None:
-            return self._bwlimit_kbps_override
-        return self._config.bwlimit_kbps
+        base = (
+            self._bwlimit_kbps_override
+            if self._bwlimit_kbps_override is not None
+            else self._config.bwlimit_kbps
+        )
+        degraded = self._degraded_bwlimit_kbps
+        if degraded is None:
+            return base
+        # bwlimit semantics: 0 == unlimited, positive == cap in KB/s. The
+        # degraded cap wins whenever it is the more restrictive of the two.
+        if base <= 0:
+            return degraded
+        return min(base, degraded)
 
     def set_remote_path_override(self, value: str | None) -> None:
         """Override the base remote folder prefix used for uploads."""

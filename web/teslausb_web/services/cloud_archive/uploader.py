@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import logging
-import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import Enum, auto
+from pathlib import Path
 from random import SystemRandom
 from typing import TYPE_CHECKING, Protocol
 
-logger = logging.getLogger(__name__)
-
+from teslausb_web.services.cloud_archive.cloud_cleanup import ensure_remote_headroom
 from teslausb_web.services.cloud_archive.discovery import EventCandidate, _discover_events
 from teslausb_web.services.cloud_archive.integrity import purge_broken_videos
 from teslausb_web.services.cloud_archive.kv import KV_KEY_LAST_SUCCESSFUL_SYNC, kv_set
@@ -32,9 +32,9 @@ from teslausb_web.services.cloud_archive.settings import (
     _read_sync_folders_setting,
 )
 
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
-    import sqlite3
-    from pathlib import Path
     from threading import Event
 
     from teslausb_web.services.cloud_archive.service import CloudArchiveService
@@ -49,6 +49,14 @@ _RANDOM = SystemRandom()
 # Path mirrors deploy/wifi-stability/wifi-watchdog.sh::PAUSE_FILE.
 _UPLOADS_PAUSED_FLAG = "/run/teslausb/uploads_paused"
 
+# Softer, EARLIER advisory than the hard pause above. While this file
+# exists, wifi-watchdog.sh has seen the first sign of SDIO trouble
+# (one missed gateway ping, or elevated RTT) but the chip is not yet
+# wedged. We keep uploading but back off — gentler bwlimit + a longer
+# inter-file cooldown — to shed load before it escalates to a hard
+# pause/wedge. Mirrors wifi-watchdog.sh::DEGRADED_FILE.
+_DEGRADED_FLAG = "/run/teslausb/wifi_degraded"
+
 # Inter-file cool-down (seconds). Sustained back-to-back rclone runs
 # (especially on small files where one finishes within ~1 s) keep
 # the SDIO bus at near-100% utilisation. A short interruptible sleep
@@ -57,6 +65,13 @@ _UPLOADS_PAUSED_FLAG = "/run/teslausb/uploads_paused"
 # brcmfmac firmware-lockup probability without measurably hurting
 # bulk throughput on typical 35 MB clips.
 INTER_FILE_COOLDOWN_SECONDS = 1.5
+
+# While the chip is degraded (but not yet paused) we widen the
+# inter-file gap and cap rclone bandwidth so the SDIO bus gets real
+# idle time to recover. Chosen to be clearly gentler than the healthy
+# path without stalling progress entirely.
+DEGRADED_INTER_FILE_COOLDOWN_SECONDS = 6.0
+DEGRADED_BWLIMIT_KBPS = 1024
 
 # How long to back off when the pause flag is observed mid-drain
 # before re-checking. Long enough to let the watchdog complete its
@@ -68,10 +83,17 @@ PAUSE_FLAG_BACKOFF_SECONDS = 15.0
 def _uploads_paused() -> bool:
     """Return True iff wifi-watchdog has asked us to stop uploading."""
     try:
-        return os.path.exists(_UPLOADS_PAUSED_FLAG)
+        return Path(_UPLOADS_PAUSED_FLAG).exists()
     except OSError:
         return False
 
+
+def _wifi_degraded() -> bool:
+    """Return True iff wifi-watchdog has asked us to throttle (not stop)."""
+    try:
+        return Path(_DEGRADED_FLAG).exists()
+    except OSError:
+        return False
 
 
 class UploadFailedError(CloudArchiveError):
@@ -510,125 +532,235 @@ def _finish_sync_session(
         connection.commit()
 
 
+class _DrainSignal(Enum):
+    """Per-candidate control signal returned to the drain loop."""
+
+    CONTINUE = auto()
+    BREAK = auto()
+
+
+@dataclass(slots=True)
+class _DrainAccount:
+    """Mutable accounting carried across one drain's candidate loop."""
+
+    running_free: int | None
+    reserve_bytes: int
+    files_synced: int = 0
+    bytes_transferred: int = 0
+    degraded_active: bool = False
+
+
+def _open_drain_account(
+    service: CloudArchiveService,
+    candidates: tuple[EventCandidate, ...],
+) -> _DrainAccount:
+    """Run the upfront reserve pre-flight and seed the drain account.
+
+    Failures fall open (upload allowed); the per-candidate gate still
+    protects the reserve before each individual transfer.
+    """
+    total_bytes = sum(max(0, c.size_bytes) for c in candidates)
+    guard = ensure_remote_headroom(service, total_bytes)
+    if not guard.ok:
+        logger.info(
+            "cloud sync: reserve tight upfront "
+            "(free=%s reserve=%s needed=%s reason=%s); will gate per file",
+            guard.free_bytes,
+            guard.reserve_bytes,
+            total_bytes,
+            guard.reason,
+        )
+    return _DrainAccount(
+        running_free=guard.free_bytes,
+        reserve_bytes=guard.reserve_bytes,
+    )
+
+
+def _reserve_allows(
+    service: CloudArchiveService,
+    candidate: EventCandidate,
+    account: _DrainAccount,
+) -> bool:
+    """Return False (and log) if uploading candidate would breach the reserve.
+
+    Only gates when the backend reports free space and a reserve is
+    configured; otherwise always allows. Refreshes ``account.running_free``
+    from the on-demand headroom check.
+    """
+    if not (
+        account.running_free is not None
+        and account.reserve_bytes > 0
+        and candidate.size_bytes > 0
+        and account.running_free - candidate.size_bytes < account.reserve_bytes
+    ):
+        return True
+    sub_guard = ensure_remote_headroom(service, candidate.size_bytes)
+    if sub_guard.free_bytes is not None:
+        account.running_free = sub_guard.free_bytes
+    if not sub_guard.ok:
+        logger.warning(
+            "cloud sync: stopping drain — uploading %s (%d bytes) "
+            "would breach reserve (free=%s reserve=%s reason=%s)",
+            candidate.relative_path,
+            candidate.size_bytes,
+            account.running_free,
+            account.reserve_bytes,
+            sub_guard.reason,
+        )
+        return False
+    return True
+
+
+def _sync_degraded_throttle(service: CloudArchiveService, *, active: bool) -> bool:
+    """Match the rclone degraded throttle to the ``wifi_degraded`` advisory.
+
+    Returns the new active state, toggling the bwlimit and logging only on a
+    transition so we don't spam the journal or repeat setter calls.
+    """
+    degraded_now = _wifi_degraded()
+    if degraded_now == active:
+        return active
+    if degraded_now:
+        service.rclone_service.set_degraded_bwlimit_kbps(DEGRADED_BWLIMIT_KBPS)
+        logger.info(
+            "cloud sync: wifi degraded — throttling rclone to %d KB/s + %.1fs inter-file cooldown",
+            DEGRADED_BWLIMIT_KBPS,
+            DEGRADED_INTER_FILE_COOLDOWN_SECONDS,
+        )
+    else:
+        service.rclone_service.set_degraded_bwlimit_kbps(None)
+        logger.info("cloud sync: wifi recovered — clearing rclone throttle")
+    return degraded_now
+
+
+def _record_upload_success(
+    service: CloudArchiveService,
+    account: _DrainAccount,
+    result: UploadResult,
+) -> _DrainSignal:
+    """Update accounting after a successful upload and run the cool-down.
+
+    The inter-file cool-down lets the SDIO bus breathe before the next
+    rclone subprocess (longer while degraded). Interruptible via stop_event
+    so ``systemctl stop`` stays crisp.
+    """
+    account.files_synced += 1
+    account.bytes_transferred += result.bytes_transferred
+    if account.running_free is not None:
+        account.running_free = max(0, account.running_free - result.bytes_transferred)
+    cooldown = (
+        DEGRADED_INTER_FILE_COOLDOWN_SECONDS
+        if account.degraded_active
+        else INTER_FILE_COOLDOWN_SECONDS
+    )
+    if _wait_with_events(service, cooldown):
+        return _DrainSignal.BREAK
+    return _DrainSignal.CONTINUE
+
+
+def _drain_candidate(
+    service: CloudArchiveService,
+    candidate: EventCandidate,
+    account: _DrainAccount,
+) -> _DrainSignal:
+    """Process one candidate; return whether the drain loop should continue.
+
+    Gates in order: priority pre-emption, hard WiFi pause, soft WiFi
+    degraded throttle, per-candidate reserve, then the upload itself.
+    """
+    # Priority pre-emption. The candidate list is frozen at drain start,
+    # but a higher-priority event (live-event telemetry, harsh-brake clip)
+    # can arrive mid-drain; break so the worker re-discovers and orders it
+    # first.
+    if _higher_priority_pending(service, candidate.priority):
+        logger.info(
+            "cloud sync: pre-empting bulk drain — higher-priority "
+            "pending row found (current candidate priority=%d)",
+            candidate.priority,
+        )
+        service.state.wake_event.set()
+        return _DrainSignal.BREAK
+
+    # Hard WiFi-stability gate. wifi-watchdog.sh sets this flag when the
+    # BCM43436 chip is wedging; spawning rclone now would worsen the lockup
+    # and almost certainly fail mid-stream. Back off and re-check.
+    if _uploads_paused():
+        logger.info(
+            "cloud sync: pausing — %s present (wifi-watchdog tier hit)",
+            _UPLOADS_PAUSED_FLAG,
+        )
+        if _wait_with_events(service, PAUSE_FLAG_BACKOFF_SECONDS):
+            return _DrainSignal.BREAK
+        return _DrainSignal.CONTINUE
+
+    # Soft WiFi-stability gate. Degraded-but-not-paused: keep uploading but
+    # throttle so the SDIO bus gets idle time and ideally never escalates.
+    account.degraded_active = _sync_degraded_throttle(service, active=account.degraded_active)
+
+    if not _reserve_allows(service, candidate, account):
+        return _DrainSignal.BREAK
+
+    service.state.set_current(candidate)
+    result = _process_candidate_upload(service, candidate)
+    return _after_upload(service, account, result)
+
+
+def _after_upload(
+    service: CloudArchiveService,
+    account: _DrainAccount,
+    result: UploadResult,
+) -> _DrainSignal:
+    """Translate an upload result into the drain loop's control signal."""
+    if result.cancelled:
+        return _DrainSignal.BREAK
+    if result.success:
+        return _record_upload_success(service, account, result)
+    if result.status == "failed" and _wait_with_events(
+        service,
+        _backoff_seconds(service, result.retry_count),
+    ):
+        return _DrainSignal.BREAK
+    return _DrainSignal.CONTINUE
+
+
 def _drain_once(service: CloudArchiveService, trigger: str) -> bool:
     service.state.begin_drain(trigger)
-    files_synced = 0
-    bytes_transferred = 0
     session_id: int | None = None
+    account: _DrainAccount | None = None
     try:
         session_id, candidates = _prepare_drain(service, trigger)
         if not candidates:
             return False
-
-        # Pre-flight: refuse to upload bytes that would push the remote
-        # below the configured reserve. Runs cleanup on-demand if
-        # auto-cleanup is enabled. Failures fall open (allow upload).
-        from teslausb_web.services.cloud_archive.cloud_cleanup import (
-            ensure_remote_headroom,
-        )
-
-        total_bytes = sum(max(0, c.size_bytes) for c in candidates)
-        guard = ensure_remote_headroom(service, total_bytes)
-        running_free: int | None = guard.free_bytes
-        reserve_bytes = guard.reserve_bytes
-        if not guard.ok:
-            logger.info(
-                "cloud sync: reserve tight upfront "
-                "(free=%s reserve=%s needed=%s reason=%s); will gate per file",
-                guard.free_bytes,
-                reserve_bytes,
-                total_bytes,
-                guard.reason,
-            )
-
+        account = _open_drain_account(service, candidates)
         for candidate in candidates:
             if service.state.stop_event.is_set() or service.state.cancel_event.is_set():
                 break
-
-            # Priority pre-emption. The candidate list is frozen at
-            # drain start, but new high-priority events (live-event
-            # telemetry hits, harsh-brake clips) can arrive while a
-            # long bulk drain is in progress. If one is sitting
-            # pending in the DB with a priority higher than the row
-            # we're about to upload, break out so the worker's next
-            # iteration re-discovers and orders priority items first.
-            if _higher_priority_pending(service, candidate.priority):
-                logger.info(
-                    "cloud sync: pre-empting bulk drain — higher-priority "
-                    "pending row found (current candidate priority=%d)",
-                    candidate.priority,
-                )
-                service.state.wake_event.set()
+            if _drain_candidate(service, candidate, account) is _DrainSignal.BREAK:
                 break
-
-            # WiFi-stability gate. wifi-watchdog.sh sets this flag
-            # when the BCM43436 chip is degrading; spawning a new
-            # rclone here would (a) make the lockup worse and
-            # (b) almost certainly fail mid-stream and re-queue.
-            # Back off briefly and re-check; the flag clears once
-            # the watchdog observes a healthy gateway tick.
-            if _uploads_paused():
-                logger.info(
-                    "cloud sync: pausing — %s present (wifi-watchdog tier hit)",
-                    _UPLOADS_PAUSED_FLAG,
-                )
-                if _wait_with_events(service, PAUSE_FLAG_BACKOFF_SECONDS):
-                    break
-                continue
-
-            # Per-candidate reserve gate. Only applies when the backend
-            # reports free space and a reserve is configured.
-            if (
-                running_free is not None
-                and reserve_bytes > 0
-                and candidate.size_bytes > 0
-                and running_free - candidate.size_bytes < reserve_bytes
-            ):
-                sub_guard = ensure_remote_headroom(service, candidate.size_bytes)
-                if sub_guard.free_bytes is not None:
-                    running_free = sub_guard.free_bytes
-                if not sub_guard.ok:
-                    logger.warning(
-                        "cloud sync: stopping drain — uploading %s (%d bytes) "
-                        "would breach reserve (free=%s reserve=%s reason=%s)",
-                        candidate.relative_path,
-                        candidate.size_bytes,
-                        running_free,
-                        reserve_bytes,
-                        sub_guard.reason,
-                    )
-                    break
-
-            service.state.set_current(candidate)
-            result = _process_candidate_upload(service, candidate)
-            if result.cancelled:
-                break
-            if result.success:
-                files_synced += 1
-                bytes_transferred += result.bytes_transferred
-                if running_free is not None:
-                    running_free = max(0, running_free - result.bytes_transferred)
-                # Inter-file cool-down — let the SDIO bus breathe
-                # before the next rclone subprocess. Interruptible
-                # via stop_event so `systemctl stop` is still crisp.
-                if _wait_with_events(service, INTER_FILE_COOLDOWN_SECONDS):
-                    break
-                continue
-            if result.status == "failed" and _wait_with_events(
-                service,
-                _backoff_seconds(service, result.retry_count),
-            ):
-                break
-        return files_synced > 0
+        return account.files_synced > 0
     finally:
-        if session_id is not None:
-            _finish_sync_session(
-                service,
-                session_id,
-                files_synced,
-                bytes_transferred,
-            )
+        # Never leak the degraded throttle past a drain. If WiFi is still
+        # degraded the next drain re-applies it on its first candidate; if
+        # it recovered, the override is already gone.
+        service.rclone_service.set_degraded_bwlimit_kbps(None)
+        _finish_drain_session(service, session_id, account)
         service.state.finish_drain()
+
+
+def _finish_drain_session(
+    service: CloudArchiveService,
+    session_id: int | None,
+    account: _DrainAccount | None,
+) -> None:
+    """Close out the sync session row with whatever progress was made."""
+    if session_id is None:
+        return
+    _finish_sync_session(
+        service,
+        session_id,
+        account.files_synced if account is not None else 0,
+        account.bytes_transferred if account is not None else 0,
+    )
 
 
 def _run_sync(service: CloudArchiveService, trigger: str = "manual") -> bool:

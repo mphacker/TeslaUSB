@@ -391,6 +391,13 @@
     box-shadow: 0 2px 4px var(--shadow);
 }
 
+/* The play/stop glyph is an empty <i> rendered via a CSS mask. As an only
+   child of the flex button it would otherwise shrink to zero width and paint
+   nothing, so pin its size and prevent flex from collapsing it. */
+.play-btn .bi {
+    flex-shrink: 0;
+}
+
 .play-btn:hover {
     transform: scale(1.1);
     box-shadow: 0 4px 8px var(--shadow-hover);

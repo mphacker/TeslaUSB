@@ -60,6 +60,7 @@ from teslausb_web.services.cloud_generic_remote_service import (
 )
 from teslausb_web.services.cloud_rclone_service import (
     CloudRcloneService,
+    RcloneAuthError,
     RcloneConfigError,
     RcloneError,
     RcloneListing,
@@ -919,15 +920,39 @@ def api_disconnect_provider() -> ResponseReturnValue:
 
 @cloud_archive_bp.route("/api/test_connection", methods=["POST"])
 def api_test_connection() -> ResponseReturnValue:
+    service = _get_rclone_service()
+    if not service.has_configured_remote():
+        return (
+            jsonify({"success": False, "message": "No configured remote."}),
+            HTTPStatus.BAD_REQUEST,
+        )
     try:
-        remotes = _get_rclone_service().list_remotes()
+        remote = service.check_connection()
     except (RcloneConfigError, ValueError) as exc:
         return _handle_request_error(exc)
+    except RcloneAuthError as exc:
+        logger.warning("cloud test_connection auth rejected: %s", exc)
+        return jsonify(
+            {
+                "success": False,
+                "auth_error": True,
+                "message": (
+                    "The cloud provider rejected the stored authorization. "
+                    "Disconnect and reconnect to re-authorize."
+                ),
+            }
+        )
     except (OAuthError, RcloneError, RuntimeError) as exc:
-        return _handle_service_error(exc)
-    if remotes:
-        return jsonify({"success": True, "message": "Connected successfully."})
-    return jsonify({"success": False, "message": "No configured remote."}), HTTPStatus.BAD_REQUEST
+        logger.warning("cloud test_connection failed: %s", exc)
+        return jsonify(
+            {
+                "success": False,
+                "message": f"Could not reach the cloud provider: {exc}",
+            }
+        )
+    return jsonify(
+        {"success": True, "message": f"Connected successfully to {remote.provider}."}
+    )
 
 
 @cloud_archive_bp.route("/api/connection_status")

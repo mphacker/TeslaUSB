@@ -40,7 +40,9 @@ from teslausb_web.services.cloud_oauth_service import (
 )
 from teslausb_web.services.cloud_rclone_service import (
     CloudRcloneService,
+    RcloneAuthError,
     RcloneEntry,
+    RcloneError,
     RcloneListing,
     RcloneRemote,
     RcloneStats,
@@ -672,7 +674,10 @@ def test_api_disconnect_also_clears_generic_remote(
 def test_api_test_connection_success(
     client: FlaskClient, rclone_service: CloudRcloneService
 ) -> None:
-    with patch.object(rclone_service, "list_remotes", return_value=(_remote(rclone_service),)):
+    with (
+        patch.object(rclone_service, "has_configured_remote", return_value=True),
+        patch.object(rclone_service, "check_connection", return_value=_remote(rclone_service)),
+    ):
         response = client.post("/cloud/api/test_connection", headers=_XHR)
     assert response.status_code == HTTPStatus.OK
     assert response.get_json()["success"] is True
@@ -681,10 +686,47 @@ def test_api_test_connection_success(
 def test_api_test_connection_returns_400_when_no_remote(
     client: FlaskClient, rclone_service: CloudRcloneService
 ) -> None:
-    with patch.object(rclone_service, "list_remotes", return_value=()):
+    with patch.object(rclone_service, "has_configured_remote", return_value=False):
         response = client.post("/cloud/api/test_connection", headers=_XHR)
     assert response.status_code == HTTPStatus.BAD_REQUEST
     assert response.get_json()["message"] == "No configured remote."
+
+
+def test_api_test_connection_reports_auth_failure(
+    client: FlaskClient, rclone_service: CloudRcloneService
+) -> None:
+    with (
+        patch.object(rclone_service, "has_configured_remote", return_value=True),
+        patch.object(
+            rclone_service,
+            "check_connection",
+            side_effect=RcloneAuthError("401 unauthorized"),
+        ),
+    ):
+        response = client.post("/cloud/api/test_connection", headers=_XHR)
+    assert response.status_code == HTTPStatus.OK
+    payload = response.get_json()
+    assert payload["success"] is False
+    assert payload["auth_error"] is True
+
+
+def test_api_test_connection_reports_unreachable_provider(
+    client: FlaskClient, rclone_service: CloudRcloneService
+) -> None:
+    with (
+        patch.object(rclone_service, "has_configured_remote", return_value=True),
+        patch.object(
+            rclone_service,
+            "check_connection",
+            side_effect=RcloneError("rclone lsd failed: connection refused"),
+        ),
+    ):
+        response = client.post("/cloud/api/test_connection", headers=_XHR)
+    assert response.status_code == HTTPStatus.OK
+    payload = response.get_json()
+    assert payload["success"] is False
+    assert "auth_error" not in payload
+    assert "Could not reach" in payload["message"]
 
 
 def test_api_connection_status_reports_connected_provider(

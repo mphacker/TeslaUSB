@@ -368,6 +368,31 @@ class CloudRcloneService:
         remote, _credentials = self._prepare_remote()
         return remote
 
+    def check_connection(self) -> RcloneRemote:
+        """Verify live connectivity and authentication to the configured remote.
+
+        Unlike :meth:`list_remotes` -- which only runs ``rclone listremotes``
+        and therefore merely confirms that a remote *exists in the local
+        config file* (it will happily report an expired or misconfigured
+        remote as present) -- this performs a real authenticated round-trip
+        to the provider by listing the remote's top-level directories
+        (``rclone lsd``). That exercises DNS, TLS, the on-demand token
+        refresh, and the provider's authorization, so a success genuinely
+        means the device can reach and use the cloud destination.
+
+        Raises :class:`RcloneAuthError` when the provider rejects the
+        credentials and :class:`RcloneError` for any other failure (network
+        outage, missing remote, timeout).
+        """
+        remote, _credentials = self._prepare_remote()
+        completed = self._run_rclone(
+            ["lsd", remote.root],
+            timeout=self._command_timeout_seconds(),
+        )
+        if completed.returncode != 0:
+            raise self._command_error("lsd", completed, error_type=RcloneError)
+        return remote
+
     def list_remotes(self) -> tuple[RcloneRemote, ...]:
         remote, _credentials = self._prepare_remote()
         completed = self._run_rclone(["listremotes"], timeout=self._command_timeout_seconds())
@@ -558,7 +583,7 @@ class CloudRcloneService:
                     config_path=self.config_file_path,
                 )
                 return remote, None
-        credentials = self._load_fresh_credentials()
+        credentials = self._load_credentials()
         provider = credentials.provider
         try:
             backend = _PROVIDER_BACKENDS[provider]
@@ -593,30 +618,24 @@ class CloudRcloneService:
         except Exception:  # pragma: no cover - defensive
             return False
 
-    def _load_fresh_credentials(self) -> OAuthCredentials:
-        from teslausb_web.services.cloud_oauth_service import TokenRefreshError
-
+    def _load_credentials(self) -> OAuthCredentials:
         try:
             credentials = self._oauth_service.load_credentials()
         except Exception as exc:
             raise RcloneAuthError(str(exc)) from exc
         if credentials is None:
             raise RcloneAuthError("No stored OAuth credentials")
-        try:
-            refreshed = self._oauth_service.refresh_if_needed(provider=credentials.provider)
-            return refreshed.credentials if refreshed.credentials is not None else credentials
-        except TokenRefreshError as exc:
-            logger.warning(
-                "Preemptive OAuth refresh failed for %s (%s); trusting rclone "
-                "to refresh on demand using its embedded client credentials.",
-                credentials.provider,
-                exc,
-            )
-            return credentials
-        except Exception as exc:
-            if isinstance(exc, RcloneAuthError):
-                raise
-            raise RcloneAuthError(str(exc)) from exc
+        # Deliberately NO preemptive token refresh here. rclone owns the
+        # OAuth token lifecycle: the rendered rclone.conf carries the
+        # refresh token, and rclone refreshes the (short-lived) access
+        # token on demand using its own embedded client credentials.
+        # Refreshing from this process would (a) require an OAuth client
+        # secret this project does not own -- Microsoft rejects it with
+        # AADSTS70002 "must include a 'client_secret'" -- and (b) race with
+        # rclone's own refresh-token rotation, risking invalidation of a
+        # token rclone just rotated. We therefore hand rclone whatever is
+        # stored and let it do the refreshing.
+        return credentials
 
     def _render_config_text(
         self,
@@ -631,17 +650,21 @@ class CloudRcloneService:
         ]
         if provider == "onedrive":
             lines.append("drive_type = personal")
-            drive_id = _discover_onedrive_drive_id(
-                credentials,
-                timeout=self._command_timeout_seconds(),
-            )
+            # Prefer the drive_id already cached in rclone.conf. We only
+            # reach out to Microsoft Graph on the very first connect (no
+            # cached value yet): the drive_id is stable for the life of the
+            # account, and re-discovering it on every render would spam 401s
+            # once the access token is stale -- and it is rclone, not this
+            # process, that keeps the token fresh (see _load_credentials).
+            # A re-connect / account switch clears rclone.conf (see
+            # CloudOAuthService.disconnect), so the cache cannot outlive the
+            # account it belongs to.
+            drive_id = _read_cached_drive_id(self.config_file_path)
             if not drive_id:
-                drive_id = _read_cached_drive_id(self.config_file_path)
-                if drive_id:
-                    logger.info(
-                        "Reusing cached OneDrive drive_id from existing "
-                        "rclone.conf because Graph discovery failed."
-                    )
+                drive_id = _discover_onedrive_drive_id(
+                    credentials,
+                    timeout=self._command_timeout_seconds(),
+                )
             if not drive_id:
                 raise RcloneAuthError(
                     "Could not reach Microsoft Graph to identify the OneDrive "
@@ -997,6 +1020,10 @@ def _read_cached_drive_id(config_path: Path) -> str | None:
     """Return the previously-rendered OneDrive drive_id from rclone.conf, if any."""
     try:
         text = config_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        # No config rendered yet (e.g. first connect). Not an error: the
+        # caller falls through to Microsoft Graph discovery.
+        return None
     except (OSError, UnicodeDecodeError) as exc:
         # A common failure mode here is the conf having been rewritten by a
         # manual `sudo rclone ...` invocation, which leaves it owned by root

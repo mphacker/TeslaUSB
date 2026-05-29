@@ -397,7 +397,11 @@ def test_render_config_raises_for_unsupported_provider(tmp_path: Path) -> None:
         service.render_config()
 
 
-def test_render_config_refreshes_near_expiry(tmp_path: Path) -> None:
+def test_render_config_does_not_preemptively_refresh(tmp_path: Path) -> None:
+    # rclone owns the token lifecycle now: render_config must hand rclone
+    # whatever is stored (even if near/after expiry) WITHOUT calling the
+    # provider's token endpoint itself. See cloud_rclone_service
+    # ._load_credentials for the rationale (Microsoft AADSTS70002).
     service, oauth_service_obj, _source_root, _state_root, binary_path = _service(tmp_path)
     _write_oauth_credentials(tmp_path, expires_at="2000-01-01T00:00:00Z")
     with (
@@ -406,20 +410,84 @@ def test_render_config_refreshes_near_expiry(tmp_path: Path) -> None:
         ),
         patch(
             "teslausb_web.services.cloud_oauth_service._open_url",
-            return_value=_StubResponse(
-                {
-                    "access_token": "fresh-access",
-                    "refresh_token": "fresh-refresh",
-                    "token_type": "Bearer",
-                    "expires_in": 1200,
-                }
-            ),
-        ),
+            side_effect=AssertionError("render_config must not refresh the OAuth token"),
+        ) as open_url,
     ):
         service.render_config()
+    open_url.assert_not_called()
     credentials = oauth_service_obj.load_credentials()
     assert credentials is not None
-    assert credentials.access_token == "fresh-access"
+    assert credentials.access_token == "access-123"
+    assert "token = " in service.config_file_path.read_text(encoding="utf-8")
+
+
+def test_check_connection_runs_lsd_round_trip(tmp_path: Path) -> None:
+    service, _oauth_service_obj, _source_root, _state_root, binary_path = _service(tmp_path)
+    with (
+        patch(
+            "teslausb_web.services.cloud_rclone_service.shutil.which", return_value=str(binary_path)
+        ),
+        patch("subprocess.run", return_value=_completed(stdout="")) as run,
+    ):
+        remote = service.check_connection()
+    assert remote.name == "teslausb"
+    invoked = run.call_args.args[0]
+    assert "lsd" in invoked
+    assert "teslausb:" in invoked
+
+
+def test_check_connection_maps_auth_failure(tmp_path: Path) -> None:
+    service, _oauth_service_obj, _source_root, _state_root, binary_path = _service(tmp_path)
+    with (
+        patch(
+            "teslausb_web.services.cloud_rclone_service.shutil.which", return_value=str(binary_path)
+        ),
+        patch(
+            "subprocess.run",
+            return_value=_completed(returncode=1, stderr="Failed to copy: 401 Unauthorized"),
+        ),
+        pytest.raises(RcloneAuthError),
+    ):
+        service.check_connection()
+
+
+def test_check_connection_raises_on_other_failure(tmp_path: Path) -> None:
+    service, _oauth_service_obj, _source_root, _state_root, binary_path = _service(tmp_path)
+    with (
+        patch(
+            "teslausb_web.services.cloud_rclone_service.shutil.which", return_value=str(binary_path)
+        ),
+        patch(
+            "subprocess.run",
+            return_value=_completed(returncode=1, stderr="connection refused"),
+        ),
+        pytest.raises(RcloneError, match="lsd"),
+    ):
+        service.check_connection()
+
+
+def test_render_config_prefers_cached_drive_id_without_graph_call(tmp_path: Path) -> None:
+    service, _oauth_service_obj, _source_root, _state_root, binary_path = _service(
+        tmp_path, provider="onedrive"
+    )
+    # Seed a previously-rendered config carrying a cached drive_id.
+    service.config_file_path.parent.mkdir(parents=True, exist_ok=True)
+    service.config_file_path.write_text(
+        "[teslausb]\ntype = onedrive\ndrive_type = personal\ndrive_id = cached-drive\n",
+        encoding="utf-8",
+    )
+    with (
+        patch(
+            "teslausb_web.services.cloud_rclone_service.shutil.which", return_value=str(binary_path)
+        ),
+        patch(
+            "teslausb_web.services.cloud_rclone_service.urlopen",
+            side_effect=AssertionError("must not call Graph when drive_id is cached"),
+        ) as urlopen_mock,
+    ):
+        service.render_config()
+    urlopen_mock.assert_not_called()
+    assert "drive_id = cached-drive" in service.config_file_path.read_text(encoding="utf-8")
 
 
 def test_list_remotes_returns_single_configured_remote(tmp_path: Path) -> None:

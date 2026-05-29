@@ -420,12 +420,14 @@ def test_disconnect_revokes_google_and_removes_files(
 ) -> None:
     _write_credentials(tmp_path / "credentials.json")
     (tmp_path / "oauth-state.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "rclone").write_text("[teslausb]\ntype = drive\n", encoding="utf-8")
     _patch_open_url(monkeypatch, payload={})
     result = _service(tmp_path).disconnect(provider="google-drive")
     assert result.disconnected is True
     assert result.revoked is True
     assert not (tmp_path / "credentials.json").exists()
     assert not (tmp_path / "oauth-state.json").exists()
+    assert not (tmp_path / "rclone").exists()
 
 
 def test_disconnect_without_revoke_endpoint_removes_local_files(tmp_path: Path) -> None:

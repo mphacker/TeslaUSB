@@ -420,6 +420,12 @@ class CloudOAuthService:
         with self._lock:
             _delete_file(self._config.credentials_path)
             _delete_file(self._config.oauth_state_path)
+            # Drop the rendered rclone.conf too. It carries the OAuth token
+            # and -- for OneDrive -- a cached drive_id pinned to the account
+            # being disconnected. Leaving it behind would let a later
+            # re-connect (possibly to a different account) silently reuse the
+            # stale drive_id. The config is regenerated on the next operation.
+            _delete_file(self._config.rclone_config_path)
         if credentials is None:
             return DisconnectResult(
                 disconnected=True,

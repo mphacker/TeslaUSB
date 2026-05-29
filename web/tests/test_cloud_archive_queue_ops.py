@@ -116,3 +116,52 @@ def test_get_sync_queue_orders_priority_before_bulk(tmp_path: Path) -> None:
     assert items[2].priority == 0
 
 
+def test_get_sync_queue_orders_by_folder_priority(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    with open_db(config.db_path) as connection:
+        for path in (
+            "RecentClips/r.mp4",
+            "SavedClips/s.mp4",
+            "SentryClips/e.mp4",
+        ):
+            connection.execute(
+                "INSERT INTO cloud_synced_files (file_path, file_size, status, "
+                "retry_count, last_error, priority) "
+                "VALUES (?, 100, 'pending', 0, NULL, 0)",
+                (path,),
+            )
+        connection.commit()
+    queries = CloudArchiveQueries(CloudArchiveQueriesConfig(db_path=config.db_path))
+
+    items = queries.get_sync_queue(
+        folder_order=("SentryClips", "SavedClips", "RecentClips")
+    )
+
+    assert [item.file_path for item in items] == [
+        "SentryClips/e.mp4",
+        "SavedClips/s.mp4",
+        "RecentClips/r.mp4",
+    ]
+
+
+def test_get_sync_queue_no_folder_order_keeps_insertion_order(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    with open_db(config.db_path) as connection:
+        for path in ("RecentClips/r.mp4", "SentryClips/e.mp4"):
+            connection.execute(
+                "INSERT INTO cloud_synced_files (file_path, file_size, status, "
+                "retry_count, last_error, priority) "
+                "VALUES (?, 100, 'pending', 0, NULL, 0)",
+                (path,),
+            )
+        connection.commit()
+    queries = CloudArchiveQueries(CloudArchiveQueriesConfig(db_path=config.db_path))
+
+    items = queries.get_sync_queue()
+
+    assert [item.file_path for item in items] == [
+        "RecentClips/r.mp4",
+        "SentryClips/e.mp4",
+    ]
+
+

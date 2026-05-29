@@ -93,3 +93,45 @@ def test_make_cloud_archive_service_accepts_cloud_config(tmp_path: Path) -> None
     service = make_cloud_archive_service(config, MagicMock(), MagicMock())
 
     assert isinstance(service, CloudArchiveService)
+
+
+def test_update_settings_purges_deselected_pending_queue_rows(tmp_path: Path) -> None:
+    """Deselecting a folder must drop its bulk-discovered ('pending') queue
+    rows immediately, while preserving manually-queued and in-flight rows for
+    any folder."""
+    config = _make_config(tmp_path)
+    with open_db(config.db_path) as connection:
+        rows = [
+            ("RecentClips/keep-pending.mp4", "pending"),
+            ("RecentClips/manual.mp4", "queued"),
+            ("RecentClips/inflight.mp4", "uploading"),
+            ("SentryClips/event.mp4", "pending"),
+        ]
+        for path, status in rows:
+            connection.execute(
+                "INSERT INTO cloud_synced_files (file_path, status, retry_count) "
+                "VALUES (?, ?, 0)",
+                (path, status),
+            )
+        connection.commit()
+    service = CloudArchiveService(
+        config=config,
+        rclone_service=MagicMock(),
+        oauth_service=MagicMock(),
+    )
+
+    service.update_settings(sync_folders=("SentryClips",))
+
+    with open_db(config.db_path) as connection:
+        remaining = {
+            str(row["file_path"])
+            for row in connection.execute(
+                "SELECT file_path FROM cloud_synced_files"
+            ).fetchall()
+        }
+
+    assert "RecentClips/keep-pending.mp4" not in remaining
+    assert "RecentClips/manual.mp4" in remaining
+    assert "RecentClips/inflight.mp4" in remaining
+    assert "SentryClips/event.mp4" in remaining
+

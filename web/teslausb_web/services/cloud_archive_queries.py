@@ -198,19 +198,48 @@ class CloudArchiveQueries:
             )
 
     def get_sync_queue(
-        self, limit: int | None = None
+        self,
+        limit: int | None = None,
+        folder_order: tuple[str, ...] = (),
     ) -> tuple[QueueItem, ...]:
+        """Return active queue rows in the order the uploader will drain them.
+
+        Ordering mirrors discovery's drain order: per-row ``priority`` first
+        (live events / hard-brake clips float to the top regardless of
+        folder), then the operator-configured folder priority
+        (``folder_order``, e.g. ``("SentryClips", "SavedClips",
+        "RecentClips")``), then insertion order. Passing ``folder_order``
+        lets the Sync Queue panel reflect a changed "Upload priority"
+        setting immediately, instead of always grouping by insertion id.
+        """
+        params: list[object] = []
+        order_terms = ["priority DESC"]
+        if folder_order:
+            # Map the top-level folder of each file_path to its configured
+            # rank. ``file_path || '/'`` guarantees instr finds a separator
+            # even for a bare root, so the substr yields the folder name.
+            folder_expr = "substr(file_path, 1, instr(file_path || '/', '/') - 1)"
+            when_clauses = []
+            for rank, folder in enumerate(folder_order):
+                when_clauses.append("WHEN ? THEN ?")
+                params.extend((folder, rank))
+            params.append(len(folder_order))
+            order_terms.append(
+                f"CASE {folder_expr} {' '.join(when_clauses)} ELSE ? END ASC"
+            )
+        order_terms.append("id ASC")
+        # order_terms is built only from constants and bound '?' placeholders
+        # (folder ranks); no caller-supplied text is interpolated.
         sql = (
-            "SELECT file_path, file_size, status, retry_count, last_error, priority "
+            "SELECT file_path, file_size, status, retry_count, last_error, priority "  # noqa: S608
             "FROM cloud_synced_files WHERE status IN ('queued', 'pending', 'uploading') "
-            "ORDER BY priority DESC, id ASC"
+            f"ORDER BY {', '.join(order_terms)}"
         )
-        params: tuple[object, ...] = ()
         if limit is not None and limit > 0:
             sql += " LIMIT ?"
-            params = (int(limit),)
+            params.append(int(limit))
         with open_db(self._config.db_path) as connection:
-            rows = connection.execute(sql, params).fetchall()
+            rows = connection.execute(sql, tuple(params)).fetchall()
         return tuple(
             QueueItem(
                 file_path=str(row["file_path"]),

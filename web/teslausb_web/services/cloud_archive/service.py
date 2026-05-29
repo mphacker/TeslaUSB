@@ -255,7 +255,7 @@ class CloudArchiveService:
     def delete_dead_letter(self, file_path: str | None = None) -> int:
         return delete_dead_letter(self.config, file_path)
 
-    def update_settings(
+    def update_settings(  # noqa: PLR0912, PLR0913, PLR0915
         self,
         *,
         sync_folders: tuple[str, ...] | None = None,
@@ -273,8 +273,10 @@ class CloudArchiveService:
         """Persist runtime overrides for user-tunable cloud archive settings."""
 
         updates: list[tuple[str, object]] = []
+        selected_sync_folders: tuple[str, ...] | None = None
         if sync_folders is not None:
             normalized = _normalize_folder_list(sync_folders)
+            selected_sync_folders = normalized
             updates.append((KV_KEY_SYNC_FOLDERS, list(normalized)))
         if priority_folders is not None:
             normalized = _normalize_folder_list(priority_folders)
@@ -338,6 +340,8 @@ class CloudArchiveService:
         with self.open_db() as connection:
             for key, value in updates:
                 _write_setting(connection, key, value)
+            if selected_sync_folders is not None:
+                self._purge_deselected_queue_rows(connection, selected_sync_folders)
             connection.commit()
         if bwlimit_kbps is not None:
             setter = getattr(self.rclone_service, "set_bwlimit_kbps_override", None)
@@ -349,6 +353,38 @@ class CloudArchiveService:
             setter = getattr(self.rclone_service, "set_remote_path_override", None)
             if callable(setter):
                 setter(normalized_remote_path or None)
+
+    @staticmethod
+    def _purge_deselected_queue_rows(
+        connection: sqlite3.Connection,
+        selected_folders: tuple[str, ...],
+    ) -> None:
+        """Drop bulk-discovered queue rows for folders the operator just
+        de-selected, so the Sync Queue panel reflects the new "Folders to
+        sync" choice immediately instead of lingering until a worker pass.
+
+        Only ``status = 'pending'`` rows (the ones discovery pre-populates)
+        are removed. Manually queued ('queued'), in-flight ('uploading'),
+        already-synced, failed and dead-letter rows are left untouched, and
+        only valid-but-deselected folders are targeted so unrelated or
+        malformed paths are never deleted. The underlying clips stay on disk
+        and are re-discovered if the folder is re-selected.
+        """
+        deselected = [
+            folder for folder in VALID_SYNC_FOLDERS if folder not in selected_folders
+        ]
+        if not deselected:
+            return
+        folder_expr = "substr(file_path, 1, instr(file_path || '/', '/') - 1)"
+        placeholders = ", ".join("?" for _ in deselected)
+        # Only '?' placeholders are interpolated (one per deselected folder);
+        # folder values are bound parameters.
+        sql = (
+            "DELETE FROM cloud_synced_files "  # noqa: S608
+            "WHERE status = 'pending' "
+            f"AND {folder_expr} IN ({placeholders})"
+        )
+        connection.execute(sql, tuple(deselected))
 
     def enqueue_live_event_from_event_json(self, event_json_paths: Sequence[str]) -> int:
         return enqueue_live_event_from_event_json(self.config, self.state, event_json_paths)

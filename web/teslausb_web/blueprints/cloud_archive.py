@@ -1080,7 +1080,19 @@ def api_queue() -> ResponseReturnValue:
         except (TypeError, ValueError):
             limit = 200
         queries = _get_queries()
-        queue = queries.get_sync_queue(limit=limit)
+        # Reflect the operator-configured upload priority in the queue
+        # ordering so reordering "Upload priority" is visible immediately.
+        # A read failure here is non-fatal — fall back to insertion order.
+        folder_order: tuple[str, ...] = ()
+        try:
+            archive_service = _get_archive_service()
+            with archive_service.open_db() as connection:
+                folder_order = tuple(
+                    _read_priority_order_setting(archive_service.config, connection)
+                )
+        except (CloudArchiveError, CloudArchiveDBError, RuntimeError) as exc:
+            logger.debug("cloud queue priority-order read failed (non-fatal): %s", exc)
+        queue = queries.get_sync_queue(limit=limit, folder_order=folder_order)
         total, priority_total = queries.count_sync_queue()
     except (CloudArchiveDBError, RuntimeError) as exc:
         logger.warning("cloud queue fetch failed: %s", exc)

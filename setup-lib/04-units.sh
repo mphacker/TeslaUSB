@@ -61,6 +61,12 @@ B1_WORKER_UNIT_SRC="${B1_REPO_ROOT}/rust/crates/teslausb-worker/units/teslausb-w
 # Nginx site source (Phase 5.19 deployment config).
 B1_NGINX_SITE_SRC="${B1_REPO_ROOT}/config/nginx-teslausb.conf"
 
+# Cache-invalidation helper (Phase 4c) — forces Tesla to re-read a USB
+# LUN after the web UI rewrites LockChime.wav / LightShow.fseq. The web
+# app invokes it as `sudo /usr/local/bin/tesla_cache_invalidate.sh`.
+B1_CACHE_INVALIDATE_SRC="${B1_REPO_ROOT}/scripts/tesla_cache_invalidate.sh"
+B1_CACHE_INVALIDATE_DST="/usr/local/bin/tesla_cache_invalidate.sh"
+
 # --------------------------------------------------------------------
 # teslausb-web.service — inline body (constant)
 # --------------------------------------------------------------------
@@ -399,7 +405,22 @@ b1_step_04() {
   fi
 
   # ------------------------------------------------------------------
-  # 5) daemon-reload (ONCE, only if any unit file changed). We do NOT
+  # 5) cache-invalidation helper script (Phase 4c). Installed to
+  #    /usr/local/bin so the web app's `sudo tesla_cache_invalidate.sh`
+  #    call resolves. Not a systemd unit — no daemon-reload needed.
+  # ------------------------------------------------------------------
+  if [[ ! -r "${B1_CACHE_INVALIDATE_SRC}" ]]; then
+    b1_err "missing required script source: ${B1_CACHE_INVALIDATE_SRC}"
+    b1_err "  (Phase 4c ships this file — has the worktree been pruned?)"
+    return 1
+  fi
+  _b1_install_file \
+    "${B1_CACHE_INVALIDATE_SRC}" \
+    "${B1_CACHE_INVALIDATE_DST}" \
+    0755
+
+  # ------------------------------------------------------------------
+  # 6) daemon-reload (ONCE, only if any unit file changed). We do NOT
   #    daemon-reload for nginx-only changes — nginx is reloaded by
   #    Phase 6.10 once every dependent file is in place.
   # ------------------------------------------------------------------

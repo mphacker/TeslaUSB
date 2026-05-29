@@ -66,13 +66,18 @@ def _make_configfs(tmp_path: Path, *, lun: int = 1, file_value: str = "/dev/nbd1
     """Build the minimum configfs layout the script expects.
 
     Returns the simulated CONFIGFS_ROOT. The script reads/writes
-    ``<root>/teslausb/functions/mass_storage.0/lun.<N>/file``.
+    ``<root>/g1/functions/mass_storage.usb0/lun.<N>/file`` (the live
+    B-1 gadget defaults — see scripts/tesla_cache_invalidate.sh).
     """
-    lun_dir = tmp_path / "teslausb" / "functions" / "mass_storage.0" / f"lun.{lun}"
-    lun_dir.mkdir(parents=True)
-    lun_file = lun_dir / "file"
+    lun_file = _default_lun_file(tmp_path, lun=lun)
+    lun_file.parent.mkdir(parents=True)
     lun_file.write_text(file_value)
     return tmp_path
+
+
+def _default_lun_file(root: Path, *, lun: int = 1) -> Path:
+    """Path to the LUN ``file`` attr under the script's default gadget."""
+    return root / "g1" / "functions" / "mass_storage.usb0" / f"lun.{lun}" / "file"
 
 
 def _run_script(
@@ -155,7 +160,7 @@ def test_eject_ms_missing_value_exits_two(tmp_path: Path) -> None:
 
 
 def test_missing_gadget_exits_three(tmp_path: Path) -> None:
-    # tmp_path has no teslausb/ subtree — script must detect that
+    # tmp_path has no g1/ subtree — script must detect that
     # the LUN file path doesn't exist and exit 3, NOT 0 or 5.
     res = _run_script(tmp_path, "--lun", "1")
     assert res.returncode == 3
@@ -166,7 +171,7 @@ def test_missing_gadget_exits_three(tmp_path: Path) -> None:
 
 
 def test_real_cycle_restores_original_value(configfs: Path) -> None:
-    lun_file = configfs / "teslausb" / "functions" / "mass_storage.0" / "lun.1" / "file"
+    lun_file = _default_lun_file(configfs)
     original = lun_file.read_text()
     assert original == "/dev/nbd1"
 
@@ -177,7 +182,7 @@ def test_real_cycle_restores_original_value(configfs: Path) -> None:
 
 
 def test_dry_run_does_not_modify_file(configfs: Path) -> None:
-    lun_file = configfs / "teslausb" / "functions" / "mass_storage.0" / "lun.1" / "file"
+    lun_file = _default_lun_file(configfs)
     before = lun_file.read_text()
     res = _run_script(configfs, "--dry-run", "--lun", "1", "--eject-ms", "10")
     assert res.returncode == 0
@@ -186,7 +191,7 @@ def test_dry_run_does_not_modify_file(configfs: Path) -> None:
 
 
 def test_idempotent_back_to_back(configfs: Path) -> None:
-    lun_file = configfs / "teslausb" / "functions" / "mass_storage.0" / "lun.1" / "file"
+    lun_file = _default_lun_file(configfs)
     original = lun_file.read_text()
     for _ in range(3):
         res = _run_script(configfs, "--lun", "1", "--eject-ms", "10")
@@ -195,7 +200,7 @@ def test_idempotent_back_to_back(configfs: Path) -> None:
 
 
 def test_empty_lun_exits_four_without_writing(configfs: Path) -> None:
-    lun_file = configfs / "teslausb" / "functions" / "mass_storage.0" / "lun.1" / "file"
+    lun_file = _default_lun_file(configfs)
     lun_file.write_text("")
     res = _run_script(configfs, "--lun", "1", "--eject-ms", "10")
     assert res.returncode == 4

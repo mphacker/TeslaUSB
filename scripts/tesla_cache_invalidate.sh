@@ -23,8 +23,10 @@
 # a trap restores the captured value before exit.
 #
 # Privilege: writes to `/sys/kernel/config/usb_gadget/...` require
-# root. Production callers invoke this via the sudoers fragment shipped
-# in Phase 4c.2 (`/etc/sudoers.d/teslausb-cache-invalidate`).
+# root. The web app invokes this as `sudo
+# /usr/local/bin/tesla_cache_invalidate.sh`; the NOPASSWD grant lives in
+# the teslausb-b1 sudoers allowlist (setup-lib/02-users.sh). The script
+# is installed to /usr/local/bin by setup-lib/04-units.sh.
 #
 # Exit codes:
 #   0  success — medium-change cycle completed
@@ -35,8 +37,12 @@
 
 set -uo pipefail
 
-GADGET="${GADGET:-teslausb}"
-FUNCTION="${FUNCTION:-mass_storage.0}"
+# Defaults match the live B-1 USB gadget: configfs gadget dir `g1`,
+# mass_storage function instance `mass_storage.usb0`, LUN 1 == MEDIA
+# drive (where LockChime.wav / LightShow.fseq live). See
+# setup-lib/11-gadget.sh and `/sys/kernel/config/usb_gadget/g1/...`.
+GADGET="${GADGET:-g1}"
+FUNCTION="${FUNCTION:-mass_storage.usb0}"
 LUN="${LUN:-1}"
 EJECT_MS="${EJECT_MS:-200}"
 DRY_RUN=0
@@ -54,8 +60,8 @@ USAGE:
 
 FLAGS:
     --lun N         LUN index to invalidate (default: 1 == media drive)
-    --gadget NAME   configfs gadget directory name (default: teslausb)
-    --function NAME mass_storage function dir (default: mass_storage.0)
+    --gadget NAME   configfs gadget directory name (default: g1)
+    --function NAME mass_storage function dir (default: mass_storage.usb0)
     --eject-ms N    milliseconds between clear and restore (default: 200)
     --dry-run       print the cycle that would be performed; no writes
     --help          this message

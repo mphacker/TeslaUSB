@@ -67,6 +67,14 @@ B1_NGINX_SITE_SRC="${B1_REPO_ROOT}/config/nginx-teslausb.conf"
 B1_CACHE_INVALIDATE_SRC="${B1_REPO_ROOT}/scripts/tesla_cache_invalidate.sh"
 B1_CACHE_INVALIDATE_DST="/usr/local/bin/tesla_cache_invalidate.sh"
 
+# Gadget re-enumeration helper (lock chime) — a soft SCSI medium-change
+# (tesla_cache_invalidate.sh) is NOT enough to make Tesla re-read
+# LockChime.wav; the car only re-reads the chime on a full USB
+# re-enumeration. This script unbinds/rebinds the UDC after a sync. The
+# web app invokes it as `sudo -n /usr/local/bin/tesla_gadget_rebind.sh`.
+B1_GADGET_REBIND_SRC="${B1_REPO_ROOT}/scripts/tesla_gadget_rebind.sh"
+B1_GADGET_REBIND_DST="/usr/local/bin/tesla_gadget_rebind.sh"
+
 # --------------------------------------------------------------------
 # teslausb-web.service — inline body (constant)
 # --------------------------------------------------------------------
@@ -417,6 +425,21 @@ b1_step_04() {
   _b1_install_file \
     "${B1_CACHE_INVALIDATE_SRC}" \
     "${B1_CACHE_INVALIDATE_DST}" \
+    0755
+
+  # ------------------------------------------------------------------
+  # 5b) gadget re-enumeration helper (lock chime). Installed to
+  #    /usr/local/bin so the web app's `sudo -n tesla_gadget_rebind.sh`
+  #    call resolves. Not a systemd unit — no daemon-reload needed.
+  # ------------------------------------------------------------------
+  if [[ ! -r "${B1_GADGET_REBIND_SRC}" ]]; then
+    b1_err "missing required script source: ${B1_GADGET_REBIND_SRC}"
+    b1_err "  (lock-chime activation ships this file — has the worktree been pruned?)"
+    return 1
+  fi
+  _b1_install_file \
+    "${B1_GADGET_REBIND_SRC}" \
+    "${B1_GADGET_REBIND_DST}" \
     0755
 
   # ------------------------------------------------------------------

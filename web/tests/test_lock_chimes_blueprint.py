@@ -26,6 +26,7 @@ from teslausb_web.services.chime_scheduler import (
     RecurringSchedule,
     WeeklySchedule,
 )
+from teslausb_web.services.gadget_rebind import RebindResult
 from teslausb_web.services.lock_chime_service import LockChimeFileError, ReencodeResult
 
 if TYPE_CHECKING:
@@ -36,6 +37,7 @@ if TYPE_CHECKING:
     from teslausb_web.services.cache_invalidation import CacheInvalidator
     from teslausb_web.services.chime_group_service import ChimeGroupManager
     from teslausb_web.services.chime_scheduler import ChimeScheduler
+    from teslausb_web.services.gadget_rebind import GadgetRebinder
 
 _XHR: Final[dict[str, str]] = {"X-Requested-With": "XMLHttpRequest"}
 _SAMPLE_FRAMES: Final[int] = 200
@@ -72,6 +74,11 @@ def client(app: Flask) -> FlaskClient:
 @pytest.fixture
 def invalidator(app: Flask) -> CacheInvalidator:
     return app.extensions["cache_invalidator"]
+
+
+@pytest.fixture
+def rebinder(app: Flask) -> GadgetRebinder:
+    return app.extensions["gadget_rebinder"]
 
 
 @pytest.fixture
@@ -388,6 +395,31 @@ def test_upload_happy_path_saves_file_and_schedules_cache(
     schedule_mock.assert_called_once_with()
 
 
+def test_upload_with_set_as_active_rebinds_gadget(
+    client, chimes_dir: Path, active_path: Path, invalidator, rebinder
+) -> None:
+    data = _upload_data("new.wav", _wav_bytes())
+    data["set_as_active"] = "true"
+    with (
+        patch.object(rebinder, "rebind", return_value=RebindResult(0, "", "")) as rebind_mock,
+        patch.object(invalidator, "schedule") as schedule_mock,
+    ):
+        response = client.post(
+            "/lock_chimes/upload",
+            data=data,
+            headers=_XHR,
+            content_type="multipart/form-data",
+        )
+    assert response.status_code == 200
+    assert response.get_json()["success"] is True
+    assert active_path.is_file()
+    # Uploading WITH "set as active" changes LockChime.wav, so it must
+    # re-enumerate; uploading without it (above) only schedules a soft
+    # invalidate.
+    rebind_mock.assert_called_once_with()
+    schedule_mock.assert_not_called()
+
+
 def test_upload_returns_400_when_no_file(client) -> None:
     response = client.post("/lock_chimes/upload", data={}, headers=_XHR)
     assert response.status_code == 400
@@ -467,18 +499,46 @@ def test_upload_bulk_returns_400_when_empty(client) -> None:
     assert response.status_code == 400
 
 
-def test_set_as_chime_replaces_active_file_and_schedules_cache(
+def test_set_as_chime_replaces_active_file_and_rebinds_gadget(
     client,
     chimes_dir: Path,
     active_path: Path,
     invalidator,
+    rebinder,
 ) -> None:
     source_bytes = _wav_bytes()
     (chimes_dir / "select.wav").write_bytes(source_bytes)
-    with patch.object(invalidator, "schedule") as schedule_mock:
+    with (
+        patch.object(rebinder, "rebind", return_value=RebindResult(0, "", "")) as rebind_mock,
+        patch.object(invalidator, "schedule") as schedule_mock,
+    ):
         response = client.post("/lock_chimes/set/select.wav", headers=_XHR)
     assert response.status_code == 200
     assert active_path.read_bytes() == source_bytes
+    # Activating a chime must trigger a full USB re-enumeration so Tesla
+    # re-reads LockChime.wav; the soft cache-invalidate is NOT enough.
+    rebind_mock.assert_called_once_with()
+    schedule_mock.assert_not_called()
+
+
+def test_set_as_chime_falls_back_to_soft_invalidate_when_rebind_fails(
+    client,
+    chimes_dir: Path,
+    invalidator,
+    rebinder,
+) -> None:
+    (chimes_dir / "select.wav").write_bytes(_wav_bytes())
+    with (
+        patch.object(
+            rebinder, "rebind", return_value=RebindResult(2, "", "boom")
+        ) as rebind_mock,
+        patch.object(invalidator, "schedule") as schedule_mock,
+    ):
+        response = client.post("/lock_chimes/set/select.wav", headers=_XHR)
+    assert response.status_code == 200
+    rebind_mock.assert_called_once_with()
+    # On rebind failure we still do the weaker soft invalidate rather
+    # than silently doing nothing.
     schedule_mock.assert_called_once_with()
 
 
@@ -497,18 +557,44 @@ def test_delete_lock_chime_removes_file_and_active_copy(
     chimes_dir: Path,
     active_path: Path,
     invalidator,
+    rebinder,
 ) -> None:
     payload = _wav_bytes()
     library_file = chimes_dir / "delete.wav"
     library_file.write_bytes(payload)
     active_path.write_bytes(payload)
-    with patch.object(invalidator, "schedule") as schedule_mock:
+    with (
+        patch.object(rebinder, "rebind", return_value=RebindResult(0, "", "")) as rebind_mock,
+        patch.object(invalidator, "schedule") as schedule_mock,
+    ):
         response = client.post("/lock_chimes/delete/delete.wav", headers=_XHR)
     body = response.get_json()
     assert response.status_code == 200
     assert body["was_active"] is True
     assert not library_file.exists()
     assert not active_path.exists()
+    # Removing the ACTIVE chime also changes LockChime.wav, so it too
+    # must re-enumerate the gadget.
+    rebind_mock.assert_called_once_with()
+    schedule_mock.assert_not_called()
+
+
+def test_delete_inactive_lock_chime_schedules_cache_without_rebind(
+    client,
+    chimes_dir: Path,
+    invalidator,
+    rebinder,
+) -> None:
+    chimes_dir.joinpath("spare.wav").write_bytes(_wav_bytes())
+    with (
+        patch.object(rebinder, "rebind") as rebind_mock,
+        patch.object(invalidator, "schedule") as schedule_mock,
+    ):
+        response = client.post("/lock_chimes/delete/spare.wav", headers=_XHR)
+    assert response.status_code == 200
+    # Deleting a non-active library chime does not touch LockChime.wav,
+    # so a soft invalidate is sufficient and no rebind should fire.
+    rebind_mock.assert_not_called()
     schedule_mock.assert_called_once_with()
 
 

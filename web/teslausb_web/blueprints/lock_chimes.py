@@ -11,6 +11,7 @@ import logging
 import shutil
 import zipfile
 from datetime import UTC, datetime
+from enum import Enum
 from http import HTTPStatus
 from io import BytesIO
 from pathlib import Path
@@ -52,6 +53,7 @@ from teslausb_web.services.chime_scheduler import (
     format_schedule_display,
     make_chime_scheduler,
 )
+from teslausb_web.services.gadget_rebind import GadgetRebinder
 from teslausb_web.services.lock_chime_service import (
     ChimeInfo,
     LockChimeAudioError,
@@ -74,6 +76,26 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 lock_chimes_bp = Blueprint("lock_chimes", __name__, url_prefix="/lock_chimes")
+
+
+class ChimeRefresh(Enum):
+    """How to make Tesla notice a media change after a chime mutation.
+
+    ``REBIND`` triggers a full USB gadget re-enumeration — required when
+    the active ``LockChime.wav`` itself changed, because Tesla caches the
+    chime and only re-reads it on a simulated unplug/replug.
+    ``SOFT_INVALIDATE`` schedules the cheaper SCSI medium-change, which is
+    enough for directory-listing changes the car re-scans on its own.
+    """
+
+    REBIND = "rebind"
+    SOFT_INVALIDATE = "soft_invalidate"
+
+    @classmethod
+    def for_active_change(cls, *, changed_active: bool) -> ChimeRefresh:
+        """Pick the strategy for a mutation that may have changed the active chime."""
+        return cls.REBIND if changed_active else cls.SOFT_INVALIDATE
+
 
 _ALLOWED_UPLOAD_EXTENSIONS: Final[frozenset[str]] = frozenset({".mp3", ".wav"})
 _ALLOWED_BULK_EXTENSIONS: Final[frozenset[str]] = frozenset({".wav"})
@@ -147,6 +169,35 @@ def _get_cache_invalidator() -> CacheInvalidator:
     return raw
 
 
+def _get_gadget_rebinder() -> GadgetRebinder:
+    raw = current_app.extensions["gadget_rebinder"]
+    if not isinstance(raw, GadgetRebinder):
+        raise RuntimeError("gadget_rebinder extension is not configured")
+    return raw
+
+
+def _refresh_for_active_chime() -> None:
+    """Make Tesla re-read a just-changed ``LockChime.wav``.
+
+    Activating (or clearing) the active chime changes the file at the
+    root of the MEDIA LUN. Unlike directory listings, Tesla caches the
+    lock chime and only re-reads it after a full USB *re-enumeration*, so
+    a soft SCSI medium-change is not enough — we must rebind the gadget
+    (simulated unplug/replug). This is synchronous so the user gets a
+    definitive result. If the rebind fails for any reason we fall back to
+    the weaker soft cache-invalidation rather than silently doing nothing.
+    """
+    result = _get_gadget_rebinder().rebind()
+    if result.ok:
+        return
+    logger.warning(
+        "gadget rebind failed (rc=%d); falling back to soft cache invalidation: %s",
+        result.returncode,
+        result.stderr.strip(),
+    )
+    _get_cache_invalidator().schedule()
+
+
 def _get_group_manager() -> ChimeGroupManager:
     raw = current_app.extensions.get("chime_group_manager")
     if isinstance(raw, ChimeGroupManager):
@@ -181,8 +232,13 @@ def _flash_or_json_error(message: str, status: HTTPStatus) -> ResponseReturnValu
     return redirect(url_for("lock_chimes.lock_chimes"))
 
 
-def _flash_or_json_success(message: str, **fields: object) -> ResponseReturnValue:
-    _get_cache_invalidator().schedule()
+def _flash_or_json_success(
+    message: str, *, refresh: ChimeRefresh = ChimeRefresh.SOFT_INVALIDATE, **fields: object
+) -> ResponseReturnValue:
+    if refresh is ChimeRefresh.REBIND:
+        _refresh_for_active_chime()
+    else:
+        _get_cache_invalidator().schedule()
     if _is_xhr():
         return _json_success_payload(message=message, **fields), HTTPStatus.OK.value
     flash(message, "success")
@@ -630,13 +686,17 @@ def upload_lock_chime() -> ResponseReturnValue:
             target_lufs=target_lufs,
         )
         saved_path = _upload_prepared_file(prepared, final_filename)
-        if _bool_from_value(request.form.get("set_as_active")):
+        activated = _bool_from_value(request.form.get("set_as_active"))
+        if activated:
             set_active_chime(saved_path.name, _chimes_dir(), _active_chime_path())
     except _RouteError as exc:
         return _flash_or_json_error(str(exc), exc.status)
     except (LockChimeAudioError, LockChimeFileError) as exc:
         return _flash_or_json_error(str(exc), HTTPStatus.UNPROCESSABLE_ENTITY)
-    return _flash_or_json_success(f"Successfully uploaded {final_filename}")
+    return _flash_or_json_success(
+        f"Successfully uploaded {final_filename}",
+        refresh=ChimeRefresh.for_active_change(changed_active=activated),
+    )
 
 
 @lock_chimes_bp.route("/upload_bulk", methods=["POST"])
@@ -700,7 +760,7 @@ def set_as_chime(filename: str) -> ResponseReturnValue:
         return _flash_or_json_error(str(exc), exc.status)
     except (LockChimeAudioError, LockChimeFileError, ValueError) as exc:
         return _flash_or_json_error(str(exc), _status_for_service_error(str(exc)))
-    return _flash_or_json_success(result.message)
+    return _flash_or_json_success(result.message, refresh=ChimeRefresh.REBIND)
 
 
 @lock_chimes_bp.route("/delete/<filename>", methods=["POST"])
@@ -719,8 +779,12 @@ def delete_lock_chime(filename: str) -> ResponseReturnValue:
         return _flash_or_json_error(str(exc), exc.status)
     except (LockChimeFileError, ValueError) as exc:
         return _flash_or_json_error(str(exc), _status_for_service_error(str(exc)))
+    chime_removed = was_active or result.was_active
     return _flash_or_json_success(
-        result.message, was_active=was_active or result.was_active, active=None
+        result.message,
+        refresh=ChimeRefresh.for_active_change(changed_active=chime_removed),
+        was_active=chime_removed,
+        active=None,
     )
 
 

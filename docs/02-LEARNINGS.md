@@ -145,15 +145,47 @@ underlying truths apply to any TeslaUSB design:
 
 - **Tesla caches the USB directory listing and won't see file
   changes without a re-enumeration.** v1's lock-chime upload
-  rebinds the gadget (unplug/replug simulation). **B-1 should
-  do the same after `LockChime.wav` overwrites** even though
-  the file change is instant on our side.
+  rebinds the gadget (unplug/replug simulation). **B-1 now does
+  the same after `LockChime.wav` activation** — see the B-1
+  learning "Lock chime needs a full UDC re-enumeration" below.
+  A soft SCSI medium-change is NOT enough for the chime.
 
 ---
 
 ## New learnings (B-1 specific)
 
 (populated as we discover them)
+
+### Lock chime needs a full UDC re-enumeration, not a soft invalidate
+
+**Symptom (2026-05-29):** Activating a new lock chime from the web
+UI updated the active-chime banner and copied the audio to the media
+LUN root as `LockChime.wav`, but the car kept playing the OLD chime
+on lock/unlock.
+
+**Root cause:** The file *location* was already correct (root of the
+MEDIA LUN, which is what the car reads). The bug was the *cache
+invalidation method*. B-1's web activation originally fired only a
+soft SCSI medium-change via `tesla_cache_invalidate.sh` (eject +
+re-insert a single LUN, ~200 ms). That is enough for the car to
+re-scan a LUN's *directory listing* (e.g. Light Show `.fseq` files),
+but the car only re-reads `LockChime.wav` itself on a **full USB
+re-enumeration** — a UDC unbind/rebind that simulates an
+unplug/replug. This is exactly what v1 did on chime upload.
+
+**Fix:** Keep the chime on the media LUN (no drive move), and on
+chime activation trigger a full gadget re-enumeration via
+`scripts/tesla_gadget_rebind.sh` (sync → UDC unbind → settle →
+restore LUN backing files → UDC rebind → bounded health wait). The
+web `GadgetRebinder` service runs it synchronously and single-flight;
+if the rebind fails it falls back to the soft invalidate. Only the
+three activation paths (upload+set-active, set-as-chime, delete of the
+active chime) re-enumerate; other mutations keep the cheaper soft
+invalidate.
+
+**Takeaway:** Soft medium-change ≠ re-enumeration. For anything the
+car reads *by name from a fixed path* (the lock chime), you must
+re-enumerate the gadget; a per-LUN eject/insert is insufficient.
 
 ### B-1 fundamental: anti-anchoring (Rust where it helps, redesign where v1 was wrong)
 
@@ -525,6 +557,7 @@ files, double-storing them on both LUNs.
 |---|---|
 | Analytics MEDIA card shows `0 used` despite uploaded files | Code is still writing to `backing_root/lightshow/...` instead of `media_root/...` |
 | Tesla doesn't see uploaded Light Show / Lock Chime | Files landed under `lightshow/` wrapper instead of root of MEDIA LUN |
+| Tesla still plays OLD Lock Chime after activation (file is correct on MEDIA root) | Only a soft SCSI medium-change fired; the chime needs a full UDC re-enumeration (`tesla_gadget_rebind.sh`) |
 | Boombox upload "works" but car doesn't play it | Wrote to `Music/Boombox/` on TESLACAM instead of `/Boombox` on MEDIA |
 | Analytics TESLACAM card shows usage growing for non-recording files | A media feature is still anchored on `backing_root` instead of `media_root` |
 

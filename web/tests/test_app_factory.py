@@ -258,6 +258,42 @@ def test_cache_invalidator_registered_on_app(app: Flask) -> None:
     assert isinstance(invalidator, CacheInvalidator)
 
 
+def test_gadget_rebinder_registered_on_app(app: Flask) -> None:
+    from teslausb_web.services.gadget_rebind import GadgetRebinder
+
+    rebinder = app.extensions["gadget_rebinder"]
+    assert isinstance(rebinder, GadgetRebinder)
+
+
+def test_gadget_rebinder_uses_configured_script_path() -> None:
+    cfg = WebConfig(
+        web=WebSection(secret_key="x" * 32, max_upload_mb=8, max_chunk_mb=1),
+        paths=PathsSection(gadget_rebind_script=Path("/opt/custom/rebind.sh")),
+        features=FeaturesSection(),
+        source_path=None,
+    )
+    app = create_app(cfg)
+    rebinder = app.extensions["gadget_rebinder"]
+    cmd = list(rebinder.command)
+    assert cmd[0] == "sudo"
+    assert cmd[1] == "-n"
+    assert Path(cmd[2]) == Path("/opt/custom/rebind.sh")
+
+
+def test_gadget_rebinder_shutdown_registered_at_atexit(monkeypatch: pytest.MonkeyPatch) -> None:
+    registered: list[object] = []
+
+    def fake_register(fn: object, /) -> object:
+        registered.append(fn)
+        return fn
+
+    monkeypatch.setattr("teslausb_web.app.atexit.register", fake_register)
+    app = create_app(_make_config())
+    assert any(
+        getattr(fn, "__self__", None) is app.extensions["gadget_rebinder"] for fn in registered
+    )
+
+
 def test_boombox_service_registered_on_app(app: Flask) -> None:
     from teslausb_web.services.boombox_service import BoomboxService
 

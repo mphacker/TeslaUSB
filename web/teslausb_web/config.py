@@ -51,6 +51,7 @@ _DEFAULT_STATE_DIR: Path = Path("/var/lib/teslausb")
 _DEFAULT_DB_PATH: Path = Path("/var/lib/teslausb/index.sqlite3")
 _DEFAULT_IPC_SOCKET: Path = Path("/run/teslausb/worker.sock")
 _DEFAULT_CACHE_SCRIPT: Path = Path("/usr/local/bin/tesla_cache_invalidate.sh")
+_DEFAULT_REBIND_SCRIPT: Path = Path("/usr/local/bin/tesla_gadget_rebind.sh")
 _DEFAULT_LOCK_CHIME_FILENAME: Final[str] = "LockChime.wav"
 _DEFAULT_CHIMES_FOLDER: Final[str] = "Chimes"
 _DEFAULT_GROUPS_FILE_RELPATH: Final[str] = "chime_groups.json"
@@ -271,7 +272,10 @@ class PathsSection:
     # reads from the second USB drive (Boombox, LightShow, LockChime,
     # Chimes library, Wraps library, LicensePlate library) lives at
     # the *root* of this path. See ``docs/02-LEARNINGS.md`` "Two-LUN
-    # media layout" for the full rationale.
+    # media layout" for the full rationale. NOTE: the lock chime lives
+    # here (correct), but Tesla only re-reads a CHANGED LockChime.wav
+    # after a full USB re-enumeration (``gadget_rebind_script``), not
+    # after a soft SCSI medium-change (``cache_invalidate_script``).
     #
     # ``None`` means "fall back to ``backing_root``" — convenient for
     # tests that only spin up a single ``tmp_path``. Production config
@@ -282,6 +286,11 @@ class PathsSection:
     db_path: Path = _DEFAULT_DB_PATH
     ipc_socket: Path = _DEFAULT_IPC_SOCKET
     cache_invalidate_script: Path = _DEFAULT_CACHE_SCRIPT
+    # Full USB re-enumeration (UDC unbind + rebind) used by lock-chime
+    # activation so Tesla picks up a changed LockChime.wav. A soft
+    # medium-change is insufficient for the chime; see the lock_chimes
+    # blueprint and ``docs/02-LEARNINGS.md``.
+    gadget_rebind_script: Path = _DEFAULT_REBIND_SCRIPT
     # When set (e.g. "/_protected_teslacam"), the /videos/stream/,
     # /videos/sei/, /videos/download/ routes return an empty 200
     # response with an ``X-Accel-Redirect`` header pointing at this
@@ -317,6 +326,7 @@ class PathsSection:
             ("db_path", self.db_path),
             ("ipc_socket", self.ipc_socket),
             ("cache_invalidate_script", self.cache_invalidate_script),
+            ("gadget_rebind_script", self.gadget_rebind_script),
         ):
             if not PurePosixPath(value.as_posix()).is_absolute():
                 raise ConfigError(None, f"[paths] {name} must be absolute, got {value!r}")
@@ -1183,6 +1193,12 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
             paths_raw,
             "cache_invalidate_script",
             _DEFAULT_CACHE_SCRIPT,
+            source,
+        ),
+        gadget_rebind_script=_coerce_path(
+            paths_raw,
+            "gadget_rebind_script",
+            _DEFAULT_REBIND_SCRIPT,
             source,
         ),
         x_accel_redirect_prefix=_coerce_str(paths_raw, "x_accel_redirect_prefix", "", source),

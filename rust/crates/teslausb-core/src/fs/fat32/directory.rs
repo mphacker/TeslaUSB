@@ -88,6 +88,7 @@
 //!   tail with `0x00` zero entries to mark end-of-directory.
 
 use core::fmt;
+use std::time::SystemTime;
 
 use crate::fs::geometry::SECTOR_SIZE_BYTES;
 
@@ -702,6 +703,78 @@ impl Timestamps {
             accessed: FatDate::epoch(),
         }
     }
+
+    /// Build timestamps from a backing file's modification time,
+    /// interpreted as UTC.
+    ///
+    /// All three FAT timestamp fields (created, modified, accessed)
+    /// are set to the same wall-clock value derived from `mtime`.
+    /// Tesla keys lock-chime (and other media) cache invalidation
+    /// off the directory entry's modified date, so surfacing the
+    /// real backing-file mtime here is what lets the vehicle notice
+    /// a file that was replaced in place.
+    ///
+    /// `mtime` values that cannot be represented in the FAT date
+    /// range (before 1980-01-01 or after 2107-12-31), or that
+    /// predate the Unix epoch, fall back to [`Self::epoch`] rather
+    /// than failing — a synthesized entry must always be emittable.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    pub fn from_system_time(mtime: SystemTime) -> Self {
+        let Ok(dur) = mtime.duration_since(SystemTime::UNIX_EPOCH) else {
+            return Self::epoch();
+        };
+        let secs = dur.as_secs();
+        let days = (secs / 86_400) as i64;
+        let secs_of_day = (secs % 86_400) as u32;
+        let (year, month, day) = civil_from_days(days);
+        // secs_of_day < 86_400 so each field is in range for u8.
+        let hour = (secs_of_day / 3_600) as u8;
+        let minute = ((secs_of_day % 3_600) / 60) as u8;
+        let second = (secs_of_day % 60) as u8;
+
+        let Ok(year) = u16::try_from(year) else {
+            return Self::epoch();
+        };
+        let (Ok(date), Ok(time)) = (
+            FatDate::new(year, month, day),
+            FatTime::new(hour, minute, second),
+        ) else {
+            return Self::epoch();
+        };
+        let dt = FatDateTime::new(date, time);
+        Self {
+            created: dt,
+            modified: dt,
+            accessed: date,
+        }
+    }
+}
+
+/// Convert a count of days since the Unix epoch (1970-01-01) into a
+/// `(year, month, day)` civil date in the proleptic Gregorian
+/// calendar (UTC).
+///
+/// Algorithm: Howard Hinnant's `civil_from_days`
+/// (<https://howardhinnant.github.io/date_algorithms.html>). `month`
+/// is in `1..=12` and `day` in `1..=31`, so both fit a `u8` without
+/// truncation.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::similar_names
+)]
+fn civil_from_days(z: i64) -> (i64, u8, u8) {
+    let z = z + 719_468;
+    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u8; // [1, 31]
+    let month = (if mp < 10 { mp + 3 } else { mp - 9 }) as u8; // [1, 12]
+    (y + i64::from(month <= 2), month, day)
 }
 
 // ── FileAttributes ────────────────────────────────────────────────────
@@ -1130,6 +1203,62 @@ mod tests {
 
     fn read_u32_le(entry: &[u8; 32], offset: usize) -> u32 {
         u32::from_le_bytes(entry[offset..offset + 4].try_into().unwrap())
+    }
+
+    fn at(secs: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs)
+    }
+
+    // ── from_system_time conversion ───────────────────────────────────
+
+    #[test]
+    fn from_system_time_converts_a_modern_utc_timestamp() {
+        // 2021-08-15 14:30:20 UTC.
+        let ts = Timestamps::from_system_time(at(1_629_037_820));
+        let expected_date = FatDate::new(2021, 8, 15).unwrap();
+        let expected_time = FatTime::new(14, 30, 20).unwrap();
+        assert_eq!(ts.modified.date.to_bits(), expected_date.to_bits());
+        assert_eq!(ts.modified.time.to_bits(), expected_time.to_bits());
+        assert_eq!(ts.created.date.to_bits(), expected_date.to_bits());
+        assert_eq!(ts.accessed.to_bits(), expected_date.to_bits());
+    }
+
+    #[test]
+    fn from_system_time_handles_leap_year_boundary() {
+        // 2000-01-01 00:00:00 UTC (2000 is a leap year).
+        let ts = Timestamps::from_system_time(at(946_684_800));
+        assert_eq!(
+            ts.modified.date.to_bits(),
+            FatDate::new(2000, 1, 1).unwrap().to_bits()
+        );
+        assert_eq!(ts.modified.time.to_bits(), FatTime::midnight().to_bits());
+    }
+
+    #[test]
+    fn from_system_time_at_fat_min_year_is_preserved() {
+        // 1980-01-01 00:00:00 UTC — the FAT epoch itself.
+        let ts = Timestamps::from_system_time(at(315_532_800));
+        assert_eq!(ts, Timestamps::epoch());
+    }
+
+    #[test]
+    fn from_system_time_before_fat_min_year_falls_back_to_epoch() {
+        // 1970-01-01 (Unix epoch) is before the 1980 FAT minimum.
+        let ts = Timestamps::from_system_time(at(0));
+        assert_eq!(ts, Timestamps::epoch());
+    }
+
+    #[test]
+    fn from_system_time_before_unix_epoch_falls_back_to_epoch() {
+        let pre = SystemTime::UNIX_EPOCH - std::time::Duration::from_secs(10);
+        assert_eq!(Timestamps::from_system_time(pre), Timestamps::epoch());
+    }
+
+    #[test]
+    fn from_system_time_after_fat_max_year_falls_back_to_epoch() {
+        // 2108-01-01 UTC exceeds the FAT maximum year (2107).
+        let ts = Timestamps::from_system_time(at(4_354_819_200));
+        assert_eq!(ts, Timestamps::epoch());
     }
 
     // ── Sanity: shape + sizing ────────────────────────────────────────

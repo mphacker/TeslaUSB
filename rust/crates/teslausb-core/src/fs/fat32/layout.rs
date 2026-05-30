@@ -586,11 +586,12 @@ fn render_directory_bytes(
     let total_bytes = directory_entry_bytes_usize(dir, is_root)?;
     let mut out = Vec::with_capacity(total_bytes);
     // Epoch timestamps for synthesized "structural" entries
-    // (root volume label, dot, dotdot). Matches the convention
-    // already used for `.`/`..` — these entries describe the
-    // volume's own metadata rather than user-visible files, so
-    // their dates carry no meaningful value to surface. Tesla
-    // never reads or displays them.
+    // (root volume label, dot, dotdot). These describe the volume's
+    // own metadata rather than user-visible files, so their dates
+    // carry no meaningful value to surface. Tesla never reads or
+    // displays them. Named child entries, by contrast, carry their
+    // backing file/dir mtime (see below) so the vehicle can detect
+    // a replaced file — most importantly `LockChime.wav`.
     let stamps = Timestamps::epoch();
 
     if is_root {
@@ -610,7 +611,7 @@ fn render_directory_bytes(
     let mut sfn_counter: u32 = 0;
     for &(kind, first_cluster, child_idx) in children {
         sfn_counter = sfn_counter.saturating_add(1);
-        let (name, size, attrs) = match kind {
+        let (name, size, attrs, child_stamps) = match kind {
             ChildKind::Subdir => {
                 let sub = dir
                     .subdirs
@@ -619,7 +620,12 @@ fn render_directory_bytes(
                         children: dir.subdirs.len() as u64,
                         maximum: MAX_ENTRIES_PER_DIRECTORY,
                     })?;
-                (sub.name.as_str(), 0u32, FileAttributes::directory())
+                (
+                    sub.name.as_str(),
+                    0u32,
+                    FileAttributes::directory(),
+                    Timestamps::from_system_time(sub.mtime),
+                )
             }
             ChildKind::File => {
                 let f = dir
@@ -633,7 +639,12 @@ fn render_directory_bytes(
                     path: f.backing_path.clone(),
                     size_bytes: f.size,
                 })?;
-                (f.name.as_str(), size, FileAttributes::archive())
+                (
+                    f.name.as_str(),
+                    size,
+                    FileAttributes::archive(),
+                    Timestamps::from_system_time(f.mtime),
+                )
             }
         };
 
@@ -643,7 +654,7 @@ fn render_directory_bytes(
         for entry in &lfn_entries {
             out.extend_from_slice(entry);
         }
-        let sfn = synthesize_sfn_entry(&short, attrs, first_cluster, size, &stamps);
+        let sfn = synthesize_sfn_entry(&short, attrs, first_cluster, size, &child_stamps);
         out.extend_from_slice(&sfn);
     }
 
@@ -699,7 +710,7 @@ mod tests {
     use std::time::SystemTime;
 
     use super::*;
-    use crate::fs::fat32::directory::{ATTR_DIRECTORY, ATTR_VOLUME_ID};
+    use crate::fs::fat32::directory::{ATTR_ARCHIVE, ATTR_DIRECTORY, ATTR_VOLUME_ID};
 
     fn epoch() -> SystemTime {
         SystemTime::UNIX_EPOCH
@@ -721,6 +732,15 @@ mod tests {
             backing_path: PathBuf::from("/").join(name),
             size,
             mtime: epoch(),
+        }
+    }
+
+    fn file_with_mtime(name: &str, size: u64, mtime: SystemTime) -> BackingFile {
+        BackingFile {
+            name: name.to_string(),
+            backing_path: PathBuf::from("/").join(name),
+            size,
+            mtime,
         }
     }
 
@@ -1067,6 +1087,41 @@ mod tests {
         let expected = pad_volume_label(b"BACKUP").expect("valid label");
         let root_bytes = layout.dir_clusters().get(&ROOT_DIRECTORY_CLUSTER).unwrap();
         assert_eq!(&root_bytes[0x00..0x0B], &expected[..]);
+    }
+
+    // ── Child entry timestamps ─────────────────────────────────────
+
+    #[test]
+    fn child_file_entry_carries_real_backing_mtime() {
+        // 2021-08-15 14:30:20 UTC — a non-epoch backing mtime must
+        // surface in the file's directory entry so Tesla can detect
+        // a replaced file (e.g. an updated LockChime.wav).
+        let mtime = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_629_037_820);
+        let mut root = empty_dir("");
+        root.files.push(file_with_mtime("LOCK.WAV", 100, mtime));
+        let tree = BackingTree { root };
+        let geo = small_geometry();
+        let layout = plan(&geo, &tree);
+        let root_bytes = layout.dir_clusters().get(&ROOT_DIRECTORY_CLUSTER).unwrap();
+
+        // Locate the SFN entry (attr == ARCHIVE; LFN entries carry
+        // ATTR_LONG_NAME and the volume label ATTR_VOLUME_ID).
+        let sfn = root_bytes
+            .chunks_exact(DIR_ENTRY_SIZE_BYTES)
+            .find(|e| e[0x0B] == ATTR_ARCHIVE)
+            .expect("archive SFN entry present");
+
+        let expected = Timestamps::from_system_time(mtime);
+        let wrt_time = u16::from_le_bytes(sfn[0x16..0x18].try_into().unwrap());
+        let wrt_date = u16::from_le_bytes(sfn[0x18..0x1A].try_into().unwrap());
+        assert_eq!(wrt_time, expected.modified.time.to_bits());
+        assert_eq!(wrt_date, expected.modified.date.to_bits());
+        // And it must not be the FAT epoch we used to emit.
+        assert_ne!(
+            wrt_date,
+            Timestamps::epoch().modified.date.to_bits(),
+            "child entry must not be stamped with the 1980 epoch",
+        );
     }
 
     // ── D2: free cluster accounting ────────────────────────────────

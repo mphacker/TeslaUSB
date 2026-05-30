@@ -57,6 +57,7 @@ from teslausb_web.services.chime_scheduler import make_chime_scheduler
 from teslausb_web.services.cloud_archive import make_cloud_archive_service
 from teslausb_web.services.cloud_oauth_service import CloudOAuthService, make_oauth_service
 from teslausb_web.services.cloud_rclone_service import CloudRcloneService, make_rclone_service
+from teslausb_web.services.gadget_rebind import GadgetRebinder
 from teslausb_web.services.jobs_service import CloudSyncAdapterProtocol, make_jobs_service
 from teslausb_web.services.license_plate_service import make_license_plate_service
 from teslausb_web.services.light_show_service import make_light_show_service
@@ -162,6 +163,7 @@ def create_app(
     _register_template_globals(app)
     _register_blueprints(app, extra_blueprints)
     _register_cache_invalidator(app, cfg)
+    _register_gadget_rebinder(app, cfg)
     _register_chime_services(app, cfg)
     _register_light_show_services(app, cfg)
     _register_music_services(app, cfg)
@@ -328,6 +330,38 @@ def _get_cache_invalidator(app: Flask) -> CacheInvalidator:
     if not isinstance(invalidator, CacheInvalidator):
         raise RuntimeError("cache_invalidator extension is not configured")
     return invalidator
+
+
+def _register_gadget_rebinder(app: Flask, cfg: WebConfig) -> None:
+    """Instantiate one :class:`GadgetRebinder` and stash it on the app.
+
+    Lock-chime *activation* writes a new ``LockChime.wav`` to the MEDIA
+    LUN, but Tesla only re-reads the chime after a full USB
+    re-enumeration. The lock-chimes blueprint calls
+    ``current_app.extensions["gadget_rebinder"].rebind()`` (synchronously)
+    on the three active-chime paths, falling back to the soft cache
+    invalidator if the rebind fails. The singleton lives for the lifetime
+    of the gunicorn worker; ``atexit`` marks it shut down so a rebind
+    requested as the worker exits is refused rather than detaching the
+    gadget mid-shutdown.
+
+    The wired command is ``["sudo", "-n", str(gadget_rebind_script)]``. The
+    NOPASSWD grant for that script path is rendered into
+    ``/etc/sudoers.d/teslausb-b1`` from ``B1_SUDOERS_ALLOWLIST`` in
+    ``setup-lib/02-users.sh``.
+    """
+    rebinder = GadgetRebinder(
+        command=("sudo", "-n", str(cfg.paths.gadget_rebind_script)),
+    )
+    app.extensions["gadget_rebinder"] = rebinder
+    atexit.register(rebinder.shutdown)
+
+
+def _get_gadget_rebinder(app: Flask) -> GadgetRebinder:
+    rebinder = app.extensions.get("gadget_rebinder")
+    if not isinstance(rebinder, GadgetRebinder):
+        raise RuntimeError("gadget_rebinder extension is not configured")
+    return rebinder
 
 
 def _register_chime_services(app: Flask, cfg: WebConfig) -> None:

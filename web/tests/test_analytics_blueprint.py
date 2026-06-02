@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from http import HTTPStatus
 from typing import TYPE_CHECKING, cast
@@ -210,6 +211,27 @@ class TestDashboard:
         stub_service.complete_error = AnalyticsDataError("DB locked")
         response = client.get("/analytics/")
         assert response.status_code == HTTPStatus.OK
+
+    def test_partition_cards_link_to_storage_page(
+        self, client: FlaskClient, stub_service: StubAnalyticsService
+    ) -> None:
+        # A USB-partition card (key "part-*") must link through to the
+        # Storage settings page; the SD-card card stays informational.
+        managed = replace(_sample_partition(), key="part-0", label="TESLACAM")
+        sd_card = replace(_sample_partition(), key="sd-card", label="SD Card")
+        assert stub_service.complete_payload is not None
+        stub_service.complete_payload = replace(
+            stub_service.complete_payload, partitions=(managed, sd_card)
+        )
+        response = client.get("/analytics/")
+        body = response.get_data(as_text=True)
+        assert 'class="analytics-card analytics-card-link"' in body
+        assert 'href="/storage/"' in body
+        assert "Manage storage" in body
+        # Exactly one managed (part-*) card here, so exactly one link; the
+        # SD-card card stays informational — a plain <div>, never a link.
+        assert body.count("analytics-card-link") == 1
+        assert '<div class="analytics-card" data-partition-key="sd-card">' in body
 
 
 # ---------------------------------------------------------------------------

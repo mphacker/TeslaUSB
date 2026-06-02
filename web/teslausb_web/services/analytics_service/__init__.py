@@ -2,11 +2,13 @@
 
 Ports v1's ``services/analytics_service.py`` to B-1's data sources:
 
-* Partition usage comes from :func:`shutil.disk_usage` on the
-  configured filesystem roots — there is no IMG/loopback layer in
-  B-1, so the v1 ``iter_all_partitions`` helper is gone and we
-  probe ``backing_root`` (always) plus ``mapping.media_root`` when
-  it resolves to a distinct mount.
+* Partition usage comes from the teslafat disk config
+  (``/etc/teslausb/teslafat-0.toml``): per ADR-0023 the gadget presents
+  ONE USB disk with a ``[[partition]]`` array (TeslaCam + Media), so we
+  emit one LUN-capped probe per partition plus an SD-card probe for the
+  underlying physical storage. On dev machines (no ``/etc/teslausb``) we
+  fall back to probing ``backing_root`` plus ``mapping.media_root`` via
+  :func:`shutil.disk_usage`.
 * Video statistics come from the mapping DB ``indexed_files``
   table (Phase 5.13b) rather than walking the SD card.
 * Storage-health thresholds and the recording-rate fallback come
@@ -17,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -166,49 +169,61 @@ class AnalyticsService:
 
 
 _TESLAFAT_CONFIG_DIR: Path = Path("/etc/teslausb")
+_TESLAFAT_DISK_CONFIG: str = "teslafat-0.toml"
 _BYTES_PER_GB: int = 1024**3
 
 
 def _discover_teslafat_luns(
     config_dir: Path = _TESLAFAT_CONFIG_DIR,
 ) -> list[Probe]:
-    """Read every ``teslafat-N.toml`` and emit one LUN-aware probe per file.
+    """Read the teslafat disk config and emit one probe per partition.
 
-    Each LUN exposes a separate USB volume to Tesla (TeslaCam / MEDIA),
-    so the analytics dashboard should show one card per LUN even when
-    the backing roots share an underlying filesystem.
+    Per ADR-0023 the gadget presents exactly ONE USB disk
+    (``teslafat-0.toml``) carrying a ``[[partition]]`` array — TeslaCam
+    and Media live on the same physical disk as two exFAT partitions.
+    Each partition is a distinct volume Tesla sees, so the analytics
+    dashboard shows one card per partition. The reported ``total_bytes``
+    is the partition's advertised ``volume_size_gb`` (Tesla's view) and
+    the used figure comes from walking the partition's backing subtree.
+
+    Only the single ``teslafat-0.toml`` disk config is read: stray
+    pre-ADR-0023 files (e.g. a dual-LUN-era ``teslafat-1.toml`` with the
+    dead top-level ``backing_root`` schema) are ignored entirely so they
+    cannot resurrect a phantom card or collide partition keys.
 
     Returns an empty list on dev machines without ``/etc/teslausb``.
     """
-    import tomllib
-
-    if not config_dir.is_dir():
+    path = config_dir / _TESLAFAT_DISK_CONFIG
+    if not path.is_file():
+        return []
+    try:
+        with path.open("rb") as handle:
+            data = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        logger.warning("analytics: cannot read %s: %s", path, exc)
+        return []
+    partitions = data.get("partition")
+    if not isinstance(partitions, list):
         return []
     probes: list[Probe] = []
-    for path in sorted(config_dir.glob("teslafat-*.toml")):
-        try:
-            with path.open("rb") as handle:
-                data = tomllib.load(handle)
-        except (OSError, tomllib.TOMLDecodeError) as exc:
-            logger.warning("analytics: cannot read %s: %s", path, exc)
+    for index, part in enumerate(partitions):
+        if not isinstance(part, dict):
             continue
-        backing_root = data.get("backing_root")
-        volume_label = data.get("volume_label")
-        volume_size_gb = data.get("volume_size_gb")
+        backing_root = part.get("backing_root")
+        volume_label = part.get("volume_label")
+        volume_size_gb = part.get("volume_size_gb")
         if not isinstance(backing_root, str) or not isinstance(volume_label, str):
             continue
-        if not isinstance(volume_size_gb, int) or volume_size_gb <= 0:
+        # ``bool`` is an ``int`` subclass — reject it so a stray
+        # ``volume_size_gb = true`` cannot become a 1 GiB partition.
+        if type(volume_size_gb) is not int or volume_size_gb <= 0:
             continue
-        stem = path.stem  # "teslafat-0"
-        suffix = stem.rsplit("-", 1)[-1]
-        key = f"lun-{suffix}"
-        capacity = volume_size_gb * _BYTES_PER_GB
         probes.append(
             Probe(
-                key=key,
+                key=f"part-{index}",
                 label=volume_label,
                 path=Path(backing_root),
-                capacity_bytes=capacity,
+                capacity_bytes=volume_size_gb * _BYTES_PER_GB,
             )
         )
     return probes
@@ -220,10 +235,11 @@ def make_analytics_service(
 ) -> AnalyticsService:
     """Build the analytics service from a :class:`WebConfig`.
 
-    On B-1 hardware we emit one probe per teslafat LUN
-    (``/etc/teslausb/teslafat-*.toml``) so the dashboard renders one
-    card per USB volume Tesla sees — even when the LUN backing roots
-    share the underlying filesystem.
+    On B-1 hardware we emit one probe per teslafat partition
+    (the ``[[partition]]`` array in ``/etc/teslausb/teslafat-0.toml``)
+    so the dashboard renders one card per USB volume Tesla sees —
+    TeslaCam and Media — even though both partitions share the one
+    physical disk.
 
     On dev machines (no ``/etc/teslausb``) we fall back to the legacy
     behaviour: probe ``backing_root`` and ``mapping.media_root`` via
@@ -232,8 +248,8 @@ def make_analytics_service(
     lun_probes = _discover_teslafat_luns()
     if lun_probes:
         # Add an SD-card probe so the operator can see the *real* free
-        # space on the underlying physical storage. The LUN cards above
-        # report Tesla's view (capped at volume_size_gb); this card
+        # space on the underlying physical storage. The partition cards
+        # above report Tesla's view (capped at volume_size_gb); this card
         # reports the root filesystem's view of the SD card.
         probes: list[Probe] = list(lun_probes)
         sd_root = Path("/")

@@ -79,6 +79,37 @@
     box-shadow: var(--shadow-md, 0 4px 8px rgba(0,0,0,0.15));
 }
 
+/* USB-partition cards link to the Storage settings page. */
+.analytics-card-link {
+    display: block;
+    text-decoration: none;
+    color: inherit;
+    cursor: pointer;
+}
+
+.analytics-card-link:hover {
+    border-color: var(--accent, #4CAF50);
+    box-shadow: var(--shadow-md, 0 6px 16px rgba(76, 175, 80, 0.25));
+    transform: translateY(-2px);
+}
+
+.analytics-card-link:focus-visible {
+    outline: 2px solid var(--accent, #4CAF50);
+    outline-offset: 2px;
+}
+
+.card-cta {
+    margin-top: 12px;
+    font-weight: 600;
+    font-size: 0.9em;
+    color: var(--accent, #4CAF50);
+    transition: transform 0.2s ease;
+}
+
+.analytics-card-link:hover .card-cta {
+    transform: translateX(4px);
+}
+
 .analytics-card h3 {
     margin-top: 0;
     color: var(--text-primary, #333);

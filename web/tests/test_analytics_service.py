@@ -29,6 +29,7 @@ from teslausb_web.services.analytics_service import (
     PartitionUsage,
     RecordingEstimate,
     VideoStatistics,
+    _discover_teslafat_luns,
     complete_to_dict,
     folder_to_dict,
     health_to_dict,
@@ -166,6 +167,127 @@ class TestServiceConstruction:
     def test_exception_hierarchy(self) -> None:
         assert issubclass(AnalyticsConfigError, AnalyticsError)
         assert issubclass(AnalyticsDataError, AnalyticsError)
+
+
+# ---------------------------------------------------------------------------
+# teslafat partition discovery (ADR-0023 single-disk / [[partition]] array)
+# ---------------------------------------------------------------------------
+
+
+class TestDiscoverTeslafatPartitions:
+    def test_parses_partition_array_into_one_probe_each(self, tmp_path: Path) -> None:
+        (tmp_path / "teslafat-0.toml").write_text(
+            "\n".join(
+                [
+                    "[[partition]]",
+                    'backing_root = "/srv/teslausb/teslacam"',
+                    "volume_size_gb = 256",
+                    'volume_label = "TESLACAM"',
+                    "",
+                    "[[partition]]",
+                    'backing_root = "/srv/teslausb/media"',
+                    "volume_size_gb = 32",
+                    'volume_label = "MEDIA"',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        probes = _discover_teslafat_luns(config_dir=tmp_path)
+        assert [p.key for p in probes] == ["part-0", "part-1"]
+        assert [p.label for p in probes] == ["TESLACAM", "MEDIA"]
+        assert probes[0].path == Path("/srv/teslausb/teslacam")
+        assert probes[0].capacity_bytes == 256 * 1024**3
+        assert probes[1].capacity_bytes == 32 * 1024**3
+
+    def test_ignores_legacy_single_lun_file(self, tmp_path: Path) -> None:
+        # Pre-ADR-0023 top-level schema (stray dual-LUN leftover) — must
+        # not resurrect a phantom card.
+        (tmp_path / "teslafat-1.toml").write_text(
+            "\n".join(
+                [
+                    'backing_root = "/srv/teslausb/media"',
+                    "volume_size_gb = 32",
+                    'volume_label = "MEDIA"',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        assert _discover_teslafat_luns(config_dir=tmp_path) == []
+
+    def test_missing_config_dir_returns_empty(self, tmp_path: Path) -> None:
+        assert _discover_teslafat_luns(config_dir=tmp_path / "nope") == []
+
+    def test_rejects_boolean_volume_size(self, tmp_path: Path) -> None:
+        # ``bool`` is an ``int`` subclass; a stray boolean must NOT become
+        # a 1 GiB partition.
+        (tmp_path / "teslafat-0.toml").write_text(
+            "\n".join(
+                [
+                    "[[partition]]",
+                    'backing_root = "/srv/teslausb/teslacam"',
+                    "volume_size_gb = true",
+                    'volume_label = "TESLACAM"',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        assert _discover_teslafat_luns(config_dir=tmp_path) == []
+
+    def test_reads_only_disk_zero_config(self, tmp_path: Path) -> None:
+        # Only teslafat-0.toml is read; a second current-schema file must
+        # not contribute cards (no duplicate part-0 keys / phantom volume).
+        (tmp_path / "teslafat-0.toml").write_text(
+            "\n".join(
+                [
+                    "[[partition]]",
+                    'backing_root = "/srv/teslausb/teslacam"',
+                    "volume_size_gb = 256",
+                    'volume_label = "TESLACAM"',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (tmp_path / "teslafat-1.toml").write_text(
+            "\n".join(
+                [
+                    "[[partition]]",
+                    'backing_root = "/srv/teslausb/other"',
+                    "volume_size_gb = 99",
+                    'volume_label = "OTHER"',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        probes = _discover_teslafat_luns(config_dir=tmp_path)
+        assert [p.key for p in probes] == ["part-0"]
+        assert probes[0].label == "TESLACAM"
+
+    def test_skips_partitions_with_invalid_fields(self, tmp_path: Path) -> None:
+        (tmp_path / "teslafat-0.toml").write_text(
+            "\n".join(
+                [
+                    "[[partition]]",
+                    'backing_root = "/srv/teslausb/teslacam"',
+                    "volume_size_gb = 0",
+                    'volume_label = "TESLACAM"',
+                    "",
+                    "[[partition]]",
+                    'backing_root = "/srv/teslausb/media"',
+                    "volume_size_gb = 32",
+                    'volume_label = "MEDIA"',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        probes = _discover_teslafat_luns(config_dir=tmp_path)
+        assert [p.key for p in probes] == ["part-1"]
+        assert probes[0].label == "MEDIA"
 
 
 # ---------------------------------------------------------------------------

@@ -77,10 +77,19 @@
         </div>
     {% endif %}
 
-    {# Drive usage cards — one card per probed root. #}
+    {# Drive usage cards — one card per probed root. USB partition cards
+       (TeslaCam / Media) link through to the Storage settings page so the
+       operator can resize them; the SD-card card is informational only. #}
     <div class="analytics-grid analytics-grid-scroll" id="partitionUsageGrid">
         {% for partition in analytics.partitions %}
+        {% set is_managed = partition.key.startswith('part-') %}
+        {% if is_managed %}
+        <a class="analytics-card analytics-card-link" href="{{ url_for('storage.index') }}"
+           data-partition-key="{{ partition.key }}"
+           aria-label="Manage {{ partition.label }} storage">
+        {% else %}
         <div class="analytics-card" data-partition-key="{{ partition.key }}">
+        {% endif %}
             <h3>
                 <svg class="nav-icon" aria-hidden="true" focusable="false"><use href="{{ sprite }}#icon-hard-drive"></use></svg>
                 {{ partition.label }}
@@ -91,7 +100,7 @@
             {% else %}
                 <div class="usage-stats">
                     <div class="stat-row">
-                        <span class="stat-label">Total Space:</span>
+                        <span class="stat-label">{% if is_managed %}Advertised:{% else %}Total Space:{% endif %}</span>
                         <span class="stat-value">{{ "%.2f"|format(partition.total_gb) }} GB</span>
                     </div>
                     <div class="stat-row">
@@ -120,8 +129,15 @@
                 <div class="progress-label">{{ "%.1f"|format(partition.percent_used) }}% Used</div>
 
                 <div class="partition-path">{{ partition.path }}</div>
+                {% if is_managed %}
+                <div class="card-cta">Manage storage &rarr;</div>
+                {% endif %}
             {% endif %}
+        {% if is_managed %}
+        </a>
+        {% else %}
         </div>
+        {% endif %}
         {% endfor %}
     </div>
 

@@ -34,6 +34,17 @@ forbidden because they bypass the safety net.
 > specific code review breaks and then fix ALL issues you find."*
 > — 2026-05-19
 
+**Second opinion before risky actions (binding).** When this skill
+is reached as the culmination of *solving an issue* (a deploy that
+fixes a bug, a diagnostic to root-cause a hardware fault), follow the
+parallel GPT-5.5 second-opinion workflow in
+`.github/copilot-instructions.md`: have a GPT-5.5 agent independently
+research the problem, reconcile its view with yours into a single root
+cause + plan, and **submit the deploy/diagnostic plan to the GPT-5.5
+agent for review before touching the live device**. Live-hardware and
+recording-critical actions must not proceed on a single (your own)
+opinion alone.
+
 The three sacred rails:
 
 1. **SSH must stay up.** If it goes down between two of our

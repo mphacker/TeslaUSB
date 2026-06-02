@@ -38,7 +38,7 @@ def _make_config(tmp_path: Path) -> WebConfig:
 def tmp_config(tmp_path: Path) -> Path:
     path = tmp_path / "teslausb.toml"
     config = sc.TeslausbConfig(
-        storage=sc.StorageSection(os_reserve_gb=20, teslacam_gb=64, media_gb=32),
+        storage=sc.StorageSection(safety_buffer_gb=20, teslacam_gb=64, media_gb=32),
         cleanup=sc.CleanupSection(target_free_pct=5, sentry_max_age_days=0),
     )
     sc.save(config, path)
@@ -78,7 +78,7 @@ def test_post_storage_no_change_flashes_info(client: FlaskClient, tmp_config: Pa
             data={
                 "teslacam_gb": "64",
                 "media_gb": "32",
-                "os_reserve_gb": "20",
+                "safety_buffer_gb": "20",
                 "target_free_pct": "5",
                 "sentry_max_age_days": "0",
                 "_preserve_with_gps_present": "1",
@@ -98,7 +98,7 @@ def test_post_storage_changes_teslacam(client: FlaskClient, tmp_config: Path) ->
             data={
                 "teslacam_gb": "100",
                 "media_gb": "32",
-                "os_reserve_gb": "20",
+                "safety_buffer_gb": "20",
                 "target_free_pct": "5",
                 "sentry_max_age_days": "0",
                 "_preserve_with_gps_present": "1",
@@ -118,7 +118,7 @@ def test_post_storage_invalid_input_returns_400(client: FlaskClient) -> None:
         data={
             "teslacam_gb": "not-a-number",
             "media_gb": "32",
-            "os_reserve_gb": "20",
+            "safety_buffer_gb": "20",
             "target_free_pct": "5",
             "sentry_max_age_days": "0",
             "_preserve_with_gps_present": "1",
@@ -137,7 +137,7 @@ def test_post_storage_apply_error_returns_500(client: FlaskClient) -> None:
             data={
                 "teslacam_gb": "100",
                 "media_gb": "32",
-                "os_reserve_gb": "20",
+                "safety_buffer_gb": "20",
                 "target_free_pct": "5",
                 "sentry_max_age_days": "0",
                 "_preserve_with_gps_present": "1",
@@ -154,7 +154,7 @@ def test_post_storage_cap_violation_returns_400(client: FlaskClient) -> None:
         data={
             "teslacam_gb": "9999",
             "media_gb": "9999",
-            "os_reserve_gb": "20",
+            "safety_buffer_gb": "20",
             "target_free_pct": "5",
             "sentry_max_age_days": "0",
             "_preserve_with_gps_present": "1",
@@ -165,3 +165,4 @@ def test_post_storage_cap_violation_returns_400(client: FlaskClient) -> None:
     # the worker-side helper would refuse. The blueprint should still
     # return success here since validation is bounds-only.
     assert resp.status_code in (302, 400)
+

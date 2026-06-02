@@ -30,13 +30,14 @@ use std::path::Path;
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 
-/// Lower bound for `os_reserve_gb` — anything below this risks
-/// starving the rootfs of free space during routine operation.
-/// Matches `OS_RESERVE_MIN_GB` in `storage_config.py`.
-pub const OS_RESERVE_MIN_GB: u32 = 8;
-/// Default for `os_reserve_gb`. Matches `OS_RESERVE_DEFAULT_GB`
+/// Lower bound for `safety_buffer_gb` — held back on top of the
+/// *measured* OS/non-partition SD usage so partition allocation can
+/// never starve the rootfs. Matches `SAFETY_BUFFER_MIN_GB` in
+/// `storage_config.py`.
+pub const SAFETY_BUFFER_MIN_GB: u32 = 5;
+/// Default for `safety_buffer_gb`. Matches `SAFETY_BUFFER_DEFAULT_GB`
 /// in `storage_config.py`.
-pub const OS_RESERVE_DEFAULT_GB: u32 = 20;
+pub const SAFETY_BUFFER_DEFAULT_GB: u32 = 5;
 /// Lower bound for any per-LUN size, in GB.
 pub const LUN_MIN_GB: u32 = 4;
 /// Upper bound for any per-LUN size, in GB. Matches the
@@ -50,8 +51,8 @@ pub const TARGET_FREE_PCT_MAX: u8 = 50;
 /// (Sentry only auto-deleted as a last resort).
 pub const SENTRY_MAX_AGE_DAYS_MAX: u32 = 3650;
 
-const fn default_os_reserve_gb() -> u32 {
-    OS_RESERVE_DEFAULT_GB
+const fn default_safety_buffer_gb() -> u32 {
+    SAFETY_BUFFER_DEFAULT_GB
 }
 
 const fn default_teslacam_gb() -> u32 {
@@ -74,18 +75,21 @@ const fn default_true() -> bool {
     true
 }
 
-/// LUN sizing + OS-reserve guard. Mirrors the `[storage]`
+/// Partition sizing + safety-buffer guard. Mirrors the `[storage]`
 /// section of teslausb.toml.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct StorageSection {
-    /// Hard reserve for OS + journals + worker scratch.
-    #[serde(default = "default_os_reserve_gb")]
-    pub os_reserve_gb: u32,
-    /// Size LUN 0 reports to Tesla (TeslaCam, exFAT).
+    /// Cushion held back on top of the *measured* OS/non-partition SD
+    /// usage so partition allocation can never starve the rootfs.
+    /// Accepts the legacy `os_reserve_gb` key for back-compat with a
+    /// pre-rework teslausb.toml (the web layer rewrites it on next save).
+    #[serde(default = "default_safety_buffer_gb", alias = "os_reserve_gb")]
+    pub safety_buffer_gb: u32,
+    /// Size partition 0 reports to Tesla (TeslaCam, exFAT).
     #[serde(default = "default_teslacam_gb")]
     pub teslacam_gb: u32,
-    /// Size LUN 1 reports to Tesla (media, FAT32).
+    /// Size partition 1 reports to Tesla (media, exFAT).
     #[serde(default = "default_media_gb")]
     pub media_gb: u32,
 }
@@ -93,7 +97,7 @@ pub struct StorageSection {
 impl Default for StorageSection {
     fn default() -> Self {
         Self {
-            os_reserve_gb: OS_RESERVE_DEFAULT_GB,
+            safety_buffer_gb: SAFETY_BUFFER_DEFAULT_GB,
             teslacam_gb: default_teslacam_gb(),
             media_gb: default_media_gb(),
         }
@@ -168,9 +172,16 @@ impl StorageConfig {
     }
 
     /// Semantic validation. Bounds-checks every field but does
-    /// NOT enforce the cross-field `teslacam + media <=
-    /// sd_total - os_reserve` constraint — that requires the
-    /// SD-card capacity and is the resize helper's job.
+    /// NOT enforce the cross-field `teslacam + media + os_usage +
+    /// safety_buffer <= sd_total` constraint.
+    ///
+    /// The worker only *reads* this config (for cleanup tuning); it never
+    /// resizes partitions, so it is deliberately NOT one of the layers that
+    /// enforce the no-overcommit capacity invariant. The two enforcing
+    /// layers are the web `apply_storage_config` pre-check and the
+    /// authoritative `teslausb-resize-lun` bash helper (which re-samples
+    /// `df`/`du` at apply time). Here we only guarantee the values are
+    /// individually in range so the worker never acts on a garbage size.
     ///
     /// # Errors
     ///
@@ -178,9 +189,9 @@ impl StorageConfig {
     /// prefix identifying the offending value.
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            self.storage.os_reserve_gb >= OS_RESERVE_MIN_GB,
-            "storage.os_reserve_gb must be >= {OS_RESERVE_MIN_GB} (got {})",
-            self.storage.os_reserve_gb,
+            self.storage.safety_buffer_gb >= SAFETY_BUFFER_MIN_GB,
+            "storage.safety_buffer_gb must be >= {SAFETY_BUFFER_MIN_GB} (got {})",
+            self.storage.safety_buffer_gb,
         );
         check_lun_size("storage.teslacam_gb", self.storage.teslacam_gb)?;
         check_lun_size("storage.media_gb", self.storage.media_gb)?;
@@ -221,7 +232,7 @@ mod tests {
     fn parses_full_file() {
         let raw = "\
 [storage]
-os_reserve_gb = 32
+safety_buffer_gb = 12
 teslacam_gb = 128
 media_gb = 64
 
@@ -232,12 +243,23 @@ preserve_with_gps = false
 ";
         let cfg: StorageConfig = toml::from_str(raw).unwrap();
         cfg.validate().unwrap();
-        assert_eq!(cfg.storage.os_reserve_gb, 32);
+        assert_eq!(cfg.storage.safety_buffer_gb, 12);
         assert_eq!(cfg.storage.teslacam_gb, 128);
         assert_eq!(cfg.storage.media_gb, 64);
         assert_eq!(cfg.cleanup.target_free_pct, 12);
         assert_eq!(cfg.cleanup.sentry_max_age_days, 90);
         assert!(!cfg.cleanup.preserve_with_gps);
+    }
+
+    #[test]
+    fn accepts_legacy_os_reserve_alias() {
+        // A pre-rework teslausb.toml carries os_reserve_gb; it must still
+        // parse (mapped onto safety_buffer_gb) until the web layer rewrites
+        // it with the new key on the next save.
+        let raw = "[storage]\nos_reserve_gb = 20\n";
+        let cfg: StorageConfig = toml::from_str(raw).unwrap();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.storage.safety_buffer_gb, 20);
     }
 
     #[test]
@@ -262,11 +284,11 @@ preserve_with_gps = false
     }
 
     #[test]
-    fn rejects_low_os_reserve() {
-        let raw = "[storage]\nos_reserve_gb = 4\n";
+    fn rejects_low_safety_buffer() {
+        let raw = "[storage]\nsafety_buffer_gb = 4\n";
         let cfg: StorageConfig = toml::from_str(raw).unwrap();
         let err = cfg.validate().unwrap_err();
-        assert!(err.to_string().contains("os_reserve_gb"), "got: {err}",);
+        assert!(err.to_string().contains("safety_buffer_gb"), "got: {err}",);
     }
 
     #[test]

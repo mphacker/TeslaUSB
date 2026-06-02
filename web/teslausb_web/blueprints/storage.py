@@ -50,9 +50,9 @@ def _form_to_config(form: dict[str, str], current: sc.TeslausbConfig) -> sc.Tesl
     so partial UI submissions don't reset unrelated knobs.
     """
     storage = sc.StorageSection(
-        os_reserve_gb=_safe_int(
-            form.get("os_reserve_gb", str(current.storage.os_reserve_gb)),
-            field="os_reserve_gb",
+        safety_buffer_gb=_safe_int(
+            form.get("safety_buffer_gb", str(current.storage.safety_buffer_gb)),
+            field="safety_buffer_gb",
         ),
         teslacam_gb=_safe_int(
             form.get("teslacam_gb", str(current.storage.teslacam_gb)),

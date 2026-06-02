@@ -257,8 +257,8 @@ def _samba_block(cfg: WebConfig) -> dict[str, object]:
 def _gadget_block(cfg: WebConfig) -> dict[str, object]:
     """USB gadget presentation to the Tesla.
 
-    "Present" means the UDC is bound AND both mass-storage LUNs have
-    non-empty backing files. Anything less is reported as ERROR — the
+    "Present" means the UDC is bound AND the single mass-storage LUN has
+    a non-empty backing file. Anything less is reported as ERROR — the
     Tesla cannot see the drive in that state, which is the worst
     user-visible outcome we can have.
     """
@@ -273,12 +273,12 @@ def _gadget_block(cfg: WebConfig) -> dict[str, object]:
     if token == "present":
         return {
             "severity": SEV_OK,
-            "message": "USB drives presented to Tesla",
+            "message": "USB drive presented to Tesla",
             "token": token,
         }
     return {
         "severity": SEV_ERROR,
-        "message": "Tesla cannot see USB drives (gadget unbound or LUN missing)",
+        "message": "Tesla cannot see USB drive (gadget unbound or LUN missing)",
         "token": token,
     }
 

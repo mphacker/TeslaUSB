@@ -59,7 +59,10 @@ RESIZE_HELPER: Final[Path] = Path("/usr/local/bin/teslausb-resize-lun")
 class LunStats:
     """Per-partition usage snapshot.
 
-    All bytes; UI converts to GB for display.
+    All bytes; UI converts to GB for display. ``max_allocatable_gb`` is
+    the largest size the operator may set this partition to right now,
+    given the other partition's advertised size, the measured OS usage,
+    and the safety buffer (see :func:`get_storage_stats`).
     """
 
     name: str
@@ -67,6 +70,7 @@ class LunStats:
     advertised_gb: int
     used_bytes: int
     free_bytes: int
+    max_allocatable_gb: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,7 +79,8 @@ class StorageStats:
 
     teslacam: LunStats
     media: LunStats
-    os_reserve_gb: int
+    safety_buffer_gb: int
+    os_usage_gb: int
     sd_total_gb: int
     sd_free_gb: int
     target_free_pct: int
@@ -83,18 +88,19 @@ class StorageStats:
     preserve_with_gps: bool
 
     @property
+    def reserve_gb(self) -> int:
+        """Total held back from partitions: measured OS usage + buffer."""
+        return self.os_usage_gb + self.safety_buffer_gb
+
+    @property
     def allocated_gb(self) -> int:
-        """Sum of the three reserve segments the cap enforces."""
-        return (
-            self.teslacam.advertised_gb
-            + self.media.advertised_gb
-            + self.os_reserve_gb
-        )
+        """Sum of the two advertised partition sizes."""
+        return self.teslacam.advertised_gb + self.media.advertised_gb
 
     @property
     def remaining_alloc_gb(self) -> int:
-        """How many GB the operator may still allocate."""
-        return max(0, self.sd_total_gb - self.allocated_gb)
+        """How many GB the operator may still allocate across partitions."""
+        return max(0, self.sd_total_gb - self.allocated_gb - self.reserve_gb)
 
 
 def _safe_disk_usage(path: Path) -> tuple[int, int]:
@@ -145,6 +151,28 @@ def _tree_size_bytes(root: Path) -> int:
     return total
 
 
+def _max_partition_gb(
+    sd_total_bytes: int,
+    other_advertised_gb: int,
+    os_used_bytes: int,
+    buffer_bytes: int,
+) -> int:
+    """Largest GB this partition may advertise without overcommitting.
+
+    Mirrors the authoritative byte-precise check in the ``teslausb-resize-lun``
+    helper: ``this_cap + other_cap + os_used + buffer <= sd_total``. Floors to
+    GiB (conservative) and clamps to the absolute LUN bounds. Returns 0 when
+    the card is unknown so the UI never advertises a bogus max.
+    """
+    if sd_total_bytes <= 0:
+        return 0
+    avail = sd_total_bytes - (other_advertised_gb * GB_BYTES) - os_used_bytes - buffer_bytes
+    max_gb = avail // GB_BYTES  # floor
+    if max_gb < 0:
+        return 0
+    return min(int(max_gb), sc.LUN_MAX_GB)
+
+
 def get_storage_stats(
     config: sc.TeslausbConfig | None = None,
     *,
@@ -166,12 +194,21 @@ def get_storage_stats(
     md_used = _tree_size_bytes(MEDIA_BACKING_ROOT)
     sd_total, sd_free = _sd_capacity_bytes()
 
+    # measured OS/non-partition usage = everything physically on the card
+    # that isn't the two backing trees (OS, journal, swap, index, tmp).
+    os_used_bytes = max(0, sd_total - sd_free - tc_used - md_used)
+    buffer_gb = config.storage.safety_buffer_gb
+    buffer_bytes = buffer_gb * GB_BYTES
+
     teslacam = LunStats(
         name="teslacam",
         backing_root=TESLACAM_BACKING_ROOT,
         advertised_gb=config.storage.teslacam_gb,
         used_bytes=tc_used,
         free_bytes=max(0, (config.storage.teslacam_gb * GB_BYTES) - tc_used),
+        max_allocatable_gb=_max_partition_gb(
+            sd_total, config.storage.media_gb, os_used_bytes, buffer_bytes
+        ),
     )
     media = LunStats(
         name="media",
@@ -179,11 +216,15 @@ def get_storage_stats(
         advertised_gb=config.storage.media_gb,
         used_bytes=md_used,
         free_bytes=max(0, (config.storage.media_gb * GB_BYTES) - md_used),
+        max_allocatable_gb=_max_partition_gb(
+            sd_total, config.storage.teslacam_gb, os_used_bytes, buffer_bytes
+        ),
     )
     return StorageStats(
         teslacam=teslacam,
         media=media,
-        os_reserve_gb=config.storage.os_reserve_gb,
+        safety_buffer_gb=buffer_gb,
+        os_usage_gb=(os_used_bytes + GB_BYTES - 1) // GB_BYTES,  # ceil (conservative)
         sd_total_gb=sd_total // GB_BYTES,
         sd_free_gb=sd_free // GB_BYTES,
         target_free_pct=config.cleanup.target_free_pct,
@@ -229,6 +270,36 @@ def apply_storage_config(
     path = config_path or sc.DEFAULT_CONFIG_PATH
 
     old_config = sc.load(path) if path.exists() else sc.default_config()
+
+    # Validate the no-overcommit cap against MEASURED usage before writing,
+    # so an over-cap submission is rejected cleanly (the resize helper
+    # re-checks authoritatively at apply time, but rejecting here avoids a
+    # half-applied config file).
+    tc_used = _tree_size_bytes(TESLACAM_BACKING_ROOT)
+    md_used = _tree_size_bytes(MEDIA_BACKING_ROOT)
+    sd_total, sd_free = _sd_capacity_bytes()
+    os_used_bytes = max(0, sd_total - sd_free - tc_used - md_used)
+    sc.validate_against_capacity(
+        new_config,
+        sd_total // GB_BYTES,
+        (os_used_bytes + GB_BYTES - 1) // GB_BYTES,  # ceil (conservative)
+    )
+
+    # Shrink guard, mirroring the authoritative check in the resize helper:
+    # refuse to persist a partition size below the data it currently stores.
+    # Done BEFORE save() so a size the helper would reject never leaves the
+    # on-disk config diverged from the live geometry.
+    if new_config.storage.teslacam_gb * GB_BYTES < tc_used:
+        raise sc.StorageConfigError(
+            f"teslacam_gb={new_config.storage.teslacam_gb} GB is smaller than "
+            f"current TeslaCam usage ({(tc_used + GB_BYTES - 1) // GB_BYTES} GB)",
+        )
+    if new_config.storage.media_gb * GB_BYTES < md_used:
+        raise sc.StorageConfigError(
+            f"media_gb={new_config.storage.media_gb} GB is smaller than "
+            f"current Media usage ({(md_used + GB_BYTES - 1) // GB_BYTES} GB)",
+        )
+
     # save() runs the same bounds checks load() does, so we can
     # rely on it to raise on invalid input.
     sc.save(new_config, path)

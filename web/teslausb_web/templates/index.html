@@ -153,7 +153,7 @@
                         </div>
                     </div>
                     <div class="metric-tile" id="metric-usb">
-                        <div class="metric-label">USB I/O (TeslaCam + Media)</div>
+                        <div class="metric-label">USB I/O (nbd0)</div>
                         <div class="metric-value" data-field="usb">—</div>
                         <div class="metric-detail" data-field="usb-detail">
                             &nbsp;
@@ -1041,11 +1041,13 @@ function dismissWifiStatus() {
                 '  · 60s avg',
                 'ok');
 
-        // USB I/O = nbd0 (TESLACAM LUN) + nbd1 (MEDIA LUN). These
-        // are the two block devices the mass-storage gadget exposes
-        // to Tesla. The v1 build used loop0 for a loopback image
-        // file; B-1 does not have a loopback image (LUNs are NBD-
-        // backed by the teslafat daemon) so loop0 was always 0.
+        // USB I/O = nbd0, the single block device the mass-storage
+        // gadget exposes to Tesla. It is one MBR-partitioned disk with
+        // two exFAT partitions (TeslaCam + Media), so a single nbd
+        // device carries all USB traffic. The v1 build used loop0 for a
+        // loopback image file; B-1 does not have a loopback image (the
+        // disk is NBD-backed by the teslafat daemon) so loop0 was
+        // always 0.
         //
         // Tesla writes are bursty (each ~1-min dashcam segment is
         // flushed by the camera SoC in a short burst), so the
@@ -1053,19 +1055,14 @@ function dismissWifiStatus() {
         // system is healthy. Headline is the 60s rolling average
         // for that reason; detail shows the live instantaneous rate.
         var nbd0 = io.nbd0 || {};
-        var nbd1 = io.nbd1 || {};
-        var usbInstR = (nbd0.read_kbs || 0) + (nbd1.read_kbs || 0);
-        var usbInstW = (nbd0.write_kbs || 0) + (nbd1.write_kbs || 0);
+        var usbInstR = (nbd0.read_kbs || 0);
+        var usbInstW = (nbd0.write_kbs || 0);
         var nbd0AvgR = (nbd0.avg60_read_kbs != null)
             ? nbd0.avg60_read_kbs : nbd0.read_kbs;
         var nbd0AvgW = (nbd0.avg60_write_kbs != null)
             ? nbd0.avg60_write_kbs : nbd0.write_kbs;
-        var nbd1AvgR = (nbd1.avg60_read_kbs != null)
-            ? nbd1.avg60_read_kbs : nbd1.read_kbs;
-        var nbd1AvgW = (nbd1.avg60_write_kbs != null)
-            ? nbd1.avg60_write_kbs : nbd1.write_kbs;
-        var usbAvgR = (nbd0AvgR || 0) + (nbd1AvgR || 0);
-        var usbAvgW = (nbd0AvgW || 0) + (nbd1AvgW || 0);
+        var usbAvgR = (nbd0AvgR || 0);
+        var usbAvgW = (nbd0AvgW || 0);
         var usbAvgTotal = usbAvgR + usbAvgW;
         // Sustained USB throughput above ~6 MB/s averaged warrants
         // a glance; above 12 MB/s is suspicious on a Pi Zero 2 W

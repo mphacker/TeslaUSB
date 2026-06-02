@@ -39,7 +39,7 @@ def test_load_parses_full_file(tmp_path: Path) -> None:
         target,
         """
         [storage]
-        os_reserve_gb = 32
+        safety_buffer_gb = 12
         teslacam_gb = 128
         media_gb = 64
 
@@ -51,7 +51,7 @@ def test_load_parses_full_file(tmp_path: Path) -> None:
     )
     config = load(target)
     assert config.storage == StorageSection(
-        os_reserve_gb=32,
+        safety_buffer_gb=12,
         teslacam_gb=128,
         media_gb=64,
     )
@@ -81,7 +81,7 @@ def test_load_rejects_malformed_toml(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("body", "needle"),
     [
-        ("[storage]\nos_reserve_gb = 4\n", "os_reserve_gb must be >= 8"),
+        ("[storage]\nsafety_buffer_gb = 4\n", "safety_buffer_gb must be >= 5"),
         ("[storage]\nteslacam_gb = 1\n", "teslacam_gb must be in"),
         ("[storage]\nmedia_gb = 9999\n", "media_gb must be in"),
         ("[cleanup]\ntarget_free_pct = -1\n", "target_free_pct"),
@@ -101,7 +101,7 @@ def test_load_validates_bounds(tmp_path: Path, body: str, needle: str) -> None:
 def test_save_roundtrip(tmp_path: Path) -> None:
     target = tmp_path / "teslausb.toml"
     config = TeslausbConfig(
-        storage=StorageSection(os_reserve_gb=24, teslacam_gb=200, media_gb=40),
+        storage=StorageSection(safety_buffer_gb=24, teslacam_gb=200, media_gb=40),
         cleanup=CleanupSection(
             target_free_pct=8,
             sentry_max_age_days=30,
@@ -141,10 +141,10 @@ def test_save_is_atomic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
 def test_save_validates_before_writing(tmp_path: Path) -> None:
     target = tmp_path / "teslausb.toml"
     bad = TeslausbConfig(
-        storage=StorageSection(os_reserve_gb=2),
+        storage=StorageSection(safety_buffer_gb=2),
         cleanup=CleanupSection(),
     )
-    with pytest.raises(StorageConfigError, match="os_reserve_gb"):
+    with pytest.raises(StorageConfigError, match="safety_buffer_gb"):
         save(bad, target)
     assert not target.exists()
 
@@ -155,7 +155,7 @@ def test_capacity_check_passes_when_sd_total_unknown() -> None:
 
 def test_capacity_check_passes_when_under_limit() -> None:
     config = TeslausbConfig(
-        storage=StorageSection(os_reserve_gb=20, teslacam_gb=64, media_gb=32),
+        storage=StorageSection(safety_buffer_gb=20, teslacam_gb=64, media_gb=32),
         cleanup=CleanupSection(),
     )
     validate_against_capacity(config, sd_total_gb=128)  # 128 - 20 = 108 usable
@@ -163,11 +163,23 @@ def test_capacity_check_passes_when_under_limit() -> None:
 
 def test_capacity_check_rejects_overcommit() -> None:
     config = TeslausbConfig(
-        storage=StorageSection(os_reserve_gb=20, teslacam_gb=256, media_gb=64),
+        storage=StorageSection(safety_buffer_gb=20, teslacam_gb=256, media_gb=64),
         cleanup=CleanupSection(),
     )
     with pytest.raises(StorageConfigError, match="exceeds usable capacity"):
         validate_against_capacity(config, sd_total_gb=256)  # 256-20=236 < 320
+
+
+def test_capacity_check_counts_measured_os_usage() -> None:
+    # Buffer alone fits, but once the measured OS footprint is added the
+    # request overcommits — proves os_usage_gb is enforced, not just buffer.
+    config = TeslausbConfig(
+        storage=StorageSection(safety_buffer_gb=5, teslacam_gb=64, media_gb=32),
+        cleanup=CleanupSection(),
+    )
+    validate_against_capacity(config, sd_total_gb=128, os_usage_gb=10)  # 96 <= 113
+    with pytest.raises(StorageConfigError, match="exceeds usable capacity"):
+        validate_against_capacity(config, sd_total_gb=128, os_usage_gb=40)  # 96 > 83
 
 
 def test_with_storage_replaces_only_named_fields() -> None:
@@ -175,7 +187,7 @@ def test_with_storage_replaces_only_named_fields() -> None:
     updated = with_storage(base, teslacam_gb=500)
     assert updated.storage.teslacam_gb == 500
     assert updated.storage.media_gb == base.storage.media_gb
-    assert updated.storage.os_reserve_gb == base.storage.os_reserve_gb
+    assert updated.storage.safety_buffer_gb == base.storage.safety_buffer_gb
     assert updated.cleanup == base.cleanup
 
 
@@ -199,9 +211,9 @@ def test_rendered_toml_has_sections_and_managed_header(tmp_path: Path) -> None:
 
 
 def test_default_constants_documented() -> None:
-    # Pin defaults — the operator chose 20 GB and these bounds; a
-    # silent change to either would surprise users.
-    assert storage_config.OS_RESERVE_DEFAULT_GB == 20
-    assert storage_config.OS_RESERVE_MIN_GB == 8
+    # Pin defaults — the operator chose a 5 GB safety buffer (floor and
+    # default) and these bounds; a silent change would surprise users.
+    assert storage_config.SAFETY_BUFFER_DEFAULT_GB == 5
+    assert storage_config.SAFETY_BUFFER_MIN_GB == 5
     assert storage_config.LUN_MIN_GB == 4
     assert storage_config.LUN_MAX_GB == 2048

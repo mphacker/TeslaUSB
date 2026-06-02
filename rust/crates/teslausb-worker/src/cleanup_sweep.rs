@@ -612,7 +612,7 @@ mod tests {
     fn storage(target_pct: u8, sentry_age: u32) -> StorageConfig {
         StorageConfig {
             storage: StorageSection {
-                os_reserve_gb: 20,
+                safety_buffer_gb: 10,
                 teslacam_gb: 64,
                 media_gb: 32,
             },

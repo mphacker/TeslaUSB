@@ -6,10 +6,10 @@ Single source of truth for:
   web UI. The single `/etc/teslausb/teslafat-0.toml` DiskConfig (one disk,
   two exFAT partitions) is DERIVED from this file by the resize helper
   (`AC.3`), which rewrites the matching `[[partition]]` size.
-* The hard OS reserve (`os_reserve_gb`) — guarantees that partition
-  allocation can never starve the rootfs. Documented in
-  `docs/06-OPERATIONS.md`; operators may edit by hand but the web
-  UI enforces the same minimum.
+* The safety buffer (`safety_buffer_gb`) — held back on top of the
+  *measured* OS/non-partition SD usage so partition allocation can
+  never starve the rootfs. Documented in `docs/06-OPERATIONS.md`;
+  operators may edit by hand but the web UI enforces the same minimum.
 * The auto-cleanup knobs consumed by the Rust worker
   (`teslausb-worker/src/cleanup.rs`): `target_free_pct`,
   `sentry_max_age_days`, `preserve_with_gps`.
@@ -43,11 +43,16 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_PATH: Final[Path] = Path("/etc/teslausb/teslausb.toml")
 
-# OS reserve floor — anything below this risks running rootfs out of
-# space during routine operation (journal, indexer scratch, archive
-# staging, worker tempfiles).
-OS_RESERVE_MIN_GB: Final[int] = 8
-OS_RESERVE_DEFAULT_GB: Final[int] = 20
+# Safety buffer floor — held back ON TOP OF the *measured* OS/non-partition
+# SD usage so the card can never physically reach 0 (which would crash the
+# rootfs and stop TeslaCam writes). This is the OS-growth budget cushion:
+# even after both partitions fill to their advertised caps, at least this
+# many GB stay free for journal/index/swap growth. Replaces the legacy flat
+# ``os_reserve_gb`` (which assumed a fixed OS footprint); the reserve is now
+# ``measured_os_usage + safety_buffer_gb``. Matches ``SAFETY_BUFFER_*`` in
+# ``rust/.../storage_config.rs`` and the ``teslausb-resize-lun`` helper.
+SAFETY_BUFFER_MIN_GB: Final[int] = 5
+SAFETY_BUFFER_DEFAULT_GB: Final[int] = 5
 
 # LUN size bounds match the teslafat backend's accepted range
 # (`setup-lib/11-gadget.sh::_b1_validate_size_gb`).
@@ -70,9 +75,15 @@ class StorageConfigError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class StorageSection:
-    """LUN sizing + OS-reserve guard."""
+    """Partition sizing + safety-buffer guard.
 
-    os_reserve_gb: int = OS_RESERVE_DEFAULT_GB
+    ``safety_buffer_gb`` is held back on top of the *measured* OS/non-
+    partition SD usage; the resize cap enforces
+    ``teslacam_gb + media_gb + measured_os_usage + safety_buffer_gb
+    <= sd_total_gb`` so the card can never physically overfill.
+    """
+
+    safety_buffer_gb: int = SAFETY_BUFFER_DEFAULT_GB
     teslacam_gb: int = 64
     media_gb: int = 32
 
@@ -107,8 +118,8 @@ def load(path: Path | None = None) -> TeslausbConfig:
 
     Raises `StorageConfigError` on parse failure or invalid values.
     Bounds-checks every field but does NOT enforce the cross-field
-    `teslacam + media <= sd_total - os_reserve` constraint — that
-    requires knowing the SD card capacity and is checked by
+    `teslacam + media + os_usage + safety_buffer <= sd_total` constraint
+    — that requires knowing the SD card capacity and is checked by
     `validate_against_capacity()`.
     """
     target = path or DEFAULT_CONFIG_PATH
@@ -154,37 +165,52 @@ def save(config: TeslausbConfig, path: Path | None = None) -> None:
 def validate_against_capacity(
     config: TeslausbConfig,
     sd_total_gb: int,
+    os_usage_gb: int = 0,
 ) -> None:
-    """Cross-field check: LUN total must fit within SD - OS reserve.
+    """Cross-field check: partitions + measured OS usage + safety buffer
+    must fit within the SD card.
 
-    Raises `StorageConfigError` with a human-readable message on
-    failure. `sd_total_gb=0` is treated as "unknown" and skips the
-    check (e.g., in unit tests with no backing filesystem).
+    The reserve held back is ``os_usage_gb`` (the *measured* non-partition
+    SD usage: OS install, journal, swap, index, tmp) plus the configured
+    ``safety_buffer_gb`` cushion. Enforcing
+    ``teslacam + media + os_usage + safety_buffer <= sd_total`` guarantees
+    that even if both partitions fill to their advertised caps, at least
+    ``safety_buffer_gb`` stays physically free, so the card can never crash
+    the rootfs.
+
+    Raises `StorageConfigError` with a human-readable message on failure.
+    `sd_total_gb=0` is treated as "unknown" and skips the check (e.g., in
+    unit tests with no backing filesystem). `os_usage_gb` defaults to 0 so
+    callers without a measurement still get the buffer-only floor.
     """
     if sd_total_gb <= 0:
         return
     storage = config.storage
-    usable = sd_total_gb - storage.os_reserve_gb
+    reserve = max(0, os_usage_gb) + storage.safety_buffer_gb
+    usable = sd_total_gb - reserve
     requested = storage.teslacam_gb + storage.media_gb
     if requested > usable:
         raise StorageConfigError(
             f"teslacam_gb + media_gb = {requested} GB exceeds usable "
             f"capacity {usable} GB (sd_total={sd_total_gb} GB minus "
-            f"os_reserve={storage.os_reserve_gb} GB)",
+            f"measured OS usage {max(0, os_usage_gb)} GB minus safety "
+            f"buffer {storage.safety_buffer_gb} GB)",
         )
 
 
 def with_storage(
     config: TeslausbConfig,
     *,
-    os_reserve_gb: int | None = None,
+    safety_buffer_gb: int | None = None,
     teslacam_gb: int | None = None,
     media_gb: int | None = None,
 ) -> TeslausbConfig:
     """Return a copy with the named storage fields replaced."""
     updated = replace(
         config.storage,
-        os_reserve_gb=os_reserve_gb if os_reserve_gb is not None else config.storage.os_reserve_gb,
+        safety_buffer_gb=(
+            safety_buffer_gb if safety_buffer_gb is not None else config.storage.safety_buffer_gb
+        ),
         teslacam_gb=teslacam_gb if teslacam_gb is not None else config.storage.teslacam_gb,
         media_gb=media_gb if media_gb is not None else config.storage.media_gb,
     )
@@ -222,8 +248,19 @@ def with_cleanup(
 
 
 def _parse_storage(section: Mapping[str, object]) -> StorageSection:
+    # Back-compat: a pre-existing teslausb.toml (before the safety-buffer
+    # rework) carries ``os_reserve_gb`` instead of ``safety_buffer_gb``.
+    # Map the legacy value onto the buffer (a larger held-back value is
+    # always conservative/safe) so an old file still loads; the next save()
+    # rewrites it with the new key.
+    if "safety_buffer_gb" in section:
+        buffer_gb = _as_int(section, "safety_buffer_gb", SAFETY_BUFFER_DEFAULT_GB)
+    elif "os_reserve_gb" in section:
+        buffer_gb = _as_int(section, "os_reserve_gb", SAFETY_BUFFER_DEFAULT_GB)
+    else:
+        buffer_gb = SAFETY_BUFFER_DEFAULT_GB
     candidate = StorageSection(
-        os_reserve_gb=_as_int(section, "os_reserve_gb", OS_RESERVE_DEFAULT_GB),
+        safety_buffer_gb=buffer_gb,
         teslacam_gb=_as_int(section, "teslacam_gb", StorageSection().teslacam_gb),
         media_gb=_as_int(section, "media_gb", StorageSection().media_gb),
     )
@@ -242,9 +279,10 @@ def _parse_cleanup(section: Mapping[str, object]) -> CleanupSection:
 
 
 def _validate_storage(section: StorageSection) -> None:
-    if section.os_reserve_gb < OS_RESERVE_MIN_GB:
+    if section.safety_buffer_gb < SAFETY_BUFFER_MIN_GB:
         raise StorageConfigError(
-            f"os_reserve_gb must be >= {OS_RESERVE_MIN_GB}, got {section.os_reserve_gb}",
+            f"safety_buffer_gb must be >= {SAFETY_BUFFER_MIN_GB}, "
+            f"got {section.safety_buffer_gb}",
         )
     _check_lun("teslacam_gb", section.teslacam_gb)
     _check_lun("media_gb", section.media_gb)
@@ -298,7 +336,7 @@ def _render(config: TeslausbConfig) -> str:
         "# Documented in docs/06-OPERATIONS.md.\n"
         "\n"
         "[storage]\n"
-        f"os_reserve_gb = {storage.os_reserve_gb}\n"
+        f"safety_buffer_gb = {storage.safety_buffer_gb}\n"
         f"teslacam_gb = {storage.teslacam_gb}\n"
         f"media_gb = {storage.media_gb}\n"
         "\n"

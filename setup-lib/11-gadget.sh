@@ -179,8 +179,8 @@ recentclips_hide_after_seconds = 0
 '
 
 # Unified storage + cleanup config (AC.1). Source of truth for partition
-# sizes and auto-cleanup knobs. `os_reserve_gb` is documented so
-# operators can edit by hand; minimum 8 GB (see docs/06-OPERATIONS.md).
+# sizes and auto-cleanup knobs. `safety_buffer_gb` is documented so
+# operators can edit by hand; minimum 5 GB (see docs/06-OPERATIONS.md).
 # `target_free_pct = 0` means "auto-tune from indexer median clip
 # size"; the Rust worker computes 2x the bytes-per-recording-minute
 # at runtime.
@@ -188,9 +188,10 @@ B1_TESLAUSB_CONF_TEMPLATE='# Managed by teslausb-b1 setup.sh (Phase 6.11) and th
 # Documented in docs/06-OPERATIONS.md "Editing teslausb.toml".
 
 [storage]
-# Hard reserve for OS + journals + worker scratch. Web UI enforces
-# the same minimum (8 GB). Default 20 GB.
-os_reserve_gb = __OS_RESERVE_GB__
+# Cushion held back on top of the MEASURED OS/non-partition SD usage so a
+# resize can never physically overfill the card. Web UI enforces the same
+# minimum (5 GB). Default 5 GB.
+safety_buffer_gb = __SAFETY_BUFFER_GB__
 teslacam_gb = __TESLACAM_GB__
 media_gb = __MEDIA_GB__
 
@@ -519,12 +520,17 @@ exec inotifywait -m -r --quiet \
 #
 # Usage: teslausb-resize-lun --lun {teslacam|media} --size-gb N
 #
-# Reads /etc/teslausb/teslausb.toml to enforce the operator storage
-# caps (os_reserve_gb, total SD-card capacity), refuses to shrink
-# below currently-used bytes, atomically rewrites the target partition
-# in the single DiskConfig AND the unified teslausb.toml, then bounces
-# usb-gadget + teslafat@0 so Tesla re-enumerates with the new
-# advertised partition size.
+# Reads /etc/teslausb/teslausb.toml for the safety buffer, MEASURES the
+# OS/non-partition SD usage at apply time, and enforces the no-overcommit
+# cap so the card can never physically overfill:
+#
+#   cap_teslacam + cap_media + measured_os_usage + safety_buffer <= sd_total
+#
+# (all computed in bytes; measured_os_usage = sd_total - sd_avail -
+# du(teslacam) - du(media)). It refuses to shrink a partition below its
+# currently-used bytes, atomically rewrites the target partition in the
+# single DiskConfig AND the unified teslausb.toml, then bounces usb-gadget +
+# teslafat@0 so Tesla re-enumerates with the new advertised partition size.
 #
 # Exit codes:
 #   0 success
@@ -618,18 +624,22 @@ rewrite_partition_volume_size_gb() {
   (( changed == 1 ))
 }
 
-OS_RESERVE_GB=$(read_toml_int os_reserve_gb "${TESLAUSB_TOML}" 20)
+OS_RESERVE_DEFAULT=5
+# Read the safety buffer; accept the legacy os_reserve_gb key on a
+# pre-rework teslausb.toml (a larger held-back value is always safe).
+SAFETY_BUFFER_GB=$(read_toml_int safety_buffer_gb "${TESLAUSB_TOML}" 0)
+if (( SAFETY_BUFFER_GB == 0 )); then
+  SAFETY_BUFFER_GB=$(read_toml_int os_reserve_gb "${TESLAUSB_TOML}" "${OS_RESERVE_DEFAULT}")
+fi
 CUR_TESLACAM_GB=$(read_toml_int teslacam_gb "${TESLAUSB_TOML}" 64)
 CUR_MEDIA_GB=$(read_toml_int    media_gb    "${TESLAUSB_TOML}" 32)
 
-# Defensive: enforce the os_reserve_gb floor (charter AC.1).
-# Both Python (storage_config.py) and Rust (storage_config.rs)
-# already enforce >= 8 GB on save, but a hand-edited TOML could
-# still slip a smaller value through; refuse to operate in that
-# case so the resize never silently allocates kernel/boot space
-# to a partition.
-if (( OS_RESERVE_GB < 8 )); then
-  echo "refusing: os_reserve_gb=${OS_RESERVE_GB} GB is below the 8 GB floor" >&2
+# Defensive: enforce the safety-buffer floor (charter AC.1). Both Python
+# (storage_config.py) and Rust (storage_config.rs) already enforce >= 5 GB
+# on save, but a hand-edited TOML could slip a smaller value through;
+# refuse so the resize never erases the OS-crash cushion.
+if (( SAFETY_BUFFER_GB < 5 )); then
+  echo "refusing: safety_buffer_gb=${SAFETY_BUFFER_GB} GB is below the 5 GB floor" >&2
   exit 3
 fi
 
@@ -642,28 +652,66 @@ fi
   exit 4
 }
 
-SD_TOTAL_GB=$(df -B1G --output=size /srv/teslausb 2>/dev/null   | tail -n1 | tr -d " " || echo 0)
-if [[ -z "${SD_TOTAL_GB}" || ! "${SD_TOTAL_GB}" =~ ^[0-9]+$ ]]; then
-  SD_TOTAL_GB=0
-fi
+# --- No-overcommit cap (byte-precise; measured OS usage) ---------------
+# Sample the SD filesystem and the two partition backing trees NOW (at
+# apply time) so the cap reflects live usage with no stale TOCTOU window.
+GIB=$(( 1024 * 1024 * 1024 ))
+read_df_bytes() { df -B1 --output="$1" /srv/teslausb 2>/dev/null | tail -n1 | tr -d " "; }
+SD_TOTAL_B=$(read_df_bytes size)
+SD_AVAIL_B=$(read_df_bytes avail)
 
-if [[ "${LUN}" == "teslacam" ]]; then
-  NEW_TESLACAM=${SIZE}; NEW_MEDIA=${CUR_MEDIA_GB}
-else
-  NEW_TESLACAM=${CUR_TESLACAM_GB}; NEW_MEDIA=${SIZE}
+# Fail CLOSED: if the SD geometry cannot be read we must NOT resize. The
+# no-overcommit cap below is the last guard against physically overfilling
+# the card (which would crash the rootfs and stop TeslaCam writes), so an
+# unreadable df must abort, never silently skip the check.
+if ! [[ "${SD_TOTAL_B}" =~ ^[0-9]+$ ]] || (( SD_TOTAL_B <= 0 )); then
+  echo "refusing: could not read SD total size from df (got: ${SD_TOTAL_B:-empty})" >&2
+  exit 3
 fi
-NEW_TOTAL=$(( NEW_TESLACAM + NEW_MEDIA + OS_RESERVE_GB ))
-
-if (( SD_TOTAL_GB > 0 && NEW_TOTAL > SD_TOTAL_GB )); then
-  echo "refusing: teslacam(${NEW_TESLACAM}) + media(${NEW_MEDIA}) + os_reserve(${OS_RESERVE_GB})"        "= ${NEW_TOTAL} GB exceeds SD capacity ${SD_TOTAL_GB} GB" >&2
+if ! [[ "${SD_AVAIL_B}" =~ ^[0-9]+$ ]]; then
+  echo "refusing: could not read SD available size from df (got: ${SD_AVAIL_B:-empty})" >&2
   exit 3
 fi
 
-# Shrink guard: refuse if used > new size. du -sb prints bytes;
-# cut -f1 grabs the size column.
-USED_BYTES=$(du -sb "${LUN_BACKING}" 2>/dev/null | cut -f1 || echo 0)
-[[ "${USED_BYTES}" =~ ^[0-9]+$ ]] || USED_BYTES=0
-USED_GB=$(( (USED_BYTES + (1024*1024*1024) - 1) / (1024*1024*1024) ))
+du_bytes() { du -sb "$1" 2>/dev/null | cut -f1; }
+USED_TC_B=$(du_bytes /srv/teslausb/teslacam)
+USED_MD_B=$(du_bytes /srv/teslausb/media)
+# Fail CLOSED on a du failure too: a 0 here would both under-count OS usage
+# AND defeat the shrink guard below, so an unreadable backing tree aborts.
+if ! [[ "${USED_TC_B}" =~ ^[0-9]+$ ]] || ! [[ "${USED_MD_B}" =~ ^[0-9]+$ ]]; then
+  echo "refusing: could not measure backing-tree usage via du" >&2
+  exit 3
+fi
+
+# measured_os_usage = everything physically on the card that is NOT the
+# two partition backing trees (OS, journal, swap, index, tmp). Clamp >= 0.
+OS_USED_B=$(( SD_TOTAL_B - SD_AVAIL_B - USED_TC_B - USED_MD_B ))
+(( OS_USED_B < 0 )) && OS_USED_B=0
+
+if [[ "${LUN}" == "teslacam" ]]; then
+  CAP_TC_B=$(( SIZE * GIB ));         CAP_MD_B=$(( CUR_MEDIA_GB * GIB ))
+else
+  CAP_TC_B=$(( CUR_TESLACAM_GB * GIB )); CAP_MD_B=$(( SIZE * GIB ))
+fi
+BUFFER_B=$(( SAFETY_BUFFER_GB * GIB ))
+NEED_B=$(( CAP_TC_B + CAP_MD_B + OS_USED_B + BUFFER_B ))
+
+if (( NEED_B > SD_TOTAL_B )); then
+  os_used_gb=$(( (OS_USED_B + GIB - 1) / GIB ))
+  sd_total_gb=$(( SD_TOTAL_B / GIB ))
+  echo "refusing: teslacam(${CAP_TC_B}) + media(${CAP_MD_B}) + os_usage(~${os_used_gb} GB)" \
+       "+ buffer(${SAFETY_BUFFER_GB} GB) exceeds SD capacity ~${sd_total_gb} GB" >&2
+  exit 3
+fi
+
+# Shrink guard: refuse if currently-used data > new size. Reuse the
+# bytes already sampled above; ceil to GB so the floor is conservative.
+if [[ "${LUN}" == "teslacam" ]]; then
+  USED_BYTES=${USED_TC_B}
+else
+  USED_BYTES=${USED_MD_B}
+fi
+USED_GB=$(( (USED_BYTES + GIB - 1) / GIB ))
 if (( USED_GB > SIZE )); then
   echo "refusing: ${LUN_BACKING} uses ${USED_GB} GB which exceeds requested ${SIZE} GB" >&2
   exit 3
@@ -695,11 +743,23 @@ if [[ -e "${TESLAUSB_TOML}" ]]; then
   mv -f "${TMP2}" "${TESLAUSB_TOML}"
 fi
 
-# Bounce: unbind UDC (Tesla sees eject), restart teslafat, re-bind.
+# Bounce: unbind UDC (Tesla sees eject), restart teslafat, re-bind. A trap
+# guarantees the gadget is re-presented even if a step below fails or the
+# helper is interrupted (SIGINT/SIGTERM) mid-bounce, so we never leave the
+# Tesla without a USB drive. Presenting is idempotent.
+present_usb() { /usr/local/bin/teslausb-present-usb >/dev/null 2>&1; }
+trap present_usb EXIT INT TERM
 /usr/local/bin/teslausb-hide-usb >/dev/null 2>&1 || true
 systemctl restart teslafat@0 >/dev/null 2>&1 || true
 sleep 2
-/usr/local/bin/teslausb-present-usb >/dev/null 2>&1 || true
+if ! present_usb; then
+  sleep 2
+  if ! present_usb; then
+    echo "resize-lun: ERROR could not re-present USB to Tesla after resize" >&2
+    exit 5
+  fi
+fi
+trap - EXIT INT TERM
 
 echo "resize-lun: complete; ${LUN} now ${SIZE} GB"
 exit 0
@@ -950,7 +1010,7 @@ b1_step_11() {
     b1_log "preserving existing ${B1_TESLAUSB_CONF}"
   else
     local teslausb_body
-    teslausb_body="${B1_TESLAUSB_CONF_TEMPLATE//__OS_RESERVE_GB__/20}"
+    teslausb_body="${B1_TESLAUSB_CONF_TEMPLATE//__SAFETY_BUFFER_GB__/5}"
     teslausb_body="${teslausb_body//__TESLACAM_GB__/${teslacam_gb}}"
     teslausb_body="${teslausb_body//__MEDIA_GB__/${media_gb}}"
     b1_log "seeding ${B1_TESLAUSB_CONF}"

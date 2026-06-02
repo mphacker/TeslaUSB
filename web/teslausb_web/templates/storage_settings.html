@@ -80,6 +80,28 @@
     color: var(--text-primary);
     font-size: var(--text-sm);
 }
+/* Single-disk capacity bar (TeslaCam | Media | OS+reserve | free). */
+.cap-bar {
+    display: flex;
+    width: 100%;
+    height: 28px;
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    border: 1px solid var(--border-input);
+    background: var(--form-input-bg);
+}
+.cap-seg { height: 100%; min-width: 2px; }
+.cap-seg-teslacam { background: #2f81f7; }
+.cap-seg-media    { background: #3fb950; }
+.cap-seg-reserve  { background: #6e7681; }
+.cap-seg-free     { background: var(--form-input-bg); }
+.cap-legend {
+    display: flex; gap: var(--space-4); flex-wrap: wrap;
+    font-size: var(--text-sm); color: var(--text-secondary);
+}
+.cap-legend span { display: inline-flex; align-items: center; gap: var(--space-2); }
+.cap-swatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+.storage-field-max { color: var(--text-secondary); font-size: var(--text-sm); font-weight: 400; }
 @media (max-width: 48rem) {
     .storage-header, .storage-card { padding: var(--space-4); }
     .storage-lun-row { grid-template-columns: 1fr; }
@@ -94,15 +116,32 @@
             Allocate how much of the SD card each partition presents to
             Tesla, and tune the auto-cleanup that keeps the TeslaCam
             partition from filling up. The gadget exposes a single USB
-            drive with two exFAT partitions (TeslaCam and Media). Changing
-            a partition's size briefly disconnects the USB gadget
-            (~30–60&nbsp;s) while Tesla re-enumerates.
+            drive with two exFAT partitions (TeslaCam and Media). You can
+            grow a partition into the card's free space — the maximum is
+            capped so the SD can never physically overfill and crash the
+            device. Changing a partition's size briefly disconnects the USB
+            gadget (~30–60&nbsp;s) while Tesla re-enumerates.
         </p>
         <div class="storage-pill-row">
             <span class="storage-pill">SD total: {{ stats.sd_total_gb }} GB</span>
             <span class="storage-pill">SD free: {{ stats.sd_free_gb }} GB</span>
             <span class="storage-pill">Allocated: {{ stats.allocated_gb }} GB</span>
-            <span class="storage-pill">Remaining: {{ stats.remaining_alloc_gb }} GB</span>
+            <span class="storage-pill">OS + reserve: {{ stats.reserve_gb }} GB</span>
+            <span class="storage-pill">Unallocated: {{ stats.remaining_alloc_gb }} GB</span>
+        </div>
+        {% set total = stats.sd_total_gb if stats.sd_total_gb > 0 else 1 %}
+        <div class="cap-bar" role="img"
+             aria-label="SD card: TeslaCam {{ stats.teslacam.advertised_gb }} GB, Media {{ stats.media.advertised_gb }} GB, OS plus reserve {{ stats.reserve_gb }} GB, unallocated {{ stats.remaining_alloc_gb }} GB of {{ stats.sd_total_gb }} GB total">
+            <div class="cap-seg cap-seg-teslacam" style="width: {{ (stats.teslacam.advertised_gb / total * 100) | round(2) }}%"></div>
+            <div class="cap-seg cap-seg-media" style="width: {{ (stats.media.advertised_gb / total * 100) | round(2) }}%"></div>
+            <div class="cap-seg cap-seg-reserve" style="width: {{ (stats.reserve_gb / total * 100) | round(2) }}%"></div>
+            <div class="cap-seg cap-seg-free" style="width: {{ (stats.remaining_alloc_gb / total * 100) | round(2) }}%"></div>
+        </div>
+        <div class="cap-legend">
+            <span><i class="cap-swatch cap-seg-teslacam"></i>TeslaCam {{ stats.teslacam.advertised_gb }} GB</span>
+            <span><i class="cap-swatch cap-seg-media"></i>Media {{ stats.media.advertised_gb }} GB</span>
+            <span><i class="cap-swatch cap-seg-reserve"></i>OS + reserve {{ stats.reserve_gb }} GB</span>
+            <span><i class="cap-swatch cap-seg-free" style="border:1px solid var(--border-input)"></i>Unallocated {{ stats.remaining_alloc_gb }} GB</span>
         </div>
     </header>
 
@@ -110,32 +149,48 @@
         <section class="storage-card">
             <h2 class="storage-card-title">Partition sizes</h2>
             <p class="storage-help">
-                The sum of TeslaCam, Media, and OS reserve must not
-                exceed the SD card size. The OS reserve protects the
-                root filesystem and cannot drop below 8&nbsp;GB.
+                Each partition can grow into the card's free space. The
+                maximum below is computed live as
+                <em>SD total − measured OS usage − the other partition − safety
+                buffer</em>, so the two partitions plus the OS can never
+                physically overfill the card. You can't shrink a partition
+                below the data it currently stores.
             </p>
 
             <div class="storage-fields">
+                {% set gib = 1024 * 1024 * 1024 %}
+                {% set tc_used_gb = (stats.teslacam.used_bytes + gib - 1) // gib %}
+                {% set md_used_gb = (stats.media.used_bytes + gib - 1) // gib %}
+                {% set tc_min = [4, tc_used_gb] | max %}
+                {% set md_min = [4, md_used_gb] | max %}
                 <div class="storage-field">
                     <label for="teslacam_gb">
                         <span>TeslaCam (exFAT) — GB</span>
-                        <span class="storage-field-copy">Used: {{ (stats.teslacam.used_bytes // (1024*1024*1024)) }} GB</span>
+                        <span class="storage-field-copy">Used: {{ tc_used_gb }} GB / {{ stats.teslacam.advertised_gb }} GB advertised</span>
                     </label>
-                    <input id="teslacam_gb" name="teslacam_gb" type="number" min="1" value="{{ stats.teslacam.advertised_gb }}" required>
+                    <input id="teslacam_gb" name="teslacam_gb" type="number"
+                           min="{{ tc_min }}" max="{{ stats.teslacam.max_allocatable_gb }}"
+                           data-used-gb="{{ tc_used_gb }}" data-min-gb="{{ tc_min }}"
+                           value="{{ stats.teslacam.advertised_gb }}" required>
+                    <span class="storage-field-max" data-max-for="teslacam_gb">Max you can set: {{ stats.teslacam.max_allocatable_gb }} GB</span>
                 </div>
                 <div class="storage-field">
                     <label for="media_gb">
                         <span>Media (exFAT) — GB</span>
-                        <span class="storage-field-copy">Used: {{ (stats.media.used_bytes // (1024*1024*1024)) }} GB</span>
+                        <span class="storage-field-copy">Used: {{ md_used_gb }} GB / {{ stats.media.advertised_gb }} GB advertised</span>
                     </label>
-                    <input id="media_gb" name="media_gb" type="number" min="1" value="{{ stats.media.advertised_gb }}" required>
+                    <input id="media_gb" name="media_gb" type="number"
+                           min="{{ md_min }}" max="{{ stats.media.max_allocatable_gb }}"
+                           data-used-gb="{{ md_used_gb }}" data-min-gb="{{ md_min }}"
+                           value="{{ stats.media.advertised_gb }}" required>
+                    <span class="storage-field-max" data-max-for="media_gb">Max you can set: {{ stats.media.max_allocatable_gb }} GB</span>
                 </div>
                 <div class="storage-field">
-                    <label for="os_reserve_gb">
-                        <span>OS reserve — GB</span>
-                        <span class="storage-field-copy">Minimum 8 GB. Default 20 GB.</span>
+                    <label for="safety_buffer_gb">
+                        <span>Safety buffer — GB</span>
+                        <span class="storage-field-copy">Held back on top of the measured OS usage ({{ stats.os_usage_gb }} GB). Minimum and default 5 GB.</span>
                     </label>
-                    <input id="os_reserve_gb" name="os_reserve_gb" type="number" min="8" value="{{ stats.os_reserve_gb }}" required>
+                    <input id="safety_buffer_gb" name="safety_buffer_gb" type="number" min="5" value="{{ stats.safety_buffer_gb }}" required>
                 </div>
             </div>
 
@@ -197,4 +252,61 @@
         </div>
     </form>
 </section>
+{% endblock %}
+{% block scripts %}
+<script>
+(function () {
+    "use strict";
+    var sdTotal = {{ stats.sd_total_gb | int }};
+    var osUsage = {{ stats.os_usage_gb | int }};
+    var tc = document.getElementById("teslacam_gb");
+    var md = document.getElementById("media_gb");
+    var buf = document.getElementById("safety_buffer_gb");
+    if (!tc || !md || !buf) { return; }
+
+    function intVal(el, fallback) {
+        var v = parseInt(el.value, 10);
+        return isNaN(v) ? fallback : v;
+    }
+
+    function maxFor(otherAdvertised, buffer) {
+        // Mirror the server: floor(sd_total - other - os_usage - buffer).
+        return Math.max(0, sdTotal - otherAdvertised - osUsage - buffer);
+    }
+
+    function refresh() {
+        var buffer = Math.max(5, intVal(buf, 5));
+
+        var tcMax = maxFor(intVal(md, 0), buffer);
+        var mdMax = maxFor(intVal(tc, 0), buffer);
+
+        tc.max = tcMax;
+        md.max = mdMax;
+
+        updateHint("teslacam_gb", tcMax);
+        updateHint("media_gb", mdMax);
+        flagOver(tc, tcMax);
+        flagOver(md, mdMax);
+    }
+
+    function updateHint(name, maxGb) {
+        var hint = document.querySelector('[data-max-for="' + name + '"]');
+        if (hint) { hint.textContent = "Max you can set: " + maxGb + " GB"; }
+    }
+
+    function flagOver(el, maxGb) {
+        var minGb = parseInt(el.getAttribute("data-min-gb"), 10) || 1;
+        var v = intVal(el, 0);
+        var bad = v > maxGb || v < minGb;
+        el.setCustomValidity(bad
+            ? "Enter a size between " + minGb + " and " + maxGb + " GB."
+            : "");
+    }
+
+    [tc, md, buf].forEach(function (el) {
+        el.addEventListener("input", refresh);
+    });
+    refresh();
+})();
+</script>
 {% endblock %}

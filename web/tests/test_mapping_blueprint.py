@@ -241,7 +241,8 @@ def app(tmp_path: Path, media_root: Path) -> Flask:
     state_dir.mkdir(parents=True, exist_ok=True)
     overrides_path = state_dir / "mapping_settings.json"
     overrides_path.write_text(
-        '{"schema_version": 1, "trip_gap_minutes": 5, "speed_limit_mph": 80}\n',
+        '{"schema_version": 1, "trip_gap_minutes": 5, "speed_limit_mph": 80, '
+        '"speed_units": "kph"}\n',
         encoding="utf-8",
     )
     cfg = WebConfig(
@@ -354,6 +355,8 @@ class TestMapView:
         # JSON-API URL. A few sentinel keys must be present.
         assert "__DATE__" in body
         assert "__TRIP_ID__" in body
+        assert '"speed_units": "kph"' in body
+        assert "js/mapping/speed_units.js" in body
 
     def test_index_renders_without_redirect_when_empty(self, empty_client: FlaskClient) -> None:
         # No data -> nothing to redirect to; the empty map must still render.

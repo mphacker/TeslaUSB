@@ -227,25 +227,3 @@ let enabledEventTypes = (function () {
         return Array.isArray(parsed) ? new Set(parsed) : null;
     } catch (e) { return null; }
 })();
-
-// Speed buckets in m/s mapped to viridis colors. Polyline segments
-// are bucketed and each bucket emits run-length-encoded multi-line
-// segments, NOT one polyline per waypoint pair (which would create
-// thousands of Leaflet objects on a multi-trip day and crush the
-// Pi Zero 2 W).
-// MPH-native speed buckets. Stored telemetry is `speed_mps` but
-// the UI is mph-only (US car), so we define the cut-points in
-// mph and convert once at compare time. Granularity is chosen
-// for typical US driving (parking → residential → city → 4-lane
-// → highway → fast highway) so colour actually varies across
-// the speeds people drive at, instead of collapsing 25-75 mph
-// into a single bucket.
-const MPS_PER_MPH = 0.44704;
-const SPEED_BUCKETS_MPH = [
-    { maxMph: 15, color: '#440154' },   //   0-15 mph   parking / walking pace
-    { maxMph: 30, color: '#3b528b' },   //  15-30 mph   residential
-    { maxMph: 45, color: '#21918c' },   //  30-45 mph   city / suburban
-    { maxMph: 60, color: '#5ec962' },   //  45-60 mph   highway (lower)
-    { maxMph: 75, color: '#fde725' },   //  60-75 mph   highway
-    { maxMph: Infinity, color: '#fffacd' }, // 75+ mph
-];

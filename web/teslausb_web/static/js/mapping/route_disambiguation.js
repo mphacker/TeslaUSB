@@ -1,9 +1,9 @@
 
 function speedColor(mps) {
-    const v = (typeof mps === 'number' && Number.isFinite(mps)) ? Math.abs(mps) : 0;
-    const mph = v / MPS_PER_MPH;
-    for (const b of SPEED_BUCKETS_MPH) if (mph < b.maxMph) return b.color;
-    return SPEED_BUCKETS_MPH[SPEED_BUCKETS_MPH.length - 1].color;
+    const speed = displaySpeedValue(mps);
+    const buckets = activeSpeedBuckets();
+    for (const bucket of buckets) if (speed < bucket.max) return bucket.color;
+    return buckets[buckets.length - 1].color;
 }
 
 // ===========================================================

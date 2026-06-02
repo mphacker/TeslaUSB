@@ -20,6 +20,7 @@ from teslausb_web.services.mapping_settings_service import (
     MappingSettings,
     MappingSettingsError,
     MappingSettingsService,
+    SpeedUnits,
     make_mapping_settings_service,
 )
 
@@ -35,22 +36,29 @@ def test_missing_file_returns_defaults(overrides_path: Path) -> None:
     assert snap.trip_gap_minutes == 5
     assert snap.speed_limit_mph == 0
     assert snap.speed_limit_mps == 0.0
+    assert snap.speed_units is SpeedUnits.MPH
     assert snap.speed_limit_enabled is False
     assert snap.trip_gap_seconds == 300
 
 
 def test_save_round_trip_and_cache(overrides_path: Path) -> None:
     svc = MappingSettingsService(overrides_path)
-    snap = svc.save_settings(trip_gap_minutes=7, speed_limit_mph=65)
+    snap = svc.save_settings(
+        trip_gap_minutes=7,
+        speed_limit_mph=65,
+        speed_units=SpeedUnits.KPH,
+    )
     assert snap.trip_gap_minutes == 7
     assert snap.speed_limit_mph == 65
     assert snap.speed_limit_mps == pytest.approx(65 * 0.44704)
+    assert snap.speed_units is SpeedUnits.KPH
     assert snap.speed_limit_enabled is True
 
     payload = json.loads(overrides_path.read_text(encoding="utf-8"))
     assert payload == {
         "schema_version": 1,
         "speed_limit_mph": 65,
+        "speed_units": "kph",
         "trip_gap_minutes": 7,
     }
 
@@ -65,14 +73,10 @@ def test_get_settings_only_stats_when_unchanged(overrides_path: Path) -> None:
     svc.save_settings(trip_gap_minutes=5, speed_limit_mph=0)
     # Warm the cache.
     svc.get_settings()
-    with patch(
-        "teslausb_web.services.mapping_settings_service.os.stat",
-        wraps=__import__("os").stat,
-    ) as stat_spy:
+    with patch("pathlib.Path.read_text", wraps=Path.read_text) as read_spy:
         for _ in range(10):
             svc.get_settings()
-        # stat() called once per get_settings, never reads the file.
-        assert stat_spy.call_count == 10
+        assert read_spy.call_count == 0
 
 
 def test_external_mutation_invalidates_cache(overrides_path: Path) -> None:
@@ -81,7 +85,8 @@ def test_external_mutation_invalidates_cache(overrides_path: Path) -> None:
     snap1 = svc.get_settings()
     # Simulate an external change with a bumped mtime.
     overrides_path.write_text(
-        '{"schema_version": 1, "trip_gap_minutes": 9, "speed_limit_mph": 75}\n',
+        '{"schema_version": 1, "trip_gap_minutes": 9, "speed_limit_mph": 75, '
+        '"speed_units": "kph"}\n',
         encoding="utf-8",
     )
     # The on-disk mtime changes monotonically; force a stat-cache bust.
@@ -94,6 +99,7 @@ def test_external_mutation_invalidates_cache(overrides_path: Path) -> None:
     assert snap2 is not snap1
     assert snap2.trip_gap_minutes == 9
     assert snap2.speed_limit_mph == 75
+    assert snap2.speed_units is SpeedUnits.KPH
 
 
 def test_validation_rejects_negative_speed(overrides_path: Path) -> None:
@@ -112,6 +118,26 @@ def test_validation_rejects_overlarge_trip_gap(overrides_path: Path) -> None:
     svc = MappingSettingsService(overrides_path)
     with pytest.raises(MappingSettingsError, match="trip_gap_minutes"):
         svc.save_settings(trip_gap_minutes=61, speed_limit_mph=0)
+
+
+def test_missing_speed_units_defaults_to_mph(overrides_path: Path) -> None:
+    overrides_path.write_text(
+        '{"schema_version": 1, "trip_gap_minutes": 5, "speed_limit_mph": 0}\n',
+        encoding="utf-8",
+    )
+    svc = MappingSettingsService(overrides_path)
+    assert svc.get_settings().speed_units is SpeedUnits.MPH
+
+
+def test_validation_rejects_unknown_speed_units(overrides_path: Path) -> None:
+    overrides_path.write_text(
+        '{"schema_version": 1, "trip_gap_minutes": 5, "speed_limit_mph": 0, '
+        '"speed_units": "mps"}\n',
+        encoding="utf-8",
+    )
+    svc = MappingSettingsService(overrides_path)
+    with pytest.raises(MappingSettingsError, match="speed_units"):
+        svc.get_settings()
 
 
 def test_unsupported_schema_version_raises(overrides_path: Path) -> None:
@@ -158,4 +184,5 @@ def test_factory_uses_cfg_overrides_path(tmp_path: Path) -> None:
         trip_gap_minutes=5,
         speed_limit_mph=0,
         speed_limit_mps=0.0,
+        speed_units=SpeedUnits.MPH,
     )

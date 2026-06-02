@@ -365,11 +365,21 @@
                         </p>
                     </div>
                     <div class="form-group">
-                        <label style="font-size:0.85rem"><strong>Speed alert (mph)</strong></label>
-                        <input type="number" name="speed_limit_mph" value="{{ cfg_mapping.speed_limit_mph|int }}" min="0" max="200" step="5" class="settings-form-input">
+                        <label for="mapping-speed-limit" style="font-size:0.85rem"><strong>Speed alert (mph)</strong></label>
+                        <input id="mapping-speed-limit" type="number" name="speed_limit_mph" value="{{ cfg_mapping.speed_limit_mph|int }}" min="0" max="200" step="5" class="settings-form-input">
                         <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
                             Marks a driving event on the map when your speed exceeds this threshold.
                             Set to 0 to disable speed alerts entirely.
+                        </p>
+                    </div>
+                    <div class="form-group">
+                        <label for="mapping-speed-units" style="font-size:0.85rem"><strong>Map speed display units</strong></label>
+                        <select id="mapping-speed-units" name="speed_units" class="settings-form-input">
+                            <option value="mph" {% if cfg_mapping.speed_units == 'mph' %}selected{% endif %}>mph</option>
+                            <option value="kph" {% if cfg_mapping.speed_units == 'kph' %}selected{% endif %}>kph</option>
+                        </select>
+                        <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
+                            Controls speed labels and color buckets on the map only. Stored telemetry and speed alerts stay canonical.
                         </p>
                     </div>
                 </div>

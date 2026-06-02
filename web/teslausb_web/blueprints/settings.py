@@ -32,6 +32,7 @@ from flask import (
     Response,
     current_app,
     flash,
+    g,
     jsonify,
     redirect,
     render_template,
@@ -39,11 +40,14 @@ from flask import (
     url_for,
 )
 
-from teslausb_web.blueprints.storage_health import current_snapshot as _storage_health_snapshot  # noqa: F401
+from teslausb_web.blueprints.storage_health import (
+    current_snapshot as _storage_health_snapshot,  # noqa: F401
+)
 from teslausb_web.services.gadget_state import gadget_mode_token
 from teslausb_web.services.mapping_settings_service import (
     MappingSettingsError,
     MappingSettingsService,
+    SpeedUnits,
 )
 from teslausb_web.services.samba_password_service import (
     SambaPasswordCommandError,
@@ -106,6 +110,15 @@ def _coerce_int_form_field(field_name: str, raw: str | None) -> int:
         return int(raw.strip())
     except ValueError as exc:
         raise MappingSettingsError(f"{field_name} must be an integer") from exc
+
+
+def _coerce_speed_units_form_field(raw: str | None) -> SpeedUnits:
+    if raw is None or not raw.strip():
+        return SpeedUnits.MPH
+    try:
+        return SpeedUnits(raw.strip().lower())
+    except ValueError as exc:
+        raise MappingSettingsError("Map speed display units must be mph or kph") from exc
 
 
 def _redirect_to_index() -> Response:
@@ -258,8 +271,6 @@ def _system_info() -> dict[str, object]:
 
 def _samba_password_set() -> bool:
     """One pdbedit probe per request — cached on flask.g to avoid double work."""
-    from flask import g
-
     cached = getattr(g, "_samba_password_set", None)
     if isinstance(cached, bool):
         return cached
@@ -277,10 +288,7 @@ def _share_paths_for_display() -> list[dict[str, str]]:
     samba_service = current_app.extensions.get("samba_service")
     shares = getattr(getattr(samba_service, "config", None), "shares", ()) or ()
     host = socket.gethostname() or "teslausb"
-    return [
-        {"name": share.name, "unc": f"\\\\{host}\\{share.name}"}
-        for share in shares
-    ]
+    return [{"name": share.name, "unc": f"\\\\{host}\\{share.name}"} for share in shares]
 
 
 def _index_context() -> dict[str, object]:
@@ -408,16 +416,19 @@ def save_mapping_settings() -> ResponseReturnValue:
             "Speed alert (mph)",
             request.form.get("speed_limit_mph"),
         )
+        speed_units = _coerce_speed_units_form_field(request.form.get("speed_units"))
         snapshot = service.save_settings(
             trip_gap_minutes=trip_gap,
             speed_limit_mph=speed_mph,
+            speed_units=speed_units,
         )
     except MappingSettingsError as exc:
         flash(f"Invalid mapping settings: {exc}", "error")
         return _redirect_to_index()
     flash(
         f"Mapping settings saved (trip gap {snapshot.trip_gap_minutes} min, "
-        f"speed alert {snapshot.speed_limit_mph} mph"
+        f"speed alert {snapshot.speed_limit_mph} mph, "
+        f"map speeds shown in {snapshot.speed_units.value}"
         f"{' — disabled' if not snapshot.speed_limit_enabled else ''}).",
         "success",
     )

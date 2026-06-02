@@ -103,6 +103,7 @@ const BOOTSTRAP = {{ mapping_bootstrap | tojson }};
 </script>
 {# Classic scripts preserve inline handler globals and share the BOOTSTRAP lexical global. #}
 <script src="{{ url_for('static', filename='js/mapping/bootstrap.js') }}"></script>
+<script src="{{ url_for('static', filename='js/mapping/speed_units.js') }}"></script>
 <script src="{{ url_for('static', filename='js/mapping/route_disambiguation.js') }}"></script>
 <script src="{{ url_for('static', filename='js/mapping/day_navigation.js') }}"></script>
 <script src="{{ url_for('static', filename='js/mapping/day_rendering.js') }}"></script>

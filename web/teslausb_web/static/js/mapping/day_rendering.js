@@ -5,7 +5,7 @@
 // ``currentDayData.trips`` (already includes inline waypoints, so
 // we don't fan out per-trip route fetches like the old
 // trip-by-trip view did). Speed-bucketed polylines render on a
-// shared canvas — see SPEED_BUCKETS_MPH / sharedCanvasRenderer above.
+// shared canvas — see activeSpeedBuckets() / sharedCanvasRenderer above.
 
 async function renderDay() {
     tripLayer.clearLayers();

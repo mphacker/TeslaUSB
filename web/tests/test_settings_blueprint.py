@@ -141,7 +141,7 @@ class TestStubRoutes:
     def test_save_mapping_persists(self, client, app) -> None:
         response = client.post(
             "/settings/save/mapping",
-            data={"trip_gap_minutes": "7", "speed_limit_mph": "65"},
+            data={"trip_gap_minutes": "7", "speed_limit_mph": "65", "speed_units": "kph"},
         )
         assert response.status_code == HTTPStatus.FOUND
         assert response.headers["Location"] == "/settings/"
@@ -149,6 +149,7 @@ class TestStubRoutes:
         snap = svc.get_settings()
         assert snap.trip_gap_minutes == 7
         assert snap.speed_limit_mph == 65
+        assert snap.speed_units == "kph"
         # And the JSON file was actually written.
         import json
 
@@ -156,13 +157,14 @@ class TestStubRoutes:
         assert payload == {
             "schema_version": 1,
             "speed_limit_mph": 65,
+            "speed_units": "kph",
             "trip_gap_minutes": 7,
         }
 
     def test_save_mapping_zero_speed_disables(self, client, app) -> None:
         response = client.post(
             "/settings/save/mapping",
-            data={"trip_gap_minutes": "5", "speed_limit_mph": "0"},
+            data={"trip_gap_minutes": "5", "speed_limit_mph": "0", "speed_units": "mph"},
         )
         assert response.status_code == HTTPStatus.FOUND
         svc = app.extensions["mapping_settings_service"]
@@ -172,13 +174,22 @@ class TestStubRoutes:
     def test_save_mapping_rejects_out_of_range(self, client, app) -> None:
         response = client.post(
             "/settings/save/mapping",
-            data={"trip_gap_minutes": "999", "speed_limit_mph": "0"},
+            data={"trip_gap_minutes": "999", "speed_limit_mph": "0", "speed_units": "mph"},
         )
         assert response.status_code == HTTPStatus.FOUND
         svc = app.extensions["mapping_settings_service"]
         # File was never written — defaults remain.
         snap = svc.get_settings()
         assert snap.trip_gap_minutes == 5
+
+    def test_save_mapping_rejects_unknown_speed_units(self, client, app) -> None:
+        response = client.post(
+            "/settings/save/mapping",
+            data={"trip_gap_minutes": "5", "speed_limit_mph": "0", "speed_units": "mps"},
+        )
+        assert response.status_code == HTTPStatus.FOUND
+        svc = app.extensions["mapping_settings_service"]
+        assert svc.get_settings().speed_units == "mph"
 
     def test_save_network_stub_redirects(self, client) -> None:
         response = client.post("/settings/save/network")

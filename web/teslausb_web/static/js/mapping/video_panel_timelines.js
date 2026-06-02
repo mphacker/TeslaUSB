@@ -16,8 +16,8 @@ function renderEvents() {
             icon: makeEventIcon(ev.event_type),
         });
 
-        const safeType = (ev.event_type || '').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/_/g, ' ');
-        const safeDesc = (ev.description || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const safeType = escapeHtml(ev.event_type || '').replace(/_/g, ' ');
+        const safeDesc = escapeHtml(formatEventDescription(ev));
 
         marker.bindPopup(
             `<strong>${safeType}</strong><br>` +
@@ -204,7 +204,7 @@ function sentryEventHtml(ev) {
         metaHtml = '<span class="st-meta-loading">Loading details…</span>';
         metaIsLazy = true;
     } else {
-        metaHtml = ev.description || ev.severity || '';
+        metaHtml = escapeHtml(formatEventDescription(ev) || ev.severity || '');
     }
     const hasCoords = ev.lat != null && ev.lon != null && (ev.lat !== 0 || ev.lon !== 0);
     const videoPath = (ev.video_path || '').replace(/"/g, '&quot;');

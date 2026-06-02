@@ -22,7 +22,9 @@ function updateOverlayTelemetry(wp) {
     if (coords) coords.textContent = `Location ${(wp.lat || 0).toFixed(4)}, ${(wp.lon || 0).toFixed(4)}`;
 
     const speedVal = document.getElementById('olSpeedVal');
-    if (speedVal) speedVal.textContent = Math.round(Math.abs((wp.speed_mps || 0) * 2.237));
+    if (speedVal) speedVal.textContent = formatDisplaySpeed(wp.speed_mps || 0);
+    const speedUnit = document.getElementById('olSpeedUnit');
+    if (speedUnit) speedUnit.textContent = speedUnitLabel();
 
     const gear = document.getElementById('olGear');
     let gearLetter = 'P';
@@ -304,7 +306,7 @@ function openVideoOverlay(waypoint, clickPoint, routeWps, tripId) {
                 <div class="oh-gear" id="olGear">P</div>
                 <div class="oh-pedal oh-brake" id="olBrake"><span class="oh-fill"><i></i></span><span class="oh-lbl">B</span></div>
                 <span class="oh-blinker left" id="olBlinkerL">◀</span>
-                <div class="oh-speed"><span class="oh-speed-val" id="olSpeedVal">0</span><span class="oh-speed-unit">mph</span></div>
+                <div class="oh-speed"><span class="oh-speed-val" id="olSpeedVal">0</span><span class="oh-speed-unit" id="olSpeedUnit">${speedUnitLabel()}</span></div>
                 <span class="oh-blinker right" id="olBlinkerR">▶</span>
                 <div class="oh-wheel" id="olWheel"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="8" stroke="#fff" stroke-width="1.4"/><path d="M6.8 9.8H17.2" stroke="#fff" stroke-width="2" stroke-linecap="round"/><path d="M12 9.8V16.8" stroke="#fff" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="12" r="1.8" stroke="#fff" stroke-width="1.4"/></svg></div>
                 <div class="oh-pedal oh-throttle" id="olThrottle"><span class="oh-fill"><i></i></span><span class="oh-lbl">A</span></div>

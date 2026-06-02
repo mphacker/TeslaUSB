@@ -57,6 +57,8 @@
 use core::fmt;
 
 use super::allocation_bitmap::{AllocationBitmap, AllocationBitmapError};
+use std::sync::Arc;
+
 use super::boot_sector::{self, BOOT_REGION_SIZE_BYTES, BootSectorError};
 use super::directory::{self, DirectoryError, RootDirectoryParams};
 use super::geometry::{ExfatGeometry, FIRST_CLUSTER_NUMBER};
@@ -86,8 +88,11 @@ pub struct ExfatSynth {
     /// Optional source for cluster-heap bytes outside the
     /// root/bitmap/upcase ranges. Installed via
     /// [`Self::with_layout`]; unset by default so the data
-    /// region zero-fills as Phase 2.11 documented.
-    data_source: Option<Box<dyn DataClusterSource + Send + Sync>>,
+    /// region zero-fills as Phase 2.11 documented. Held behind an
+    /// `Arc` so the write-side resolver can share the same layout
+    /// snapshot for lazy directory-buffer materialization (see
+    /// [`Self::directory_byte_source`]).
+    data_source: Option<Arc<dyn DataClusterSource + Send + Sync>>,
 }
 
 /// Errors returned by [`ExfatSynth::new`] and [`ExfatSynth::read`].
@@ -364,8 +369,17 @@ impl ExfatSynth {
                 .map_err(ExfatSynthError::Bitmap)?;
         }
         self.root_directory = layout.root_directory_bytes().to_vec();
-        self.data_source = Some(Box::new(layout));
+        self.data_source = Some(Arc::new(layout));
         Ok(self)
+    }
+
+    /// Clone the shared layout snapshot installed by
+    /// [`Self::with_layout`], for use as a lazy directory-byte
+    /// source by the write-side resolver. Returns `None` if no
+    /// layout was installed.
+    #[must_use]
+    pub fn directory_byte_source(&self) -> Option<Arc<dyn DataClusterSource + Send + Sync>> {
+        self.data_source.clone()
     }
 
     /// The geometry this synthesizer was built for.

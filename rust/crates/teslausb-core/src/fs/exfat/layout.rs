@@ -56,7 +56,7 @@
 //!   required.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::fs::backing_tree::{BackingDir, BackingFile, BackingTree};
 use crate::fs::cluster_layout::{AllocError, Allocation, ClusterAllocator};
@@ -114,6 +114,24 @@ pub struct FilePlacement {
     /// Absolute backing path. The materializer opens this
     /// path to serve file-content cluster reads.
     pub backing_path: PathBuf,
+}
+
+/// Where a single directory ended up in the synthesized
+/// volume. Used by the write-side resolver to seed every
+/// directory's contiguous cluster chain at startup — without
+/// this, only the root directory is known and Tesla's writes
+/// into subdirectory clusters (every `TeslaCam` clip lives in a
+/// subdirectory) are silently dropped after a remount.
+#[derive(Debug, Clone)]
+pub struct DirPlacement {
+    /// Directory path relative to the backing root (the root
+    /// directory itself is not included in the placement list;
+    /// see [`ExfatLayout::root_directory_bytes`]).
+    pub relative_path: PathBuf,
+    /// First cluster of the directory's contiguous allocation.
+    pub first_cluster: u32,
+    /// Number of contiguous clusters the directory occupies.
+    pub cluster_count: u32,
 }
 
 /// Errors that can prevent an [`ExfatLayout`] from being
@@ -198,9 +216,11 @@ impl std::error::Error for LayoutError {
 pub struct ExfatLayout {
     bytes_per_cluster: u32,
     cluster_heap_byte_offset: u64,
+    root_directory_cluster: u32,
     root_directory_bytes: Vec<u8>,
     subdir_clusters: BTreeMap<u32, Vec<u8>>,
     file_placements: Vec<FilePlacement>,
+    dir_placements: Vec<DirPlacement>,
     allocated_extents: Vec<Allocation>,
 }
 
@@ -275,9 +295,7 @@ impl ExfatLayout {
         )
         .map_err(LayoutError::Alloc)?;
 
-        let mut subdir_clusters: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
-        let mut file_placements: Vec<FilePlacement> = Vec::new();
-        let mut allocated_extents: Vec<Allocation> = Vec::new();
+        let mut sink = LayoutSink::default();
 
         let mut top_level_children: Vec<ChildEntry> =
             Vec::with_capacity(tree.root.subdirs.len() + tree.root.files.len());
@@ -285,10 +303,9 @@ impl ExfatLayout {
         for sub in &tree.root.subdirs {
             let alloc = plan_dir(
                 sub,
+                &PathBuf::from(sub.name.as_str()),
                 &mut allocator,
-                &mut subdir_clusters,
-                &mut file_placements,
-                &mut allocated_extents,
+                &mut sink,
                 metadata.upcase,
             )?;
             top_level_children.push(ChildEntry {
@@ -305,7 +322,7 @@ impl ExfatLayout {
         }
 
         for f in &tree.root.files {
-            let placement = plan_file(f, &mut allocator, &mut allocated_extents)?;
+            let placement = plan_file(f, &mut allocator, &mut sink.allocated_extents)?;
             top_level_children.push(ChildEntry {
                 name: f.name.as_str(),
                 attrs: FileAttributes {
@@ -316,18 +333,27 @@ impl ExfatLayout {
                 data_length: placement.size_bytes,
                 no_fat_chain: !placement.allocation.is_empty(),
             });
-            file_placements.push(placement);
+            sink.file_placements.push(placement);
         }
 
         let root_directory_bytes =
             render_root_directory(geometry, metadata, &top_level_children, bytes_per_cluster)?;
 
+        let LayoutSink {
+            subdir_clusters,
+            file_placements,
+            dir_placements,
+            allocated_extents,
+        } = sink;
+
         Ok(Self {
             bytes_per_cluster,
             cluster_heap_byte_offset,
+            root_directory_cluster: geometry.first_root_directory_cluster(),
             root_directory_bytes,
             subdir_clusters,
             file_placements,
+            dir_placements,
             allocated_extents,
         })
     }
@@ -366,6 +392,15 @@ impl ExfatLayout {
         &self.file_placements
     }
 
+    /// All subdirectory placements in DFS-pre-order (the root
+    /// directory is excluded — it lives at
+    /// [`ExfatGeometry::first_root_directory_cluster`] with bytes
+    /// from [`Self::root_directory_bytes`]).
+    #[must_use]
+    pub fn dir_placements(&self) -> &[DirPlacement] {
+        &self.dir_placements
+    }
+
     /// All contiguous extents the planner allocated for
     /// subdirectories and files. The synth marks each one in
     /// the allocation bitmap; the FAT region is unchanged
@@ -378,23 +413,37 @@ impl ExfatLayout {
 
 impl DataClusterSource for ExfatLayout {
     fn read_cluster_bytes(&self, cluster: u32, byte_in_cluster: usize, out: &mut [u8]) {
-        if let Some(bytes) = self.subdir_clusters.get(&cluster) {
-            let cluster_len = bytes.len();
-            let start = byte_in_cluster.min(cluster_len);
-            let available = cluster_len.saturating_sub(start);
-            let take = available.min(out.len());
-            if take > 0 {
-                let src_end = start.saturating_add(take);
-                if let (Some(src), Some(dst)) = (bytes.get(start..src_end), out.get_mut(..take)) {
-                    dst.copy_from_slice(src);
-                }
-            }
-            if let Some(tail) = out.get_mut(take..) {
-                tail.fill(0);
-            }
+        // The root directory cluster is held separately from
+        // `subdir_clusters`; serve it here too so the write-side
+        // resolver can materialize the root buffer (and its
+        // pre-existing-child baseline) from this single source.
+        if cluster == self.root_directory_cluster {
+            copy_cluster_bytes(&self.root_directory_bytes, byte_in_cluster, out);
+        } else if let Some(bytes) = self.subdir_clusters.get(&cluster) {
+            copy_cluster_bytes(bytes, byte_in_cluster, out);
         } else {
             out.fill(0);
         }
+    }
+}
+
+/// Copy `bytes` starting at `byte_in_cluster` into `out`,
+/// zero-filling any tail past the end of `bytes`. Shared by the
+/// root- and subdirectory-cluster arms of
+/// [`ExfatLayout::read_cluster_bytes`].
+fn copy_cluster_bytes(bytes: &[u8], byte_in_cluster: usize, out: &mut [u8]) {
+    let cluster_len = bytes.len();
+    let start = byte_in_cluster.min(cluster_len);
+    let available = cluster_len.saturating_sub(start);
+    let take = available.min(out.len());
+    if take > 0 {
+        let src_end = start.saturating_add(take);
+        if let (Some(src), Some(dst)) = (bytes.get(start..src_end), out.get_mut(..take)) {
+            dst.copy_from_slice(src);
+        }
+    }
+    if let Some(tail) = out.get_mut(take..) {
+        tail.fill(0);
     }
 }
 
@@ -420,12 +469,23 @@ struct ChildEntry<'a> {
     no_fat_chain: bool,
 }
 
+/// Mutable accumulators threaded through the recursive layout
+/// planner. They always grow together as the single "plan
+/// output", so bundling them keeps [`plan_dir`] within the
+/// argument budget and names the clump.
+#[derive(Default)]
+struct LayoutSink {
+    subdir_clusters: BTreeMap<u32, Vec<u8>>,
+    file_placements: Vec<FilePlacement>,
+    dir_placements: Vec<DirPlacement>,
+    allocated_extents: Vec<Allocation>,
+}
+
 fn plan_dir(
     dir: &BackingDir,
+    relative_path: &Path,
     allocator: &mut ClusterAllocator,
-    subdir_clusters: &mut BTreeMap<u32, Vec<u8>>,
-    file_placements: &mut Vec<FilePlacement>,
-    allocated_extents: &mut Vec<Allocation>,
+    sink: &mut LayoutSink,
     upcase: &UpcaseTable,
 ) -> Result<Allocation, LayoutError> {
     let bytes_per_cluster = allocator.bytes_per_cluster();
@@ -437,7 +497,12 @@ fn plan_dir(
     let dir_alloc = allocator
         .allocate(alloc_request)
         .map_err(LayoutError::Alloc)?;
-    allocated_extents.push(dir_alloc);
+    sink.allocated_extents.push(dir_alloc);
+    sink.dir_placements.push(DirPlacement {
+        relative_path: relative_path.to_path_buf(),
+        first_cluster: dir_alloc.first_cluster,
+        cluster_count: dir_alloc.cluster_count,
+    });
 
     // Recurse first so children's cluster numbers are stable.
     let mut child_entries: Vec<ChildEntry<'_>> =
@@ -447,19 +512,18 @@ fn plan_dir(
     for sub in &dir.subdirs {
         let sub_alloc = plan_dir(
             sub,
+            &relative_path.join(sub.name.as_str()),
             allocator,
-            subdir_clusters,
-            file_placements,
-            allocated_extents,
+            sink,
             upcase,
         )?;
         sub_allocs.push(sub_alloc);
     }
     let mut file_allocs: Vec<(Allocation, u64)> = Vec::with_capacity(dir.files.len());
     for f in &dir.files {
-        let placement = plan_file(f, allocator, allocated_extents)?;
+        let placement = plan_file(f, allocator, &mut sink.allocated_extents)?;
         file_allocs.push((placement.allocation, placement.size_bytes));
-        file_placements.push(placement);
+        sink.file_placements.push(placement);
     }
 
     for (sub, alloc) in dir.subdirs.iter().zip(sub_allocs.iter()) {
@@ -489,7 +553,12 @@ fn plan_dir(
     }
 
     let entry_bytes = render_directory_entries(&child_entries, upcase)?;
-    write_into_clusters(&entry_bytes, dir_alloc, bytes_per_cluster, subdir_clusters);
+    write_into_clusters(
+        &entry_bytes,
+        dir_alloc,
+        bytes_per_cluster,
+        &mut sink.subdir_clusters,
+    );
 
     Ok(dir_alloc)
 }
@@ -905,6 +974,30 @@ mod tests {
         let mut buf = vec![0xFFu8; 64];
         layout.read_cluster_bytes(u32::MAX, 0, &mut buf);
         assert!(buf.iter().all(|&b| b == 0));
+    }
+
+    /// Regression: the root directory cluster must be served by the
+    /// `DataClusterSource` (not just `root_directory_bytes()`), so the
+    /// write-side resolver can materialize the root buffer and its
+    /// pre-existing-child baseline from this single source. Before the
+    /// fix `read_cluster_bytes(root_cluster, ..)` zero-filled, leaving
+    /// the seeded root buffer empty and root deletions undetected.
+    #[test]
+    fn data_source_serves_root_directory_cluster_bytes() {
+        let fx = Fixture::new();
+        let mut root = empty_dir("root");
+        root.subdirs.push(empty_dir("RecentClips"));
+        let tree = BackingTree { root };
+        let layout = ExfatLayout::plan(&fx.geo, &fx.metadata(), &tree).expect("plan ok");
+        let root_cluster = fx.geo.first_root_directory_cluster();
+        let expected = layout.root_directory_bytes().to_vec();
+        assert!(
+            expected.iter().any(|&b| b != 0),
+            "root directory bytes should carry the RecentClips entry"
+        );
+        let mut buf = vec![0u8; expected.len()];
+        layout.read_cluster_bytes(root_cluster, 0, &mut buf);
+        assert_eq!(buf, expected);
     }
 
     // ─── sizing helpers ───────────────────────────────────────────────

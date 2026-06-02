@@ -362,6 +362,28 @@ impl Fat32WriteState {
         self
     }
 
+    /// Whether any host write is mid-flight: an unresolved dir
+    /// entry awaiting its cluster chain (`pending_files`),
+    /// out-of-order data awaiting an owner (`pending_data`), or a
+    /// file currently materialized as `.partial` awaiting flush
+    /// (`in_flight_files`). When all three are empty the volume is
+    /// quiescent and a full re-walk + swap is safe. See
+    /// [`crate::backend::reloadable::ReloadableBackend`].
+    #[must_use]
+    pub fn is_quiescent(&self) -> bool {
+        self.pending_files.is_empty()
+            && self.pending_data.is_empty()
+            && self.in_flight_files.is_empty()
+    }
+
+    /// Test-only: force the state to look mid-write so quiescence
+    /// gating can be exercised deterministically without driving a
+    /// real Tesla write burst.
+    #[cfg(test)]
+    pub(crate) fn mark_inflight_for_test(&mut self) {
+        self.in_flight_files.insert(PathBuf::from(".test-inflight"));
+    }
+
     /// Apply one kernel-issued write to the state machine.
     ///
     /// # Errors

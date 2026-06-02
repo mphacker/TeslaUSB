@@ -38,14 +38,17 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use teslausb_core::backend::BackendError;
 use teslausb_core::fs::cluster_layout::FIRST_DATA_CLUSTER;
 use teslausb_core::fs::cluster_map::{ClusterMap, ClusterMapError, FileExtent};
+use teslausb_core::fs::data_cluster_source::DataClusterSource;
 use teslausb_core::fs::exfat::dir_decode::{
     self, DecodedExfatEntry, ExfatDecodeResult, ExfatDirDecodeError, PartialEntrySet,
 };
 use teslausb_core::fs::exfat::geometry::ExfatGeometry;
+use teslausb_core::fs::exfat::layout::DirPlacement;
 use teslausb_core::fs::exfat::parse::{DecodeWriteError, DecodedWrite, decode_write};
 use teslausb_core::fs::geometry::{Geometry, SECTOR_SIZE_BYTES};
 
@@ -205,6 +208,17 @@ pub struct ExfatWriteState {
     /// in place; the Phase 4b cleanup worker decides whether
     /// to actually reap based on GPS / SEI metadata.
     deleted: DeletedSet,
+
+    /// Layout snapshot used to lazily materialize a seeded
+    /// directory's cluster bytes on its first write. Seeded
+    /// subdirectories start with an empty `buffer` (to bound
+    /// memory — a full `TeslaCam` tree has thousands of 128 KiB
+    /// directory clusters); on the first directory-cluster
+    /// write we fill the buffer from this source so that
+    /// `redecode_directory` sees the directory's *pre-existing*
+    /// entries and never mistakes them for deletions. `None`
+    /// for unit tests that construct the state without a layout.
+    dir_byte_source: Option<Arc<dyn DataClusterSource + Send + Sync>>,
 }
 
 /// Tracks the in-memory mirror of the exFAT allocation bitmap and
@@ -375,6 +389,7 @@ impl ExfatWriteState {
             recorded_file_sizes,
             bitmap: None,
             deleted: DeletedSet::new(),
+            dir_byte_source: None,
         };
         // Bootstrap the root directory with a single-cluster
         // chain. A FAT write that extends it will rebuild the
@@ -412,6 +427,62 @@ impl ExfatWriteState {
         self
     }
 
+    /// Seed every planned subdirectory's contiguous cluster chain
+    /// into the resolver, with `source` retained for lazy buffer
+    /// materialization (see [`Self::dir_byte_source`]).
+    ///
+    /// Without this, [`Self::new`] knows only the root directory.
+    /// Every `TeslaCam` clip lives inside a subdirectory
+    /// (`TeslaCam/RecentClips`, `SentryClips/<event>`, …), so after
+    /// a remount Tesla's directory-entry writes into those
+    /// subdirectory clusters would hit neither `cluster_to_directory`
+    /// nor `cluster_map`, fall into `pending_data`, and the clip
+    /// data would be silently dropped — the 2026-06-01 recording
+    /// outage. Seeding the chains here makes those writes resolve
+    /// from the very first one after open.
+    ///
+    /// Subdirectory `buffer`s are left empty and materialized
+    /// lazily on first write to bound memory; the root buffer is
+    /// materialized eagerly (a single cluster) so a partial root
+    /// rewrite still re-decodes the complete child set.
+    #[must_use]
+    pub fn with_directory_seed(
+        mut self,
+        source: Arc<dyn DataClusterSource + Send + Sync>,
+        dirs: &[DirPlacement],
+    ) -> Self {
+        let bytes_per_cluster_usize = self.bytes_per_cluster as usize;
+        let root_cluster = self.geometry.first_root_directory_cluster();
+        if let Some(root_state) = self.directories.get_mut(&root_cluster) {
+            let mut buf = vec![0u8; bytes_per_cluster_usize];
+            source.read_cluster_bytes(root_cluster, 0, &mut buf);
+            // Establish the pre-existing child baseline so the first
+            // post-open redecode of a partial root rewrite diffs
+            // against the real prior set (catching deletions), not an
+            // empty set.
+            let parent_path = root_state.parent_path.clone();
+            root_state.registered_children = Self::decode_registered_children(&buf, &parent_path);
+            root_state.buffer = buf;
+        }
+        for dir in dirs {
+            if dir.cluster_count == 0 {
+                continue;
+            }
+            let chain: Vec<u32> =
+                (dir.first_cluster..dir.first_cluster.saturating_add(dir.cluster_count)).collect();
+            let mut dir_state = DirectoryState::new(dir.relative_path.clone());
+            for &cluster in &chain {
+                self.cluster_to_directory.insert(cluster, dir.first_cluster);
+            }
+            dir_state.chain = chain;
+            // buffer intentionally left empty: lazily materialized
+            // from `source` on the first write to this directory.
+            self.directories.insert(dir.first_cluster, dir_state);
+        }
+        self.dir_byte_source = Some(source);
+        self
+    }
+
     /// Switch the pending-data spill from the default in-memory
     /// store (16 MiB cap) to a disk-backed store at `spill_dir`
     /// with a much larger cap (default 4 GiB). Production must
@@ -421,6 +492,28 @@ impl ExfatWriteState {
     pub fn with_disk_spill(mut self, spill_dir: PathBuf, max_bytes: u64) -> Self {
         self.pending_data = PendingSpill::open_disk(spill_dir, max_bytes);
         self
+    }
+
+    /// Whether any host write is mid-flight: an unresolved dir
+    /// entry awaiting its cluster chain (`pending_files`),
+    /// out-of-order data awaiting an owner (`pending_data`), or a
+    /// file currently materialized as `.partial` awaiting flush
+    /// (`in_flight_files`). When all three are empty the volume is
+    /// quiescent and a full re-walk + swap is safe. See
+    /// [`crate::backend::reloadable::ReloadableBackend`].
+    #[must_use]
+    pub fn is_quiescent(&self) -> bool {
+        self.pending_files.is_empty()
+            && self.pending_data.is_empty()
+            && self.in_flight_files.is_empty()
+    }
+
+    /// Test-only: force the state to look mid-write so quiescence
+    /// gating can be exercised deterministically without driving a
+    /// real Tesla write burst.
+    #[cfg(test)]
+    pub(crate) fn mark_inflight_for_test(&mut self) {
+        self.in_flight_files.insert(PathBuf::from(".test-inflight"));
     }
 
     /// Apply one kernel-issued write to the state machine.
@@ -553,12 +646,46 @@ impl ExfatWriteState {
         bytes: &[u8],
     ) -> Result<(), ExfatWriteError> {
         let bytes_per_cluster_usize = self.bytes_per_cluster as usize;
+        // Clone the cheap Arc handle up front so the lazy-fill
+        // below doesn't conflict with the `&mut directories` borrow.
+        let source = self.dir_byte_source.clone();
         let Some(dir_state) = self.directories.get_mut(&dir_first) else {
             return Ok(());
         };
         let Some(chain_index) = dir_state.chain.iter().position(|&c| c == cluster_number) else {
             return Ok(());
         };
+        // Lazy materialization: a seeded subdirectory starts with an
+        // empty buffer to bound memory. Fill it from the layout
+        // snapshot on first write so `redecode_directory` sees the
+        // directory's pre-existing entries (not just this write) and
+        // never mistakes them for deletions.
+        let needed_len = dir_state
+            .chain
+            .len()
+            .saturating_mul(bytes_per_cluster_usize);
+        if dir_state.buffer.len() < needed_len {
+            let mut buf = vec![0u8; needed_len];
+            if let Some(source) = source.as_ref() {
+                for (i, &cluster) in dir_state.chain.iter().enumerate() {
+                    let off = i.saturating_mul(bytes_per_cluster_usize);
+                    if let Some(slot) = buf.get_mut(off..off + bytes_per_cluster_usize) {
+                        source.read_cluster_bytes(cluster, 0, slot);
+                    }
+                }
+            }
+            dir_state.buffer = buf;
+            // Baseline the pre-existing child set from the freshly
+            // materialized buffer so the redecode below diffs against
+            // the directory's real prior entries. Without this, a clip
+            // Tesla deletes on its first write to a seeded subdirectory
+            // would diff against an empty set and go undetected,
+            // leaking a stale `cluster_map` extent (later misroute) and
+            // skipping its retention deletion mark.
+            let parent_path = dir_state.parent_path.clone();
+            dir_state.registered_children =
+                Self::decode_registered_children(&dir_state.buffer, &parent_path);
+        }
         let buffer_offset = chain_index.saturating_mul(bytes_per_cluster_usize);
         let copy_end = byte_in_cluster.saturating_add(bytes.len());
         let cluster_end = bytes_per_cluster_usize.min(copy_end);
@@ -607,6 +734,39 @@ impl ExfatWriteState {
             .apply_chunk(relative_path, byte_in_file, bytes)?;
         self.in_flight_files.insert(relative_path.clone());
         Ok(())
+    }
+
+    /// Decode a directory buffer into its `(first_cluster ->
+    /// relative_path)` child map, mirroring the File-entry decode
+    /// in [`Self::redecode_directory`]. Used to establish the
+    /// pre-existing baseline for a freshly materialized seeded
+    /// directory so the first post-open redecode correctly detects
+    /// deletions instead of diffing against an empty set.
+    fn decode_registered_children(buffer: &[u8], parent_path: &Path) -> HashMap<u32, PathBuf> {
+        let mut children: HashMap<u32, PathBuf> = HashMap::new();
+        if buffer.is_empty() {
+            return children;
+        }
+        let Ok(decoded) = dir_decode::decode_directory_cluster(buffer, None::<PartialEntrySet>)
+        else {
+            return children;
+        };
+        for entry in &decoded.entries {
+            if let DecodedExfatEntry::File {
+                name,
+                first_cluster,
+                ..
+            } = entry
+            {
+                if *first_cluster < FIRST_DATA_CLUSTER {
+                    continue;
+                }
+                if let Some(name) = name.as_deref() {
+                    children.insert(*first_cluster, parent_path.join(name));
+                }
+            }
+        }
+        children
     }
 
     fn redecode_directory(&mut self, dir_first: u32) -> Result<(), ExfatWriteError> {
@@ -777,20 +937,99 @@ impl ExfatWriteState {
         first_cluster: u32,
         relative_path: PathBuf,
     ) -> Result<(), ExfatWriteError> {
+        // Desired geometry comes from the dir-entry just decoded
+        // into `pending_files` (set by `handle_child_seen`). An
+        // exFAT directory is almost always `NoFatChain` (contiguous,
+        // no FAT entries written), so a FAT walk cannot recover its
+        // size — we derive the chain from `data_length` instead.
+        let (no_fat_chain, cluster_count) = self
+            .pending_files
+            .get(&first_cluster)
+            .map_or((true, 1), |p| (p.no_fat_chain, p.cluster_count));
+
         if self.directories.contains_key(&first_cluster) {
+            // Already known. A `NoFatChain` directory that grows
+            // (e.g. RecentClips rolling over into a new cluster)
+            // writes no FAT entry, so `resolve_after_fat_change`
+            // never fires; detect and adopt the growth here.
+            self.grow_directory_if_needed(first_cluster, no_fat_chain, cluster_count)?;
             return Ok(());
         }
         let mut dir_state = DirectoryState::new(relative_path);
-        if let Some(chain_vec) = self.try_walk_chain(first_cluster) {
-            self.adopt_directory_chain(&mut dir_state, first_cluster, &chain_vec);
+        let chain_vec = if no_fat_chain && cluster_count >= 1 {
+            (first_cluster..first_cluster.saturating_add(cluster_count)).collect::<Vec<_>>()
+        } else if let Some(chain_vec) = self.try_walk_chain(first_cluster) {
+            chain_vec
         } else {
-            dir_state.chain = vec![first_cluster];
-            dir_state.buffer = vec![0u8; self.bytes_per_cluster as usize];
-            self.cluster_to_directory
-                .insert(first_cluster, first_cluster);
-        }
+            vec![first_cluster]
+        };
+        self.adopt_directory_chain(&mut dir_state, first_cluster, &chain_vec);
         self.directories.insert(first_cluster, dir_state);
         self.replay_pending_data_for_directory(first_cluster)?;
+        Ok(())
+    }
+
+    /// Extend an already-registered contiguous (`NoFatChain`)
+    /// directory whose dir-entry now reports more clusters than we
+    /// have mapped. FAT-chained growth is still handled by
+    /// [`Self::resolve_after_fat_change`]; this covers the
+    /// contiguous case that writes no FAT entry.
+    fn grow_directory_if_needed(
+        &mut self,
+        first_cluster: u32,
+        no_fat_chain: bool,
+        cluster_count: u32,
+    ) -> Result<(), ExfatWriteError> {
+        if !no_fat_chain {
+            return Ok(());
+        }
+        let bytes_per_cluster_usize = self.bytes_per_cluster as usize;
+        let new_clusters: Vec<u32> = {
+            let Some(dir_state) = self.directories.get(&first_cluster) else {
+                return Ok(());
+            };
+            let current = u32::try_from(dir_state.chain.len()).unwrap_or(u32::MAX);
+            if cluster_count <= current {
+                return Ok(());
+            }
+            (first_cluster.saturating_add(current)..first_cluster.saturating_add(cluster_count))
+                .collect()
+        };
+        let (Some(&start), Some(&last)) = (new_clusters.first(), new_clusters.last()) else {
+            return Ok(());
+        };
+        // A freshly-claimed directory cluster authoritatively
+        // overrides any stale file extent that still maps it.
+        let evicted = self
+            .cluster_map
+            .remove_overlapping(start, last.saturating_add(1));
+        if !evicted.is_empty() {
+            tracing::debug!(
+                first_cluster,
+                evicted = evicted.len(),
+                "directory growth evicted stale overlapping file extents"
+            );
+        }
+        for &cluster in &new_clusters {
+            self.cluster_to_directory.insert(cluster, first_cluster);
+        }
+        if let Some(dir_state) = self.directories.get_mut(&first_cluster) {
+            dir_state.chain.extend_from_slice(&new_clusters);
+            // Only grow an already-materialized buffer; an empty
+            // (not-yet-written) buffer stays lazy and fills to the
+            // new size on the next write.
+            if !dir_state.buffer.is_empty() {
+                let new_len = dir_state
+                    .chain
+                    .len()
+                    .saturating_mul(bytes_per_cluster_usize);
+                dir_state.buffer.resize(new_len, 0);
+            }
+        }
+        for cluster in new_clusters {
+            self.replay_pending_data_for_cluster(cluster)?;
+        }
+        self.redecode_directory(first_cluster)?;
         Ok(())
     }
 
@@ -1497,6 +1736,264 @@ mod tests {
     fn root_cluster_byte() -> u64 {
         let g = geo();
         cluster_to_volume_byte(&g, g.first_root_directory_cluster())
+    }
+
+    /// Minimal [`DataClusterSource`] for seeding tests: returns
+    /// the recorded bytes for a cluster (zero-filled past the end)
+    /// and all-zero for any unknown cluster — exactly the contract
+    /// the real [`ExfatLayout`] honours for empty/never-written
+    /// directory clusters.
+    #[derive(Debug)]
+    struct FakeDirSource {
+        clusters: HashMap<u32, Vec<u8>>,
+    }
+
+    impl DataClusterSource for FakeDirSource {
+        fn read_cluster_bytes(&self, cluster: u32, byte_in_cluster: usize, out: &mut [u8]) {
+            let src = self.clusters.get(&cluster);
+            for (i, slot) in out.iter_mut().enumerate() {
+                *slot = src
+                    .and_then(|v| v.get(byte_in_cluster + i))
+                    .copied()
+                    .unwrap_or(0);
+            }
+        }
+    }
+
+    fn build_dir_entry(name: &str, first_cluster: u32, data_length: u64) -> Vec<u8> {
+        let n: Vec<u16> = name.encode_utf16().collect();
+        let params = FileEntrySetParams {
+            name: &n,
+            attributes: FileAttributes {
+                directory: true,
+                ..FileAttributes::default()
+            },
+            timestamps: ts(),
+            first_cluster,
+            valid_data_length: data_length,
+            data_length,
+            no_fat_chain: true,
+        };
+        let upcase = UpcaseTable::ascii_identity();
+        encode_file_entry_set(&params, &upcase).expect("encode dir entry")
+    }
+
+    fn seeded_state(
+        tmp: &TempDir,
+        dirs: &[DirPlacement],
+        source_clusters: HashMap<u32, Vec<u8>>,
+    ) -> ExfatWriteState {
+        let source = Arc::new(FakeDirSource {
+            clusters: source_clusters,
+        });
+        ExfatWriteState::new(geo(), writer(tmp), &[]).with_directory_seed(source, dirs)
+    }
+
+    /// Regression test for the 2026-06-01 recording outage
+    /// (Defect 2 — the "reboot amplifier"). Before the fix, only
+    /// the root directory was seeded into the resolver, so a clip
+    /// dir-entry written into a *subdirectory* cluster after open
+    /// hit neither `cluster_to_directory` nor `cluster_map`, spilled
+    /// to `pending_data`, and the clip never materialized. With the
+    /// subdirectory seeded, the write resolves from the first one.
+    #[test]
+    fn seeded_subdir_resolves_clip_written_after_open() {
+        let tmp = TempDir::new().unwrap();
+        let g = geo();
+        let dirs = vec![DirPlacement {
+            relative_path: PathBuf::from("RecentClips"),
+            first_cluster: 5,
+            cluster_count: 1,
+        }];
+        let mut s = seeded_state(&tmp, &dirs, HashMap::new());
+
+        let payload = b"reboot clip payload".repeat(4);
+        let clip_cluster = 9;
+        // Tesla writes the clip's dir entry INTO the seeded
+        // subdirectory cluster, then the clip data.
+        let entry = build_file_entry("clip.mp4", clip_cluster, payload.len() as u64, true);
+        s.apply_write(cluster_to_volume_byte(&g, 5), &entry)
+            .expect("clip dir entry into subdir cluster");
+        write_cluster_data(&mut s, clip_cluster, &payload);
+        s.flush().expect("flush");
+
+        let on_disk = fs::read(tmp.path().join("RecentClips").join("clip.mp4"))
+            .expect("clip must materialize under the seeded subdirectory");
+        assert_eq!(on_disk, payload);
+    }
+
+    /// Regression test for Defect 1 — contiguous (`NoFatChain`)
+    /// directory growth. `RecentClips` rolling over into a second
+    /// cluster writes no FAT entry, so the only growth signal is the
+    /// updated `data_length` in its parent dir-entry. Before the
+    /// fix, `ensure_directory_registered` early-returned for the
+    /// already-known directory and the new cluster stayed unmapped,
+    /// dropping every clip written into it.
+    #[test]
+    fn contiguous_directory_growth_registers_new_cluster() {
+        let tmp = TempDir::new().unwrap();
+        let g = geo();
+        let bpc = g.bytes_per_cluster();
+        let dirs = vec![DirPlacement {
+            relative_path: PathBuf::from("RecentClips"),
+            first_cluster: 5,
+            cluster_count: 1,
+        }];
+        // The original RecentClips cluster is packed with in-use
+        // entries (0xA1 = an unknown-but-in-use EntryType the decoder
+        // skips as Malformed). The point is it carries NO 0x00
+        // end-of-directory marker, so a decode of the grown directory
+        // flows past cluster 5 into the new cluster 6 — exactly why a
+        // full directory rolls over into a second cluster on a Tesla.
+        let mut source = HashMap::new();
+        source.insert(5u32, vec![0xA1u8; bpc as usize]);
+        let mut s = seeded_state(&tmp, &dirs, source);
+
+        // Step 1: Tesla grows RecentClips by rewriting its dir-entry
+        // in the ROOT directory with data_length = 2 clusters.
+        let grow_entry = build_dir_entry("RecentClips", 5, 2 * u64::from(bpc));
+        s.apply_write(root_cluster_byte(), &grow_entry)
+            .expect("grow dir entry in root");
+
+        // Step 2: a clip dir-entry written into the NEW second
+        // cluster (6) must now resolve.
+        let payload = b"growth clip data".repeat(3);
+        let clip_cluster = 9;
+        let entry = build_file_entry("clip2.mp4", clip_cluster, payload.len() as u64, true);
+        s.apply_write(cluster_to_volume_byte(&g, 6), &entry)
+            .expect("clip dir entry into grown cluster");
+        write_cluster_data(&mut s, clip_cluster, &payload);
+        s.flush().expect("flush");
+
+        let on_disk = fs::read(tmp.path().join("RecentClips").join("clip2.mp4"))
+            .expect("clip in the grown directory cluster must materialize");
+        assert_eq!(on_disk, payload);
+    }
+
+    /// Regression test for the GPT-5.5-reviewed blocker: a clip
+    /// Tesla DELETES on its very first write to a seeded
+    /// subdirectory must be detected. Before the baseline fix, the
+    /// lazy-materialized subdirectory diffed the post-write decode
+    /// against an EMPTY `registered_children`, so the removal was
+    /// missed — leaking the clip's stale `cluster_map` extent (a
+    /// later misroute / data-loss window) and skipping its retention
+    /// deletion mark. The pre-existing committed file must be kept
+    /// (Phase 4.2: deletions only discard `.partial` work).
+    #[test]
+    fn seeded_subdir_first_write_detects_deletion_of_preexisting_clip() {
+        let tmp = TempDir::new().unwrap();
+        let g = geo();
+        let bpc = g.bytes_per_cluster() as usize;
+
+        // A committed pre-existing clip lives in RecentClips at
+        // cluster 9; its dir-entry sits in RecentClips' cluster 5.
+        fs::create_dir_all(tmp.path().join("RecentClips")).unwrap();
+        fs::write(
+            tmp.path().join("RecentClips").join("clipA.mp4"),
+            vec![0u8; 64],
+        )
+        .unwrap();
+        let pre = PreExistingExfatExtent {
+            first_cluster: 9,
+            cluster_count: 1,
+            first_byte_in_file: 0,
+            file_size_bytes: 64,
+            relative_path: PathBuf::from("RecentClips/clipA.mp4"),
+        };
+        let mut dir_bytes = build_file_entry("clipA.mp4", 9, 64, true);
+        dir_bytes.resize(bpc, 0);
+        let mut source = HashMap::new();
+        source.insert(5u32, dir_bytes);
+
+        let dirs = vec![DirPlacement {
+            relative_path: PathBuf::from("RecentClips"),
+            first_cluster: 5,
+            cluster_count: 1,
+        }];
+        let src = Arc::new(FakeDirSource { clusters: source });
+        let mut s =
+            ExfatWriteState::new(geo(), writer(&tmp), &[pre]).with_directory_seed(src, &dirs);
+        assert_eq!(
+            s.extent_count(),
+            1,
+            "pre-existing clip seeded into cluster_map"
+        );
+
+        // Tesla rewrites RecentClips' cluster 5, dropping clipA.
+        let zeros = vec![0u8; bpc];
+        s.apply_write(cluster_to_volume_byte(&g, 5), &zeros)
+            .expect("subdir cluster rewrite");
+
+        assert!(
+            s.deleted().contains(Path::new("RecentClips/clipA.mp4")),
+            "deletion on the first write to a seeded subdir must be recorded"
+        );
+        assert_eq!(
+            s.extent_count(),
+            0,
+            "the deleted clip's stale extent must be evicted from cluster_map"
+        );
+        assert!(
+            tmp.path().join("RecentClips").join("clipA.mp4").exists(),
+            "the committed backing file is preserved (only .partial work is discarded)"
+        );
+    }
+
+    /// Root half of the same blocker (GPT-5.5 second-pass finding):
+    /// the root directory cluster is materialized in
+    /// `with_directory_seed` from the same `DataClusterSource`. Once
+    /// the source serves the root cluster, a clip Tesla deletes on its
+    /// first write to ROOT must also be detected — root must not diff
+    /// against an empty baseline either.
+    #[test]
+    fn seeded_root_first_write_detects_deletion_of_preexisting_clip() {
+        let tmp = TempDir::new().unwrap();
+        let g = geo();
+        let bpc = g.bytes_per_cluster() as usize;
+        let root_cluster = g.first_root_directory_cluster();
+
+        // A committed pre-existing clip lives at root, cluster 9.
+        fs::write(tmp.path().join("clipR.mp4"), vec![0u8; 64]).unwrap();
+        let pre = PreExistingExfatExtent {
+            first_cluster: 9,
+            cluster_count: 1,
+            first_byte_in_file: 0,
+            file_size_bytes: 64,
+            relative_path: PathBuf::from("clipR.mp4"),
+        };
+        // The source serves the root cluster carrying clipR's entry —
+        // exactly what the real `ExfatLayout` now does.
+        let mut root_bytes = build_file_entry("clipR.mp4", 9, 64, true);
+        root_bytes.resize(bpc, 0);
+        let mut source = HashMap::new();
+        source.insert(root_cluster, root_bytes);
+
+        let src = Arc::new(FakeDirSource { clusters: source });
+        let mut s = ExfatWriteState::new(geo(), writer(&tmp), &[pre]).with_directory_seed(src, &[]);
+        assert_eq!(
+            s.extent_count(),
+            1,
+            "pre-existing clip seeded into cluster_map"
+        );
+
+        // Tesla rewrites the root cluster, dropping clipR.
+        let zeros = vec![0u8; bpc];
+        s.apply_write(cluster_to_volume_byte(&g, root_cluster), &zeros)
+            .expect("root cluster rewrite");
+
+        assert!(
+            s.deleted().contains(Path::new("clipR.mp4")),
+            "deletion on the first write to the seeded root must be recorded"
+        );
+        assert_eq!(
+            s.extent_count(),
+            0,
+            "the deleted clip's stale extent must be evicted from cluster_map"
+        );
+        assert!(
+            tmp.path().join("clipR.mp4").exists(),
+            "the committed backing file is preserved"
+        );
     }
 
     #[test]

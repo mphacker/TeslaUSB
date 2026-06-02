@@ -256,8 +256,7 @@ impl PendingSpill {
                 match append_chunk_to_disk(&path, byte_in_cluster, bytes) {
                     Ok(file_offset) => {
                         let entry = index.entry(cluster);
-                        let is_new =
-                            matches!(entry, std::collections::hash_map::Entry::Vacant(_));
+                        let is_new = matches!(entry, std::collections::hash_map::Entry::Vacant(_));
                         entry.or_default().push(DiskChunkMeta {
                             byte_in_cluster: byte_in_cluster_u32,
                             file_offset,
@@ -413,9 +412,7 @@ impl PendingSpill {
             };
             self.total_bytes = self.total_bytes.saturating_sub(evicted_bytes);
             self.evicted_clusters_total = self.evicted_clusters_total.saturating_add(1);
-            self.evicted_chunks_total = self
-                .evicted_chunks_total
-                .saturating_add(evicted_chunks);
+            self.evicted_chunks_total = self.evicted_chunks_total.saturating_add(evicted_chunks);
             self.evicted_bytes_total = self.evicted_bytes_total.saturating_add(evicted_bytes);
             tracing::warn!(
                 cluster = oldest_cluster,
@@ -454,11 +451,7 @@ fn prepare_spill_dir(spill_dir: &Path) -> std::io::Result<()> {
 /// Append one chunk to its cluster file. File format per chunk:
 /// `[byte_in_cluster: u64 LE][len: u64 LE][bytes…]`. Returns the
 /// file offset where the payload (not the header) starts.
-fn append_chunk_to_disk(
-    path: &Path,
-    byte_in_cluster: usize,
-    bytes: &[u8],
-) -> std::io::Result<u64> {
+fn append_chunk_to_disk(path: &Path, byte_in_cluster: usize, bytes: &[u8]) -> std::io::Result<u64> {
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     let header_start = file.seek(SeekFrom::End(0))?;
     let mut header = [0u8; 16];
@@ -583,8 +576,7 @@ mod tests {
     #[test]
     fn disk_mode_round_trips_chunks_through_filesystem() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let mut spill =
-            PendingSpill::open_disk(tmp.path().to_path_buf(), 1024 * 1024);
+        let mut spill = PendingSpill::open_disk(tmp.path().to_path_buf(), 1024 * 1024);
         spill.push(7, 0, b"first");
         spill.push(7, 16, b"second");
         spill.push(8, 0, b"other");

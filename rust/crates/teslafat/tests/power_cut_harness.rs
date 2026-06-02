@@ -39,7 +39,7 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 use teslafat::backend::SynthBackend;
 use teslafat::backend::dir_tree::{DirTreeWriter, PARTIAL_SUFFIX};
-use teslafat::config::{Config, FsType, NbdConfig, RetentionConfig};
+use teslafat::config::{Config, FsType, RetentionConfig};
 use teslausb_core::backend::{BlockBackend, WriteFlags};
 use teslausb_core::fs::cluster_layout::FIRST_DATA_CLUSTER;
 use teslausb_core::fs::fat32::directory::{
@@ -61,8 +61,8 @@ fn sample_cfg(backing_root: PathBuf) -> Config {
         cluster_size: None,
         fs_type: FsType::Fat32,
         retention: RetentionConfig::default(),
-        nbd: NbdConfig::default(),
         spill_dir: None,
+        reload_on_sighup: true,
     }
 }
 
@@ -578,8 +578,8 @@ async fn exfat_power_cut_mid_write_recovery_discards_partial() {
         cluster_size: None,
         fs_type: FsType::Exfat,
         retention: RetentionConfig::default(),
-        nbd: NbdConfig::default(),
         spill_dir: None,
+        reload_on_sighup: true,
     };
     let backend = SynthBackend::open(&cfg).expect("open exfat");
     let g = ExfatGeometry::for_volume_size(VOLUME_BYTES).expect("geo");

@@ -514,6 +514,12 @@ impl SynthBackend {
                 relative_path: relative.to_path_buf(),
             });
         }
+        // Snapshot the (cheap, byte-free) directory placements
+        // before the layout is moved into the synth — the resolver
+        // seeds every subdirectory's cluster chain from these so
+        // Tesla's clip-entry writes resolve from the first one after
+        // a remount (2026-06-01 recording-outage fix).
+        let dir_placements = layout.dir_placements().to_vec();
         let synth = synth
             .with_layout(layout)
             .map_err(SynthBackendError::ExfatSynth)?;
@@ -521,8 +527,12 @@ impl SynthBackend {
             DirTreeWriter::new(cfg.backing_root.clone()).map_err(SynthBackendError::DirTree)?;
         let bitmap_first_cluster = synth.bitmap_first_cluster();
         let bitmap_cluster_count = synth.bitmap_cluster_count();
-        let mut exfat_write = ExfatWriteState::new(geometry.clone(), dir_tree, &pre_existing_extents)
-            .with_allocation_bitmap(bitmap_first_cluster, bitmap_cluster_count);
+        let mut exfat_write =
+            ExfatWriteState::new(geometry.clone(), dir_tree, &pre_existing_extents)
+                .with_allocation_bitmap(bitmap_first_cluster, bitmap_cluster_count);
+        if let Some(source) = synth.directory_byte_source() {
+            exfat_write = exfat_write.with_directory_seed(source, &dir_placements);
+        }
         if let Some(ref spill_dir) = cfg.spill_dir {
             exfat_write = exfat_write.with_disk_spill(
                 spill_dir.clone(),
@@ -567,6 +577,38 @@ impl SynthBackend {
         matches!(self.inner, SynthInner::Fat32(_))
     }
 
+    /// Whether the volume is quiescent — no host write is
+    /// mid-flight (no unresolved dir entry, no out-of-order data
+    /// awaiting an owner, no `.partial` awaiting flush).
+    ///
+    /// [`crate::backend::reloadable::ReloadableBackend`] consults
+    /// this before going live with a re-walked view: a full
+    /// layout swap is only safe while no in-flight write is
+    /// addressing the *current* layout. A poisoned `write_state`
+    /// lock is treated as **not** quiescent (fail-safe: never swap
+    /// when the write machine's state is uncertain).
+    #[must_use]
+    pub fn is_quiescent(&self) -> bool {
+        self.write_state.lock().is_ok_and(|state| match &*state {
+            WriteState::Fat32(s) => s.is_quiescent(),
+            WriteState::Exfat(s) => s.is_quiescent(),
+        })
+    }
+
+    /// Test-only: force the write machine to look mid-write so the
+    /// quiescence gate in
+    /// [`crate::backend::reloadable::ReloadableBackend::try_go_live`]
+    /// can be exercised deterministically.
+    #[cfg(test)]
+    pub(crate) fn mark_inflight_for_test(&self) {
+        if let Ok(mut state) = self.write_state.lock() {
+            match &mut *state {
+                WriteState::Fat32(s) => s.mark_inflight_for_test(),
+                WriteState::Exfat(s) => s.mark_inflight_for_test(),
+            }
+        }
+    }
+
     /// Snapshot the current extent table. Test-only helper: the
     /// production read path acquires the lock per-call.
     #[cfg(test)]
@@ -574,6 +616,19 @@ impl SynthBackend {
         self.file_extents
             .read()
             .map_or_else(|p| p.into_inner().clone(), |g| g.clone())
+    }
+
+    /// First (lowest) byte offset of the first backing-file extent,
+    /// or `None` if no files are mapped. Test-only helper for
+    /// sibling-module tests that need to read a known file's data
+    /// region without reaching into the private extent table.
+    #[cfg(test)]
+    pub(crate) fn first_file_byte(&self) -> Option<u64> {
+        self.file_extents
+            .read()
+            .map_or_else(|p| p.into_inner().clone(), |g| g.clone())
+            .first()
+            .map(|e| e.first_byte)
     }
 
     /// Translate the operator-facing `recentclips_hide_after_seconds`
@@ -925,8 +980,8 @@ mod tests {
             cluster_size: None,
             fs_type,
             retention: crate::config::RetentionConfig::default(),
-            nbd: crate::config::NbdConfig::default(),
             spill_dir: None,
+            reload_on_sighup: true,
         }
     }
 

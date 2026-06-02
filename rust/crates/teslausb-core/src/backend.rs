@@ -262,6 +262,32 @@ pub trait BlockBackend {
     async fn flush(&self) -> BackendResult<()>;
 }
 
+/// Transparent forwarding impl so an `Arc`-wrapped backend satisfies
+/// [`BlockBackend`] directly.
+///
+/// A composing backend (e.g. a partitioned disk) can then own
+/// `Arc<Child>` children while a separate control path — such as the
+/// `teslafat` SIGHUP live-reload handler — keeps its own `Arc` clone
+/// of each child to re-walk it, without a bespoke wrapper type. The
+/// forwarding is zero-cost beyond the `Arc` deref.
+impl<T: BlockBackend + ?Sized> BlockBackend for std::sync::Arc<T> {
+    fn size(&self) -> u64 {
+        (**self).size()
+    }
+
+    async fn read(&self, offset: u64, buf: &mut [u8]) -> BackendResult<()> {
+        (**self).read(offset, buf).await
+    }
+
+    async fn write(&self, offset: u64, buf: &[u8], flags: WriteFlags) -> BackendResult<()> {
+        (**self).write(offset, buf, flags).await
+    }
+
+    async fn flush(&self) -> BackendResult<()> {
+        (**self).flush().await
+    }
+}
+
 /// Helper that returns [`BackendError::OutOfBounds`] when the
 /// `(offset, len)` pair would access bytes past `size`.
 ///

@@ -2,11 +2,12 @@
 //!
 //! Spawns the compiled `teslafat` binary as a subprocess against a
 //! fixture TOML config that points the NBD listen socket at a
-//! tempdir-local path, then drives the NBD newstyle handshake +
+//! tempdir-local path and `backing_root` at an empty tempdir
+//! directory, then drives the NBD newstyle handshake +
 //! transmission protocol over a real `tokio::net::UnixStream` from
-//! the test process. The placeholder backend
-//! ([`teslafat::backend::ZeroBackend`]) synthesises zero bytes for
-//! every READ, so the smoke test asserts:
+//! the test process. The backend ([`teslafat::backend::SynthBackend`],
+//! wrapped in [`teslafat::backend::ReloadableBackend`]) synthesises a
+//! FAT32 view of the (empty) backing tree, so the smoke test asserts:
 //!
 //! 1. The daemon binds the configured socket and accepts a real
 //!    Unix-domain client.
@@ -14,9 +15,10 @@
 //!    export size — proving the [`teslafat::config::Config`] →
 //!    [`teslafat::server::serve`] → handshake plumbing is wired
 //!    end-to-end through the binary's `main`.
-//! 3. A `NBD_CMD_READ` of 4 KiB at offset 0 returns 4096 zero
-//!    bytes — proving the transmission loop dispatches commands
-//!    against the `ZeroBackend`.
+//! 3. A `NBD_CMD_READ` of 4 KiB at offset 0 returns the synthesized
+//!    FAT32 boot sector (jump `EB 58 90`, `MSWIN4.1`, `FAT32   `,
+//!    `55 AA`) — proving the transmission loop dispatches commands
+//!    against the live `SynthBackend` view.
 //! 4. The daemon exits cleanly on `SIGTERM` with no clients
 //!    connected — proving the signal-handling + accept-loop
 //!    shutdown wiring works.
@@ -26,6 +28,9 @@
 //!    never propagate to the accept loop" contract holds in the
 //!    binary (not just in `serve_one_connection`'s isolated unit
 //!    tests).
+//! 6. A `SIGHUP` re-walks the backing tree and swaps in a fresh
+//!    view once the LUN is quiescent, without changing the export
+//!    size — proving the Phase-1 live-reload wiring.
 //!
 //! The test deliberately speaks the NBD wire protocol directly over
 //! the Unix socket instead of going through the kernel `nbd-client`
@@ -54,12 +59,17 @@
 // explicitly carves out tests in the §"Lints" discussion. `panic`
 // is allowed for the same reason: a panicked smoke test surfaces
 // the captured daemon stderr via `DaemonHandle::Drop`, which is
-// strictly more useful than a swallowed `Err`.
+// strictly more useful than a swallowed `Err`. `print_stderr` is
+// allowed because the failure-path stderr dump
+// (`dump_stderr_on_failure`) deliberately writes the captured
+// daemon log to the test harness's stderr so a CI failure is
+// self-diagnosing.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
+    clippy::print_stderr,
     clippy::missing_panics_doc,
     clippy::missing_errors_doc
 )]
@@ -81,17 +91,30 @@ use teslafat::nbd::handshake::{
     CF_FIXED_NEWSTYLE, CF_NO_ZEROES, GREETING_LEN, IHAVEOPT, NBD_OPT_EXPORT_NAME,
 };
 use teslafat::nbd::wire::{
-    NBD_CMD_DISC, NBD_CMD_READ, NBD_EOK, NBD_SIMPLE_REPLY_MAGIC, REQUEST_HEADER_LEN, RequestHeader,
+    NBD_CMD_DISC, NBD_CMD_READ, NBD_EOK, NBD_SIMPLE_REPLY_MAGIC, RequestHeader,
     SIMPLE_REPLY_HEADER_LEN, encode_request_header,
 };
 
 /// Bytes in one GiB. Mirrors the constant the daemon uses in
-/// `main::unix_serve` to size the `ZeroBackend` from
+/// `main::unix_serve` to size the `SynthBackend` from
 /// `cfg.volume_size_gb`. Kept as a smoke-test local constant so a
 /// future renumbering in `main` (e.g. switching to GB instead of
 /// GiB) would surface here as an assertion failure rather than
 /// silently accept the new size.
 const BYTES_PER_GIB: u64 = 1024 * 1024 * 1024;
+
+/// Reserved region before the first partition in the synthesised MBR
+/// disk: one 1 MiB alignment unit (2048 sectors) holding sector 0.
+/// Matches `teslausb_core::fs::mbr::DEFAULT_ALIGNMENT_SECTORS`.
+const MBR_GAP_BYTES: u64 = 1024 * 1024;
+
+/// Total NBD export size the daemon advertises for a single-partition
+/// disk: the MBR/alignment gap plus the partition's volume bytes. The
+/// daemon now exports a whole partitioned disk (ADR-0023), not a bare
+/// volume, so the wire size is larger than `volume_size_gb * 2^30`.
+fn expected_disk_size(volume_size_gb: u32) -> u64 {
+    u64::from(volume_size_gb) * BYTES_PER_GIB + MBR_GAP_BYTES
+}
 
 /// Polling interval for waiting on the daemon's socket file to
 /// appear after spawn. 50 ms is long enough to avoid CPU-burning
@@ -169,10 +192,7 @@ impl DaemonHandle {
                         let _ = child.kill();
                         let _ = child.wait();
                         self.dump_stderr_on_failure();
-                        panic!(
-                            "daemon did not exit within {:?} of SIGTERM",
-                            SIGTERM_WAIT_TIMEOUT
-                        );
+                        panic!("daemon did not exit within {SIGTERM_WAIT_TIMEOUT:?} of SIGTERM");
                     }
                     thread::sleep(SOCKET_POLL_INTERVAL);
                 }
@@ -213,7 +233,7 @@ impl Drop for DaemonHandle {
             let deadline = Instant::now() + SIGTERM_WAIT_TIMEOUT;
             loop {
                 match child.try_wait() {
-                    Ok(Some(_)) => break,
+                    Ok(Some(_)) | Err(_) => break,
                     Ok(None) => {
                         if Instant::now() >= deadline {
                             let _ = child.kill();
@@ -222,7 +242,6 @@ impl Drop for DaemonHandle {
                         }
                         thread::sleep(SOCKET_POLL_INTERVAL);
                     }
-                    Err(_) => break,
                 }
             }
             if thread::panicking() {
@@ -230,29 +249,6 @@ impl Drop for DaemonHandle {
             }
         }
     }
-}
-
-/// Render the smoke-test fixture config TOML.
-///
-/// Defaults match the inc-1.6 `NbdConfig::default()` except the
-/// socket path, which is forced into the tempdir so each test gets
-/// an isolated bind. `volume_size_gb` is parameterised so the
-/// "advertises configured size" test can pin a non-default value
-/// and assert the daemon plumbs it through.
-fn fixture_toml(socket_path: &Path, volume_size_gb: u32, handshake_timeout_s: u64) -> String {
-    let socket = socket_path.display();
-    format!(
-        "backing_root = \"/var/teslacam\"\n\
-         volume_size_gb = {volume_size_gb}\n\
-         volume_label = \"TESLACAM\"\n\
-         \n\
-         [retention]\n\
-         recentclips_hide_after_seconds = 1800\n\
-         \n\
-         [nbd]\n\
-         socket_path = \"{socket}\"\n\
-         handshake_timeout_seconds = {handshake_timeout_s}\n"
-    )
 }
 
 /// Build the spawn config and start the daemon. Polls until the
@@ -268,7 +264,18 @@ fn start_daemon_with_handshake_timeout(
     let tempdir = TempDir::new().expect("tempdir");
     let config_path = tempdir.path().join("teslafat.toml");
     let socket_path = tempdir.path().join("teslafat.sock");
-    let toml = fixture_toml(&socket_path, volume_size_gb, handshake_timeout_s);
+    // The daemon walks `backing_root` at startup; point it at a real
+    // empty directory inside the tempdir so `SynthBackend::open`
+    // succeeds (an empty TeslaCAM volume) instead of erroring on a
+    // missing path.
+    let backing_root = tempdir.path().join("backing");
+    std::fs::create_dir_all(&backing_root).expect("create backing dir");
+    let toml = fixture_toml_with_backing(
+        &socket_path,
+        &backing_root,
+        volume_size_gb,
+        handshake_timeout_s,
+    );
     std::fs::write(&config_path, toml).expect("write config");
 
     // Cargo sets `CARGO_BIN_EXE_<bin-name>` for integration tests
@@ -338,6 +345,118 @@ fn wait_for_socket(path: &Path, timeout_dur: Duration) -> Result<(), String> {
     ))
 }
 
+/// Send SIGHUP to a PID via the POSIX `kill(1)` command. This is the
+/// live-reload trigger: the daemon re-walks its backing tree and swaps
+/// in a fresh synth view once the LUN is quiescent.
+fn send_sighup(pid: u32) -> std::io::Result<()> {
+    let status = Command::new("kill")
+        .arg("-HUP")
+        .arg(pid.to_string())
+        .status()?;
+    if !status.success() {
+        return Err(std::io::Error::other(format!(
+            "kill -HUP {pid} returned {status:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// Poll the daemon's captured stderr until a line contains `needle`
+/// or the deadline elapses. Returns the matching line on success.
+fn wait_for_stderr_line(
+    handle: &DaemonHandle,
+    needle: &str,
+    timeout_dur: Duration,
+) -> Option<String> {
+    let deadline = Instant::now() + timeout_dur;
+    loop {
+        if let Some(line) = handle
+            .stderr_snapshot()
+            .into_iter()
+            .find(|l| l.contains(needle))
+        {
+            return Some(line);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        thread::sleep(SOCKET_POLL_INTERVAL);
+    }
+}
+
+/// Build a fixture config TOML pointing `backing_root` at a caller-
+/// supplied path so a test can mutate the backing tree and trigger a
+/// SIGHUP reload.
+fn fixture_toml_with_backing(
+    socket_path: &Path,
+    backing_root: &Path,
+    volume_size_gb: u32,
+    handshake_timeout_s: u64,
+) -> String {
+    let socket = socket_path.display();
+    let backing = backing_root.display();
+    format!(
+        "disk_signature = 0x12345678\n\
+         \n\
+         [nbd]\n\
+         socket_path = \"{socket}\"\n\
+         handshake_timeout_seconds = {handshake_timeout_s}\n\
+         \n\
+         [[partition]]\n\
+         backing_root = \"{backing}\"\n\
+         volume_size_gb = {volume_size_gb}\n\
+         volume_label = \"TESLACAM\"\n\
+         \n\
+         [partition.retention]\n\
+         recentclips_hide_after_seconds = 1800\n"
+    )
+}
+
+/// Start the daemon against a caller-owned `backing_root` (kept alive
+/// by the test) so the test can add files and SIGHUP-reload the view.
+fn start_daemon_with_backing_root(volume_size_gb: u32, backing_root: &Path) -> DaemonHandle {
+    let tempdir = TempDir::new().expect("tempdir");
+    let config_path = tempdir.path().join("teslafat.toml");
+    let socket_path = tempdir.path().join("teslafat.sock");
+    let toml = fixture_toml_with_backing(&socket_path, backing_root, volume_size_gb, 30);
+    std::fs::write(&config_path, toml).expect("write config");
+
+    let binary = env!("CARGO_BIN_EXE_teslafat");
+    let mut child = Command::new(binary)
+        .arg("--config")
+        .arg(&config_path)
+        .env("RUST_LOG", "teslafat=debug,info")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn teslafat");
+
+    let stderr_lines = Arc::new(Mutex::new(Vec::<String>::new()));
+    if let Some(stderr) = child.stderr.take() {
+        let sink = Arc::clone(&stderr_lines);
+        thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines().map_while(Result::ok) {
+                sink.lock().unwrap().push(line);
+            }
+        });
+    }
+
+    let handle = DaemonHandle {
+        child: Some(child),
+        socket_path: socket_path.clone(),
+        stderr_lines,
+        _tempdir: tempdir,
+    };
+
+    if let Err(e) = wait_for_socket(&handle.socket_path, SOCKET_WAIT_TIMEOUT) {
+        handle.dump_stderr_on_failure();
+        panic!("daemon did not bind socket: {e}");
+    }
+    handle
+}
+
 /// Send SIGTERM to a PID via the POSIX `kill(1)` command. Zero
 /// new dependencies; works on every Unix host we support
 /// (Linux + macOS dev box).
@@ -373,7 +492,7 @@ fn smoke_runtime() -> tokio::runtime::Runtime {
 /// `cfg.volume_size_gb * GiB` plumbing is correct end-to-end.
 ///
 /// Mirrors the helper in `crate::server::tests::drive_client_handshake`
-/// but adds CF_NO_ZEROES (avoids the 124-byte pad) and parses the
+/// but adds `CF_NO_ZEROES` (avoids the 124-byte pad) and parses the
 /// 10-byte reply into the advertised size. Re-implementing it
 /// here (rather than re-exporting) keeps the cross-platform test
 /// helper isolated to its single user inside the production
@@ -432,7 +551,7 @@ async fn client_handshake_export_name(stream: &mut UnixStream) -> u64 {
 /// `offset`, return the payload bytes the server replies with.
 /// Asserts the simple-reply header has the right magic, the
 /// expected `handle`, and `error == NBD_EOK`. The test calls this
-/// as the primary "did the transmission loop and ZeroBackend
+/// as the primary "did the transmission loop and `SynthBackend`
 /// agree?" assertion.
 async fn client_read(stream: &mut UnixStream, offset: u64, length: u32, handle: u64) -> Vec<u8> {
     let req = encode_request_header(&RequestHeader {
@@ -547,23 +666,31 @@ async fn connect_with_retry(path: &Path) -> UnixStream {
 
 /// Happy path. The daemon serves a single client through the full
 /// pipeline: handshake -> READ 4 KiB -> DISC -> SIGTERM ->
-/// clean exit. Verifies the ZeroBackend wires through the
-/// transmission loop and the server::serve accept loop, and that
+/// clean exit. Verifies the `SynthBackend` wires through the
+/// transmission loop and the `server::serve` accept loop, and that
 /// the daemon's signal handler closes the run cleanly.
+///
+/// The READ targets the first byte of partition 1 (one 1 MiB
+/// alignment unit in, past the MBR/gap), which for the synthesized
+/// FAT32 volume is the boot sector: we assert the fixed `EB 58 90`
+/// jump, the `MSWIN4.1` OEM tag, the `FAT32   ` filesystem tag, and
+/// the `55 AA` end signature all arrive byte-exact over the NBD wire
+/// — proving the partitioned synth view (not a zero placeholder) is
+/// being served.
 #[test]
-fn daemon_serves_all_zero_via_nbd_handshake_and_read() {
+fn daemon_serves_fat_boot_sector_via_nbd_handshake_and_read() {
     let handle = start_daemon(4);
 
     let rt = smoke_runtime();
     let payload = rt.block_on(async {
         let mut stream = connect_with_retry(handle.socket_path()).await;
         let advertised = client_handshake_export_name(&mut stream).await;
-        let expected = u64::from(4u32) * BYTES_PER_GIB;
+        let expected = expected_disk_size(4);
         assert_eq!(
             advertised, expected,
             "advertised export size {advertised} != expected {expected}",
         );
-        let payload = client_read(&mut stream, 0, 4096, 0xC0FF_EE00_DEAD_BEEFu64).await;
+        let payload = client_read(&mut stream, MBR_GAP_BYTES, 4096, 0xC0FF_EE00_DEAD_BEEFu64).await;
         client_disc(&mut stream, 0xC0FF_EE00_DEAD_BEF0u64).await;
         // Give the server a moment to recognise DISC and drop the
         // connection before we SIGTERM. Not strictly required —
@@ -575,10 +702,25 @@ fn daemon_serves_all_zero_via_nbd_handshake_and_read() {
     });
 
     assert_eq!(payload.len(), 4096, "READ payload length");
-    assert!(
-        payload.iter().all(|&b| b == 0),
-        "READ payload not all zero (first non-zero at index {:?})",
-        payload.iter().position(|&b| b != 0),
+    assert_eq!(
+        &payload[0x00..0x03],
+        &[0xEB, 0x58, 0x90],
+        "boot sector jump instruction mismatch",
+    );
+    assert_eq!(
+        &payload[0x03..0x0B],
+        b"MSWIN4.1",
+        "boot sector OEM name mismatch",
+    );
+    assert_eq!(
+        &payload[0x52..0x5A],
+        b"FAT32   ",
+        "boot sector filesystem-type tag mismatch",
+    );
+    assert_eq!(
+        &payload[0x1FE..0x200],
+        &[0x55, 0xAA],
+        "boot sector end signature mismatch",
     );
 
     let status = handle.sigterm_and_wait();
@@ -620,7 +762,7 @@ fn daemon_exits_cleanly_on_sigterm_with_no_clients() {
 }
 
 /// ADR-0006 §B enforcement in the binary, not just the unit test.
-/// Connect, send a handshake reply that omits CF_FIXED_NEWSTYLE so
+/// Connect, send a handshake reply that omits `CF_FIXED_NEWSTYLE` so
 /// the server's handshake returns `Err`; the daemon must log a
 /// `warn!` and stay alive. A second client then connects, completes
 /// a real handshake + READ + DISC, and the daemon SIGTERMs out
@@ -664,9 +806,13 @@ fn daemon_recovers_from_bad_handshake_and_accepts_next_client() {
         {
             let mut good = connect_with_retry(handle.socket_path()).await;
             let advertised = client_handshake_export_name(&mut good).await;
-            assert_eq!(advertised, u64::from(4u32) * BYTES_PER_GIB);
+            assert_eq!(advertised, expected_disk_size(4));
             let payload = client_read(&mut good, 0, 512, 0xBADD_F00D_BADD_F00Du64).await;
-            assert!(payload.iter().all(|&b| b == 0), "second-client READ");
+            assert_eq!(
+                &payload[0x1FE..0x200],
+                &[0x55, 0xAA],
+                "second-client READ: MBR boot signature",
+            );
             client_disc(&mut good, 0xBADD_F00D_BADD_F00Eu64).await;
         }
     });
@@ -678,7 +824,7 @@ fn daemon_recovers_from_bad_handshake_and_accepts_next_client() {
     );
 }
 
-/// `cfg.volume_size_gb` actually flows through main -> ZeroBackend
+/// `cfg.volume_size_gb` actually flows through main -> `SynthBackend`
 /// -> handshake export-name reply -> wire. Uses a non-default size
 /// to rule out "the daemon ignored config and used a constant".
 #[test]
@@ -696,8 +842,8 @@ fn daemon_advertises_configured_volume_size_in_handshake() {
 
     assert_eq!(
         advertised,
-        u64::from(VOL_GIB) * BYTES_PER_GIB,
-        "wire-advertised size != volume_size_gb * 2^30",
+        expected_disk_size(VOL_GIB),
+        "wire-advertised size != disk (MBR gap + volume_size_gb * 2^30)",
     );
 
     let status = handle.sigterm_and_wait();
@@ -734,7 +880,7 @@ fn daemon_emits_started_sentinel_in_serve_mode() {
     assert!(status.success(), "daemon exit status {status:?}");
 }
 
-/// Cleanly exercising the SOCKET_WAIT_TIMEOUT path is hard without
+/// Cleanly exercising the `SOCKET_WAIT_TIMEOUT` path is hard without
 /// either flakiness or a fake daemon, so we accept that the
 /// "happy" tests above already exercise the polling logic via
 /// their own setup. This guard tests instead that
@@ -759,6 +905,91 @@ fn daemon_handshake_timeout_config_value_reaches_sentinel() {
     assert!(
         saw_field,
         "did not see nbd_handshake_timeout_s=47 in the sentinel line",
+    );
+
+    let status = handle.sigterm_and_wait();
+    assert!(status.success(), "daemon exit status {status:?}");
+}
+
+/// SIGHUP triggers a live re-walk of the backing tree and a
+/// quiescence-gated swap of the served synth view, without restarting
+/// the daemon and without changing the advertised export size (the NBD
+/// size contract is fixed for the life of the connection/device).
+///
+/// This proves the Phase-1 live-reload wiring end-to-end through the
+/// real binary: the SIGHUP handler is installed alongside SIGTERM/SIGINT,
+/// the rebuild runs off the request path, and the quiescent swap
+/// applies. A file added to the backing tree between start and SIGHUP
+/// is picked up by the re-walk (observable via the rebuilt
+/// `file_count` in the log), and the daemon keeps serving + still
+/// exits cleanly on SIGTERM afterwards.
+#[test]
+fn daemon_reloads_backing_tree_on_sighup() {
+    const VOL_GIB: u32 = 4;
+
+    let backing = TempDir::new().expect("backing tempdir");
+    std::fs::write(backing.path().join("first.txt"), b"hello").expect("seed file");
+
+    let handle = start_daemon_with_backing_root(VOL_GIB, backing.path());
+
+    // Record the export size before the reload.
+    let rt = smoke_runtime();
+    let size_before = rt.block_on(async {
+        let mut stream = connect_with_retry(handle.socket_path()).await;
+        let size = client_handshake_export_name(&mut stream).await;
+        client_disc(&mut stream, 0).await;
+        size
+    });
+    assert_eq!(
+        size_before,
+        expected_disk_size(VOL_GIB),
+        "pre-reload export size != disk (MBR gap + volume_size_gb * 2^30)",
+    );
+
+    // Mutate the backing tree, then trigger the live reload.
+    std::fs::write(backing.path().join("second.txt"), b"world").expect("add file");
+    send_sighup(handle.pid()).expect("kill -HUP <pid>");
+
+    // The daemon should re-walk, rebuild, and swap in the new view.
+    let rebuilt = wait_for_stderr_line(
+        &handle,
+        "rebuilt synth view from backing tree",
+        Duration::from_secs(10),
+    );
+    if rebuilt.is_none() {
+        handle.dump_stderr_on_failure();
+    }
+    assert!(
+        rebuilt.is_some(),
+        "daemon did not log a rebuild after SIGHUP"
+    );
+
+    let swapped = wait_for_stderr_line(
+        &handle,
+        "reload swap applied; new synth view is live",
+        Duration::from_secs(10),
+    );
+    if swapped.is_none() {
+        handle.dump_stderr_on_failure();
+    }
+    assert!(
+        swapped.is_some(),
+        "daemon did not apply the quiescent reload swap after SIGHUP",
+    );
+
+    // The export size is a fixed contract: it must be identical after
+    // the reload (it is derived from the config geometry, not the file
+    // set), or the kernel nbd-client / USB host would see the device
+    // size change underneath it.
+    let size_after = rt.block_on(async {
+        let mut stream = connect_with_retry(handle.socket_path()).await;
+        let size = client_handshake_export_name(&mut stream).await;
+        client_disc(&mut stream, 0).await;
+        size
+    });
+    assert_eq!(
+        size_after, size_before,
+        "export size changed across a SIGHUP reload",
     );
 
     let status = handle.sigterm_and_wait();

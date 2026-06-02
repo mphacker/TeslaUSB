@@ -30,11 +30,18 @@ use predicates::str;
 use tempfile::NamedTempFile;
 
 const FIXTURE_TOML: &str = "\
+disk_signature = 0x12345678
+
+[nbd]
+socket_path = \"/run/teslausb/teslafat.sock\"
+
+[[partition]]
 backing_root = \"/var/teslacam\"
 volume_size_gb = 64
 volume_label = \"TESLACAM\"
+fs_type = \"exfat\"
 
-[retention]
+[partition.retention]
 recentclips_hide_after_seconds = 1800
 ";
 
@@ -83,7 +90,7 @@ fn missing_config_exits_failure_with_path_in_error() {
 
 #[test]
 fn invalid_volume_size_in_config_exits_failure() {
-    let fixture = write_fixture(b"backing_root = \"/x\"\nvolume_size_gb = 1\n");
+    let fixture = write_fixture(b"[[partition]]\nbacking_root = \"/x\"\nvolume_size_gb = 1\n");
 
     Command::cargo_bin("teslafat")
         .unwrap()
@@ -97,8 +104,9 @@ fn invalid_volume_size_in_config_exits_failure() {
 
 #[test]
 fn unknown_field_in_config_exits_failure() {
-    let fixture =
-        write_fixture(b"backing_root = \"/x\"\nvolume_size_gb = 64\nnot_a_field = \"boom\"\n");
+    let fixture = write_fixture(
+        b"[[partition]]\nbacking_root = \"/x\"\nvolume_size_gb = 64\nnot_a_field = \"boom\"\n",
+    );
 
     Command::cargo_bin("teslafat")
         .unwrap()

@@ -39,7 +39,7 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 use teslafat::backend::SynthBackend;
-use teslafat::config::{Config, FsType, NbdConfig, RetentionConfig};
+use teslafat::config::{Config, FsType, RetentionConfig};
 use teslausb_core::backend::{BlockBackend, WriteFlags};
 use teslausb_core::fs::cluster_layout::FIRST_DATA_CLUSTER;
 use teslausb_core::fs::exfat::directory::{
@@ -62,8 +62,8 @@ fn sample_cfg(backing_root: PathBuf) -> Config {
         cluster_size: None,
         fs_type: FsType::Exfat,
         retention: RetentionConfig::default(),
-        nbd: NbdConfig::default(),
         spill_dir: None,
+        reload_on_sighup: true,
     }
 }
 

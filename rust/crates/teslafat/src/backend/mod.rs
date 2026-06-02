@@ -33,6 +33,19 @@
 //!   owning file or FAT chain is known. Used by both `fat32_write`
 //!   and `exfat_write` to prevent the unbounded growth that
 //!   OOM-killed `teslafat` on the Pi Zero 2 W on 2026-05-24.
+//! * [`reloadable`] — `ReloadableBackend`: wraps a [`SynthBackend`]
+//!   behind a swappable `Arc` so the daemon can re-walk `backing_root`
+//!   and atomically present backing-tree changes made on the Pi side
+//!   (lock-chime activation, cloud-sync deletions) to the USB host
+//!   **without a process restart**. Triggered by `SIGHUP`. See the
+//!   module docs for the load-then-use concurrency contract and the
+//!   media-LUN-only write-safety caveat.
+//! * [`partitioned`] — `PartitionedDiskBackend`: composes N child
+//!   backends (each a [`ReloadableBackend`]) behind a single
+//!   MBR-partitioned disk (ADR-0023), serving sector 0 from a
+//!   synthesized MBR and routing every other offset into the child
+//!   that owns it. Pure composition over [`BlockBackend`]; no
+//!   FS-synth changes.
 //!
 //! [`BlockBackend`]: teslausb_core::backend::BlockBackend
 
@@ -40,12 +53,16 @@ pub mod dir_tree;
 pub mod dirty_map;
 pub mod exfat_write;
 pub mod fat32_write;
+pub mod partitioned;
 pub(crate) mod pending_spill;
+pub mod reloadable;
 pub mod synth;
 pub mod zero;
 
 pub use dir_tree::{DirTreeError, DirTreeWriter, PARTIAL_SUFFIX};
 pub use exfat_write::{ExfatWriteError, ExfatWriteState};
 pub use fat32_write::{Fat32WriteError, Fat32WriteState};
+pub use partitioned::{PartitionedDiskBackend, PartitionedDiskError};
+pub use reloadable::ReloadableBackend;
 pub use synth::{SynthBackend, SynthBackendError};
 pub use zero::ZeroBackend;

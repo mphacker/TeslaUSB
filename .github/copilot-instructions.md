@@ -45,6 +45,40 @@ A reusable probe lives at
 `~/.copilot/session-state/<session>/files/perf_probe.py` (and prior
 checkpoints) — adapt rather than rewriting from scratch.
 
+## Problem-solving — run a parallel GPT-5.5 second opinion
+
+When you are trying to **root-cause or solve an issue** (a bug, an
+outage, a regression, an unexpected behavior, or any non-trivial design
+decision), do **not** rely solely on your own analysis. In parallel with
+your own investigation, kick off a **GPT-5.5 agent** (a background
+`Task`/sub-agent on model `gpt-5.5`) to independently research the
+problem and produce its own view of the root cause and fix.
+
+The workflow is mandatory for issue-solving:
+
+1. **Frame the problem once, completely.** Write a self-contained prompt
+   with all the context the GPT-5.5 agent needs (symptoms, relevant
+   files, what you've observed, the constraints/invariants, and the
+   specific question). The agent is stateless — it can't see your
+   conversation, so give it everything.
+2. **Launch the GPT-5.5 agent in parallel** and continue your own
+   independent investigation while it runs. Do **not** just wait idle —
+   form your own hypothesis and root cause from the code.
+3. **Compare notes.** When the agent returns, reconcile its findings
+   with yours: where you agree, where you disagree, and why. Treat
+   disagreement as a signal to dig deeper, not to pick a side by fiat.
+4. **Formulate a single, final root cause and plan of action** that
+   incorporates the strongest evidence from both views. Surface the
+   comparison (your view, GPT-5.5's view, the reconciled conclusion)
+   so the operator can see the reasoning.
+5. **Keep GPT-5.5 in the loop for verification.** Once you have a fix or
+   plan, send it back to the GPT-5.5 agent for review before executing
+   anything risky (especially live-hardware or recording-critical work).
+
+This is a standing operator directive: a second, independent opinion
+catches blind spots and prevents anchoring on the first plausible cause.
+It does not replace your own rigor — it cross-checks it.
+
 ## Charter still binds
 
 This file does not override `docs/03-CODE-QUALITY-CHARTER.md`. The

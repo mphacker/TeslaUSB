@@ -346,8 +346,8 @@ b1_step_04() {
   local nginx_changed=""
 
   # ------------------------------------------------------------------
-  # 1) teslafat@.service (Phase 1.6, instances @0 + @1 enabled later
-  #    by 6.10 against teslafat-0.toml + teslafat-1.toml).
+  # 1) teslafat@.service (Phase 1.6, only instance @0 enabled later
+  #    by 6.10 against single DiskConfig teslafat-0.toml with two exFAT partitions).
   # ------------------------------------------------------------------
   if [[ ! -r "${B1_TESLAFAT_UNIT_SRC}" ]]; then
     b1_err "missing required unit source: ${B1_TESLAFAT_UNIT_SRC}"

@@ -4,9 +4,10 @@
 # simulating a USB re-plug (UDC unbind + rebind).
 #
 # Why: Tesla caches the custom lock chime (LockChime.wav at the root of
-# the MEDIA LUN) and only re-reads it on a fresh USB *enumeration*. A
-# soft SCSI medium-change (tesla_cache_invalidate.sh, ~200 ms) is enough
-# for Tesla to re-read directory listings (new music tracks, LightShow
+# the MEDIA partition — partition 2 of the single dashcam device) and
+# only re-reads it on a fresh USB *enumeration*. A soft SCSI
+# medium-change (tesla_cache_invalidate.sh, ~200 ms) is enough for
+# Tesla to re-read directory listings (new music tracks, LightShow
 # files), but it is NOT enough for the lock chime — the car keeps
 # playing the OLD chime until the device is re-enumerated. v1 solved
 # this the same way (rebind_usb_gadget): unbind the gadget UDC, pause,
@@ -14,23 +15,37 @@
 # pick up a changed chime.
 #
 # What this does:
-#   1. `sync` so any clip the car just finished is flushed to the
-#      backing store before we detach.
-#   2. Capture the current UDC + both LUN backing file paths.
-#   3. Unbind the gadget UDC (Tesla sees an eject of BOTH LUNs).
-#   4. Wait briefly for the disconnect to settle.
-#   5. Re-restore the LUN backing files if the unbind cleared them
+#   1. `sync` so the just-written LockChime.wav (and any clip the car
+#      just finished) is flushed to the media backing store before the
+#      daemon re-walks it.
+#   2. SIGHUP the teslafat instance (teslafat@0) so it re-walks the
+#      media partition'"'"'s backing tree and atomically swaps in a FRESH
+#      synthesised exFAT view, then BLOCK (bounded) until the daemon
+#      logs that the swap went live. Only the media partition reloads
+#      on SIGHUP (the TeslaCam partition sets reload_on_sighup=false in
+#      its DiskConfig), so the marker unambiguously means the chime
+#      view is fresh. This MUST happen before the rebind: teslafat
+#      snapshots its directory tree in memory, so without the re-walk
+#      the rebind would just re-present the STALE chime and the car
+#      would keep playing the old sound. The wait is gated on the
+#      daemon'"'"'s RELOAD_LIVE_MARKER journal token (a contract with
+#      teslafat'"'"'s main.rs). This step runs while the gadget is still
+#      bound, so a failure here leaves TeslaCam fully attached.
+#   3. Capture the current UDC + the LUN backing file path.
+#   4. Unbind the gadget UDC (Tesla sees an eject of the device).
+#   5. Wait briefly for the disconnect to settle.
+#   6. Re-restore the LUN backing file if the unbind cleared it
 #      (defensive — mirrors v1, which observed unbind clearing LUNs).
-#   6. Rebind the UDC (Tesla re-enumerates, re-reads the chime).
-#   7. Wait (bounded) for the gadget to come back fully healthy — UDC
-#      bound AND both LUN files re-backed — before returning success,
+#   7. Rebind the UDC (Tesla re-enumerates, re-reads the fresh chime).
+#   8. Wait (bounded) for the gadget to come back fully healthy — UDC
+#      bound AND the LUN file re-backed — before returning success,
 #      so the caller knows TeslaCam recording can resume.
 #
-# Safety: this briefly (~settle + rebind, ~2-4 s) detaches BOTH LUNs
-# from the car, including TeslaCam. It is invoked ONLY for the rare,
-# deliberate act of changing the active lock chime. The bounded health
-# wait makes a failure to recover loud and fast (non-zero exit) rather
-# than silently leaving TeslaCam detached.
+# Safety: this briefly (~settle + rebind, ~2-4 s) detaches the single
+# USB device from the car, including the TeslaCam partition. It is
+# invoked ONLY for the rare, deliberate act of changing the active lock
+# chime. The bounded health wait makes a failure to recover loud and
+# fast (non-zero exit) rather than silently leaving TeslaCam detached.
 #
 # Why reuse teslausb-hide-usb / teslausb-present-usb: those are the
 # tested, idempotent UDC primitives installed by setup-lib/11-gadget.sh.
@@ -53,6 +68,8 @@
 #   2  usage error (bad flag)
 #   3  prerequisite missing (configfs gadget dir or helper scripts absent)
 #   5  rebind failed, or the gadget did not return healthy in time
+#   6  media teslafat re-walk did not go live within --reload-timeout
+#      (gadget left untouched — TeslaCam still attached)
 
 set -uo pipefail
 
@@ -66,6 +83,21 @@ SETTLE_S="${SETTLE_S:-2}"
 # Measured recovery is sub-second; 30 s is "the rebind wedged" rather
 # than "this is slow".
 RECOVER_TIMEOUT_S="${RECOVER_TIMEOUT_S:-30}"
+# teslafat systemd instance to SIGHUP for the pre-rebind re-walk.
+# The single teslafat@0 serves the whole partitioned disk; only its
+# media partition (partition 2, holding LockChime.wav) opts into
+# reload_on_sighup, so the re-walk refreshes the chime view while the
+# continuously-recorded TeslaCam partition is left untouched.
+TESLAFAT_MEDIA_UNIT="${TESLAFAT_MEDIA_UNIT:-teslafat@0}"
+# How long to wait for teslafat@0 to log that its media re-walk swapped
+# live. The media partition is read-mostly so the swap is near-instant;
+# 15 s covers a brief overlapping host write (teslafat retries the
+# gated swap for ~10 s) plus journal latency.
+RELOAD_TIMEOUT_S="${RELOAD_TIMEOUT_S:-15}"
+# Stable journal token teslafat logs the instant the re-walk goes live.
+# CONTRACT: must equal RELOAD_LIVE_MARKER in
+# rust/crates/teslafat/src/main.rs. Keep the two in lock-step.
+RELOAD_LIVE_MARKER="${RELOAD_LIVE_MARKER:-teslafat-reload-live}"
 DRY_RUN=0
 
 CONFIGFS_ROOT="${CONFIGFS_ROOT:-/sys/kernel/config/usb_gadget}"
@@ -80,20 +112,27 @@ tesla_gadget_rebind.sh — unbind + rebind the USB gadget UDC so Tesla
 
 USAGE:
     tesla_gadget_rebind.sh [--gadget NAME] [--function NAME]
-                           [--settle N] [--timeout N] [--dry-run] [--help]
+                           [--settle N] [--timeout N]
+                           [--media-unit UNIT] [--reload-timeout N]
+                           [--dry-run] [--help]
 
 FLAGS:
-    --gadget NAME   configfs gadget directory name (default: g1)
-    --function NAME mass_storage function dir (default: mass_storage.usb0)
-    --settle N      seconds between unbind and rebind (default: 2)
-    --timeout N     seconds to wait for gadget recovery (default: 30)
-    --dry-run       print what would happen; no UDC change
-    --help          this message
+    --gadget NAME      configfs gadget directory name (default: g1)
+    --function NAME    mass_storage function dir (default: mass_storage.usb0)
+    --settle N         seconds between unbind and rebind (default: 2)
+    --timeout N        seconds to wait for gadget recovery (default: 30)
+    --media-unit UNIT  teslafat systemd instance whose media partition
+                       to SIGHUP before rebind (default: teslafat@0)
+    --reload-timeout N seconds to wait for the media re-walk to go live
+                       (default: 15)
+    --dry-run          print what would happen; no UDC change
+    --help             this message
 
 EXIT CODES:
     0  success            2  usage error
     3  prerequisite missing
     5  rebind failed or gadget did not recover in time
+    6  media teslafat re-walk did not go live in time (gadget untouched)
 USAGE
 }
 
@@ -110,6 +149,8 @@ while [[ $# -gt 0 ]]; do
         --function) require_value "$1" "${2:-}"; FUNCTION="$2"; shift 2 ;;
         --settle) require_value "$1" "${2:-}"; SETTLE_S="$2"; shift 2 ;;
         --timeout) require_value "$1" "${2:-}"; RECOVER_TIMEOUT_S="$2"; shift 2 ;;
+        --media-unit) require_value "$1" "${2:-}"; TESLAFAT_MEDIA_UNIT="$2"; shift 2 ;;
+        --reload-timeout) require_value "$1" "${2:-}"; RELOAD_TIMEOUT_S="$2"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
         --help | -h) usage; exit 0 ;;
         *) echo "tesla_gadget_rebind.sh: unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -122,6 +163,17 @@ if [[ ! "$SETTLE_S" =~ ^[0-9]+$ ]]; then
 fi
 if [[ ! "$RECOVER_TIMEOUT_S" =~ ^[0-9]+$ ]]; then
     echo "tesla_gadget_rebind.sh: --timeout must be a non-negative integer (got: $RECOVER_TIMEOUT_S)" >&2
+    exit 2
+fi
+if [[ ! "$RELOAD_TIMEOUT_S" =~ ^[0-9]+$ ]]; then
+    echo "tesla_gadget_rebind.sh: --reload-timeout must be a non-negative integer (got: $RELOAD_TIMEOUT_S)" >&2
+    exit 2
+fi
+# $TESLAFAT_MEDIA_UNIT is passed to systemctl/journalctl. Restrict it to
+# a safe systemd-unit charset (template instances use '@') so a caller
+# cannot inject shell metacharacters or extra arguments.
+if [[ ! "$TESLAFAT_MEDIA_UNIT" =~ ^[A-Za-z0-9._@-]+$ ]]; then
+    echo "tesla_gadget_rebind.sh: --media-unit must match [A-Za-z0-9._@-]+ (got: $TESLAFAT_MEDIA_UNIT)" >&2
     exit 2
 fi
 # $GADGET / $FUNCTION are interpolated into configfs paths below. Restrict
@@ -141,7 +193,6 @@ fi
 GADGET_DIR="${CONFIGFS_ROOT}/${GADGET}"
 UDC_FILE="${GADGET_DIR}/UDC"
 LUN0_FILE="${GADGET_DIR}/functions/${FUNCTION}/lun.0/file"
-LUN1_FILE="${GADGET_DIR}/functions/${FUNCTION}/lun.1/file"
 
 if [[ ! -d "$GADGET_DIR" ]]; then
     echo "tesla_gadget_rebind.sh: configfs gadget dir not found: $GADGET_DIR" >&2
@@ -158,30 +209,71 @@ done
 # Capture the current backing so we can re-restore if the unbind clears
 # the LUN file attributes (observed in v1's rebind path).
 lun0_was="$(cat "$LUN0_FILE" 2> /dev/null || true)"
-lun1_was="$(cat "$LUN1_FILE" 2> /dev/null || true)"
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
-    echo "DRY-RUN: would 'sync', '${HIDE_USB}', sleep ${SETTLE_S}s," \
-         "restore LUN files if cleared, '${PRESENT_USB}', then wait up to" \
-         "${RECOVER_TIMEOUT_S}s for UDC + both LUN files to re-back"
+    echo "DRY-RUN: would 'sync', SIGHUP ${TESLAFAT_MEDIA_UNIT} and wait up to" \
+         "${RELOAD_TIMEOUT_S}s for '${RELOAD_LIVE_MARKER}', then '${HIDE_USB}'," \
+         "sleep ${SETTLE_S}s, restore the LUN file if cleared, '${PRESENT_USB}'," \
+         "then wait up to ${RECOVER_TIMEOUT_S}s for UDC + the LUN file to re-back"
     exit 0
 fi
 
-# 1. Flush dirty backing writes before detaching.
+# Send the media teslafat instance a SIGHUP and block until it logs that
+# the re-walk swapped live, so the subsequent rebind re-presents the
+# FRESH chime rather than the stale in-memory snapshot. Runs while the
+# gadget is still bound, so any failure here is safe (TeslaCam stays
+# attached) and returns exit 6 without ever touching the UDC.
+reload_media_lun() {
+    # Mark the journal cursor *before* the SIGHUP so we only match a
+    # swap caused by THIS request, not a stale one from an earlier run.
+    local since
+    since="@$(date +%s)"
+    echo "tesla_gadget_rebind.sh: re-walking media LUN (SIGHUP ${TESLAFAT_MEDIA_UNIT})..."
+    if ! systemctl kill -s HUP "$TESLAFAT_MEDIA_UNIT" 2> /dev/null; then
+        echo "tesla_gadget_rebind.sh: could not SIGHUP ${TESLAFAT_MEDIA_UNIT}" \
+             "(not running?) — refusing to rebind a stale view" >&2
+        return 1
+    fi
+    local deadline
+    deadline=$(( $(date +%s) + RELOAD_TIMEOUT_S ))
+    while true; do
+        if journalctl -u "$TESLAFAT_MEDIA_UNIT" --since "$since" --no-pager -o cat 2> /dev/null \
+                | grep -q -- "$RELOAD_LIVE_MARKER"; then
+            echo "tesla_gadget_rebind.sh: media re-walk is live"
+            return 0
+        fi
+        if [[ "$(date +%s)" -ge "$deadline" ]]; then
+            echo "tesla_gadget_rebind.sh: media re-walk did NOT go live within" \
+                 "${RELOAD_TIMEOUT_S}s — refusing to rebind a stale view" >&2
+            return 1
+        fi
+        sleep 1
+    done
+}
+
+# 1. Flush dirty backing writes (incl. the just-written LockChime.wav)
+#    so the daemon's re-walk sees the new bytes.
 sync
 
-# 2. Unbind the UDC (Tesla "ejects" both drives).
+# 2. Re-walk the media LUN so teslafat serves the fresh chime, and wait
+#    for the swap to go live BEFORE we re-enumerate. Failure here leaves
+#    the gadget bound (TeslaCam safe) and exits 6.
+if ! reload_media_lun; then
+    exit 6
+fi
+
+# 3. Unbind the UDC (Tesla "ejects" the device).
 echo "tesla_gadget_rebind.sh: unbinding USB gadget (Tesla sees eject)..."
 if ! "$HIDE_USB"; then
     echo "tesla_gadget_rebind.sh: ${HIDE_USB} failed" >&2
     exit 5
 fi
 
-# 3. Let the disconnect settle on the host side.
+# 4. Let the disconnect settle on the host side.
 sleep "$SETTLE_S"
 
-# 4. Re-restore LUN backing files if the unbind cleared them, so the
-#    gadget comes back with BOTH drives intact (TeslaCam must not vanish).
+# 5. Re-restore the LUN backing file if the unbind cleared it, so the
+#    gadget comes back with the device intact (TeslaCam must not vanish).
 restore_lun() {
     local lun_file="$1" want="$2"
     [[ -z "$want" ]] && return 0
@@ -193,30 +285,28 @@ restore_lun() {
     fi
 }
 restore_lun "$LUN0_FILE" "$lun0_was"
-restore_lun "$LUN1_FILE" "$lun1_was"
 
-# 5. Rebind the UDC (Tesla re-enumerates, re-reads LockChime.wav).
+# 6. Rebind the UDC (Tesla re-enumerates, re-reads LockChime.wav).
 echo "tesla_gadget_rebind.sh: rebinding USB gadget (Tesla re-enumerates)..."
 if ! "$PRESENT_USB"; then
     echo "tesla_gadget_rebind.sh: ${PRESENT_USB} failed" >&2
     exit 5
 fi
 
-# 6. Wait (bounded) for full health: UDC bound AND both LUN files backed.
+# 7. Wait (bounded) for full health: UDC bound AND the LUN file backed.
 deadline=$(( $(date +%s) + RECOVER_TIMEOUT_S ))
 while true; do
     udc="$(cat "$UDC_FILE" 2> /dev/null || true)"
     lun0="$(cat "$LUN0_FILE" 2> /dev/null || true)"
-    lun1="$(cat "$LUN1_FILE" 2> /dev/null || true)"
-    if [[ -n "$udc" && -n "$lun0" && -n "$lun1" ]]; then
-        echo "tesla_gadget_rebind.sh: gadget healthy (UDC=${udc}, lun0=${lun0}, lun1=${lun1})"
+    if [[ -n "$udc" && -n "$lun0" ]]; then
+        echo "tesla_gadget_rebind.sh: gadget healthy (UDC=${udc}, lun0=${lun0})"
         exit 0
     fi
     if [[ "$(date +%s)" -ge "$deadline" ]]; then
         echo "tesla_gadget_rebind.sh: gadget did NOT recover within ${RECOVER_TIMEOUT_S}s" \
-             "(UDC='${udc}' lun0='${lun0}' lun1='${lun1}')" >&2
+             "(UDC='${udc}' lun0='${lun0}')" >&2
         echo "  TeslaCam may be detached — operator should inspect" \
-             "'systemctl status usb-gadget.service teslafat@0 teslafat@1'" >&2
+             "'systemctl status usb-gadget.service teslafat@0'" >&2
         exit 5
     fi
     sleep 1

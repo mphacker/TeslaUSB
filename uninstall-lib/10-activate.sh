@@ -28,13 +28,12 @@ b1_undo_10() {
   else
     # Canonical fallback: every unit 6.4 lays down + nginx (6.4 also
     # installs the nginx site). teslafat is templated — Phase 6.10
-    # enables @0 + @1; mirror that here.
+    # enables only @0; mirror that here.
     units=(
       nginx.service
       teslausb-web.service
       teslausb-worker.service
       'teslafat@0.service'
-      'teslafat@1.service'
     )
   fi
   b1_log "undo 10: stop+disable ${#units[@]} unit(s): ${units[*]}"

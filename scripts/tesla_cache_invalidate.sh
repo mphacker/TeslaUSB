@@ -38,12 +38,16 @@
 set -uo pipefail
 
 # Defaults match the live B-1 USB gadget: configfs gadget dir `g1`,
-# mass_storage function instance `mass_storage.usb0`, LUN 1 == MEDIA
-# drive (where LockChime.wav / LightShow.fseq live). See
-# setup-lib/11-gadget.sh and `/sys/kernel/config/usb_gadget/g1/...`.
+# mass_storage function instance `mass_storage.usb0`, LUN 0 == the
+# single partitioned dashcam device (MBR with partition 1 = TeslaCam,
+# partition 2 = media carrying LockChime.wav / LightShow.fseq). Under
+# the single-LUN topology (ADR-0023) there is no separate media LUN, so
+# cycling lun.0 medium-changes the whole device and Tesla re-reads both
+# partitions. See setup-lib/11-gadget.sh and
+# `/sys/kernel/config/usb_gadget/g1/...`.
 GADGET="${GADGET:-g1}"
 FUNCTION="${FUNCTION:-mass_storage.usb0}"
-LUN="${LUN:-1}"
+LUN="${LUN:-0}"
 EJECT_MS="${EJECT_MS:-200}"
 DRY_RUN=0
 
@@ -59,7 +63,8 @@ USAGE:
                               [--eject-ms N] [--dry-run] [--help]
 
 FLAGS:
-    --lun N         LUN index to invalidate (default: 1 == media drive)
+    --lun N         LUN index to invalidate (default: 0 == the single
+                    partitioned device; cycling it re-reads both partitions)
     --gadget NAME   configfs gadget directory name (default: g1)
     --function NAME mass_storage function dir (default: mass_storage.usb0)
     --eject-ms N    milliseconds between clear and restore (default: 200)

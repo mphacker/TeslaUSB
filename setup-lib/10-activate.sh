@@ -70,9 +70,7 @@ B1_ENABLE_UNITS=(
   teslausb-web.service
   teslausb-worker.service
   teslafat@0.service
-  teslafat@1.service
   nbd-attach@0.service
-  nbd-attach@1.service
   usb-gadget.service
   cloud-archive.service
   gadget-recovery.service
@@ -86,8 +84,8 @@ export B1_ENABLE_UNITS
 # Units to `systemctl start`, in dependency order. NetworkManager must
 # be up before nginx binds port 80; teslafat (block backend) must be
 # up before nbd-attach (which connects to its socket); nbd-attach
-# must be up before usb-gadget (which uses /dev/nbd{0,1} as LUN
-# backings); usb-gadget LAST in the storage chain — once UDC is bound
+# must be up before usb-gadget (which uses /dev/nbd0 as the LUN
+# backing); usb-gadget LAST in the storage chain — once UDC is bound
 # Tesla sees drives, so we want every layer below it healthy first.
 # teslausb-web depends on the worker which depends on teslafat being
 # attachable. watchdog goes last so its priority drop-in from 6.7
@@ -96,9 +94,7 @@ B1_START_ORDER=(
   NetworkManager.service
   nginx.service
   teslafat@0.service
-  teslafat@1.service
   nbd-attach@0.service
-  nbd-attach@1.service
   usb-gadget.service
   teslausb-worker.service
   teslausb-web.service

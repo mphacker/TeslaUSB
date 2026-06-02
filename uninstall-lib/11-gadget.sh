@@ -36,7 +36,6 @@ b1_undo_11() {
   # 1. Stop + disable in reverse dependency order.
   _b1_stop_disable usb-gadget.service
   _b1_stop_disable nbd-attach@0.service
-  _b1_stop_disable nbd-attach@1.service
   # teslafat@N stays under 6.4's ownership; we leave it.
 
   # 2. Best-effort teardown of any still-composed gadget (in case

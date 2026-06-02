@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
 # setup-lib/11-gadget.sh — Phase 6.11 (USB gadget pipeline)
 #
-# Wires up the customer-facing USB gadget so Tesla sees two mass-
-# storage LUNs backed by the teslafat daemons. This step is what
-# makes B-1 actually USEFUL — without it teslafat is just a
-# daemon talking to an empty socket and nothing reaches the car.
+# Wires up the customer-facing USB gadget so Tesla sees one mass-
+# storage LUN backed by a single teslafat-served, MBR-partitioned
+# disk. This step is what makes B-1 actually USEFUL — without it
+# teslafat is just a daemon talking to an empty socket and nothing
+# reaches the car.
 #
 # Pipeline (in startup order):
 #
-#   teslafat@0.service      teslafat@1.service        (Phase 6.4)
-#         │ AF_UNIX sock          │ AF_UNIX sock
-#         ▼                       ▼
-#   nbd-attach@0.service     nbd-attach@1.service     (this step)
-#   nbd-client -unix … sock /dev/nbd0   /dev/nbd1
-#         │                       │
-#         ▼                       ▼
+#   teslafat@0.service                                 (Phase 6.4)
+#         │ AF_UNIX sock (/run/teslausb/teslafat-0.sock)
+#         ▼
+#   nbd-attach@0.service                               (this step)
+#   nbd-client -unix … sock /dev/nbd0
+#         │ whole synthesized disk: MBR + two exFAT partitions
+#         ▼
 #   ┌────────────────────────────────────────────────┐
 #   │ usb-gadget.service  — configfs g1               │
 #   │   functions/mass_storage.usb0/                  │
 #   │     lun.0/file = /dev/nbd0                      │
-#   │     lun.1/file = /dev/nbd1                      │
 #   │   UDC = <dwc2 UDC name from /sys/class/udc/>    │
 #   └────────────────────────────────────────────────┘
 #         │
@@ -28,16 +28,15 @@
 #
 # === What this step installs ===
 #
-#   * /etc/modprobe.d/teslausb-nbd.conf — `options nbd nbds_max=2 max_part=0`
+#   * /etc/modprobe.d/teslausb-nbd.conf — `options nbd nbds_max=1 max_part=0`
 #   * /etc/modules-load.d/teslausb.conf — load `nbd` at boot
-#   * /etc/teslausb/teslafat-0.toml — TeslaCam LUN config (exFAT, size chosen at install)
-#   * /etc/teslausb/teslafat-1.toml — media LUN config (FAT32, size chosen at install)
+#   * /etc/teslausb/teslafat-0.toml — DiskConfig: TeslaCam + media exFAT partitions
 #   * /etc/systemd/system/nbd-attach@.service — templated attach unit
 #   * /etc/systemd/system/usb-gadget.service — configfs gadget oneshot
 #   * /usr/local/bin/teslausb-gadget-up — configfs g1 builder script
 #   * /usr/local/bin/teslausb-gadget-down — configfs g1 teardown script
-#   * /usr/local/bin/teslausb-present-usb — UDC bind (Tesla "sees" drives)
-#   * /usr/local/bin/teslausb-hide-usb — UDC unbind (Tesla "ejects" drives)
+#   * /usr/local/bin/teslausb-present-usb — UDC bind (Tesla "sees" the disk)
+#   * /usr/local/bin/teslausb-hide-usb — UDC unbind (Tesla "ejects" the disk)
 #   * /usr/local/bin/teslausb-watch — live inotify view of TeslaCam/media writes
 #
 # === Safety rails ===
@@ -45,7 +44,7 @@
 #   * Refuses to install if /etc/systemd/system/teslafat@.service is
 #     absent (Phase 6.4 predecessor). Exits 4.
 #   * NEVER tries to bring the gadget UP itself — that is Phase 6.10's
-#     job (which enables nbd-attach@{0,1}.service + usb-gadget.service).
+#     job (which enables nbd-attach@0.service + usb-gadget.service).
 #   * Every file install is idempotent: sha256(src) vs sha256(dst);
 #     no-op on match; one-shot `.b1-backup-<ISO>` sidecar on first
 #     divergence; mode/owner re-applied if drifted.
@@ -76,9 +75,8 @@ B1_NBD_MODPROBE_CONF="/etc/modprobe.d/teslausb-nbd.conf"
 B1_NBD_MODULES_LOAD="/etc/modules-load.d/teslausb.conf"
 B1_TESLAFAT_CONF_DIR="/etc/teslausb"
 B1_TESLAFAT_CONF_0="${B1_TESLAFAT_CONF_DIR}/teslafat-0.toml"
-B1_TESLAFAT_CONF_1="${B1_TESLAFAT_CONF_DIR}/teslafat-1.toml"
 # Unified storage + cleanup config (AC.1). Web UI + Rust worker read
-# this file; teslafat-{0,1}.toml are regenerated from it on resize.
+# this file; teslafat-0.toml is kept in sync from it on resize.
 B1_TESLAUSB_CONF="${B1_TESLAFAT_CONF_DIR}/teslausb.toml"
 
 B1_NBD_ATTACH_UNIT="/etc/systemd/system/nbd-attach@.service"
@@ -89,7 +87,7 @@ B1_GADGET_DOWN_BIN="/usr/local/bin/teslausb-gadget-down"
 B1_PRESENT_USB_BIN="/usr/local/bin/teslausb-present-usb"
 B1_HIDE_USB_BIN="/usr/local/bin/teslausb-hide-usb"
 B1_WATCH_BIN="/usr/local/bin/teslausb-watch"
-# AC.3 — operator-driven LUN resize helper + narrow sudoers.
+# AC.3 — operator-driven partition resize helper + narrow sudoers.
 B1_RESIZE_LUN_BIN="/usr/local/bin/teslausb-resize-lun"
 B1_RESIZE_SUDOERS="/etc/sudoers.d/teslausb-resize"
 
@@ -97,7 +95,6 @@ B1_GADGET_TARGETS=(
   "${B1_NBD_MODPROBE_CONF}"
   "${B1_NBD_MODULES_LOAD}"
   "${B1_TESLAFAT_CONF_0}"
-  "${B1_TESLAFAT_CONF_1}"
   "${B1_TESLAUSB_CONF}"
   "${B1_NBD_ATTACH_UNIT}"
   "${B1_USB_GADGET_UNIT}"
@@ -113,7 +110,7 @@ B1_GADGET_TARGETS=(
 export B1_GADGET_NAME B1_GADGET_VENDOR_ID B1_GADGET_PRODUCT_ID \
   B1_GADGET_SERIAL B1_GADGET_MANUFACTURER B1_GADGET_PRODUCT \
   B1_NBD_MODPROBE_CONF B1_NBD_MODULES_LOAD B1_TESLAFAT_CONF_DIR \
-  B1_TESLAFAT_CONF_0 B1_TESLAFAT_CONF_1 B1_TESLAUSB_CONF B1_NBD_ATTACH_UNIT \
+  B1_TESLAFAT_CONF_0 B1_TESLAUSB_CONF B1_NBD_ATTACH_UNIT \
   B1_USB_GADGET_UNIT B1_GADGET_UP_BIN B1_GADGET_DOWN_BIN \
   B1_PRESENT_USB_BIN B1_HIDE_USB_BIN B1_WATCH_BIN \
   B1_RESIZE_LUN_BIN B1_RESIZE_SUDOERS B1_GADGET_TARGETS
@@ -121,11 +118,11 @@ export B1_GADGET_NAME B1_GADGET_VENDOR_ID B1_GADGET_PRODUCT_ID \
 # ---- Inline file body constants -----------------------------------
 
 B1_NBD_MODPROBE_BODY='# Managed by teslausb-b1 setup.sh (Phase 6.11). Do not edit.
-# nbds_max=2 so /dev/nbd0 and /dev/nbd1 exist; max_part=0 because
-# the teslafat-served block device is a single whole-disk FAT32/exFAT
-# volume with no partition table — we do NOT want kernel partition
-# scanning racing the synth backend.
-options nbd nbds_max=2 max_part=0
+# nbds_max=1 because only /dev/nbd0 backs the single USB LUN.
+# max_part=0 is intentional: the Pi must not partition-scan the
+# synthesized MBR disk; it only serves the whole block device while
+# Tesla reads the partition table over USB.
+options nbd nbds_max=1 max_part=0
 '
 
 B1_NBD_MODULES_BODY='# Managed by teslausb-b1 setup.sh (Phase 6.11). Do not edit.
@@ -133,54 +130,55 @@ nbd
 '
 
 B1_TESLAFAT_CONF_0_TEMPLATE='# Managed by teslausb-b1 setup.sh (Phase 6.11). Do not edit.
-# LUN 0 — TeslaCam (dashcam + sentry + saved clips).
-#
-# fs_type=exfat is REQUIRED here. Tesla refuses to write to a
-# FAT32 volume larger than ~32 GiB (its mass-storage stack
-# treats them as malformed) and the TeslaCam LUN is sized for
-# the operator-chosen drive size, which is always well above
-# that threshold in practice. See docs/02-LEARNINGS.md
-# "Phase 6 — Tesla requires exFAT on the TeslaCam LUN".
+# exFAT is required for both partitions, and both partitions live on
+# one USB device so Tesla reads LockChime.wav, LightShow, and Boombox
+# from partition 2 instead of ignoring a separate media device.
+disk_signature = 0x54455355
+
+[nbd]
+socket_path = "/run/teslausb/teslafat-0.sock"
+handshake_timeout_seconds = 30
+
+[[partition]]
 backing_root = "/srv/teslausb/teslacam"
-volume_size_gb = __SIZE_GB__
+volume_size_gb = __TESLACAM_SIZE_GB__
 volume_label = "TESLACAM"
 fs_type = "exfat"
+# The dashcam volume is written continuously by the car. Never
+# live-swap its synth layout on SIGHUP (chime activation): a swap of
+# an actively-recorded volume is out of scope, and excluding it keeps
+# the media partition the only one whose reload logs the
+# teslafat-reload-live marker the rebind script waits on.
+reload_on_sighup = false
 # Disk-backed pending-data spill (ADR-0021). Holds pre-dir-entry
 # cluster writes safely on disk so we never lose Tesla video bytes
-# under burst load. Per-instance subdir is created by StateDirectory=
-# in teslafat@.service.
+# under burst load.
 spill_dir = "/var/lib/teslafat/spill/0"
-
-[retention]
+[partition.retention]
 # Hide RecentClips entries older than 1 hour from Tesla. Matches
 # Tesla'"'"'s own RecentClips rotation window; the worker still keeps
 # the underlying files until the cleanup policy reaps them.
 recentclips_hide_after_seconds = 3600
 
-[nbd]
-socket_path = "/run/teslausb/teslafat-0.sock"
-handshake_timeout_seconds = 30
-'
-
-B1_TESLAFAT_CONF_1_TEMPLATE='# Managed by teslausb-b1 setup.sh (Phase 6.11). Do not edit.
-# LUN 1 — user-managed media (lock chimes, light shows, music, wraps).
+[[partition]]
 backing_root = "/srv/teslausb/media"
-volume_size_gb = __SIZE_GB__
+volume_size_gb = __MEDIA_SIZE_GB__
 volume_label = "MEDIA"
-fs_type = "fat32"
-# Disk-backed pending-data spill (ADR-0021); see LUN-0 comment above.
+fs_type = "exfat"
+# Read-mostly media volume holding LockChime.wav, LightShow/, and
+# Boombox/. Live-reload on SIGHUP so a chime/lightshow change is
+# re-walked and swapped in before the gadget re-enumerates (the
+# rebind script gates on this partition'"'"'s reload marker).
+reload_on_sighup = true
+# Disk-backed pending-data spill (ADR-0021); partition-scoped so
+# media writes never share pending data with dashcam writes.
 spill_dir = "/var/lib/teslafat/spill/1"
-
-[retention]
+[partition.retention]
 # Media files are user-managed; never hide based on age.
 recentclips_hide_after_seconds = 0
-
-[nbd]
-socket_path = "/run/teslausb/teslafat-1.sock"
-handshake_timeout_seconds = 30
 '
 
-# Unified storage + cleanup config (AC.1). Source of truth for LUN
+# Unified storage + cleanup config (AC.1). Source of truth for partition
 # sizes and auto-cleanup knobs. `os_reserve_gb` is documented so
 # operators can edit by hand; minimum 8 GB (see docs/06-OPERATIONS.md).
 # `target_free_pct = 0` means "auto-tune from indexer median clip
@@ -207,7 +205,7 @@ preserve_with_gps = true
 
 B1_NBD_ATTACH_UNIT_BODY='# Managed by teslausb-b1 setup.sh (Phase 6.11). Do not edit.
 # nbd-attach@N.service — attaches /dev/nbdN to teslafat@N'"'"'s
-# AF_UNIX socket. Templated: %i = instance number (0 or 1).
+# AF_UNIX socket. Phase 6.10 enables only instance 0 for the single disk.
 [Unit]
 Description=Attach /dev/nbd%i to teslafat@%i (Phase 6.11)
 Documentation=https://github.com/mphacker/TeslaUSB
@@ -232,15 +230,10 @@ RemainAfterExit=yes
 ExecStartPre=/bin/sh -c '"'"'for i in $(seq 1 30); do [ -S /run/teslausb/teslafat-%i.sock ] && exit 0; sleep 0.5; done; echo "teslafat-%i.sock did not appear within 15s" >&2; exit 1'"'"'
 # nbd-client uses a unix socket: -unix <path> instead of -h/-p.
 # -persist keeps the kernel side alive across brief daemon restarts.
-# -block-size 512 MUST match teslafat'"'"'s synthesized FAT32 BPB
-# (BPB_BytsPerSec = 0x0200 / 512). If these disagree the kernel
-# refuses to mount the volume with
-# `FAT-fs (nbdN): logical sector size too small for device`
-# and Tesla refuses to enumerate it as a usable USB drive (this
-# was the smoking gun for the "Tesla sees the drive but never
-# writes to RecentClips" bug in Phase 6 hardware bring-up — see
-# docs/02-LEARNINGS.md "FAT logical sector size must match NBD
-# logical block size" for the full diagnosis).
+# -block-size 512 MUST match the synthesized disk sector size. If
+# these disagree, hosts reject the block device before Tesla can
+# enumerate it as a usable USB drive; Phase 6 hardware bring-up
+# proved the NBD and filesystem sector sizes must agree.
 ExecStart=/usr/sbin/nbd-client -unix /run/teslausb/teslafat-%i.sock /dev/nbd%i -persist -block-size 512 -nofork
 ExecStop=/usr/sbin/nbd-client -d /dev/nbd%i
 
@@ -258,14 +251,14 @@ WantedBy=multi-user.target
 '
 
 B1_USB_GADGET_UNIT_BODY='# Managed by teslausb-b1 setup.sh (Phase 6.11). Do not edit.
-# usb-gadget.service — composes the configfs g1 gadget with two
-# mass_storage LUNs backed by /dev/nbd{0,1}, then binds it to the
-# dwc2 UDC so Tesla sees the drives.
+# usb-gadget.service — composes the configfs g1 gadget with one
+# mass_storage LUN backed by /dev/nbd0: an MBR-partitioned disk
+# with TeslaCam and media exFAT partitions.
 [Unit]
-Description=TeslaUSB B-1 USB gadget (configfs, two mass_storage LUNs)
+Description=TeslaUSB B-1 USB gadget (configfs, one mass_storage LUN; MBR disk, two exFAT partitions)
 Documentation=https://github.com/mphacker/TeslaUSB
-Requires=nbd-attach@0.service nbd-attach@1.service
-After=nbd-attach@0.service nbd-attach@1.service sys-kernel-config.mount
+Requires=nbd-attach@0.service
+After=nbd-attach@0.service sys-kernel-config.mount
 # Cap automatic restart loops (paired with `Restart=on-failure`
 # below). Belongs in [Unit] per systemd.unit(5).
 StartLimitBurst=10
@@ -298,7 +291,6 @@ set -eu
 GADGET_NAME="g1"
 GADGET_DIR="/sys/kernel/config/usb_gadget/${GADGET_NAME}"
 LUN0="/dev/nbd0"
-LUN1="/dev/nbd1"
 
 VENDOR_ID="0x1d6b"
 PRODUCT_ID="0x0104"
@@ -327,14 +319,13 @@ mount_configfs() {
 }
 
 teardown_existing_g1() {
-  # If g1 already exists, idempotency: if bound + LUNs match, exit 0.
+  # If g1 already exists, idempotency: if bound + LUN matches, exit 0.
   # Otherwise tear it down before rebuilding.
   if [ -d "${GADGET_DIR}" ]; then
     current_udc=$(cat "${GADGET_DIR}/UDC" 2>/dev/null || true)
     current_lun0=$(cat "${GADGET_DIR}/functions/mass_storage.usb0/lun.0/file" 2>/dev/null || true)
-    current_lun1=$(cat "${GADGET_DIR}/functions/mass_storage.usb0/lun.1/file" 2>/dev/null || true)
-    if [ -n "${current_udc}" ] && [ "${current_lun0}" = "${LUN0}" ] && [ "${current_lun1}" = "${LUN1}" ]; then
-      echo "teslausb-gadget-up: g1 already up on ${current_udc} with correct LUNs — idempotent no-op"
+    if [ -n "${current_udc}" ] && [ "${current_lun0}" = "${LUN0}" ]; then
+      echo "teslausb-gadget-up: g1 already up on ${current_udc} with correct LUN — idempotent no-op"
       exit 0
     fi
     # Tear down for rebuild.
@@ -354,23 +345,15 @@ build_g1() {
   echo "${MANUFACTURER}" > "${GADGET_DIR}/strings/0x409/manufacturer"
   echo "${PRODUCT}"      > "${GADGET_DIR}/strings/0x409/product"
 
-  # mass_storage function with two LUNs.
+  # One mass_storage LUN; the backing disk contains the MBR partitions.
   mkdir -p "${GADGET_DIR}/functions/mass_storage.usb0"
   echo 1 > "${GADGET_DIR}/functions/mass_storage.usb0/stall"
-  # lun.0 is created automatically; lun.1 must be mkdir-d.
-  mkdir -p "${GADGET_DIR}/functions/mass_storage.usb0/lun.1"
 
-  # LUN 0 — TeslaCam
+  # LUN 0 — partitioned TeslaUSB disk
   echo 1 > "${GADGET_DIR}/functions/mass_storage.usb0/lun.0/removable"
   echo 0 > "${GADGET_DIR}/functions/mass_storage.usb0/lun.0/cdrom"
   echo 0 > "${GADGET_DIR}/functions/mass_storage.usb0/lun.0/ro"
   echo "${LUN0}" > "${GADGET_DIR}/functions/mass_storage.usb0/lun.0/file"
-
-  # LUN 1 — media
-  echo 1 > "${GADGET_DIR}/functions/mass_storage.usb0/lun.1/removable"
-  echo 0 > "${GADGET_DIR}/functions/mass_storage.usb0/lun.1/cdrom"
-  echo 0 > "${GADGET_DIR}/functions/mass_storage.usb0/lun.1/ro"
-  echo "${LUN1}" > "${GADGET_DIR}/functions/mass_storage.usb0/lun.1/file"
 
   # Configuration c.1
   mkdir -p "${GADGET_DIR}/configs/c.1/strings/0x409"
@@ -393,7 +376,6 @@ bind_udc() {
 ensure_modules
 mount_configfs
 require_block "${LUN0}"
-require_block "${LUN1}"
 teardown_existing_g1
 build_g1
 bind_udc
@@ -426,7 +408,6 @@ rmdir "${GADGET_DIR}/configs/c.1/strings/0x409" 2>/dev/null || true
 rmdir "${GADGET_DIR}/configs/c.1" 2>/dev/null || true
 
 # Functions.
-rmdir "${GADGET_DIR}/functions/mass_storage.usb0/lun.1" 2>/dev/null || true
 rmdir "${GADGET_DIR}/functions/mass_storage.usb0" 2>/dev/null || true
 
 # Top-level strings + gadget dir.
@@ -534,16 +515,16 @@ exec inotifywait -m -r --quiet \
   "$ROOT"
 '
 
-# AC.3 — teslausb-resize-lun: operator-driven LUN size change.
+# AC.3 — teslausb-resize-lun: operator-driven partition size change.
 #
 # Usage: teslausb-resize-lun --lun {teslacam|media} --size-gb N
 #
-# Reads /etc/teslausb/teslausb.toml to enforce the operator's
-# storage caps (os_reserve_gb, total SD-card capacity), refuses
-# to shrink below currently-used bytes, atomically rewrites the
-# per-LUN teslafat config AND the unified teslausb.toml, then
-# bounces usb-gadget + teslafat units so Tesla re-enumerates
-# with the new advertised size.
+# Reads /etc/teslausb/teslausb.toml to enforce the operator storage
+# caps (os_reserve_gb, total SD-card capacity), refuses to shrink
+# below currently-used bytes, atomically rewrites the target partition
+# in the single DiskConfig AND the unified teslausb.toml, then bounces
+# usb-gadget + teslafat@0 so Tesla re-enumerates with the new
+# advertised partition size.
 #
 # Exit codes:
 #   0 success
@@ -557,8 +538,7 @@ set -euo pipefail
 
 CONF_DIR="/etc/teslausb"
 TESLAUSB_TOML="${CONF_DIR}/teslausb.toml"
-LUN0_TOML="${CONF_DIR}/teslafat-0.toml"
-LUN1_TOML="${CONF_DIR}/teslafat-1.toml"
+DISK_TOML="${CONF_DIR}/teslafat-0.toml"
 
 usage() {
   echo "usage: teslausb-resize-lun --lun {teslacam|media} --size-gb N" >&2
@@ -585,13 +565,12 @@ if (( SIZE < 4 || SIZE > 2048 )); then
 fi
 
 case "${LUN}" in
-  teslacam) LUN_TOML="${LUN0_TOML}"; LUN_BACKING="/srv/teslausb/teslacam"; LUN_IDX=0; KEY="teslacam_gb" ;;
-  media)    LUN_TOML="${LUN1_TOML}"; LUN_BACKING="/srv/teslausb/media";    LUN_IDX=1; KEY="media_gb"    ;;
+  teslacam) PARTITION_IDX=0; LUN_BACKING="/srv/teslausb/teslacam"; KEY="teslacam_gb" ;;
+  media)    PARTITION_IDX=1; LUN_BACKING="/srv/teslausb/media";    KEY="media_gb"    ;;
   *)        echo "unknown LUN: ${LUN}" >&2; exit 3 ;;
 esac
 
-# Pure-bash TOML int reader (no awk, so the body needs no
-# single-quote escaping when embedded as a setup-lib heredoc).
+# Pure-bash TOML int reader.
 read_toml_int() {
   local key="$1" file="$2" default="$3"
   if [[ ! -e "${file}" ]]; then echo "${default}"; return; fi
@@ -604,6 +583,41 @@ read_toml_int() {
   if [[ -z "${val}" ]]; then echo "${default}"; else echo "${val}"; fi
 }
 
+read_partition_volume_size_gb() {
+  local target="$1" file="$2" default="$3"
+  if [[ ! -e "${file}" ]]; then echo "${default}"; return; fi
+  local line partition=-1
+  while IFS= read -r line; do
+    if [[ "${line}" =~ ^[[:space:]]*\[\[partition\]\] ]]; then
+      partition=$(( partition + 1 ))
+      continue
+    fi
+    if (( partition == target )) && [[ "${line}" =~ ^[[:space:]]*volume_size_gb[[:space:]]*=[[:space:]]*([0-9]+) ]]; then
+      echo "${BASH_REMATCH[1]}"
+      return
+    fi
+  done < "${file}"
+  echo "${default}"
+}
+
+rewrite_partition_volume_size_gb() {
+  local target="$1" size="$2" src="$3" dst="$4"
+  local line partition=-1 changed=0
+  : > "${dst}" || return 1
+  while IFS= read -r line; do
+    if [[ "${line}" =~ ^[[:space:]]*\[\[partition\]\] ]]; then
+      partition=$(( partition + 1 ))
+    fi
+    if (( partition == target )) && [[ "${line}" =~ ^[[:space:]]*volume_size_gb[[:space:]]*= ]]; then
+      printf "%s\n" "volume_size_gb = ${size}" >> "${dst}" || return 1
+      changed=1
+    else
+      printf "%s\n" "${line}" >> "${dst}" || return 1
+    fi
+  done < "${src}"
+  (( changed == 1 ))
+}
+
 OS_RESERVE_GB=$(read_toml_int os_reserve_gb "${TESLAUSB_TOML}" 20)
 CUR_TESLACAM_GB=$(read_toml_int teslacam_gb "${TESLAUSB_TOML}" 64)
 CUR_MEDIA_GB=$(read_toml_int    media_gb    "${TESLAUSB_TOML}" 32)
@@ -613,7 +627,7 @@ CUR_MEDIA_GB=$(read_toml_int    media_gb    "${TESLAUSB_TOML}" 32)
 # already enforce >= 8 GB on save, but a hand-edited TOML could
 # still slip a smaller value through; refuse to operate in that
 # case so the resize never silently allocates kernel/boot space
-# to a LUN.
+# to a partition.
 if (( OS_RESERVE_GB < 8 )); then
   echo "refusing: os_reserve_gb=${OS_RESERVE_GB} GB is below the 8 GB floor" >&2
   exit 3
@@ -624,12 +638,11 @@ fi
 # any future change that adds a new LUN must also extend KEY to
 # match this allowlist or the resize aborts safely.
 [[ "${KEY}" =~ ^(teslacam_gb|media_gb)$ ]] || {
-  echo "internal error: invalid KEY '${KEY}'" >&2
+  echo "internal error: invalid KEY ${KEY}" >&2
   exit 4
 }
 
-SD_TOTAL_GB=$(df -B1G --output=size /srv/teslausb 2>/dev/null \
-  | tail -n1 | tr -d " " || echo 0)
+SD_TOTAL_GB=$(df -B1G --output=size /srv/teslausb 2>/dev/null   | tail -n1 | tr -d " " || echo 0)
 if [[ -z "${SD_TOTAL_GB}" || ! "${SD_TOTAL_GB}" =~ ^[0-9]+$ ]]; then
   SD_TOTAL_GB=0
 fi
@@ -642,13 +655,12 @@ fi
 NEW_TOTAL=$(( NEW_TESLACAM + NEW_MEDIA + OS_RESERVE_GB ))
 
 if (( SD_TOTAL_GB > 0 && NEW_TOTAL > SD_TOTAL_GB )); then
-  echo "refusing: teslacam(${NEW_TESLACAM}) + media(${NEW_MEDIA}) + os_reserve(${OS_RESERVE_GB})" \
-       "= ${NEW_TOTAL} GB exceeds SD capacity ${SD_TOTAL_GB} GB" >&2
+  echo "refusing: teslacam(${NEW_TESLACAM}) + media(${NEW_MEDIA}) + os_reserve(${OS_RESERVE_GB})"        "= ${NEW_TOTAL} GB exceeds SD capacity ${SD_TOTAL_GB} GB" >&2
   exit 3
 fi
 
 # Shrink guard: refuse if used > new size. du -sb prints bytes;
-# cut -f1 grabs the size column without invoking awk.
+# cut -f1 grabs the size column.
 USED_BYTES=$(du -sb "${LUN_BACKING}" 2>/dev/null | cut -f1 || echo 0)
 [[ "${USED_BYTES}" =~ ^[0-9]+$ ]] || USED_BYTES=0
 USED_GB=$(( (USED_BYTES + (1024*1024*1024) - 1) / (1024*1024*1024) ))
@@ -657,33 +669,35 @@ if (( USED_GB > SIZE )); then
   exit 3
 fi
 
-OLD_SIZE=$(read_toml_int volume_size_gb "${LUN_TOML}" 0)
+OLD_SIZE=$(read_partition_volume_size_gb "${PARTITION_IDX}" "${DISK_TOML}" 0)
 echo "resize-lun: ${LUN} ${OLD_SIZE} -> ${SIZE} GB"
 
-# Atomically rewrite per-LUN teslafat config.
-TMP="${LUN_TOML}.tmp.$$"
-sed -E "s/^([[:space:]]*volume_size_gb[[:space:]]*=[[:space:]]*).*/\1${SIZE}/" \
-  "${LUN_TOML}" > "${TMP}"
-if ! grep -q "^volume_size_gb[[:space:]]*=[[:space:]]*${SIZE}\$" "${TMP}"; then
+# Atomically rewrite the selected partition in the single DiskConfig.
+TMP="${DISK_TOML}.tmp.$$"
+if ! rewrite_partition_volume_size_gb "${PARTITION_IDX}" "${SIZE}" "${DISK_TOML}" "${TMP}"; then
   rm -f "${TMP}"
-  echo "resize-lun: sed failed to update ${LUN_TOML}" >&2
+  echo "resize-lun: failed to update partition ${PARTITION_IDX} in ${DISK_TOML}" >&2
   exit 4
 fi
-chmod 0644 "${TMP}"
-mv -f "${TMP}" "${LUN_TOML}"
+if [[ "$(read_partition_volume_size_gb "${PARTITION_IDX}" "${TMP}" 0)" != "${SIZE}" ]]; then
+  rm -f "${TMP}"
+  echo "resize-lun: verification failed for partition ${PARTITION_IDX} in ${DISK_TOML}" >&2
+  exit 4
+fi
+chmod 0644 "${TMP}" || { rm -f "${TMP}"; exit 4; }
+mv -f "${TMP}" "${DISK_TOML}" || { rm -f "${TMP}"; exit 4; }
 
 # Atomically rewrite the [storage] section of teslausb.toml.
 if [[ -e "${TESLAUSB_TOML}" ]]; then
   TMP2="${TESLAUSB_TOML}.tmp.$$"
-  sed -E "s/^([[:space:]]*${KEY}[[:space:]]*=[[:space:]]*).*/\1${SIZE}/" \
-    "${TESLAUSB_TOML}" > "${TMP2}"
+  sed -E "s/^([[:space:]]*${KEY}[[:space:]]*=[[:space:]]*).*/\1${SIZE}/"     "${TESLAUSB_TOML}" > "${TMP2}"
   chmod 0644 "${TMP2}"
   mv -f "${TMP2}" "${TESLAUSB_TOML}"
 fi
 
 # Bounce: unbind UDC (Tesla sees eject), restart teslafat, re-bind.
 /usr/local/bin/teslausb-hide-usb >/dev/null 2>&1 || true
-systemctl restart "teslafat@${LUN_IDX}" >/dev/null 2>&1 || true
+systemctl restart teslafat@0 >/dev/null 2>&1 || true
 sleep 2
 /usr/local/bin/teslausb-present-usb >/dev/null 2>&1 || true
 
@@ -750,16 +764,22 @@ _b1_recommend_sizes() {
   echo "${teslacam} ${media}"
 }
 
-# _b1_existing_volume_size_gb <conf_file>  — extract the
-# `volume_size_gb = N` value from an existing TOML config, or empty.
+# _b1_existing_volume_size_gb <conf_file> [key]  — extract the
+# integer value for key from an existing TOML config, or empty.
+# Defaults to volume_size_gb for legacy callers; setup uses the
+# teslausb.toml storage keys to preserve operator choices on re-run.
 _b1_existing_volume_size_gb() {
-  local conf="$1"
-  if [[ ! -e "${conf}" ]]; then
+  local conf="$1" key="${2:-volume_size_gb}"
+  if [[ ! "${key}" =~ ^[A-Za-z0-9_]+$ || ! -e "${conf}" ]]; then
     return 0
   fi
-  awk -F'=' '/^[[:space:]]*volume_size_gb[[:space:]]*=/ {
-    gsub(/[[:space:]]/,"",$2); print $2; exit
-  }' "${conf}"
+  local line
+  while IFS= read -r line; do
+    if [[ "${line}" =~ ^[[:space:]]*${key}[[:space:]]*=[[:space:]]*([0-9]+) ]]; then
+      echo "${BASH_REMATCH[1]}"
+      return 0
+    fi
+  done < "${conf}"
 }
 
 # _b1_validate_size_gb <n>  — returns 0 if n is an integer in
@@ -771,30 +791,31 @@ _b1_validate_size_gb() {
   return 0
 }
 
-# _b1_resolve_size_gb <lun_index> <label> <recommended> <env_var_name>
-#                     <existing_conf_path>
+# _b1_resolve_size_gb <partition_index> <label> <recommended> <env_var_name>
+#                     <existing_conf_path> [existing_key]
 # Returns chosen size on stdout. Priority:
 #   1. Env var (TESLAUSB_LUN0_SIZE_GB / TESLAUSB_LUN1_SIZE_GB) if set+valid
-#   2. Existing TOML config value (preserves operator choices on re-run)
+#   2. Existing TOML storage value (preserves operator choices on re-run)
 #   3. Interactive prompt if stdin is a TTY and not dry-run/non-interactive
 #   4. Recommended value
 _b1_resolve_size_gb() {
   local idx="$1" label="$2" recommended="$3" env_var="$4" existing_conf="$5"
+  local existing_key="${6:-volume_size_gb}"
   local env_val="${!env_var:-}"
 
   if [[ -n "${env_val}" ]]; then
     if _b1_validate_size_gb "${env_val}"; then
-      b1_log "  LUN ${idx} (${label}): using ${env_val} GB from ${env_var}" >&2
+      b1_log "  partition ${idx} (${label}): using ${env_val} GB from ${env_var}" >&2
       echo "${env_val}"
       return 0
     fi
-    b1_warn "  LUN ${idx} (${label}): ${env_var}=${env_val} invalid (must be int 4..2048); ignoring" >&2
+    b1_warn "  partition ${idx} (${label}): ${env_var}=${env_val} invalid (must be int 4..2048); ignoring" >&2
   fi
 
   local existing
-  existing=$(_b1_existing_volume_size_gb "${existing_conf}")
+  existing=$(_b1_existing_volume_size_gb "${existing_conf}" "${existing_key}")
   if [[ -n "${existing}" ]] && _b1_validate_size_gb "${existing}"; then
-    b1_log "  LUN ${idx} (${label}): preserving existing ${existing} GB from ${existing_conf}" >&2
+    b1_log "  partition ${idx} (${label}): preserving existing ${existing} GB from ${existing_conf} ${existing_key}" >&2
     echo "${existing}"
     return 0
   fi
@@ -803,7 +824,7 @@ _b1_resolve_size_gb() {
   if [[ -t 0 && "${TESLAUSB_DRY_RUN:-0}" != "1" && "${TESLAUSB_NON_INTERACTIVE:-0}" != "1" ]]; then
     local input
     while true; do
-      printf '  LUN %s (%s) size in GB [recommended %s, range 4..2048]: ' \
+      printf '  partition %s (%s) size in GB [recommended %s, range 4..2048]: ' \
         "${idx}" "${label}" "${recommended}" >&2
       if ! IFS= read -r input; then
         # EOF / Ctrl-D — fall through to recommended.
@@ -812,12 +833,12 @@ _b1_resolve_size_gb() {
       fi
       input="${input// /}"
       if [[ -z "${input}" ]]; then
-        b1_log "  LUN ${idx} (${label}): using recommended ${recommended} GB" >&2
+        b1_log "  partition ${idx} (${label}): using recommended ${recommended} GB" >&2
         echo "${recommended}"
         return 0
       fi
       if _b1_validate_size_gb "${input}"; then
-        b1_log "  LUN ${idx} (${label}): using ${input} GB (operator entered)" >&2
+        b1_log "  partition ${idx} (${label}): using ${input} GB (operator entered)" >&2
         echo "${input}"
         return 0
       fi
@@ -825,7 +846,7 @@ _b1_resolve_size_gb() {
     done
   fi
 
-  b1_log "  LUN ${idx} (${label}): using recommended ${recommended} GB" >&2
+  b1_log "  partition ${idx} (${label}): using recommended ${recommended} GB" >&2
   echo "${recommended}"
 }
 
@@ -839,7 +860,8 @@ _b1_install_file() {
   local dst="$1" mode="$2" body="$3"
   local stage="${SCRIPT_DIR:-$(dirname "$(dirname "${BASH_SOURCE[0]}")")}/setup-lib/.b1-stage-11"
   mkdir -p "${stage}"
-  local stage_file="${stage}/$(basename "${dst}")"
+  local stage_file
+  stage_file="${stage}/$(basename "${dst}")"
   printf '%s' "${body}" > "${stage_file}"
   chmod "${mode}" "${stage_file}"
 
@@ -896,8 +918,8 @@ b1_step_11() {
   _b1_install_file "${B1_NBD_MODPROBE_CONF}" 0644 "${B1_NBD_MODPROBE_BODY}"
   _b1_install_file "${B1_NBD_MODULES_LOAD}"  0644 "${B1_NBD_MODULES_BODY}"
 
-  # 2. teslafat per-LUN configs (with operator-chosen / recommended sizes).
-  b1_log "resolving LUN sizes"
+  # 2. Single DiskConfig (two exFAT partitions with operator-chosen / recommended sizes).
+  b1_log "resolving partition sizes"
   local total_gb teslacam_rec media_rec teslacam_gb media_gb
   total_gb=$(_b1_data_root_total_gb)
   if [[ "${total_gb}" -gt 0 ]]; then
@@ -909,21 +931,20 @@ b1_step_11() {
   b1_log "  recommended: TeslaCam=${teslacam_rec} GB, Media=${media_rec} GB"
 
   teslacam_gb=$(_b1_resolve_size_gb 0 TESLACAM "${teslacam_rec}" \
-                  TESLAUSB_LUN0_SIZE_GB "${B1_TESLAFAT_CONF_0}")
+                  TESLAUSB_LUN0_SIZE_GB "${B1_TESLAUSB_CONF}" teslacam_gb)
   media_gb=$(_b1_resolve_size_gb 1 MEDIA "${media_rec}" \
-              TESLAUSB_LUN1_SIZE_GB "${B1_TESLAFAT_CONF_1}")
+              TESLAUSB_LUN1_SIZE_GB "${B1_TESLAUSB_CONF}" media_gb)
 
-  local conf0_body conf1_body
-  conf0_body="${B1_TESLAFAT_CONF_0_TEMPLATE//__SIZE_GB__/${teslacam_gb}}"
-  conf1_body="${B1_TESLAFAT_CONF_1_TEMPLATE//__SIZE_GB__/${media_gb}}"
+  local conf0_body
+  conf0_body="${B1_TESLAFAT_CONF_0_TEMPLATE//__TESLACAM_SIZE_GB__/${teslacam_gb}}"
+  conf0_body="${conf0_body//__MEDIA_SIZE_GB__/${media_gb}}"
 
-  b1_log "installing teslafat per-LUN configs"
+  b1_log "installing teslafat DiskConfig"
   _b1_install_file "${B1_TESLAFAT_CONF_0}" 0644 "${conf0_body}"
-  _b1_install_file "${B1_TESLAFAT_CONF_1}" 0644 "${conf1_body}"
 
-  # 2b. Unified storage+cleanup config. Source of truth for LUN
-  # sizes going forward; existing teslafat-*.toml stay in sync via
-  # the resize helper (AC.3). Preserves an existing file if present
+  # 2b. Unified storage+cleanup config. Source of truth for partition
+  # sizes going forward; teslafat-0.toml stays in sync via the
+  # resize helper (AC.3). Preserves an existing file if present
   # (so the operator's cleanup knobs survive a re-run of setup.sh).
   if [[ -e "${B1_TESLAUSB_CONF}" ]]; then
     b1_log "preserving existing ${B1_TESLAUSB_CONF}"
@@ -949,7 +970,7 @@ b1_step_11() {
   #     drops inherits the group (e.g. teslausb.toml.tmp).
   #   * sticky bit (+t) on the dir so the web user can only
   #     unlink/rename files they own — root-owned configs like
-  #     worker.toml and teslafat-*.toml stay safe.
+  #     worker.toml and teslafat-0.toml stay safe.
   #   * chown the file itself to the web user so the atomic rename
   #     can replace it.
   if getent group teslausb >/dev/null && id -u "${B1_WEB_USER:-pi}" >/dev/null 2>&1; then

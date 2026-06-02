@@ -221,14 +221,22 @@ function sentryEventHtml(ev) {
     html += '><div class="st-dot ' + info.dot + '"></div><div class="st-card">';
     html += '<div class="st-type">' + info.label + '</div><div class="st-date">' + formatLocalTime(ev.timestamp) + '</div>';
     html += '<div class="st-meta"' + (metaIsLazy ? ' data-lazy-meta="1"' : '') + '>' + metaHtml + '</div><div class="st-actions">';
+    // Show-on-Map locates the event and loads its day's trip routes (see the
+    // st-btn-map handler). Offered whenever the event has finite coords, so
+    // folder-backed saved/sentry events can jump to the route too — not only
+    // the Play/Download/Delete folder controls.
+    const mapBtnHtml = hasCoords
+        ? '<button class="vp-btn st-btn-map" type="button" title="Show on Map" aria-label="Show event on map" data-lat="' + ev.lat + '" data-lon="' + ev.lon + '">' + ICON_MAP_PIN + '</button>'
+        : '';
     if (folderBacked) {
         html += '<button class="vp-btn st-btn-play" type="button" title="Play" aria-label="Play event clip">' + ICON_PLAY + '</button>';
+        html += mapBtnHtml;
         html += '<button class="vp-btn st-btn-dl" type="button" title="Download ZIP" aria-label="Download event ZIP">' + ICON_DOWNLOAD + '</button>';
     } else if (isFolderEvent) {
         if (videoPath) html += '<button class="vp-btn st-btn-play" type="button" title="Play" aria-label="Play event clip">' + ICON_PLAY + '</button>';
-        if (hasCoords) html += '<button class="vp-btn st-btn-map" type="button" title="Show on Map" aria-label="Show event on map" data-lat="' + ev.lat + '" data-lon="' + ev.lon + '">' + ICON_MAP_PIN + '</button>';
+        html += mapBtnHtml;
     } else if (hasCoords) {
-        html += '<button class="vp-btn st-btn-map" type="button" title="Show on Map" aria-label="Show event on map" data-lat="' + ev.lat + '" data-lon="' + ev.lon + '">' + ICON_MAP_PIN + '</button>';
+        html += mapBtnHtml;
     } else if (videoPath) {
         html += '<button class="vp-btn st-btn-play" type="button" title="Play" aria-label="Play event clip">' + ICON_PLAY + '</button>';
     }

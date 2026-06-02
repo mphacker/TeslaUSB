@@ -147,8 +147,10 @@ underlying truths apply to any TeslaUSB design:
   changes without a re-enumeration.** v1's lock-chime upload
   rebinds the gadget (unplug/replug simulation). **B-1 now does
   the same after `LockChime.wav` activation** — see the B-1
-  learning "Lock chime needs a full UDC re-enumeration" below.
-  A soft SCSI medium-change is NOT enough for the chime.
+  learning "Lock chime activation: re-walk *then* re-enumerate"
+  below. A soft SCSI medium-change is NOT enough for the chime,
+  and on B-1 a re-enumeration alone is *also* not enough — the
+  userspace daemon must re-walk the media partition first.
 
 ---
 
@@ -156,36 +158,72 @@ underlying truths apply to any TeslaUSB design:
 
 (populated as we discover them)
 
-### Lock chime needs a full UDC re-enumeration, not a soft invalidate
+### Lock chime activation: re-walk *then* re-enumerate
 
-**Symptom (2026-05-29):** Activating a new lock chime from the web
-UI updated the active-chime banner and copied the audio to the media
-LUN root as `LockChime.wav`, but the car kept playing the OLD chime
-on lock/unlock.
+**Status (2026-06-01): WORKING.** Activating a lock chime from the web
+UI now reliably updates the sound the car plays on lock/unlock, on the
+single-LUN / two-exFAT-partition layout (ADR-0023). The mechanism below
+is the current, verified-on-hardware flow.
 
-**Root cause:** The file *location* was already correct (root of the
-MEDIA LUN, which is what the car reads). The bug was the *cache
-invalidation method*. B-1's web activation originally fired only a
-soft SCSI medium-change via `tesla_cache_invalidate.sh` (eject +
-re-insert a single LUN, ~200 ms). That is enough for the car to
-re-scan a LUN's *directory listing* (e.g. Light Show `.fseq` files),
-but the car only re-reads `LockChime.wav` itself on a **full USB
-re-enumeration** — a UDC unbind/rebind that simulates an
-unplug/replug. This is exactly what v1 did on chime upload.
+**Symptom history (2026-05-29 → 2026-06-01):** Activating a new chime
+updated the active-chime banner and wrote the audio to the MEDIA
+partition root as `LockChime.wav`, but the car kept playing the OLD
+chime. Two distinct causes were peeled back in order:
 
-**Fix:** Keep the chime on the media LUN (no drive move), and on
-chime activation trigger a full gadget re-enumeration via
-`scripts/tesla_gadget_rebind.sh` (sync → UDC unbind → settle →
-restore LUN backing files → UDC rebind → bounded health wait). The
-web `GadgetRebinder` service runs it synchronously and single-flight;
-if the rebind fails it falls back to the soft invalidate. Only the
-three activation paths (upload+set-active, set-as-chime, delete of the
-active chime) re-enumerate; other mutations keep the cheaper soft
-invalidate.
+1. *Wrong invalidation method.* B-1 originally fired only a soft SCSI
+   medium-change via `tesla_cache_invalidate.sh` (clear + restore one
+   LUN `file` attribute, ~200 ms). That is enough for the car to
+   re-scan a *directory listing* (e.g. Light Show `.fseq` files), but
+   the car only re-reads `LockChime.wav` *by its fixed path* on a full
+   USB **re-enumeration** (UDC unbind/rebind ≈ unplug/replug).
+2. *Stale in-memory view.* After the cutover to the single
+   userspace-served disk, even a re-enumeration kept replaying the old
+   chime, because **`teslafat` snapshots the synthesized exFAT
+   directory tree in memory**. A UDC rebind alone just re-presents that
+   *stale* snapshot — the daemon never re-read the new bytes off the
+   backing tree.
 
-**Takeaway:** Soft medium-change ≠ re-enumeration. For anything the
-car reads *by name from a fixed path* (the lock chime), you must
-re-enumerate the gadget; a per-LUN eject/insert is insufficient.
+**Current mechanism (what activation does now):** On the single
+partitioned disk, the chime lives at the root of **partition 2 (MEDIA)**
+of the one device; there is no separate media LUN, so the whole device
+is `lun.0`. Activation runs `scripts/tesla_gadget_rebind.sh`, which
+performs, in order:
+
+1. `sync` — flush the just-written `LockChime.wav` to the backing tree.
+2. **SIGHUP `teslafat@0` to re-walk the MEDIA partition** and
+   atomically swap in a FRESH synthesized exFAT view, then **block
+   (bounded, ~15 s) until the daemon logs the `teslafat-reload-live`
+   marker**. Only the MEDIA partition opts into `reload_on_sighup`; the
+   continuously-recording TeslaCam partition sets it `false`, so the
+   re-walk refreshes the chime view without disturbing dashcam writes.
+   This step runs *while the gadget is still bound*, so a failure here
+   is safe (TeslaCam stays attached) and exits without touching the UDC.
+   **This re-walk MUST precede the rebind** — otherwise step 4
+   re-presents the stale snapshot and the car keeps the old chime.
+3. UDC unbind (`teslausb-hide-usb`) → settle (~2 s) → restore the
+   `lun.0` backing file if the unbind cleared it.
+4. UDC rebind (`teslausb-present-usb`) → wait (bounded, ~30 s) for full
+   health (UDC bound AND `lun.0` re-backed) before returning success.
+
+The `teslafat-reload-live` token is a **contract** between the script's
+`RELOAD_LIVE_MARKER` and `RELOAD_LIVE_MARKER` in
+`rust/crates/teslafat/src/main.rs` — keep the two in lock-step.
+
+**Web wiring:** `GadgetRebinder` (`services/gadget_rebind.py`) runs the
+script synchronously and single-flight (a rebind briefly detaches BOTH
+partitions, so concurrent rebinds must serialize). Only the activation
+paths (upload+set-active, set-as-chime, delete of the active chime)
+re-enumerate; if the rebind fails they fall back to the soft
+`CacheInvalidator`. All other mutations (non-active upload, rename,
+schedule/group edits) keep the cheaper debounced soft invalidate.
+
+**Takeaways:**
+- Soft medium-change ≠ re-enumeration. For anything the car reads *by
+  name from a fixed path* (the lock chime), you must re-enumerate.
+- On a userspace-synthesized filesystem, re-enumeration ≠ fresh data.
+  The daemon caches its directory tree in memory; you must force it to
+  re-walk the backing tree (and confirm the swap went live) *before*
+  the host re-reads. Re-walk first, re-enumerate second.
 
 ### B-1 fundamental: anti-anchoring (Rust where it helps, redesign where v1 was wrong)
 

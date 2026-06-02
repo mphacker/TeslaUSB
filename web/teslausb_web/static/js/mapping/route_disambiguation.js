@@ -210,7 +210,7 @@ async function loadPlayableTripsForCurrentDay(date, seq) {
     let data;
     try {
         const resp = await fetch(
-            `${BOOTSTRAP.api.playable_trips}?date=${encodeURIComponent(date)}`,
+            withTz(`${BOOTSTRAP.api.playable_trips}?date=${encodeURIComponent(date)}`),
         );
         if (!resp.ok) {
             // Non-200 (e.g. 503 when image is missing or 400 on bad

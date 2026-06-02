@@ -34,6 +34,11 @@ dependencies = [
     # on Linux and works on Windows dev boxes (sensors return {} there,
     # which the system_metrics service degrades gracefully on).
     "psutil>=5.9",
+    # tzdata supplies the IANA timezone database for `zoneinfo` so the
+    # mapping page can bucket trips/events by the operator's local
+    # calendar day. Raspberry Pi OS ships the system zoneinfo, but tzdata
+    # guarantees the database is present regardless of host packaging.
+    "tzdata>=2024.1",
 ]
 
 [project.optional-dependencies]

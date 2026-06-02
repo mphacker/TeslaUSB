@@ -175,7 +175,11 @@ class TestStubRoutes:
             "trip_gap_minutes": 7,
         }
         prefs_payload = json.loads(prefs_svc.path.read_text(encoding="utf-8"))
-        assert prefs_payload == {"schema_version": 1, "speed_units": "kph"}
+        assert prefs_payload == {
+            "schema_version": 1,
+            "speed_units": "kph",
+            "display_timezone": "",
+        }
 
     def test_units_only_change_does_not_touch_worker_overrides(self, client, app) -> None:
         import json
@@ -201,6 +205,7 @@ class TestStubRoutes:
         assert json.loads(prefs_svc.path.read_text(encoding="utf-8")) == {
             "schema_version": 1,
             "speed_units": "kph",
+            "display_timezone": "",
         }
 
     def test_save_mapping_zero_speed_disables(self, client, app) -> None:

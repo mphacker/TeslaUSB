@@ -22,6 +22,7 @@ from teslausb_web.services.mapping_sql import (
     _video_url_path,
 )
 from teslausb_web.services.mapping_trip_derivation import epoch_to_iso
+from teslausb_web.services.mapping_tz import UTC_TZ_NAME
 
 _DEFAULT_EVENT_OVERVIEW_LIMIT: Final[int] = 5000
 _CLIP_EVENT_TABLE: Final[str] = "clip_events"
@@ -34,22 +35,24 @@ _CLIP_EVENT_TYPE_SQL: Final[str] = (
 
 
 def _query_clip_event_day_counts(connection: sqlite3.Connection) -> tuple[sqlite3.Row, ...]:
+    """Return raw ``(timestamp_utc, bucket)`` rows for local-day bucketing.
+
+    Day assignment is timezone-dependent, so this returns one row per
+    clip event (not a SQL ``GROUP BY date``); the caller buckets each
+    into its local calendar day. ``bucket`` carries the event class so
+    the caller can split sentry from non-sentry counts.
+    """
     if not _table_exists(connection, _CLIP_EVENT_TABLE):
         return ()
     return tuple(
         connection.execute(
-            "SELECT date(timestamp_utc, 'unixepoch') AS day, "
-            "       COUNT(*) AS event_count, "
-            "       SUM(CASE WHEN bucket = ? THEN 1 ELSE 0 END) AS sentry_count "
-            "  FROM clip_events "
-            " GROUP BY day",
-            (EVENT_SENTRY,),
+            "SELECT timestamp_utc, bucket FROM clip_events",
         ).fetchall()
     )
 
 
 def _query_clip_events_for_day(
-    connection: sqlite3.Connection, date_str: str
+    connection: sqlite3.Connection, date_str: str, tz_name: str = UTC_TZ_NAME
 ) -> tuple[sqlite3.Row, ...]:
     return _query_clip_events(
         connection,
@@ -60,6 +63,7 @@ def _query_clip_events_for_day(
         date_to=None,
         date=date_str,
         limit=_DEFAULT_EVENT_OVERVIEW_LIMIT,
+        tz_name=tz_name,
     )
 
 
@@ -73,23 +77,25 @@ def _query_clip_events(  # noqa: PLR0913
     date_to: str | None,
     date: str | None,
     limit: int,
+    tz_name: str = UTC_TZ_NAME,
 ) -> tuple[sqlite3.Row, ...]:
     if not _table_exists(connection, _CLIP_EVENT_TABLE):
         return ()
     if severity is not None and severity != _SEVERITY_INFO:
         return ()
-    clauses, params = _clip_event_clauses(event_type, bbox, date_from, date_to, date)
+    clauses, params = _clip_event_clauses(event_type, bbox, date_from, date_to, date, tz_name)
     where_sql = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     params.append(limit)
     return tuple(connection.execute(_clip_event_sql(where_sql), params).fetchall())
 
 
-def _clip_event_clauses(
+def _clip_event_clauses(  # noqa: PLR0913
     event_type: str | None,
     bbox: tuple[float, float, float, float] | None,
     date_from: str | None,
     date_to: str | None,
     date: str | None,
+    tz_name: str = UTC_TZ_NAME,
 ) -> tuple[list[str], list[object]]:
     clauses: list[str] = []
     params: list[object] = []
@@ -97,7 +103,7 @@ def _clip_event_clauses(
         clauses.append(f"{_CLIP_EVENT_TYPE_SQL} = ?")
         params.append(event_type)
     _append_time_bbox_clauses(
-        clauses, params, "ce", "est_lat", "est_lon", bbox, date_from, date_to, date
+        clauses, params, "ce", "est_lat", "est_lon", bbox, date_from, date_to, date, tz_name
     )
     return clauses, params
 

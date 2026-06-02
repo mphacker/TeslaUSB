@@ -346,12 +346,33 @@ class TestUrlMap:
 
 
 class TestMapView:
-    def test_index_redirects_to_latest_day(self, client: FlaskClient) -> None:
-        # Bare "/" must land the operator on the most-recent day with data
-        # (Trip B is on 2024-06-02) instead of an empty map.
+    def test_index_does_not_redirect_and_exposes_latest_day(
+        self, client: FlaskClient
+    ) -> None:
+        # Bare "/" no longer server-redirects to a UTC-computed day (that
+        # would flash the wrong day for an operator whose evening drive
+        # crossed midnight UTC). In the default "Auto" mode (no saved
+        # timezone override) the server cannot know the browser zone on
+        # first paint, so it embeds an EMPTY latest_date and lets
+        # init.js + /api/days resolve the latest *local* day. Pre-seeding a
+        # UTC day here is exactly the flash-the-wrong-day bug.
         response = client.get("/")
-        assert response.status_code == HTTPStatus.FOUND
-        assert "date=2024-06-02" in response.headers["Location"]
+        assert response.status_code == HTTPStatus.OK
+        body = response.get_data(as_text=True)
+        assert '"date": ""' in body
+        assert '"latest_date": ""' in body
+
+    def test_index_preseeds_latest_day_when_override_set(self, app: Flask) -> None:
+        # With an explicit Settings timezone override the server zone is
+        # authoritative on first paint (the client buckets identically), so
+        # the server CAN pre-seed the latest day with no flash risk.
+        prefs = app.extensions["map_view_prefs_service"]
+        prefs.save_preferences(speed_units="kph", display_timezone="UTC")
+        response = app.test_client().get("/")
+        assert response.status_code == HTTPStatus.OK
+        body = response.get_data(as_text=True)
+        assert '"latest_date": "2024-06-02"' in body
+        assert '"display_timezone": "UTC"' in body
 
     def test_index_page_renders(self, client: FlaskClient) -> None:
         response = client.get("/?date=2024-06-02")

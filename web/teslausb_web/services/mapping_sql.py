@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
+from teslausb_web.services.mapping_tz import UTC_TZ_NAME, day_bounds_utc
+
 if TYPE_CHECKING:
     import sqlite3
 
@@ -72,10 +74,28 @@ def _append_time_bbox_clauses(  # noqa: PLR0913
     date_from: str | None,
     date_to: str | None,
     date: str | None,
+    tz_name: str = UTC_TZ_NAME,
+    *,
+    trip_alias: str | None = None,
 ) -> None:
     if date is not None:
-        clauses.append(f"date({alias}.timestamp_utc, 'unixepoch') = ?")
-        params.append(date)
+        start_epoch, end_epoch = day_bounds_utc(date, tz_name)
+        if trip_alias is None:
+            clauses.append(f"{alias}.timestamp_utc >= ? AND {alias}.timestamp_utc < ?")
+            params.extend([start_epoch, end_epoch])
+        else:
+            # Trip-attached events bucket by their owning trip's start day,
+            # standalone events by their own timestamp — identical to the
+            # day-payload and day-rollup rule. Without this, an event whose
+            # raw timestamp drifts across local midnight would appear under
+            # a different day in /api/events?date= than in the day payload.
+            clauses.append(
+                f"(({alias}.trip_id IS NOT NULL "
+                f"AND {trip_alias}.start_utc >= ? AND {trip_alias}.start_utc < ?) "
+                f"OR ({alias}.trip_id IS NULL "
+                f"AND {alias}.timestamp_utc >= ? AND {alias}.timestamp_utc < ?))"
+            )
+            params.extend([start_epoch, end_epoch, start_epoch, end_epoch])
     if date_from is not None:
         clauses.append(
             f"strftime('%Y-%m-%dT%H:%M:%S+00:00', {alias}.timestamp_utc, 'unixepoch') >= ?"

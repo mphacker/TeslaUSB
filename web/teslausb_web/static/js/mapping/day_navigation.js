@@ -38,7 +38,7 @@ async function loadDays() {
     // be careful not to clobber an in-flight day load — that's
     // what the dayLoadSeq token in loadDay() is for.
     try {
-        const resp = await fetch(BOOTSTRAP.api.days + '?limit=365');
+        const resp = await fetch(withTz(BOOTSTRAP.api.days + '?limit=365'));
         const data = await resp.json();
         allDays = data.days || [];
 
@@ -119,7 +119,7 @@ async function loadDay(date, options) {
         let eventsData;
         if (BOOTSTRAP.api.day_payload_template) {
             const payloadResp = await fetch(
-                BOOTSTRAP.api.day_payload_template.replace('__DATE__', encodeURIComponent(date)),
+                withTz(BOOTSTRAP.api.day_payload_template.replace('__DATE__', encodeURIComponent(date))),
             );
             const payload = await payloadResp.json();
             routesData = { trips: payload.trips || [] };
@@ -129,8 +129,8 @@ async function loadDay(date, options) {
             // hundreds of events and silently truncating would hide
             // markers the day card promises. Server caps at 5000.
             const [routesResp, eventsResp] = await Promise.all([
-                fetch(BOOTSTRAP.api.day_routes_template.replace('__DATE__', encodeURIComponent(date))),
-                fetch(`${BOOTSTRAP.api.events}?date=${encodeURIComponent(date)}&limit=5000`),
+                fetch(withTz(BOOTSTRAP.api.day_routes_template.replace('__DATE__', encodeURIComponent(date)))),
+                fetch(withTz(`${BOOTSTRAP.api.events}?date=${encodeURIComponent(date)}&limit=5000`)),
             ]);
             routesData = await routesResp.json();
             eventsData = await eventsResp.json();
@@ -308,7 +308,7 @@ function selectDayForTrip(tripId) {
         }
         const wps = geojson.properties.waypoints;
         if (!wps.length || !wps[0].timestamp) return;
-        const date = String(wps[0].timestamp).substr(0, 10);
+        const date = localDayOf(wps[0].timestamp);
         if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return;
 
         // If the trip's day is older than the /api/days window

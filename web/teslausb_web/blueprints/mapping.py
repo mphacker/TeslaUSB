@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
+from datetime import date
 from http import HTTPStatus
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
@@ -14,13 +15,15 @@ from flask import (
     Response,
     current_app,
     jsonify,
-    redirect,
     render_template,
     request,
     url_for,
 )
 
-from teslausb_web.services.map_view_prefs_service import MapViewPreferencesService
+from teslausb_web.services.map_view_prefs_service import (
+    MapViewPreferencesError,
+    MapViewPreferencesService,
+)
 from teslausb_web.services.mapping_queries import (
     ChartCount,
     DayPayload,
@@ -40,6 +43,7 @@ from teslausb_web.services.mapping_queries import (
     TripRow,
     TripTelemetryPoint,
 )
+from teslausb_web.services.mapping_tz import normalize_tz
 from teslausb_web.services.video_service import event_playback_target
 
 if TYPE_CHECKING:
@@ -115,6 +119,31 @@ def _get_queries() -> MappingQueries:
     return queries
 
 
+def _map_view_prefs() -> MapViewPreferencesService:
+    prefs_service = current_app.extensions.get("map_view_prefs_service")
+    if not isinstance(prefs_service, MapViewPreferencesService):
+        raise RuntimeError("map_view_prefs_service extension is not configured")
+    return prefs_service
+
+
+def _resolve_display_tz() -> str:
+    """Resolve the day-bucketing zone: saved override > browser tz > UTC.
+
+    The operator's explicit Settings override (an IANA name) wins so the
+    map is deterministic across every device. When unset ("Auto"), the
+    browser's reported ``tz`` query param is used. Both are normalised to
+    a valid IANA name; anything unknown degrades to UTC.
+    """
+    try:
+        override = _map_view_prefs().get_preferences().display_timezone
+    except (MapViewPreferencesError, RuntimeError) as exc:
+        logger.warning("display-timezone preference lookup failed: %s", exc)
+        override = ""
+    if override:
+        return normalize_tz(override)
+    return normalize_tz(request.args.get("tz"))
+
+
 def _json_error_payload(message: str) -> Response:
     return jsonify({"success": False, "error": message})
 
@@ -134,6 +163,10 @@ def _parse_bbox() -> tuple[float, float, float, float] | None:
 def _require_iso_date(date_text: str) -> str:
     if _DATE_RE.fullmatch(date_text) is None:
         raise MappingRequestError("date must be YYYY-MM-DD")
+    try:
+        date.fromisoformat(date_text)
+    except ValueError as exc:
+        raise MappingRequestError("date must be a real calendar day") from exc
     return date_text
 
 
@@ -453,25 +486,26 @@ def _handle_query_error(exc: Exception) -> ResponseReturnValue:
 @mapping_bp.route("/")
 def map_view() -> ResponseReturnValue:
     requested_date = request.args.get("date", "").strip()
-    # Server-side redirect to the latest day so the user lands directly on
-    # rendered data instead of an empty map. Skipped when the URL already
-    # carries a date.
-    initial_date = requested_date
-    latest_date: str | None = None
-    try:
-        latest_date = _get_queries().query_latest_date()
-    except (MappingQueryError, RuntimeError) as exc:
-        logger.warning("latest-date lookup failed: %s", exc)
-        latest_date = None
-    if not requested_date and latest_date:
-        target = url_for("mapping.map_view", date=latest_date)
-        return redirect(target, code=HTTPStatus.FOUND)
-    if not initial_date and latest_date:
-        initial_date = latest_date
-    prefs_service = current_app.extensions.get("map_view_prefs_service")
-    if not isinstance(prefs_service, MapViewPreferencesService):
-        raise RuntimeError("map_view_prefs_service extension is not configured")
+    prefs_service = _map_view_prefs()
     map_preferences = prefs_service.get_preferences()
+    # The "latest day" is timezone-dependent. On first paint the server
+    # cannot know the browser's zone (no JS has run yet), so we only
+    # pre-seed ``latest_date`` when an explicit Settings override makes
+    # the server-side zone authoritative. In Auto mode we render the
+    # shell with no initial date and let init.js + /api/days resolve the
+    # latest *local* day once the browser zone is known — pre-seeding a
+    # UTC latest day there would flash the wrong day for an operator
+    # whose evening drive crossed midnight UTC. An explicit ``?date=`` in
+    # the URL is always honoured.
+    latest_date: str | None = None
+    if map_preferences.display_timezone:
+        try:
+            latest_date = _get_queries().query_latest_date(
+                normalize_tz(map_preferences.display_timezone)
+            )
+        except (MappingQueryError, RuntimeError) as exc:
+            logger.warning("latest-date lookup failed: %s", exc)
+            latest_date = None
     bootstrap = {
         "api": {
             "days": url_for("mapping.api_days"),
@@ -504,9 +538,10 @@ def map_view() -> ResponseReturnValue:
             "tile_cache_sw": url_for("_tile_cache_service_worker"),
         },
         "view": {
-            "date": initial_date,
+            "date": requested_date,
             "latest_date": latest_date or "",
             "speed_units": map_preferences.speed_units.value,
+            "display_timezone": map_preferences.display_timezone,
             "video_stream_template": "/videos/stream/__PATH__",
         },
         "features": {
@@ -620,6 +655,7 @@ def api_events() -> ResponseReturnValue:
             date_from=request.args.get("date_from"),
             date_to=request.args.get("date_to"),
             date=date,
+            tz_name=_resolve_display_tz(),
         )
     except MappingRequestError as exc:
         return _handle_request_error(exc)
@@ -641,6 +677,7 @@ def api_days() -> ResponseReturnValue:
                 request.args.get("min_distance", _DEFAULT_DAY_MIN_DISTANCE_KM, type=float),
                 default=_DEFAULT_DAY_MIN_DISTANCE_KM,
             ),
+            tz_name=_resolve_display_tz(),
         )
     except (MappingQueryError, RuntimeError) as exc:
         return _handle_query_error(exc)
@@ -656,6 +693,7 @@ def api_day_routes(date: str) -> ResponseReturnValue:
                 request.args.get("min_distance", _DEFAULT_DAY_MIN_DISTANCE_KM, type=float),
                 default=_DEFAULT_DAY_MIN_DISTANCE_KM,
             ),
+            tz_name=_resolve_display_tz(),
         )
     except MappingRequestError as exc:
         return _handle_request_error(exc)
@@ -673,7 +711,9 @@ def api_day_payload(date: str) -> ResponseReturnValue:
     ``/api/stats``, ``/api/driving-stats``) with one direct-SQL call.
     """
     try:
-        payload = _get_queries().query_day_payload(_require_iso_date(date))
+        payload = _get_queries().query_day_payload(
+            _require_iso_date(date), tz_name=_resolve_display_tz()
+        )
     except MappingRequestError as exc:
         return _handle_request_error(exc)
     except (MappingQueryError, RuntimeError) as exc:
@@ -685,7 +725,7 @@ def api_day_payload(date: str) -> ResponseReturnValue:
 def api_trips_playable() -> ResponseReturnValue:
     try:
         date = _require_iso_date(request.args.get("date", ""))
-        trips = _get_queries().playable_trips_for_date(date)
+        trips = _get_queries().playable_trips_for_date(date, tz_name=_resolve_display_tz())
     except MappingRequestError as exc:
         return _handle_request_error(exc)
     except (MappingQueryError, RuntimeError) as exc:
@@ -714,7 +754,7 @@ def api_driving_stats() -> ResponseReturnValue:
 @mapping_bp.route("/api/event-charts")
 def api_event_charts() -> ResponseReturnValue:
     try:
-        data = _get_queries().get_event_chart_data()
+        data = _get_queries().get_event_chart_data(_resolve_display_tz())
     except (MappingQueryError, RuntimeError) as exc:
         return _handle_query_error(exc)
     return jsonify(_serialize_event_chart_data(data))
@@ -727,6 +767,7 @@ def api_sentry_events() -> ResponseReturnValue:
         events = _get_queries().query_events(
             limit=page_request.limit + 1,
             offset=page_request.offset,
+            tz_name=_resolve_display_tz(),
         )
     except (MappingQueryError, RuntimeError) as exc:
         return _handle_query_error(exc)

@@ -11,6 +11,55 @@ if ('serviceWorker' in navigator) {
         .catch(err => console.warn('Tile cache SW failed:', err));
 }
 
+// --- Display timezone (browser tz day bucketing) ---
+//
+// Map "days" are bucketed by the operator's local calendar day, not by
+// UTC (a 20:10 EDT drive on June 1 is 00:10 UTC June 2 and must file
+// under June 1). The server resolves the day boundary in this order:
+// explicit Settings override > this browser's reported zone > UTC. We
+// therefore send the browser's IANA zone on every day-scoped request;
+// when an override is configured the server ignores this value.
+const BROWSER_TZ = (function () {
+    try {
+        return Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+    } catch (e) { return ''; }
+})();
+
+// Effective display zone for client-side day bucketing. Mirrors the
+// server's resolution order: an explicit Settings override wins over the
+// browser's reported zone. ``withTz()`` still sends the *browser* zone so
+// the server's Auto path stays correct; ``localDayOf()`` uses this
+// effective zone so "Show on Map" and trip-row day derivation agree with
+// the server even when the operator pins a non-local override.
+const DISPLAY_TZ = (BOOTSTRAP.view && BOOTSTRAP.view.display_timezone) || BROWSER_TZ;
+
+// Append the browser timezone to a day-scoped API URL. Preserves any
+// existing query string and is a no-op when the browser does not
+// report a zone (the server then falls back to its override or UTC).
+function withTz(url) {
+    if (!BROWSER_TZ) return url;
+    const sep = url.indexOf('?') === -1 ? '?' : '&';
+    return url + sep + 'tz=' + encodeURIComponent(BROWSER_TZ);
+}
+
+// Convert an ISO-8601 UTC timestamp to the YYYY-MM-DD calendar day in
+// the operator's display timezone, matching the server's day bucketing.
+// en-CA formats as YYYY-MM-DD. Falls back to a naive UTC-date slice
+// only when no display zone is known or parsing fails.
+function localDayOf(isoTs) {
+    if (!isoTs) return '';
+    const naive = String(isoTs).replace(' ', 'T').slice(0, 10);
+    if (!DISPLAY_TZ) return naive;
+    try {
+        const parsed = new Date(String(isoTs).replace(' ', 'T'));
+        if (isNaN(parsed.getTime())) return naive;
+        return new Intl.DateTimeFormat('en-CA', {
+            timeZone: DISPLAY_TZ,
+            year: 'numeric', month: '2-digit', day: '2-digit',
+        }).format(parsed);
+    } catch (e) { return naive; }
+}
+
 // Format ISO timestamp to local time
 function formatLocalTime(isoStr) {
     if (!isoStr) return 'Unknown';

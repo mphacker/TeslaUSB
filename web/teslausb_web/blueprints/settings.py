@@ -26,6 +26,7 @@ import sys
 from http import HTTPStatus
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
+from zoneinfo import available_timezones
 
 from flask import (
     Blueprint,
@@ -302,6 +303,15 @@ def _share_paths_for_display() -> list[dict[str, str]]:
     return [{"name": share.name, "unc": f"\\\\{host}\\{share.name}"} for share in shares]
 
 
+def _available_timezones() -> list[str]:
+    """Return the sorted IANA zone names for the Settings timezone picker.
+
+    Sourced from the same `zoneinfo` database used to bucket map days, so
+    the picker can only offer zones the server can actually resolve.
+    """
+    return sorted(available_timezones())
+
+
 def _index_context() -> dict[str, object]:
     wifi_status, ap_status, ap_config = _wifi_context()
     mapping_service = _get_mapping_settings_service()
@@ -326,6 +336,7 @@ def _index_context() -> dict[str, object]:
             **mapping_service.serialize_for_template(mapping_snapshot),
             **prefs_service.serialize_for_template(map_preferences),
         },
+        "available_timezones": _available_timezones(),
         "cfg_network": {
             "samba_password": "",
             "samba_enabled": samba_on,
@@ -434,13 +445,16 @@ def save_mapping_settings() -> ResponseReturnValue:
             request.form.get("speed_limit_mph"),
         )
         speed_units = _coerce_speed_units_form_field(request.form.get("speed_units"))
+        display_timezone = request.form.get("display_timezone", "")
         snapshot = settings_service.get_settings()
         if snapshot.trip_gap_minutes != trip_gap or snapshot.speed_limit_mph != speed_mph:
             snapshot = settings_service.save_settings(
                 trip_gap_minutes=trip_gap,
                 speed_limit_mph=speed_mph,
             )
-        preferences = prefs_service.save_preferences(speed_units=speed_units)
+        preferences = prefs_service.save_preferences(
+            speed_units=speed_units, display_timezone=display_timezone
+        )
     except (MappingSettingsError, MapViewPreferencesError) as exc:
         flash(f"Invalid mapping settings: {exc}", "error")
         return _redirect_to_index()

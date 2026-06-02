@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any, NoReturn
 
 import pytest
@@ -584,6 +584,135 @@ class TestMaterialisedHotPath:
         assert days[0].event_count == 1
         assert queries.query_latest_date() == "2024-06-06"
 
+    def test_clip_event_buckets_by_display_timezone(self, tmp_path: Path) -> None:
+        # Regression for the operator bug (ADR-0025): a honk + drive on the
+        # evening of June 1 in America/Detroit (EDT) is stored as its true
+        # UTC instant 2024-06-02 00:10Z. Bucketing by UTC files it under
+        # June 2 (the bug); bucketing by the operator's zone files it under
+        # June 1. The tz must thread all the way through query_events,
+        # query_day_payload, query_days and query_latest_date.
+        db_path = tmp_path / "index.sqlite3"
+        # 2024-06-02 00:10 UTC == 2024-06-01 20:10 EDT.
+        event_epoch = _epoch(2024, 6, 2, 0, 10)
+        clip_path = "SavedClips/2024-06-01_20-10-00/2024-06-01_20-10-00-front.mp4"
+        _seed_db(
+            db_path,
+            [
+                {
+                    "relative_path": clip_path,
+                    "bucket": "saved",
+                    "clip_started_utc": event_epoch - 5,
+                    "waypoints": [],
+                }
+            ],
+        )
+        _create_empty_materialised_tables(db_path)
+        _create_clip_events_table(db_path)
+        clip_id = _clip_id_for_path(db_path, clip_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "INSERT INTO clip_events(event_json_relative_path, event_dir_relative_path, "
+                "bucket, primary_clip_id, timestamp_utc, est_lat, est_lon, reason, city, "
+                "camera, indexed_at_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "SavedClips/2024-06-01_20-10-00/event.json",
+                    "SavedClips/2024-06-01_20-10-00",
+                    "saved",
+                    clip_id,
+                    event_epoch,
+                    42.33,
+                    -83.05,
+                    "user_honk",
+                    "detroit",
+                    "front",
+                    event_epoch + 1,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        queries = MappingQueries(
+            config=MappingQueriesConfig(db_path=db_path, media_root=tmp_path / "media")
+        )
+
+        detroit = "America/Detroit"
+        # Operator's local zone: the event belongs to June 1.
+        assert len(queries.query_events(date="2024-06-01", tz_name=detroit)) == 1
+        assert queries.query_events(date="2024-06-02", tz_name=detroit) == ()
+        assert queries.query_day_payload("2024-06-01", tz_name=detroit).events != ()
+        detroit_days = queries.query_days(limit=10, min_distance_km=0.0, tz_name=detroit)
+        assert detroit_days[0].date == "2024-06-01"
+        assert queries.query_latest_date(detroit) == "2024-06-01"
+
+        # UTC (the back-compat default): the same event buckets to June 2.
+        assert len(queries.query_events(date="2024-06-02")) == 1
+        assert queries.query_events(date="2024-06-01") == ()
+        utc_days = queries.query_days(limit=10, min_distance_km=0.0)
+        assert utc_days[0].date == "2024-06-02"
+        assert queries.query_latest_date() == "2024-06-02"
+
+    def test_detected_event_buckets_by_trip_day_across_local_midnight(
+        self, tmp_path: Path
+    ) -> None:
+        # Regression (GPT-5.5 review, ADR-0025): a trip-attached detected
+        # event whose own timestamp drifts across local midnight must bucket
+        # by its owning trip's start day in /api/events?date= and in
+        # DayPayload.latest_date, identical to the day payload and the day
+        # rollup. Otherwise the same honk renders under one day on the map
+        # (trip day) and another in the events list (event-timestamp day).
+        db_path = tmp_path / "index.sqlite3"
+        trip_start = _epoch(2024, 6, 2, 3, 50)  # 2024-06-01 23:50 EDT (June 1 local)
+        event_epoch = _epoch(2024, 6, 2, 4, 15)  # 2024-06-02 00:15 EDT (June 2 local)
+        clip_path = "RecentClips/2024-06-01_23-50-00/2024-06-01_23-50-00-front.mp4"
+        _seed_db(
+            db_path,
+            [
+                {
+                    "relative_path": clip_path,
+                    "bucket": "recent",
+                    "clip_started_utc": trip_start,
+                    "waypoints": [],
+                }
+            ],
+        )
+        _create_empty_materialised_tables(db_path)
+        _create_clip_events_table(db_path)
+        clip_id = _clip_id_for_path(db_path, clip_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "INSERT INTO trips(start_utc, end_utc, start_clip_id, end_clip_id, "
+                "distance_km, duration_seconds, video_count, bucket) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (trip_start, event_epoch, clip_id, clip_id, 5.0, 1500, 1, "recent"),
+            )
+            trip_id = int(conn.execute("SELECT id FROM trips").fetchone()[0])
+            conn.execute(
+                "INSERT INTO detected_events(trip_id, clip_id, event_type, severity, "
+                "timestamp_utc, latitude_deg, longitude_deg, description) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (trip_id, clip_id, "honk", "info", event_epoch, 42.33, -83.05, ""),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        queries = MappingQueries(
+            config=MappingQueriesConfig(db_path=db_path, media_root=tmp_path / "media")
+        )
+
+        detroit = "America/Detroit"
+        # Trip-attached event buckets by the trip's start day (June 1 local),
+        # NOT by its own timestamp (June 2 local).
+        assert len(queries.query_events(date="2024-06-01", tz_name=detroit)) == 1
+        assert queries.query_events(date="2024-06-02", tz_name=detroit) == ()
+        # The day payload already bucketed by trip day; the events list and
+        # latest_date (via _latest_date_locked) must now agree.
+        assert queries.query_day_payload("2024-06-01", tz_name=detroit).events != ()
+        assert (
+            queries.query_day_payload("2024-06-01", tz_name=detroit).latest_date == "2024-06-01"
+        )
+
     def test_clip_event_without_primary_clip_has_no_video_path(
         self, tmp_path: Path
     ) -> None:
@@ -810,11 +939,11 @@ class TestPlayableCache:
 
     def test_cache_trims_when_oversized(self, worker_db_factory: WorkerDbFactory) -> None:
         q = worker_db_factory([])
-        # 65 distinct dates pushes the cache past _MAX_PLAYABLE_CACHE_ENTRIES (64).
-        for day in range(1, 32):
-            q.playable_trips_for_date(f"2024-01-{day:02d}")
-        for day in range(1, 35):
-            q.playable_trips_for_date(f"2024-02-{day:02d}")
+        # 65 distinct valid dates pushes the cache past
+        # _MAX_PLAYABLE_CACHE_ENTRIES (64).
+        base = date(2024, 1, 1)
+        for offset in range(65):
+            q.playable_trips_for_date((base + timedelta(days=offset)).isoformat())
         # After trimming, the internal map must be <= 64 entries.
         assert len(q._playable_trips_cache) <= 64  # whitebox check
 

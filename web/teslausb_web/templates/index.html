@@ -382,6 +382,18 @@
                             Controls speed labels and color buckets on the map only. Stored telemetry and speed alerts stay canonical.
                         </p>
                     </div>
+                    <div class="form-group">
+                        <label for="mapping-display-timezone" style="font-size:0.85rem"><strong>Map day timezone</strong></label>
+                        <select id="mapping-display-timezone" name="display_timezone" class="settings-form-input">
+                            <option value="" {% if not cfg_mapping.display_timezone %}selected{% endif %}>Auto (use this device's timezone)</option>
+                            {% for tz in available_timezones %}
+                            <option value="{{ tz }}" {% if cfg_mapping.display_timezone == tz %}selected{% endif %}>{{ tz }}</option>
+                            {% endfor %}
+                        </select>
+                        <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
+                            Groups trips and events into calendar days using this timezone. Leave on Auto to use the timezone of whatever device you view the map from.
+                        </p>
+                    </div>
                 </div>
                 <button type="submit" class="btn btn-primary" style="width:100%">Save Mapping Settings</button>
             </form>

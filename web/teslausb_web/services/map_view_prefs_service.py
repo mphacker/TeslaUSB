@@ -15,6 +15,8 @@ from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Final, cast
 
+from teslausb_web.services.mapping_tz import normalize_tz
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
@@ -24,6 +26,10 @@ _SCHEMA_VERSION: Final[int] = 1
 _JSON_ENCODING: Final[str] = "utf-8"
 _JSON_INDENT: Final[int] = 2
 _TMP_SUFFIX: Final[str] = ".tmp"
+
+# Empty string = "Auto": resolve the display day from the browser's
+# reported zone. Any other value is an explicit IANA override.
+_AUTO_TIMEZONE: Final[str] = ""
 
 
 class SpeedUnits(StrEnum):
@@ -45,6 +51,7 @@ class MapViewPreferences:
     """Cold-path map presentation preferences."""
 
     speed_units: SpeedUnits = _DEFAULT_SPEED_UNITS
+    display_timezone: str = _AUTO_TIMEZONE
 
 
 _DEFAULT_PREFERENCES: Final[MapViewPreferences] = MapViewPreferences()
@@ -88,12 +95,18 @@ class MapViewPreferencesService:
             )
         return _preferences_from_mapping(payload)
 
-    def save_preferences(self, *, speed_units: SpeedUnits | str) -> MapViewPreferences:
+    def save_preferences(
+        self, *, speed_units: SpeedUnits | str, display_timezone: str | None = None
+    ) -> MapViewPreferences:
         """Validate and persist preferences atomically."""
-        preferences = MapViewPreferences(speed_units=_coerce_speed_units(speed_units))
+        preferences = MapViewPreferences(
+            speed_units=_coerce_speed_units(speed_units),
+            display_timezone=_coerce_display_timezone(display_timezone),
+        )
         payload: dict[str, object] = {
             "schema_version": _SCHEMA_VERSION,
             "speed_units": preferences.speed_units.value,
+            "display_timezone": preferences.display_timezone,
         }
         with self._lock:
             _write_json_atomically(self._path, payload)
@@ -101,12 +114,37 @@ class MapViewPreferencesService:
 
     def serialize_for_template(self, preferences: MapViewPreferences) -> dict[str, object]:
         """Return template keys for map-view preferences."""
-        return {"speed_units": preferences.speed_units.value}
+        return {
+            "speed_units": preferences.speed_units.value,
+            "display_timezone": preferences.display_timezone,
+        }
 
 
 def _preferences_from_mapping(payload: Mapping[str, object]) -> MapViewPreferences:
     raw_speed_units = payload.get("speed_units", _DEFAULT_SPEED_UNITS)
-    return MapViewPreferences(speed_units=_coerce_speed_units(raw_speed_units))
+    raw_timezone = payload.get("display_timezone", _AUTO_TIMEZONE)
+    return MapViewPreferences(
+        speed_units=_coerce_speed_units(raw_speed_units),
+        display_timezone=_coerce_display_timezone(raw_timezone),
+    )
+
+
+def _coerce_display_timezone(value: object) -> str:
+    """Return a valid IANA zone, or ``""`` (Auto) when absent/blank.
+
+    An explicit but unrecognised zone is rejected so the operator gets
+    a clear error rather than a silent fall-back to UTC at save time.
+    """
+    if value is None:
+        return _AUTO_TIMEZONE
+    if not isinstance(value, str):
+        raise MapViewPreferencesError(f"display_timezone must be a string, got {value!r}")
+    candidate = value.strip()
+    if not candidate:
+        return _AUTO_TIMEZONE
+    if normalize_tz(candidate) != candidate:
+        raise MapViewPreferencesError(f"Unknown display_timezone: {candidate!r}")
+    return candidate
 
 
 def _coerce_speed_units(value: object) -> SpeedUnits:

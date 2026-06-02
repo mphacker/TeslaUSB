@@ -32,6 +32,7 @@ def test_save_round_trip_persists_kph(prefs_path: Path) -> None:
     assert json.loads(prefs_path.read_text(encoding="utf-8")) == {
         "schema_version": 1,
         "speed_units": "kph",
+        "display_timezone": "",
     }
 
 
@@ -39,6 +40,42 @@ def test_validation_rejects_bad_speed_units(prefs_path: Path) -> None:
     svc = MapViewPreferencesService(prefs_path)
     with pytest.raises(MapViewPreferencesError, match="speed_units"):
         svc.save_preferences(speed_units="mps")
+
+
+def test_default_display_timezone_is_auto(prefs_path: Path) -> None:
+    svc = MapViewPreferencesService(prefs_path)
+    assert svc.get_preferences().display_timezone == ""
+
+
+def test_save_valid_display_timezone_round_trips(prefs_path: Path) -> None:
+    svc = MapViewPreferencesService(prefs_path)
+    saved = svc.save_preferences(
+        speed_units=SpeedUnits.MPH, display_timezone="America/Detroit"
+    )
+    assert saved.display_timezone == "America/Detroit"
+    assert svc.get_preferences().display_timezone == "America/Detroit"
+
+
+def test_blank_display_timezone_is_auto(prefs_path: Path) -> None:
+    svc = MapViewPreferencesService(prefs_path)
+    saved = svc.save_preferences(speed_units=SpeedUnits.MPH, display_timezone="  ")
+    assert saved.display_timezone == ""
+
+
+def test_unknown_display_timezone_is_rejected(prefs_path: Path) -> None:
+    svc = MapViewPreferencesService(prefs_path)
+    with pytest.raises(MapViewPreferencesError, match="display_timezone"):
+        svc.save_preferences(speed_units=SpeedUnits.MPH, display_timezone="Mars/Phobos")
+
+
+def test_bad_on_disk_display_timezone_is_rejected(prefs_path: Path) -> None:
+    prefs_path.write_text(
+        '{"schema_version": 1, "speed_units": "mph", "display_timezone": "Nowhere/Land"}\n',
+        encoding="utf-8",
+    )
+    svc = MapViewPreferencesService(prefs_path)
+    with pytest.raises(MapViewPreferencesError, match="display_timezone"):
+        svc.get_preferences()
 
 
 def test_bad_on_disk_speed_units_is_rejected(prefs_path: Path) -> None:

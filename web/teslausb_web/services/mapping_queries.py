@@ -63,6 +63,12 @@ from teslausb_web.services.mapping_trip_derivation import (
     load_waypoints_by_clip,
     simplify_polyline_rdp,
 )
+from teslausb_web.services.mapping_tz import (
+    UTC_TZ_NAME,
+    day_bounds_utc,
+    local_date_of,
+    local_date_of_iso,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
@@ -550,8 +556,8 @@ class MappingQueries:
         trip = TripGroup(id=clips[0].id, clips=clips)
         return flatten_trip_waypoints(trip, waypoints_by_clip)
 
-    def query_latest_date(self) -> str | None:
-        """Return the most-recent UTC date with data as ``YYYY-MM-DD``, or None.
+    def query_latest_date(self, tz_name: str = UTC_TZ_NAME) -> str | None:
+        """Return the most-recent local date with data as ``YYYY-MM-DD``, or None.
 
         Derived from :meth:`query_days` so "latest date" stays a single
         source of truth with "which days have data": it unions trips,
@@ -562,30 +568,36 @@ class MappingQueries:
         days (e.g. a sentry- or horn-triggered day with no qualifying
         driving trip) still count, matching what the day view will render.
 
-        Used by the page route to redirect bare ``/`` requests to the
-        latest day so the operator lands on rendered data, never an empty
-        map.
+        ``tz_name`` is the operator's display zone: the "latest day" is the
+        newest day *in that zone*, so a late-evening drive that crosses
+        midnight UTC still resolves to the local day the operator sees.
         """
-        days = self.query_days(limit=1, min_distance_km=0.0)
+        days = self.query_days(limit=1, min_distance_km=0.0, tz_name=tz_name)
         if not days:
             return None
         return days[0].date
 
-    def query_day_payload(self, date_str: str) -> DayPayload:
-        """Cached single-day payload (RDP-simplified + cap)."""
+    def query_day_payload(self, date_str: str, tz_name: str = UTC_TZ_NAME) -> DayPayload:
+        """Cached single-day payload (RDP-simplified + cap).
+
+        The cache key includes ``tz_name`` because the same calendar date
+        spans different UTC instants in different display zones — a UTC
+        viewer and an EDT viewer must never share a cached payload.
+        """
+        cache_key = f"{tz_name}\x1f{date_str}"
         mtime_ns, size = self._stat_db()
         now = time.monotonic()
         with self._day_payload_lock:
-            cached = self._day_payload_cache.get(date_str)
+            cached = self._day_payload_cache.get(cache_key)
             if cached is not None:
                 cached_mtime, cached_size, computed_at, payload = cached
                 same_db = cached_mtime == mtime_ns and cached_size == size
                 fresh = (now - computed_at) < _SNAPSHOT_CACHE_TTL_SECONDS
                 if same_db or fresh:
                     return payload
-        payload = self._compute_day_payload(date_str)
+        payload = self._compute_day_payload(date_str, tz_name)
         with self._day_payload_lock:
-            self._day_payload_cache[date_str] = (
+            self._day_payload_cache[cache_key] = (
                 mtime_ns,
                 size,
                 time.monotonic(),
@@ -593,7 +605,7 @@ class MappingQueries:
             )
         return payload
 
-    def _compute_day_payload(self, date_str: str) -> DayPayload:
+    def _compute_day_payload(self, date_str: str, tz_name: str = UTC_TZ_NAME) -> DayPayload:
         """Return trips + events for a single date via direct SQL.
 
         This is the fast path the map page uses on initial load: ONE
@@ -610,18 +622,19 @@ class MappingQueries:
         existing tests and recovery flows continue to work.
         """
         try:
+            day_start, day_end = day_bounds_utc(date_str, tz_name)
             with self.open_db() as connection:
                 trip_rows = connection.execute(
                     "SELECT id, start_utc, end_utc, start_clip_id, end_clip_id, "
                     "       start_lat, start_lon, end_lat, end_lon, "
                     "       distance_km, duration_seconds, video_count, bucket "
                     "  FROM trips "
-                    " WHERE date(start_utc, 'unixepoch') = ? "
+                    " WHERE start_utc >= ? AND start_utc < ? "
                     " ORDER BY start_utc DESC, id DESC",
-                    (date_str,),
+                    (day_start, day_end),
                 ).fetchall()
-                latest = self._latest_date_locked(connection)
-                clip_event_rows = _query_clip_events_for_day(connection, date_str)
+                latest = self._latest_date_locked(connection, tz_name)
+                clip_event_rows = _query_clip_events_for_day(connection, date_str, tz_name)
                 if not trip_rows:
                     # No trips for this day; still load any standalone
                     # events recorded against the date (e.g. sentry-only
@@ -633,9 +646,9 @@ class MappingQueries:
                         "       description, frame_index "
                         "  FROM detected_events "
                         " WHERE trip_id IS NULL "
-                        "   AND date(timestamp_utc, 'unixepoch') = ? "
+                        "   AND timestamp_utc >= ? AND timestamp_utc < ? "
                         " ORDER BY timestamp_utc DESC, id DESC",
-                        (date_str,),
+                        (day_start, day_end),
                     ).fetchall()
                     events = _sort_event_rows(
                         self._build_events_for_day({}, event_rows)
@@ -680,15 +693,15 @@ class MappingQueries:
                     "  FROM detected_events e "
                     "  LEFT JOIN trips t ON t.id = e.trip_id "
                     " WHERE (e.trip_id IS NOT NULL "
-                    "        AND date(t.start_utc, 'unixepoch') = ?) "
+                    "        AND t.start_utc >= ? AND t.start_utc < ?) "
                     "    OR (e.trip_id IS NULL "
-                    "        AND date(e.timestamp_utc, 'unixepoch') = ?) "
+                    "        AND e.timestamp_utc >= ? AND e.timestamp_utc < ?) "
                     " ORDER BY e.timestamp_utc DESC, e.id DESC",
-                    (date_str, date_str),
+                    (day_start, day_end, day_start, day_end),
                 ).fetchall()
         except sqlite3.OperationalError as exc:
             if "no such table" in str(exc).lower():
-                return self._day_payload_via_snapshot(date_str)
+                return self._day_payload_via_snapshot(date_str, tz_name)
             raise MappingQueryError(f"Failed to load day payload: {exc}") from exc
         except sqlite3.Error as exc:
             raise MappingQueryError(f"Failed to load day payload: {exc}") from exc
@@ -734,27 +747,40 @@ class MappingQueries:
         )
 
     @staticmethod
-    def _latest_date_locked(connection: sqlite3.Connection) -> str | None:
-        """Newest UTC date with data, embedded in each day payload.
+    def _latest_date_locked(
+        connection: sqlite3.Connection, tz_name: str = UTC_TZ_NAME
+    ) -> str | None:
+        """Newest local date with data, embedded in each day payload.
 
-        Unions ``trips.start_utc`` with ``detected_events.timestamp_utc``
-        so an event-only newest day (e.g. sentry- or horn-triggered) is
-        reflected in ``DayPayload.latest_date`` and the front-end's
-        day-navigation bounds, matching :meth:`query_latest_date`. Only
-        reached on the materialised SQL path, where both tables exist.
+        Unions ``trips.start_utc`` with each detected event's *bucket*
+        epoch — the owning trip's ``start_utc`` for trip-attached events,
+        else the event's own ``timestamp_utc`` — so an event-only newest
+        day (e.g. sentry- or horn-triggered) is reflected in
+        ``DayPayload.latest_date`` and the front-end's day-navigation
+        bounds, matching :meth:`query_days`. Using the trip's start for
+        trip-attached events keeps "latest day" identical to the day an
+        event renders under when its raw timestamp drifts across local
+        midnight. Only reached on the materialised SQL path, where both
+        tables exist.
+
+        The max epoch is converted to a calendar day in ``tz_name`` so the
+        newest day is the newest day the operator sees, not the newest UTC
+        day.
         """
         selects = [
             "SELECT MAX(start_utc) AS ts FROM trips",
-            "SELECT MAX(timestamp_utc) AS ts FROM detected_events",
+            "SELECT MAX(COALESCE(t.start_utc, e.timestamp_utc)) AS ts "
+            "  FROM detected_events e "
+            "  LEFT JOIN trips t ON t.id = e.trip_id",
         ]
         if _table_exists(connection, _CLIP_EVENT_TABLE):
             selects.append("SELECT MAX(timestamp_utc) AS ts FROM clip_events")
         row = connection.execute(
-            "SELECT date(MAX(ts), 'unixepoch') FROM (" + " UNION ALL ".join(selects) + ")",  # noqa: S608
+            "SELECT MAX(ts) FROM (" + " UNION ALL ".join(selects) + ")",  # noqa: S608
         ).fetchone()
         if row is None or row[0] is None:
             return None
-        return str(row[0])
+        return local_date_of(int(row[0]), tz_name)
 
     @staticmethod
     def _build_events_for_day(
@@ -795,11 +821,13 @@ class MappingQueries:
             )
         return tuple(out)
 
-    def _day_payload_via_snapshot(self, date_str: str) -> DayPayload:
+    def _day_payload_via_snapshot(
+        self, date_str: str, tz_name: str = UTC_TZ_NAME
+    ) -> DayPayload:
         """Fallback day-payload path for older DB schemas / test fixtures."""
-        trips = self.query_day_routes(date_str, min_distance_km=0.0)
-        events = self.query_events(date=date_str, limit=5000)
-        days = self.query_days(limit=1, min_distance_km=0.0)
+        trips = self.query_day_routes(date_str, min_distance_km=0.0, tz_name=tz_name)
+        events = self.query_events(date=date_str, limit=5000, tz_name=tz_name)
+        days = self.query_days(limit=1, min_distance_km=0.0, tz_name=tz_name)
         latest = days[0].date if days else None
         return DayPayload(date=date_str, trips=trips, events=events, latest_date=latest)
 
@@ -875,6 +903,7 @@ class MappingQueries:
         date_from: str | None = None,
         date_to: str | None = None,
         date: str | None = None,
+        tz_name: str = UTC_TZ_NAME,
     ) -> tuple[EventRow, ...]:
         skip = _coerce_offset(offset)
         cap = _coerce_limit(limit, default=_DEFAULT_EVENT_LIMIT)
@@ -888,6 +917,7 @@ class MappingQueries:
                 date_from=date_from,
                 date_to=date_to,
                 date=date,
+                tz_name=tz_name,
             )
         except sqlite3.OperationalError as exc:
             if "no such table" not in str(exc).lower():
@@ -895,11 +925,21 @@ class MappingQueries:
         except sqlite3.Error as exc:
             raise MappingQueryError(f"Failed to query events: {exc}") from exc
         snapshot = self._load_snapshot()
-        all_events: list[DerivedEvent] = []
+        rows: list[EventRow] = []
         for materialised in snapshot.trips:
-            all_events.extend(materialised.events)
-        all_events.extend(snapshot.sentry_events)
-        rows = [_event_row_from_derived(event) for event in all_events]
+            # Trip-attached events bucket by their owning trip's start day
+            # (mirrors the SQL path and day rollup), so an event whose raw
+            # timestamp drifts across local midnight stays with its trip.
+            trip_day = local_date_of(materialised.metrics.start_epoch, tz_name)
+            for event in materialised.events:
+                if date is not None and trip_day != date:
+                    continue
+                rows.append(_event_row_from_derived(event))
+        for sentry_event in snapshot.sentry_events:
+            row = _event_row_from_derived(sentry_event)
+            if date is not None and local_date_of_iso(row.timestamp, tz_name) != date:
+                continue
+            rows.append(row)
         filtered = _filter_event_rows(
             rows,
             event_type=event_type,
@@ -907,7 +947,6 @@ class MappingQueries:
             bbox=bbox,
             date_from=date_from,
             date_to=date_to,
-            date=date,
         )
         ordered = sorted(filtered, key=lambda row: row.timestamp, reverse=True)
         return tuple(ordered[skip : skip + cap])
@@ -923,6 +962,7 @@ class MappingQueries:
         date_from: str | None,
         date_to: str | None,
         date: str | None,
+        tz_name: str = UTC_TZ_NAME,
     ) -> tuple[EventRow, ...]:
         query_cap = limit + offset
         with self.open_db() as connection:
@@ -935,6 +975,7 @@ class MappingQueries:
                 date_to=date_to,
                 date=date,
                 limit=query_cap,
+                tz_name=tz_name,
             )
             clip_rows = _query_clip_events(
                 connection,
@@ -945,6 +986,7 @@ class MappingQueries:
                 date_to=date_to,
                 date=date,
                 limit=query_cap,
+                tz_name=tz_name,
             )
         rows = tuple(_detected_event_row_from_sql(row) for row in detected_rows)
         rows += tuple(_clip_event_row_from_sql(row) for row in clip_rows)
@@ -955,131 +997,91 @@ class MappingQueries:
         *,
         limit: int | None = _DEFAULT_DAY_LIMIT,
         min_distance_km: float | None = _DEFAULT_MIN_DISTANCE_KM,
+        tz_name: str = UTC_TZ_NAME,
     ) -> tuple[DayRow, ...]:
         threshold = _coerce_min_distance(min_distance_km)
         cap = _coerce_limit(limit, default=_DEFAULT_DAY_LIMIT)
         try:
-            return self._compute_days_via_sql(limit=cap, threshold=threshold)
+            return self._compute_days_via_sql(limit=cap, threshold=threshold, tz_name=tz_name)
         except sqlite3.OperationalError as exc:
             if "no such table" not in str(exc).lower():
                 raise MappingQueryError(f"Failed to query days: {exc}") from exc
         except sqlite3.Error as exc:
             raise MappingQueryError(f"Failed to query days: {exc}") from exc
-        return self._query_days_via_snapshot(limit=cap, threshold=threshold)
+        return self._query_days_via_snapshot(limit=cap, threshold=threshold, tz_name=tz_name)
 
-    def _compute_days_via_sql(self, *, limit: int, threshold: float) -> tuple[DayRow, ...]:
-        """Per-day rollups computed in SQL.
+    def _compute_days_via_sql(
+        self, *, limit: int, threshold: float, tz_name: str = UTC_TZ_NAME
+    ) -> tuple[DayRow, ...]:
+        """Per-day rollups bucketed in the operator's display zone.
 
-        Three index-friendly aggregates:
+        The boundary between days is timezone-dependent, so the aggregate
+        cannot be a SQL ``GROUP BY date(...)`` (that buckets by UTC). We
+        fetch the raw timestamps and bucket each row into its local day in
+        Python via :func:`local_date_of`. The row counts are retention-
+        bounded (≤ a few thousand) so this stays cheap, and we aggregate
+        every row before applying ``limit``.
 
-        * trips grouped by `date(start_utc,'unixepoch')`, filtered by the
-          distance threshold so low-distance "trips" (idle waypoint
-          clusters) do not contaminate the row count;
-        * trip-attached events grouped by their owning trip's day, so an
-          event's day matches its trip even if the event timestamp drifts
-          across midnight UTC;
-        * standalone events (sentry only — `trip_id IS NULL`) grouped by
-          their own day.
+        Day-assignment rules preserved from the SQL path:
 
-        We then merge in Python (≤ N_days entries, ≤ 90 typical) and
-        cap to ``limit``.
+        * trips are filtered by the distance threshold (so idle waypoint
+          clusters do not inflate the count) and bucketed by ``start_utc``;
+        * trip-attached events are bucketed by their owning trip's
+          ``start_utc``, so an event's day matches its trip even if the
+          event timestamp drifts across local midnight;
+        * standalone (sentry-only) events are bucketed by their own
+          timestamp.
         """
         with self.open_db() as connection:
             trip_rows = connection.execute(
-                "SELECT date(start_utc, 'unixepoch') AS day, "
-                "       COUNT(*) AS trip_count, "
-                "       COALESCE(SUM(video_count), 0) AS video_count, "
-                "       COALESCE(SUM(distance_km), 0.0) AS total_distance_km, "
-                "       MIN(start_utc) AS first_start_utc, "
-                "       MAX(end_utc) AS last_end_utc "
+                "SELECT start_utc, end_utc, video_count, distance_km "
                 "  FROM trips "
-                " WHERE distance_km >= ? "
-                " GROUP BY day",
+                " WHERE distance_km >= ?",
                 (threshold,),
             ).fetchall()
             trip_event_rows = connection.execute(
-                "SELECT date(t.start_utc, 'unixepoch') AS day, "
-                "       COUNT(*) AS event_count, "
-                "       SUM(CASE WHEN e.event_type = ? THEN 1 ELSE 0 END) "
-                "           AS sentry_count "
+                "SELECT t.start_utc AS bucket_ts, e.event_type AS marker "
                 "  FROM detected_events e "
-                "  JOIN trips t ON t.id = e.trip_id "
-                " GROUP BY day",
-                (EVENT_SENTRY,),
+                "  JOIN trips t ON t.id = e.trip_id",
             ).fetchall()
             standalone_event_rows = connection.execute(
-                "SELECT date(timestamp_utc, 'unixepoch') AS day, "
-                "       COUNT(*) AS event_count, "
-                "       SUM(CASE WHEN event_type = ? THEN 1 ELSE 0 END) "
-                "           AS sentry_count "
+                "SELECT timestamp_utc AS bucket_ts, event_type AS marker "
                 "  FROM detected_events "
-                " WHERE trip_id IS NULL "
-                " GROUP BY day",
-                (EVENT_SENTRY,),
+                " WHERE trip_id IS NULL",
             ).fetchall()
             clip_event_rows = _query_clip_event_day_counts(connection)
 
         per_day: dict[str, _DaySqlAccumulator] = {}
         for row in trip_rows:
-            day = str(row["day"])
-            per_day[day] = _DaySqlAccumulator(
-                trip_count=int(row["trip_count"] or 0),
-                video_count=int(row["video_count"] or 0),
-                total_distance_km=float(row["total_distance_km"] or 0.0),
-                first_start=epoch_to_iso(int(row["first_start_utc"]))
-                if row["first_start_utc"] is not None
-                else None,
-                last_end=epoch_to_iso(int(row["last_end_utc"]))
-                if row["last_end_utc"] is not None
-                else None,
-            )
-        for row in trip_event_rows:
-            day = str(row["day"])
-            entry = per_day.setdefault(day, _DaySqlAccumulator())
-            entry.event_count += int(row["event_count"] or 0)
-            entry.sentry_count += int(row["sentry_count"] or 0)
-        for row in standalone_event_rows:
-            day = str(row["day"])
-            entry = per_day.setdefault(day, _DaySqlAccumulator())
-            entry.event_count += int(row["event_count"] or 0)
-            entry.sentry_count += int(row["sentry_count"] or 0)
+            _observe_day_trip(per_day, row, tz_name)
+        for row in (*trip_event_rows, *standalone_event_rows):
+            day = local_date_of(int(row["bucket_ts"]), tz_name)
+            _observe_day_event(per_day, day, str(row["marker"]))
         for row in clip_event_rows:
-            day = str(row["day"])
-            entry = per_day.setdefault(day, _DaySqlAccumulator())
-            entry.event_count += int(row["event_count"] or 0)
-            entry.sentry_count += int(row["sentry_count"] or 0)
-        out = [
-            DayRow(
-                date=day,
-                trip_count=agg.trip_count,
-                video_count=agg.video_count,
-                total_distance_km=round(agg.total_distance_km, 2),
-                event_count=agg.event_count,
-                sentry_count=agg.sentry_count,
-                first_start=agg.first_start,
-                last_end=agg.last_end,
-            )
-            for day, agg in per_day.items()
-        ]
+            day = local_date_of(int(row["timestamp_utc"]), tz_name)
+            _observe_day_event(per_day, day, str(row["bucket"]))
+        out = [_day_row_from_accumulator(day, agg) for day, agg in per_day.items()]
         out.sort(key=lambda r: r.date, reverse=True)
         return tuple(out[:limit])
 
-    def _query_days_via_snapshot(self, *, limit: int, threshold: float) -> tuple[DayRow, ...]:
+    def _query_days_via_snapshot(
+        self, *, limit: int, threshold: float, tz_name: str = UTC_TZ_NAME
+    ) -> tuple[DayRow, ...]:
         snapshot = self._load_snapshot()
         per_day: dict[str, _DayAccumulator] = {}
         for materialised in snapshot.trips:
             if materialised.metrics.distance_km < threshold:
                 continue
-            day = _iso_day(materialised.metrics.start_epoch)
+            day = local_date_of(materialised.metrics.start_epoch, tz_name)
             entry = per_day.setdefault(day, _DayAccumulator())
             entry.observe_trip(materialised)
         for materialised in snapshot.trips:
-            trip_day = _iso_day(materialised.metrics.start_epoch)
+            trip_day = local_date_of(materialised.metrics.start_epoch, tz_name)
             for event in materialised.events:
                 entry = per_day.setdefault(trip_day, _DayAccumulator())
                 entry.observe_event(event)
         for sentry_event in snapshot.sentry_events:
-            day = sentry_event.timestamp[:10]
+            day = local_date_of_iso(sentry_event.timestamp, tz_name)
             entry = per_day.setdefault(day, _DayAccumulator())
             entry.observe_event(sentry_event)
         rows = [accumulator.build(day) for day, accumulator in per_day.items()]
@@ -1091,6 +1093,7 @@ class MappingQueries:
         date_str: str,
         *,
         min_distance_km: float | None = _DEFAULT_MIN_DISTANCE_KM,
+        tz_name: str = UTC_TZ_NAME,
     ) -> tuple[DayRouteTrip, ...]:
         # Reuse the cached single-day payload (already scoped SQL: only
         # this day's trips, clips, and waypoints) so we never trigger
@@ -1104,45 +1107,51 @@ class MappingQueries:
         except sqlite3.Error as exc:
             raise MappingQueryError(f"Failed to query day routes: {exc}") from exc
         if has_trips is None:
-            return self._query_day_routes_via_snapshot(date_str, threshold)
-        payload = self._compute_day_payload(date_str)
+            return self._query_day_routes_via_snapshot(date_str, threshold, tz_name)
+        payload = self._compute_day_payload(date_str, tz_name)
         return tuple(trip for trip in payload.trips if trip.distance_km >= threshold)
 
     def _query_day_routes_via_snapshot(
-        self, date_str: str, threshold: float
+        self, date_str: str, threshold: float, tz_name: str = UTC_TZ_NAME
     ) -> tuple[DayRouteTrip, ...]:
         snapshot = self._load_snapshot()
         matches = [
             materialised
             for materialised in snapshot.trips
-            if _iso_day(materialised.metrics.start_epoch) == date_str
+            if local_date_of(materialised.metrics.start_epoch, tz_name) == date_str
             and materialised.metrics.distance_km >= threshold
         ]
         matches.sort(key=lambda item: item.metrics.start_epoch, reverse=True)
         return tuple(_day_route_trip_from_materialised(item) for item in matches)
 
-    def playable_trips_for_date(self, date_str: str) -> tuple[PlayableTrip, ...]:
-        cached = self._get_playable_trips_cache(date_str)
+    def playable_trips_for_date(
+        self, date_str: str, tz_name: str = UTC_TZ_NAME
+    ) -> tuple[PlayableTrip, ...]:
+        cache_key = f"{tz_name}\x1f{date_str}"
+        cached = self._get_playable_trips_cache(cache_key)
         if cached is not None:
             return cached
         try:
-            results = self._compute_playable_via_sql(date_str)
+            results = self._compute_playable_via_sql(date_str, tz_name)
         except sqlite3.OperationalError as exc:
             if "no such table" not in str(exc).lower():
                 raise MappingQueryError(f"Failed to query playable trips: {exc}") from exc
-            results = self._playable_via_snapshot(date_str)
+            results = self._playable_via_snapshot(date_str, tz_name)
         except sqlite3.Error as exc:
             raise MappingQueryError(f"Failed to query playable trips: {exc}") from exc
-        self._store_playable_trips_cache(date_str, results)
+        self._store_playable_trips_cache(cache_key, results)
         return results
 
-    def _compute_playable_via_sql(self, date_str: str) -> tuple[PlayableTrip, ...]:
+    def _compute_playable_via_sql(
+        self, date_str: str, tz_name: str = UTC_TZ_NAME
+    ) -> tuple[PlayableTrip, ...]:
+        day_start, day_end = day_bounds_utc(date_str, tz_name)
         with self.open_db() as connection:
             trip_rows = connection.execute(
                 "SELECT id FROM trips "
-                " WHERE date(start_utc, 'unixepoch') = ? "
+                " WHERE start_utc >= ? AND start_utc < ? "
                 " ORDER BY start_utc ASC, id ASC",
-                (date_str,),
+                (day_start, day_end),
             ).fetchall()
             if not trip_rows:
                 return ()
@@ -1187,7 +1196,9 @@ class MappingQueries:
             )
         return tuple(out)
 
-    def _playable_via_snapshot(self, date_str: str) -> tuple[PlayableTrip, ...]:
+    def _playable_via_snapshot(
+        self, date_str: str, tz_name: str = UTC_TZ_NAME
+    ) -> tuple[PlayableTrip, ...]:
         snapshot = self._load_snapshot()
         file_cache: dict[str, bool] = {}
         return tuple(
@@ -1198,7 +1209,7 @@ class MappingQueries:
                 ),
             )
             for materialised in snapshot.trips
-            if _iso_day(materialised.metrics.start_epoch) == date_str
+            if local_date_of(materialised.metrics.start_epoch, tz_name) == date_str
         )
 
     def get_stats(self) -> Stats:
@@ -1383,7 +1394,7 @@ class MappingQueries:
             ),
         )
 
-    def get_event_chart_data(self) -> EventChartData:
+    def get_event_chart_data(self, tz_name: str = UTC_TZ_NAME) -> EventChartData:
         snapshot = self._load_snapshot()
         cutoff_day = _cutoff_day_string(_CHART_LOOKBACK_DAYS)
         all_events = [event for item in snapshot.trips for event in item.events]
@@ -1391,8 +1402,8 @@ class MappingQueries:
         return EventChartData(
             by_type=_chart_by_type(all_events),
             by_severity=_chart_by_severity(all_events),
-            over_time=_chart_over_time(all_events, cutoff_day),
-            fsd_timeline=_chart_fsd_timeline(snapshot, cutoff_day),
+            over_time=_chart_over_time(all_events, cutoff_day, tz_name),
+            fsd_timeline=_chart_fsd_timeline(snapshot, cutoff_day, tz_name),
         )
 
     def reset_playable_trips_cache_for_tests(self) -> None:
@@ -1541,9 +1552,9 @@ class MappingQueries:
             raise MappingQueryError(f"Failed to count waypoints: {exc}") from exc
         return int(row["total"] or 0)
 
-    def _get_playable_trips_cache(self, date_str: str) -> tuple[PlayableTrip, ...] | None:
+    def _get_playable_trips_cache(self, cache_key: str) -> tuple[PlayableTrip, ...] | None:
         with self._playable_trips_cache_lock:
-            cached = self._playable_trips_cache.get(date_str)
+            cached = self._playable_trips_cache.get(cache_key)
             if cached is None:
                 return None
             age = time.monotonic() - cached.computed_at
@@ -1551,9 +1562,11 @@ class MappingQueries:
                 return None
             return cached.payload
 
-    def _store_playable_trips_cache(self, date_str: str, payload: tuple[PlayableTrip, ...]) -> None:
+    def _store_playable_trips_cache(
+        self, cache_key: str, payload: tuple[PlayableTrip, ...]
+    ) -> None:
         with self._playable_trips_cache_lock:
-            self._playable_trips_cache[date_str] = _PlayableTripsCacheEntry(
+            self._playable_trips_cache[cache_key] = _PlayableTripsCacheEntry(
                 computed_at=time.monotonic(),
                 payload=payload,
             )
@@ -1584,6 +1597,48 @@ class _DaySqlAccumulator:
     sentry_count: int = 0
     first_start: str | None = None
     last_end: str | None = None
+
+
+def _observe_day_trip(
+    per_day: dict[str, _DaySqlAccumulator], row: sqlite3.Row, tz_name: str
+) -> None:
+    """Fold one trip row into its local-day accumulator.
+
+    ``first_start``/``last_end`` are kept as fixed-width ISO strings
+    (``epoch_to_iso`` output), so a lexicographic min/max is identical
+    to an epoch min/max without carrying a second numeric field.
+    """
+    start_iso = epoch_to_iso(int(row["start_utc"]))
+    end_iso = epoch_to_iso(int(row["end_utc"])) if row["end_utc"] is not None else None
+    entry = per_day.setdefault(local_date_of(int(row["start_utc"]), tz_name), _DaySqlAccumulator())
+    entry.trip_count += 1
+    entry.video_count += int(row["video_count"] or 0)
+    entry.total_distance_km += float(row["distance_km"] or 0.0)
+    if entry.first_start is None or start_iso < entry.first_start:
+        entry.first_start = start_iso
+    if end_iso is not None and (entry.last_end is None or end_iso > entry.last_end):
+        entry.last_end = end_iso
+
+
+def _observe_day_event(per_day: dict[str, _DaySqlAccumulator], day: str, marker: str) -> None:
+    """Increment a day's event count, flagging sentry markers separately."""
+    entry = per_day.setdefault(day, _DaySqlAccumulator())
+    entry.event_count += 1
+    if marker == EVENT_SENTRY:
+        entry.sentry_count += 1
+
+
+def _day_row_from_accumulator(day: str, agg: _DaySqlAccumulator) -> DayRow:
+    return DayRow(
+        date=day,
+        trip_count=agg.trip_count,
+        video_count=agg.video_count,
+        total_distance_km=round(agg.total_distance_km, 2),
+        event_count=agg.event_count,
+        sentry_count=agg.sentry_count,
+        first_start=agg.first_start,
+        last_end=agg.last_end,
+    )
 
 
 @dataclass(slots=True)
@@ -1811,8 +1866,11 @@ def _query_detected_events(  # noqa: PLR0913
     date_to: str | None,
     date: str | None,
     limit: int,
+    tz_name: str = UTC_TZ_NAME,
 ) -> tuple[sqlite3.Row, ...]:
-    clauses, params = _detected_event_clauses(event_type, severity, bbox, date_from, date_to, date)
+    clauses, params = _detected_event_clauses(
+        event_type, severity, bbox, date_from, date_to, date, tz_name
+    )
     where_sql = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     params.append(limit)
     return tuple(connection.execute(_detected_event_sql(where_sql), params).fetchall())
@@ -1825,6 +1883,7 @@ def _detected_event_clauses(  # noqa: PLR0913
     date_from: str | None,
     date_to: str | None,
     date: str | None,
+    tz_name: str = UTC_TZ_NAME,
 ) -> tuple[list[str], list[object]]:
     clauses: list[str] = []
     params: list[object] = []
@@ -1835,7 +1894,8 @@ def _detected_event_clauses(  # noqa: PLR0913
         clauses.append("e.severity = ?")
         params.append(severity)
     _append_time_bbox_clauses(
-        clauses, params, "e", "latitude_deg", "longitude_deg", bbox, date_from, date_to, date
+        clauses, params, "e", "latitude_deg", "longitude_deg", bbox, date_from, date_to, date,
+        tz_name, trip_alias="t",
     )
     return clauses, params
 
@@ -1960,15 +2020,12 @@ def _filter_event_rows(  # noqa: PLR0913
     bbox: tuple[float, float, float, float] | None,
     date_from: str | None,
     date_to: str | None,
-    date: str | None,
 ) -> list[EventRow]:
     out: list[EventRow] = []
     for row in rows:
         if event_type is not None and row.event_type != event_type:
             continue
         if severity is not None and row.severity != severity:
-            continue
-        if date is not None and row.timestamp[:10] != date:
             continue
         if date_from is not None and row.timestamp < date_from:
             continue
@@ -2186,23 +2243,25 @@ def _chart_by_severity(events: Sequence[DerivedEvent]) -> tuple[SeverityChartPoi
 
 
 def _chart_over_time(
-    events: Sequence[DerivedEvent], cutoff_day: str
+    events: Sequence[DerivedEvent], cutoff_day: str, tz_name: str
 ) -> tuple[EventChartPoint, ...]:
     counts: dict[str, int] = {}
     for event in events:
-        day = event.timestamp[:10]
+        day = local_date_of_iso(event.timestamp, tz_name)
         if day < cutoff_day:
             continue
         counts[day] = counts.get(day, 0) + 1
     return tuple(EventChartPoint(day=day, value=value) for day, value in sorted(counts.items()))
 
 
-def _chart_fsd_timeline(snapshot: _Snapshot, cutoff_day: str) -> tuple[FsdTimelinePoint, ...]:
+def _chart_fsd_timeline(
+    snapshot: _Snapshot, cutoff_day: str, tz_name: str
+) -> tuple[FsdTimelinePoint, ...]:
     fsd: dict[str, int] = {}
     manual: dict[str, int] = {}
     for materialised in snapshot.trips:
         for entry in materialised.waypoints:
-            day = entry.iso_timestamp[:10]
+            day = local_date_of_iso(entry.iso_timestamp, tz_name)
             if day < cutoff_day:
                 continue
             if is_autopilot_engaged(entry.waypoint.autopilot_state):
@@ -2243,10 +2302,6 @@ def _coerce_min_distance(value: float | None) -> float:
 
 def _cutoff_day_string(days: int) -> str:
     return (datetime.now(tz=UTC) - timedelta(days=days)).date().isoformat()
-
-
-def _iso_day(epoch_seconds: float) -> str:
-    return datetime.fromtimestamp(epoch_seconds, tz=UTC).date().isoformat()
 
 
 def _percentage(part: int, whole: int) -> float:

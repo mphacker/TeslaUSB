@@ -251,9 +251,7 @@ def app(tmp_path: Path, media_root: Path) -> Flask:
             state_dir=state_dir,
             cache_invalidate_script=tmp_path / "invalidate.sh",
         ),
-        storage_retention=StorageRetentionSection(
-            policy_path=state_dir / "retention_policy.json"
-        ),
+        storage_retention=StorageRetentionSection(policy_path=state_dir / "retention_policy.json"),
         mapping=MappingSection(
             db_path=db_path,
             media_root=media_root,
@@ -282,9 +280,7 @@ def empty_app(tmp_path: Path) -> Flask:
             state_dir=state_dir,
             cache_invalidate_script=tmp_path / "invalidate.sh",
         ),
-        storage_retention=StorageRetentionSection(
-            policy_path=state_dir / "retention_policy.json"
-        ),
+        storage_retention=StorageRetentionSection(policy_path=state_dir / "retention_policy.json"),
         mapping=MappingSection(
             db_path=db_path,
             media_root=media,
@@ -359,9 +355,7 @@ class TestMapView:
         assert "__DATE__" in body
         assert "__TRIP_ID__" in body
 
-    def test_index_renders_without_redirect_when_empty(
-        self, empty_client: FlaskClient
-    ) -> None:
+    def test_index_renders_without_redirect_when_empty(self, empty_client: FlaskClient) -> None:
         # No data -> nothing to redirect to; the empty map must still render.
         response = empty_client.get("/")
         assert response.status_code == HTTPStatus.OK
@@ -413,6 +407,15 @@ class TestTrips:
         assert len(first) == 1
         assert len(second) == 1
         assert first[0]["id"] != second[0]["id"]
+
+    def test_api_trips_page_reports_has_next(self, client: FlaskClient) -> None:
+        first = client.get("/api/trips?limit=1&page=1").get_json()
+        second = client.get("/api/trips?limit=1&page=2").get_json()
+        assert first["has_next"] is True
+        assert first["next_page"] == 2
+        assert len(first["trips"]) == 1
+        assert second["has_next"] is False
+        assert second["trips"][0]["id"] != first["trips"][0]["id"]
 
 
 class TestTripRoute:
@@ -617,6 +620,15 @@ class TestSentryEvents:
         assert sentry_events
         assert sentry_events[0]["source_folder"] == "SentryClips"
         assert sentry_events[0]["event_folder"] == "2024-06-01_18-00-00"
+
+    def test_sentry_events_page_reports_has_next(self, client: FlaskClient) -> None:
+        first = client.get("/api/sentry-events?limit=1&page=1").get_json()
+        second = client.get("/api/sentry-events?limit=1&page=2").get_json()
+        assert first["has_next"] is True
+        assert first["next_page"] == 2
+        assert len(first["events"]) == 1
+        assert len(second["events"]) == 1
+        assert second["events"][0]["id"] != first["events"][0]["id"]
 
 
 # ---------------------------------------------------------------------------

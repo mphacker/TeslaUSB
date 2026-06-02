@@ -79,6 +79,13 @@ class MappingFilesystemError(MappingBlueprintError):
 
 
 @dataclass(frozen=True, slots=True)
+class _PageRequest:
+    page: int
+    limit: int
+    offset: int
+
+
+@dataclass(frozen=True, slots=True)
 class _EventDetails:
     clip_count: int
     camera_count: int
@@ -140,6 +147,19 @@ def _coerce_non_negative_float(value: float | None, *, default: float) -> float:
     if value is None or value < 0:
         return default
     return value
+
+
+def _parse_page_request(*, default_limit: int, cap: int | None = None) -> _PageRequest:
+    limit = _coerce_limit(
+        request.args.get("limit", default_limit, type=int),
+        default=default_limit,
+        cap=cap,
+    )
+    page = request.args.get("page", 1, type=int) or 1
+    page = max(1, page)
+    offset_arg = request.args.get("offset", type=int)
+    offset = max(0, offset_arg) if offset_arg is not None else (page - 1) * limit
+    return _PageRequest(page=page, limit=limit, offset=offset)
 
 
 def _safe_segment(segment: str, *, field_name: str) -> str:
@@ -497,19 +517,15 @@ def map_view() -> ResponseReturnValue:
 
 @mapping_bp.route("/api/trips")
 def api_trips() -> ResponseReturnValue:
-    limit = _coerce_limit(
-        request.args.get("limit", _DEFAULT_TRIP_LIMIT, type=int),
-        default=_DEFAULT_TRIP_LIMIT,
-    )
-    offset = request.args.get("offset", 0, type=int)
+    page_request = _parse_page_request(default_limit=_DEFAULT_TRIP_LIMIT)
     min_distance = _coerce_non_negative_float(
         request.args.get("min_distance", _DEFAULT_DAY_MIN_DISTANCE_KM, type=float),
         default=_DEFAULT_DAY_MIN_DISTANCE_KM,
     )
     try:
         trips = _get_queries().query_trips(
-            limit=limit,
-            offset=offset,
+            limit=page_request.limit + 1,
+            offset=page_request.offset,
             bbox=_parse_bbox(),
             date_from=request.args.get("date_from"),
             date_to=request.args.get("date_to"),
@@ -517,7 +533,17 @@ def api_trips() -> ResponseReturnValue:
         )
     except (MappingQueryError, RuntimeError) as exc:
         return _handle_query_error(exc)
-    return jsonify({"trips": [_serialize_trip(trip) for trip in trips]})
+    visible_trips = trips[: page_request.limit]
+    return jsonify(
+        {
+            "trips": [_serialize_trip(trip) for trip in visible_trips],
+            "has_next": len(trips) > page_request.limit,
+            "next_page": page_request.page + 1,
+            "page": page_request.page,
+            "limit": page_request.limit,
+            "total_video_count": sum(trip.video_count for trip in visible_trips),
+        }
+    )
 
 
 @mapping_bp.route("/api/trip/<int:trip_id>/route")
@@ -690,12 +716,24 @@ def api_event_charts() -> ResponseReturnValue:
 
 @mapping_bp.route("/api/sentry-events")
 def api_sentry_events() -> ResponseReturnValue:
+    page_request = _parse_page_request(default_limit=_DEFAULT_EVENT_LIMIT)
     try:
-        events = _get_queries().query_events(limit=200)
+        events = _get_queries().query_events(
+            limit=page_request.limit + 1,
+            offset=page_request.offset,
+        )
     except (MappingQueryError, RuntimeError) as exc:
         return _handle_query_error(exc)
-    sorted_events = sorted(events, key=lambda event: event.timestamp, reverse=True)
-    return jsonify({"events": [_sentry_event_payload(event) for event in sorted_events]})
+    visible_events = events[: page_request.limit]
+    return jsonify(
+        {
+            "events": [_sentry_event_payload(event) for event in visible_events],
+            "has_next": len(events) > page_request.limit,
+            "next_page": page_request.page + 1,
+            "page": page_request.page,
+            "limit": page_request.limit,
+        }
+    )
 
 
 @mapping_bp.route("/api/event-details/<folder>/<event_name>")

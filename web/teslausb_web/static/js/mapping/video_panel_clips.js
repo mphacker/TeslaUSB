@@ -2,10 +2,9 @@ async function loadVideoList(append) {
     if (vpLoading) return;
     const folder = document.getElementById('vpFolder').value;
     const list = document.getElementById('vpList');
+    const loadSeq = vpLoadSeq;
     if (!append) {
         list.innerHTML = '<div class="vp-loading">Loading\u2026</div>';
-        vpPage = 1;
-        if (vpScrollObserver) { vpScrollObserver.disconnect(); vpScrollObserver = null; }
     }
     vpLoading = true;
 
@@ -15,10 +14,10 @@ async function loadVideoList(append) {
         });
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         const data = await resp.json();
+        if (loadSeq !== vpLoadSeq || vpCurrentTab !== 'clips') return;
         vpHasNext = data.has_next;
         vpFolderStructure = data.folder_structure || 'events';
 
-        // Drop any prior sentinel before appending more cards
         var existingSentinel = list.querySelector('.vp-sentinel');
         if (existingSentinel) existingSentinel.remove();
 
@@ -81,41 +80,13 @@ async function loadVideoList(append) {
             list.appendChild(card);
         });
 
-        if (vpHasNext) {
-            var sentinel = document.createElement('div');
-            sentinel.className = 'vp-sentinel';
-            sentinel.textContent = 'Loading more\u2026';
-            list.appendChild(sentinel);
-            attachVpScrollSentinel(sentinel);
-        }
+        appendVpScrollSentinel(list, function() { vpPage++; loadVideoList(true); });
     } catch(e) {
         console.error('Failed to load videos:', e);
         if (!append) list.innerHTML = '<div class="vp-empty">Failed to load videos</div>';
     } finally {
-        vpLoading = false;
+        if (loadSeq === vpLoadSeq) vpLoading = false;
     }
-}
-
-function attachVpScrollSentinel(sentinel) {
-    if (vpScrollObserver) { vpScrollObserver.disconnect(); vpScrollObserver = null; }
-    if (!('IntersectionObserver' in window)) {
-        // Fallback for very old browsers: just immediately load the next page.
-        if (vpHasNext && !vpLoading) { vpPage++; loadVideoList(true); }
-        return;
-    }
-    var root = document.getElementById('vpList');
-    vpScrollObserver = new IntersectionObserver(function(entries) {
-        for (var i = 0; i < entries.length; i++) {
-            if (entries[i].isIntersecting && vpHasNext && !vpLoading) {
-                vpScrollObserver.disconnect();
-                vpScrollObserver = null;
-                vpPage++;
-                loadVideoList(true);
-                break;
-            }
-        }
-    }, { root: root, rootMargin: '200px 0px', threshold: 0 });
-    vpScrollObserver.observe(sentinel);
 }
 
 function vpPlay(folder, name, structure) {

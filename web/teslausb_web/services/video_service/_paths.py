@@ -42,6 +42,19 @@ class DeletionError(RuntimeError):
     """Filesystem deletion failed for reasons other than missing file."""
 
 
+class ClipPermissionError(DeletionError):
+    """Deletion failed specifically because the web user lacks permission.
+
+    Raised when ``rmtree``/``unlink`` fails with EACCES/EPERM. Tesla and
+    the Rust materializer create per-event clip directories as
+    ``teslausb:teslausb`` mode 0755, so the web user ``pi`` (group
+    ``teslausb``, r-x only) cannot unlink the files inside. Callers may
+    catch THIS subclass specifically to retry via the root-owned
+    ``teslausb_delete_clip.sh`` helper, while still treating every other
+    :class:`DeletionError` as a hard failure.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class ResolvedClip:
     """A path that has passed the containment check.
@@ -130,6 +143,8 @@ def safe_delete_clip(target: Path, allowed_roots: tuple[Path, ...]) -> None:
     if resolved.is_dir():
         try:
             shutil.rmtree(resolved)
+        except PermissionError as exc:
+            raise ClipPermissionError(f"rmtree permission denied: {resolved}: {exc}") from exc
         except OSError as exc:
             raise DeletionError(f"rmtree failed: {resolved}: {exc}") from exc
         return
@@ -138,6 +153,8 @@ def safe_delete_clip(target: Path, allowed_roots: tuple[Path, ...]) -> None:
     except FileNotFoundError:
         # Treat as success — the post-condition (file absent) holds.
         return
+    except PermissionError as exc:
+        raise ClipPermissionError(f"unlink permission denied: {resolved}: {exc}") from exc
     except OSError as exc:
         raise DeletionError(f"unlink failed: {resolved}: {exc}") from exc
 

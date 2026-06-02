@@ -65,6 +65,14 @@ ipc_socket = "/run/teslausb/worker.sock"
 # /etc/sudoers.d/teslausb-cache-invalidate (Phase 4c.2).
 cache_invalidate_script = "/usr/local/bin/tesla_cache_invalidate.sh"
 
+# Root-owned helper the web shells out to (via `sudo -n`) ONLY when a
+# direct clip delete fails with EACCES. Tesla / the Rust materializer
+# create per-event clip dirs as teslausb:teslausb mode 0755, so the web
+# user `pi` cannot rmtree them. The helper re-validates the path is a
+# real TeslaCam clip directory before removing it. Must match the argv
+# pinned in the sudoers fragment /etc/sudoers.d/teslausb-b1.
+delete_clip_script = "/usr/local/bin/teslausb_delete_clip.sh"
+
 # nginx X-Accel-Redirect prefix for serving video clips directly via
 # nginx instead of streaming through the single sync gunicorn worker.
 # When set, /videos/stream/, /videos/sei/, and /videos/download/

@@ -52,6 +52,7 @@ _DEFAULT_DB_PATH: Path = Path("/var/lib/teslausb/index.sqlite3")
 _DEFAULT_IPC_SOCKET: Path = Path("/run/teslausb/worker.sock")
 _DEFAULT_CACHE_SCRIPT: Path = Path("/usr/local/bin/tesla_cache_invalidate.sh")
 _DEFAULT_REBIND_SCRIPT: Path = Path("/usr/local/bin/tesla_gadget_rebind.sh")
+_DEFAULT_DELETE_CLIP_SCRIPT: Path = Path("/usr/local/bin/teslausb_delete_clip.sh")
 _DEFAULT_LOCK_CHIME_FILENAME: Final[str] = "LockChime.wav"
 _DEFAULT_CHIMES_FOLDER: Final[str] = "Chimes"
 _DEFAULT_GROUPS_FILE_RELPATH: Final[str] = "chime_groups.json"
@@ -294,6 +295,15 @@ class PathsSection:
     # medium-change is insufficient for the chime; see the lock_chimes
     # blueprint and ``docs/02-LEARNINGS.md``.
     gadget_rebind_script: Path = _DEFAULT_REBIND_SCRIPT
+    # Root-owned, path-validating helper used to delete a TeslaCam clip
+    # directory the web user (``pi``) cannot remove directly: Tesla/the Rust
+    # materializer create per-event dirs as ``teslausb:teslausb`` mode 0755,
+    # so ``pi`` (group teslausb, r-x only) gets EACCES on rmtree. The web
+    # invokes this via ``sudo -n`` ONLY as a fallback after a direct delete
+    # raises PermissionError; the script re-validates containment itself.
+    # See ``scripts/teslausb_delete_clip.sh`` and the sudoers allowlist in
+    # ``setup-lib/02-users.sh``.
+    delete_clip_script: Path = _DEFAULT_DELETE_CLIP_SCRIPT
     # When set (e.g. "/_protected_teslacam"), the /videos/stream/,
     # /videos/sei/, /videos/download/ routes return an empty 200
     # response with an ``X-Accel-Redirect`` header pointing at this
@@ -330,6 +340,7 @@ class PathsSection:
             ("ipc_socket", self.ipc_socket),
             ("cache_invalidate_script", self.cache_invalidate_script),
             ("gadget_rebind_script", self.gadget_rebind_script),
+            ("delete_clip_script", self.delete_clip_script),
         ):
             if not PurePosixPath(value.as_posix()).is_absolute():
                 raise ConfigError(None, f"[paths] {name} must be absolute, got {value!r}")
@@ -1204,6 +1215,12 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
             paths_raw,
             "gadget_rebind_script",
             _DEFAULT_REBIND_SCRIPT,
+            source,
+        ),
+        delete_clip_script=_coerce_path(
+            paths_raw,
+            "delete_clip_script",
+            _DEFAULT_DELETE_CLIP_SCRIPT,
             source,
         ),
         x_accel_redirect_prefix=_coerce_str(paths_raw, "x_accel_redirect_prefix", "", source),

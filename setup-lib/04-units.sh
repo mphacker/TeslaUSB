@@ -75,6 +75,15 @@ B1_CACHE_INVALIDATE_DST="/usr/local/bin/tesla_cache_invalidate.sh"
 B1_GADGET_REBIND_SRC="${B1_REPO_ROOT}/scripts/tesla_gadget_rebind.sh"
 B1_GADGET_REBIND_DST="/usr/local/bin/tesla_gadget_rebind.sh"
 
+# Privileged clip-delete helper — the web runs as `pi`, but Tesla / the
+# materializer create per-event clip dirs as teslausb:teslausb mode 0755,
+# so `pi` cannot rmtree them. This root-owned, path-validating helper is
+# invoked as `sudo -n /usr/local/bin/teslausb_delete_clip.sh <path>` ONLY
+# when a direct delete fails with EACCES. See setup-lib/02-users.sh for
+# the matching NOPASSWD allowlist entry.
+B1_DELETE_CLIP_SRC="${B1_REPO_ROOT}/scripts/teslausb_delete_clip.sh"
+B1_DELETE_CLIP_DST="/usr/local/bin/teslausb_delete_clip.sh"
+
 # --------------------------------------------------------------------
 # teslausb-web.service — inline body (constant)
 # --------------------------------------------------------------------
@@ -440,6 +449,21 @@ b1_step_04() {
   _b1_install_file \
     "${B1_GADGET_REBIND_SRC}" \
     "${B1_GADGET_REBIND_DST}" \
+    0755
+
+  # ------------------------------------------------------------------
+  # 5c) privileged clip-delete helper. Installed to /usr/local/bin so
+  #    the web app's `sudo -n teslausb_delete_clip.sh <path>` fallback
+  #    resolves. Root-owned + path-validating; not a systemd unit.
+  # ------------------------------------------------------------------
+  if [[ ! -r "${B1_DELETE_CLIP_SRC}" ]]; then
+    b1_err "missing required script source: ${B1_DELETE_CLIP_SRC}"
+    b1_err "  (clip-delete fallback ships this file — has the worktree been pruned?)"
+    return 1
+  fi
+  _b1_install_file \
+    "${B1_DELETE_CLIP_SRC}" \
+    "${B1_DELETE_CLIP_DST}" \
     0755
 
   # ------------------------------------------------------------------

@@ -238,6 +238,24 @@ def test_paths_state_dir_defaults_to_standard_state_path(tmp_path: Path) -> None
     assert cfg.paths.state_dir == Path("/var/lib/teslausb")
 
 
+def test_delete_clip_script_default_and_override(tmp_path: Path) -> None:
+    default_file = tmp_path / "delete_default.toml"
+    _write(default_file, "")
+    assert load_config(default_file).paths.delete_clip_script == Path(
+        "/usr/local/bin/teslausb_delete_clip.sh"
+    )
+
+    override_file = tmp_path / "delete_override.toml"
+    _write(
+        override_file,
+        """
+[paths]
+delete_clip_script = "/opt/custom/del.sh"
+""",
+    )
+    assert load_config(override_file).paths.delete_clip_script == Path("/opt/custom/del.sh")
+
+
 def test_chimes_defaults_round_trip(tmp_path: Path) -> None:
     cfg_file = tmp_path / "chimes_defaults.toml"
     _write(cfg_file, "[chimes]\n")

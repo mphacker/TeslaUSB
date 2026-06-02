@@ -67,6 +67,7 @@ B1_SUDOERS_ALLOWLIST=(
   "/usr/bin/systemctl is-active smbd"
   "/usr/local/bin/tesla_cache_invalidate.sh" # Phase 4c.2 invalidation
   "/usr/local/bin/tesla_gadget_rebind.sh" # lock-chime full UDC re-enumeration
+  "/usr/local/bin/teslausb_delete_clip.sh *" # privileged clip delete (self-validating path)
   "/usr/bin/nmcli"                       # NetworkManager from captive_portal
 )
 

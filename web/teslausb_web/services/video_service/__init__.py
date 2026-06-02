@@ -19,6 +19,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from teslausb_web.services.privileged_delete import (
+    PrivilegedClipDeleter,
+    PrivilegedDeleteError,
+)
 from teslausb_web.services.video_service._filesystem import (
     count_videos,
     event_playback_target,
@@ -43,6 +47,7 @@ from teslausb_web.services.video_service._models import (
     SessionGroup,
 )
 from teslausb_web.services.video_service._paths import (
+    ClipPermissionError,
     DeletionError,
     PathSecurityError,
     ResolvedClip,
@@ -77,6 +82,13 @@ class VideoService:
     """
 
     teslacam_root: Path
+
+    # Optional fallback used ONLY when a direct delete raises
+    # ``ClipPermissionError`` (the web user ``pi`` cannot rmtree a
+    # teslausb-owned 0755 event dir). ``None`` disables the fallback —
+    # the permission error then propagates as a ``DeletionError`` exactly
+    # as before. Wired by :func:`make_video_service` from config.
+    clip_deleter: PrivilegedClipDeleter | None = None
 
     # ------------------------------------------------------------------
     # Folder + event listings.
@@ -238,7 +250,7 @@ class VideoService:
             for clip in get_session_files(folder_path, sanitized_event):
                 clip_path = Path(clip.path)
                 try:
-                    safe_delete_clip(clip_path, self._allowed_roots())
+                    self._delete_one(clip_path)
                     deleted.append(clip.name)
                     deleted_paths.append(clip_path)
                 except (DeletionError, PathSecurityError) as exc:
@@ -256,7 +268,7 @@ class VideoService:
                         deleted_paths.append(entry)
             except OSError as exc:
                 logger.warning("safe_delete_clip: scan failed %s: %s", event_path, exc)
-            safe_delete_clip(event_path, self._allowed_roots())
+            self._delete_one(event_path)
         return DeleteOutcome(
             deleted_files=tuple(deleted),
             deleted_count=len(deleted),
@@ -272,6 +284,27 @@ class VideoService:
         if self.teslacam_root.exists():
             roots.append(self.teslacam_root)
         return tuple(roots)
+
+    def _delete_one(self, path: Path) -> None:
+        """Delete one clip path, falling back to the privileged helper.
+
+        Attempts a direct delete first (the common case on a correctly
+        permissioned tree). Only when that raises
+        :class:`ClipPermissionError` — the web user ``pi`` cannot remove a
+        teslausb-owned 0755 event dir — does it retry via the root-owned
+        helper. With no ``clip_deleter`` configured the permission error
+        propagates unchanged (still a ``DeletionError`` subclass).
+        """
+        try:
+            safe_delete_clip(path, self._allowed_roots())
+        except ClipPermissionError:
+            if self.clip_deleter is None:
+                raise
+            logger.info("direct delete denied, retrying via privileged helper: %s", path)
+            try:
+                self.clip_deleter.delete(path)
+            except PrivilegedDeleteError as exc:
+                raise DeletionError(f"privileged delete failed: {path}: {exc}") from exc
 
     def _folder_path(self, folder: str) -> Path | None:
         """Map a logical folder name to its on-disk path."""
@@ -310,6 +343,10 @@ def make_video_service(cfg: WebConfig) -> VideoService:
     """
     return VideoService(
         teslacam_root=cfg.paths.backing_root / _TESLACAM_DIRNAME,
+        clip_deleter=PrivilegedClipDeleter(
+            script=cfg.paths.delete_clip_script,
+            sudo_prefix=cfg.samba.sudo_prefix,
+        ),
     )
 
 
@@ -318,6 +355,7 @@ __all__ = (
     "CameraVideos",
     "Clip",
     "ClipFile",
+    "ClipPermissionError",
     "DeleteOutcome",
     "DeletionError",
     "EncryptedFlags",
@@ -325,6 +363,8 @@ __all__ = (
     "EventFolder",
     "EventSummary",
     "PathSecurityError",
+    "PrivilegedClipDeleter",
+    "PrivilegedDeleteError",
     "RangeParseError",
     "RangeRequest",
     "ResolvedClip",

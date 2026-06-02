@@ -9,6 +9,7 @@ service is built directly via :func:`VideoService`.
 from __future__ import annotations
 
 import json
+import shutil
 import zipfile
 from typing import TYPE_CHECKING
 
@@ -16,10 +17,12 @@ import pytest
 from teslausb_web.services.video_service import (
     DeletionError,
     PathSecurityError,
+    PrivilegedDeleteError,
     VideoService,
     assert_inside,
 )
 from teslausb_web.services.video_service._paths import (
+    ClipPermissionError,
     resolve_clip_path,
     safe_delete_clip,
 )
@@ -357,6 +360,100 @@ class TestSafeDelete:
 
 
 # ---------------------------------------------------------------------------
+# Privileged-delete fallback: when a direct rmtree raises EACCES (the web
+# user `pi` cannot remove a teslausb-owned 0755 event dir), VideoService
+# retries via the injected clip_deleter. These tests simulate the EACCES by
+# monkeypatching shutil.rmtree rather than relying on real ownership, so
+# they run on any OS / CI.
+# ---------------------------------------------------------------------------
+
+
+class _RecordingDeleter:
+    """Stand-in for PrivilegedClipDeleter that records calls.
+
+    ``raises`` lets a test simulate the helper itself failing so the
+    PrivilegedDeleteError → DeletionError translation can be exercised.
+    """
+
+    def __init__(self, *, raises: bool = False) -> None:
+        self.calls: list[Path] = []
+        self._raises = raises
+        # Capture the real rmtree NOW: tests monkeypatch the shared
+        # ``shutil.rmtree`` to simulate EACCES on the direct delete, and
+        # that patch is global (same module object), so the fallback must
+        # use the unpatched reference to actually remove the tree.
+        self._real_rmtree = shutil.rmtree
+
+    def delete(self, path: Path) -> None:
+        self.calls.append(path)
+        if self._raises:
+            raise PrivilegedDeleteError("simulated helper failure")
+        self._real_rmtree(path)
+
+
+class TestPrivilegedDeleteFallback:
+    @staticmethod
+    def _patch_rmtree_eacces(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Force shutil.rmtree to raise PermissionError once, like 0755 dirs."""
+
+        def _boom(_path: object, *_a: object, **_k: object) -> None:
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr(
+            "teslausb_web.services.video_service._paths.shutil.rmtree",
+            _boom,
+        )
+
+    def test_event_delete_falls_back_to_helper(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        deleter = _RecordingDeleter()
+        teslacam = _build_tree(tmp_path)
+        svc = VideoService(teslacam_root=teslacam, clip_deleter=deleter)  # type: ignore[arg-type]
+        self._patch_rmtree_eacces(monkeypatch)
+
+        outcome = svc.safe_delete_clip("SentryClips", "2025-01-15_12-30-45")
+
+        assert len(deleter.calls) == 1
+        assert deleter.calls[0].name == "2025-01-15_12-30-45"
+        assert outcome.deleted_count > 0
+        assert not (teslacam / "SentryClips" / "2025-01-15_12-30-45").exists()
+
+    def test_no_deleter_propagates_permission_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        teslacam = _build_tree(tmp_path)
+        svc = VideoService(teslacam_root=teslacam)
+        self._patch_rmtree_eacces(monkeypatch)
+
+        # The event branch surfaces the DeletionError subclass directly.
+        with pytest.raises(DeletionError):
+            svc.safe_delete_clip("SentryClips", "2025-01-15_12-30-45")
+
+    def test_helper_failure_becomes_deletion_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        deleter = _RecordingDeleter(raises=True)
+        teslacam = _build_tree(tmp_path)
+        svc = VideoService(teslacam_root=teslacam, clip_deleter=deleter)  # type: ignore[arg-type]
+        self._patch_rmtree_eacces(monkeypatch)
+
+        with pytest.raises(DeletionError):
+            svc.safe_delete_clip("SentryClips", "2025-01-15_12-30-45")
+        assert len(deleter.calls) == 1
+
+    def test_successful_direct_delete_skips_helper(self, tmp_path: Path) -> None:
+        deleter = _RecordingDeleter()
+        teslacam = _build_tree(tmp_path)
+        svc = VideoService(teslacam_root=teslacam, clip_deleter=deleter)  # type: ignore[arg-type]
+
+        svc.safe_delete_clip("SentryClips", "2025-01-15_12-30-45")
+
+        assert deleter.calls == []
+        assert not (teslacam / "SentryClips" / "2025-01-15_12-30-45").exists()
+
+
+# ---------------------------------------------------------------------------
 # iter_zip_file + assorted edge cases for coverage.
 # ---------------------------------------------------------------------------
 
@@ -378,3 +475,36 @@ class TestExtraCoverage:
         target.write_bytes(b"x")
         safe_delete_clip(target, (root,))
         assert not target.exists()
+
+    def test_permission_error_dir_maps_to_clip_permission_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "root"
+        event = root / "evt"
+        event.mkdir(parents=True)
+
+        def _boom(_path: object, *_a: object, **_k: object) -> None:
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr(
+            "teslausb_web.services.video_service._paths.shutil.rmtree",
+            _boom,
+        )
+        with pytest.raises(ClipPermissionError):
+            safe_delete_clip(event, (root,))
+        assert issubclass(ClipPermissionError, DeletionError)
+
+    def test_permission_error_file_maps_to_clip_permission_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "root"
+        root.mkdir()
+        target = root / "x.mp4"
+        target.write_bytes(b"x")
+
+        def _boom(_self: object) -> None:
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr("pathlib.Path.unlink", _boom)
+        with pytest.raises(ClipPermissionError):
+            safe_delete_clip(target, (root,))

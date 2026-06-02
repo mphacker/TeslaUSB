@@ -764,15 +764,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open_in_memory().unwrap();
         let cfg = storage(5, 0);
-        let s = sweep_to_target(
-            &store,
-            dir.path(),
-            &cfg,
-            0,
-            1_000,
-            &KeepFilter::disabled(),
-        )
-        .unwrap();
+        let s =
+            sweep_to_target(&store, dir.path(), &cfg, 0, 1_000, &KeepFilter::disabled()).unwrap();
         assert_eq!(s, SweepSummary::default());
     }
 

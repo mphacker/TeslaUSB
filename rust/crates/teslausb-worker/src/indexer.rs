@@ -86,6 +86,12 @@ pub struct Indexer {
 /// guard so older entries are harmless to forget.
 const MAX_DEBOUNCE_ENTRIES: usize = 8_192;
 
+/// Maximum directory depth walked during bootstrap below each
+/// TeslaCam bucket root. Tesla currently nests saved/sentry
+/// clips one event directory deep; keeping a small explicit
+/// bound prevents accidental walks of arbitrary trees.
+const MAX_BOOTSTRAP_RECURSION_DEPTH: usize = 4;
+
 impl Indexer {
     /// Build an indexer around the configured store.
     #[must_use]
@@ -128,29 +134,13 @@ impl Indexer {
                 );
                 continue;
             }
-            let entries = std::fs::read_dir(&root).map_err(|e| IndexerError::Io {
-                path: root.clone(),
-                source: e,
-            })?;
             // First pass: collect every `is_indexable` MP4 path under
             // this bucket, grouped by clip base ("RecentClips/2026-...
-            // -19-42-29" → all four camera angles).  We then index the
-            // canonical front variant per group, falling back to any
-            // sibling angle if Tesla never wrote a front.mp4 for that
-            // group (rare, but harmless to recover).
+            // -19-42-29" → all camera angles). Saved/Sentry events are
+            // stored in per-event subdirectories, so this walk is
+            // intentionally recursive but explicitly bounded.
             let mut groups: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
-            for entry in entries {
-                let entry = entry.map_err(|e| IndexerError::Io {
-                    path: root.clone(),
-                    source: e,
-                })?;
-                let path = entry.path();
-                if !crate::watcher::is_indexable(&path) {
-                    continue;
-                }
-                let base = clip_group_key(&path);
-                groups.entry(base).or_default().push(path);
-            }
+            collect_indexable_clips(&root, &root, 0, &mut groups)?;
             for (_, paths) in groups {
                 let Some(canonical) = pick_canonical_clip(&paths) else {
                     // Group has no front sibling. Per the
@@ -160,7 +150,6 @@ impl Indexer {
                     summary.skipped_no_front += 1;
                     debug!(
                         group_size = paths.len(),
-                        sample = %paths[0].display(),
                         "bootstrap: clip group has no -front.mp4 sibling; skipping",
                     );
                     continue;
@@ -339,6 +328,70 @@ impl Indexer {
     }
 }
 
+fn collect_indexable_clips(
+    root: &Path,
+    dir: &Path,
+    depth: usize,
+    groups: &mut HashMap<PathBuf, Vec<PathBuf>>,
+) -> Result<()> {
+    let entries = std::fs::read_dir(dir).map_err(|e| IndexerError::Io {
+        path: dir.to_path_buf(),
+        source: e,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|e| IndexerError::Io {
+            path: dir.to_path_buf(),
+            source: e,
+        })?;
+        collect_indexable_entry(root, depth, groups, &entry)?;
+    }
+    Ok(())
+}
+
+fn collect_indexable_entry(
+    root: &Path,
+    depth: usize,
+    groups: &mut HashMap<PathBuf, Vec<PathBuf>>,
+    entry: &std::fs::DirEntry,
+) -> Result<()> {
+    let path = entry.path();
+    let file_type = entry.file_type().map_err(|e| IndexerError::Io {
+        path: path.clone(),
+        source: e,
+    })?;
+    if file_type.is_dir() {
+        collect_indexable_dir(root, &path, depth, groups)
+    } else {
+        collect_indexable_file(path, groups);
+        Ok(())
+    }
+}
+
+fn collect_indexable_dir(
+    root: &Path,
+    path: &Path,
+    depth: usize,
+    groups: &mut HashMap<PathBuf, Vec<PathBuf>>,
+) -> Result<()> {
+    if depth >= MAX_BOOTSTRAP_RECURSION_DEPTH {
+        debug!(
+            root = %root.display(),
+            path = %path.display(),
+            max_depth = MAX_BOOTSTRAP_RECURSION_DEPTH,
+            "bootstrap: maximum recursion depth reached; skipping directory",
+        );
+        return Ok(());
+    }
+    collect_indexable_clips(root, path, depth + 1, groups)
+}
+
+fn collect_indexable_file(path: PathBuf, groups: &mut HashMap<PathBuf, Vec<PathBuf>>) {
+    if crate::watcher::is_indexable(&path) {
+        let base = clip_group_key(&path);
+        groups.entry(base).or_default().push(path);
+    }
+}
+
 #[derive(Debug, Error)]
 enum WalkAndRecordError {
     #[error("{0}")]
@@ -470,7 +523,45 @@ mod tests {
         let s = indexer.bootstrap().unwrap();
         // One group → one clip seen, not four
         assert_eq!(s.seen, 1, "expected 1 group, got {}", s.seen);
-        assert_eq!(s.failed, 1, "garbage MP4 fails parse but counts as the canonical pick");
+        assert_eq!(
+            s.failed, 1,
+            "garbage MP4 fails parse but counts as the canonical pick"
+        );
+    }
+
+    #[test]
+    fn bootstrap_recurses_into_saved_and_sentry_event_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = make_config(dir.path());
+        let saved = cfg.bucket_root(Bucket::Saved).join("event-saved");
+        let sentry = cfg.bucket_root(Bucket::Sentry).join("event-sentry");
+        write_garbage_clip(&saved.join("2026-05-22_19-42-29-front.mp4"));
+        write_garbage_clip(&sentry.join("2026-05-22_19-43-29-front.mp4"));
+
+        let store = Store::open_in_memory().unwrap();
+        let mut indexer = Indexer::new(cfg, store);
+        let s = indexer.bootstrap().unwrap();
+
+        assert_eq!(s.seen, 2);
+        assert_eq!(s.failed, 2);
+        assert_eq!(s.indexed, 0);
+    }
+
+    #[test]
+    fn bootstrap_nested_group_still_requires_front_clip() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = make_config(dir.path());
+        let saved = cfg.bucket_root(Bucket::Saved).join("event-saved");
+        write_garbage_clip(&saved.join("2026-05-22_19-42-29-back.mp4"));
+        write_garbage_clip(&saved.join("2026-05-22_19-42-29-left_repeater.mp4"));
+
+        let store = Store::open_in_memory().unwrap();
+        let mut indexer = Indexer::new(cfg, store);
+        let s = indexer.bootstrap().unwrap();
+
+        assert_eq!(s.seen, 0);
+        assert_eq!(s.skipped_no_front, 1);
+        assert_eq!(s.failed, 0);
     }
 
     #[test]

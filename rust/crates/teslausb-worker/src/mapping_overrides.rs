@@ -26,7 +26,7 @@
 //! `derive_events` skips the speed-limit branch entirely.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::SystemTime;
 
 use serde::Deserialize;
@@ -104,6 +104,8 @@ const fn default_speed_limit_mph() -> i64 {
     DEFAULT_SPEED_LIMIT_MPH
 }
 
+type OverrideCache = Option<(SystemTime, MappingOverrides)>;
+
 /// Cached-snapshot reader. Use one per worker process — clones
 /// share the same backing cache.
 #[derive(Debug)]
@@ -115,7 +117,7 @@ pub struct MappingOverridesReader {
     // syscall returns `Err(NotFound)` in that case, and a
     // subsequent file create will have a strictly-later mtime,
     // so the cache invalidates correctly.
-    cache: Mutex<Option<(SystemTime, MappingOverrides)>>,
+    cache: Mutex<OverrideCache>,
 }
 
 impl MappingOverridesReader {
@@ -140,7 +142,7 @@ impl MappingOverridesReader {
     /// mtime changed since the previous successful load.
     pub fn load(&self) -> MappingOverrides {
         let current_mtime = self.current_mtime();
-        let mut guard = self.cache.lock().expect("mapping-overrides cache poisoned");
+        let mut guard = self.cache_guard();
         if let Some((cached_mtime, snapshot)) = *guard {
             if cached_mtime == current_mtime {
                 return snapshot;
@@ -157,10 +159,23 @@ impl MappingOverridesReader {
     /// mark the trips table dirty.
     pub fn mtime_changed_since_last_load(&self) -> bool {
         let current_mtime = self.current_mtime();
-        let guard = self.cache.lock().expect("mapping-overrides cache poisoned");
+        let guard = self.cache_guard();
         match *guard {
             None => true,
             Some((cached_mtime, _)) => cached_mtime != current_mtime,
+        }
+    }
+
+    fn cache_guard(&self) -> MutexGuard<'_, OverrideCache> {
+        match self.cache.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                warn!(
+                    path = %self.path.display(),
+                    "mapping-overrides cache lock poisoned; recovering inner snapshot",
+                );
+                poisoned.into_inner()
+            }
         }
     }
 
@@ -273,8 +288,7 @@ mod tests {
             br#"{"schema_version":1,"trip_gap_minutes":9,"speed_limit_mph":75}"#,
         )
         .unwrap();
-        filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(new_mtime))
-            .unwrap();
+        filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(new_mtime)).unwrap();
 
         assert!(reader.mtime_changed_since_last_load());
         let s3 = reader.load();

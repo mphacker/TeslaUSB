@@ -45,12 +45,7 @@ use crate::store::ClipRecord;
 
 /// Canonical cloud-path roots. Mirrors `KNOWN_CLOUD_ROOTS` in
 /// `web/teslausb_web/services/cloud_archive/paths.py`.
-const KNOWN_CLOUD_ROOTS: &[&str] = &[
-    "RecentClips",
-    "SentryClips",
-    "SavedClips",
-    "TeslaTrackMode",
-];
+const KNOWN_CLOUD_ROOTS: &[&str] = &["RecentClips", "SentryClips", "SavedClips", "TeslaTrackMode"];
 
 /// KV key under `cloud_archive_meta.key` carrying the
 /// `keep_clips_until_synced` toggle. Mirrors
@@ -152,11 +147,10 @@ impl KeepFilter {
                 in_flight: HashSet::new(),
             });
         }
-        let in_flight =
-            read_in_flight_paths(&conn).map_err(|e| KeepFilterError::Sqlite {
-                path: cloud_db_path.to_path_buf(),
-                source: e,
-            })?;
+        let in_flight = read_in_flight_paths(&conn).map_err(|e| KeepFilterError::Sqlite {
+            path: cloud_db_path.to_path_buf(),
+            source: e,
+        })?;
         debug!(
             count = in_flight.len(),
             "cloud_keep: loaded in-flight upload set",
@@ -403,21 +397,14 @@ mod tests {
         let dir = open_seeded_db(Some("1"), &[("RecentClips/x.mp4", "pending")]);
         // Delete the placeholder credentials file the helper drops in.
         std::fs::remove_file(creds_path(&dir)).unwrap();
-        let f = KeepFilter::load(
-            &dir.path().join("cloud_sync.db"),
-            &creds_path(&dir),
-        )
-        .unwrap();
+        let f = KeepFilter::load(&dir.path().join("cloud_sync.db"), &creds_path(&dir)).unwrap();
         assert!(!f.enabled);
         assert!(!f.should_keep(&mk_clip("TeslaCam/RecentClips/x.mp4", 5)));
     }
 
     #[test]
     fn load_defaults_enabled_when_toggle_absent() {
-        let dir = open_seeded_db(
-            None,
-            &[("RecentClips/x.mp4", "pending")],
-        );
+        let dir = open_seeded_db(None, &[("RecentClips/x.mp4", "pending")]);
         let f = KeepFilter::load(&dir.path().join("cloud_sync.db"), &creds_path(&dir)).unwrap();
         assert!(f.enabled);
         assert_eq!(f.in_flight_len(), 1);
@@ -425,10 +412,7 @@ mod tests {
 
     #[test]
     fn load_respects_off_toggle() {
-        let dir = open_seeded_db(
-            Some("0"),
-            &[("RecentClips/x.mp4", "pending")],
-        );
+        let dir = open_seeded_db(Some("0"), &[("RecentClips/x.mp4", "pending")]);
         let f = KeepFilter::load(&dir.path().join("cloud_sync.db"), &creds_path(&dir)).unwrap();
         assert!(!f.enabled);
         assert!(!f.should_keep(&mk_clip("TeslaCam/RecentClips/x.mp4", 5)));
@@ -462,10 +446,7 @@ mod tests {
         // An in-flight clip with no SEI/GPS waypoints is not
         // worth pinning storage for, even mid-upload — the
         // operator only cares about clips with telemetry.
-        let dir = open_seeded_db(
-            Some("1"),
-            &[("RecentClips/in_flight.mp4", "pending")],
-        );
+        let dir = open_seeded_db(Some("1"), &[("RecentClips/in_flight.mp4", "pending")]);
         let f = KeepFilter::load(&dir.path().join("cloud_sync.db"), &creds_path(&dir)).unwrap();
         assert!(f.enabled);
         assert!(!f.should_keep(&mk_clip("TeslaCam/RecentClips/in_flight.mp4", 0)));
@@ -480,10 +461,8 @@ mod tests {
             Some("RecentClips/x.mp4"),
         );
         assert_eq!(
-            canonical_cloud_path(Path::new(
-                "deeply/nested/RecentClips/2026-05-28/y.mp4"
-            ))
-            .as_deref(),
+            canonical_cloud_path(Path::new("deeply/nested/RecentClips/2026-05-28/y.mp4"))
+                .as_deref(),
             Some("RecentClips/2026-05-28/y.mp4"),
         );
         assert_eq!(

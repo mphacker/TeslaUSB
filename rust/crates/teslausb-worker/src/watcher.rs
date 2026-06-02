@@ -1,6 +1,6 @@
 //! Clip watcher — emits a stream of [`WatchEvent`]s when
 //! Tesla finishes writing a new `*.mp4` into one of the
-//! three bucket directories.
+//! bucket directories or an event subdirectory.
 //!
 //! Pure-logic helpers (`is_indexable`, `event_to_bucket`) are
 //! always compiled and unit-tested. The `ClipWatcher` struct
@@ -15,9 +15,12 @@
 //!   and called `close()`. Walking the clip is safe.
 //! * `IN_MOVED_TO` — defensive: if Tesla ever switches to
 //!   write-tmp-then-rename, we still notice the final clip.
+//! * `IN_CREATE` — directory-only plumbing. It lets the watcher
+//!   subscribe to new event directories before Tesla closes
+//!   clips inside them; create-only file events are ignored.
 //!
-//! We do NOT subscribe to `IN_MODIFY` / `IN_CREATE` — those
-//! fire mid-write and would race against an incomplete
+//! We do NOT emit events for `IN_MODIFY` / file `IN_CREATE` —
+//! those fire mid-write and would race against an incomplete
 //! `mdat` box.
 
 // File-level: "inotify", "IN_CLOSE_WRITE", "IN_MOVED_TO",
@@ -66,6 +69,9 @@ pub enum WatcherError {
     /// `backing_root`.
     #[error("bucket root {0:?} does not exist")]
     BucketRootMissing(PathBuf),
+    /// Recursive watching would exceed the configured safety cap.
+    #[error("clip watcher directory limit exceeded ({0})")]
+    WatchLimitExceeded(usize),
     /// The watcher is not supported on the host platform
     /// (i.e. compiling on non-Linux). Production builds
     /// target Linux only; this exists so unit tests on
@@ -131,27 +137,71 @@ pub fn is_front_camera_clip(path: &Path) -> bool {
         .any(|suffix| lower.ends_with(suffix))
 }
 
+#[cfg(any(test, target_os = "linux"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WatchAction {
+    EmitFile(WatchKind),
+    AddDirectory(DirectoryArrival),
+    RemoveWatch,
+    Ignore,
+}
+
+#[cfg(any(test, target_os = "linux"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirectoryArrival {
+    Created,
+    Moved,
+}
+
+#[cfg(any(test, target_os = "linux"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RawWatchEvent {
+    FileCloseWrite,
+    FileMovedTo,
+    FileCreated,
+    DirectoryCreated,
+    DirectoryMovedTo,
+    DirectoryOther,
+    WatchIgnored,
+}
+
+#[cfg(any(test, target_os = "linux"))]
+const fn classify_raw_event(event: RawWatchEvent) -> WatchAction {
+    match event {
+        RawWatchEvent::FileCloseWrite => WatchAction::EmitFile(WatchKind::CloseWrite),
+        RawWatchEvent::FileMovedTo => WatchAction::EmitFile(WatchKind::Moved),
+        RawWatchEvent::DirectoryCreated => WatchAction::AddDirectory(DirectoryArrival::Created),
+        RawWatchEvent::DirectoryMovedTo => WatchAction::AddDirectory(DirectoryArrival::Moved),
+        RawWatchEvent::WatchIgnored => WatchAction::RemoveWatch,
+        RawWatchEvent::FileCreated | RawWatchEvent::DirectoryOther => WatchAction::Ignore,
+    }
+}
+
 /// Map an event-fd path to its bucket. The watcher receives
 /// events with the watch descriptor's directory plus the
 /// event's basename; the caller is expected to assemble the
 /// full path before calling this. Returns `None` if the path
-/// is not directly inside one of the configured bucket roots.
+/// is not inside one of the configured bucket roots.
 #[must_use]
 pub fn event_to_bucket(path: &Path, config: &Config) -> Option<Bucket> {
-    let parent = path.parent()?;
-    Bucket::all()
-        .into_iter()
-        .find(|&bucket| parent == config.bucket_root(bucket))
+    Bucket::all().into_iter().find(|&bucket| {
+        path.strip_prefix(config.bucket_root(bucket))
+            .ok()
+            .is_some_and(|relative| relative.components().next().is_some())
+    })
 }
 
 #[cfg(target_os = "linux")]
 mod linux_impl {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::path::PathBuf;
 
     use inotify::{EventMask, Inotify, WatchDescriptor, WatchMask};
 
-    use super::{Result, WatchEvent, WatchKind, WatcherError, event_to_bucket, is_indexable};
+    use super::{
+        DirectoryArrival, RawWatchEvent, Result, WatchAction, WatchEvent, WatcherError,
+        classify_raw_event, is_indexable,
+    };
     use crate::config::Config;
     use crate::store::Bucket;
 
@@ -161,19 +211,36 @@ mod linux_impl {
     /// fragment any larger burst across reads.
     const EVENT_BUFFER_BYTES: usize = 4096;
 
+    /// Maximum directory depth watched below each bucket root.
+    /// Tesla event folders are one level deep; the extra margin
+    /// supports future shallow grouping without unbounded watch
+    /// growth.
+    const MAX_WATCH_RECURSION_DEPTH: usize = 4;
+
+    /// Hard cap on inotify watches owned by this worker.
+    const MAX_WATCHED_DIRECTORIES: usize = 4096;
+
+    #[derive(Clone)]
+    struct WatchedDir {
+        bucket: Bucket,
+        path: PathBuf,
+        depth: usize,
+    }
+
     /// Real `inotify(7)`-backed watcher.
     pub struct ClipWatcher {
         inotify: Inotify,
         /// Reverse map from watch descriptor → directory path,
         /// so events (which carry only the basename) can be
         /// resolved to full paths.
-        descriptors: HashMap<WatchDescriptor, PathBuf>,
+        descriptors: HashMap<WatchDescriptor, WatchedDir>,
+        watched_paths: HashSet<PathBuf>,
         buf: Vec<u8>,
     }
 
     impl ClipWatcher {
-        /// Create a watcher subscribed to each of the three
-        /// bucket directories declared in `config`. Every
+        /// Create a watcher subscribed to each bucket directory
+        /// declared in `config` plus bounded descendants. Every
         /// bucket root must already exist on disk — the
         /// supervisor `mkdir -p`s them at startup.
         ///
@@ -184,22 +251,20 @@ mod linux_impl {
         /// be added.
         pub fn new(config: &Config) -> Result<Self> {
             let inotify = Inotify::init()?;
-            let mut descriptors = HashMap::new();
+            let mut watcher = Self {
+                inotify,
+                descriptors: HashMap::new(),
+                watched_paths: HashSet::new(),
+                buf: vec![0_u8; EVENT_BUFFER_BYTES],
+            };
             for bucket in Bucket::all() {
                 let root = config.bucket_root(bucket);
                 if !root.is_dir() {
                     return Err(WatcherError::BucketRootMissing(root));
                 }
-                let wd = inotify
-                    .watches()
-                    .add(&root, WatchMask::CLOSE_WRITE | WatchMask::MOVED_TO)?;
-                descriptors.insert(wd, root);
+                watcher.add_recursive_dir(bucket, root, 0)?;
             }
-            Ok(Self {
-                inotify,
-                descriptors,
-                buf: vec![0_u8; EVENT_BUFFER_BYTES],
-            })
+            Ok(watcher)
         }
 
         /// Block until at least one event arrives, then return
@@ -229,52 +294,168 @@ mod linux_impl {
                 .collect();
             let mut out = Vec::new();
             for (wd, mask, name) in detached {
-                if let Some(watch_event) = self.classify(&wd, mask, name.as_deref()) {
-                    out.push(watch_event);
-                }
+                out.extend(self.classify(&wd, mask, name.as_deref())?);
             }
             Ok(out)
         }
 
         fn classify(
-            &self,
+            &mut self,
             wd: &WatchDescriptor,
             mask: EventMask,
             name: Option<&std::ffi::OsStr>,
-        ) -> Option<WatchEvent> {
-            let dir = self.descriptors.get(wd)?;
-            let name = name?;
-            let path = dir.join(name);
-            if !is_indexable(&path) {
-                return None;
+        ) -> Result<Vec<WatchEvent>> {
+            let action = classify_raw_event(raw_event_from_mask(mask));
+            if action == WatchAction::RemoveWatch {
+                self.remove_watch(wd);
+                return Ok(Vec::new());
             }
-            let kind = if mask.contains(EventMask::CLOSE_WRITE) {
-                WatchKind::CloseWrite
-            } else if mask.contains(EventMask::MOVED_TO) {
-                WatchKind::Moved
-            } else {
-                return None;
+            let Some(dir) = self.descriptors.get(wd).cloned() else {
+                return Ok(Vec::new());
             };
-            // Resolve via the descriptor map for safety even
-            // though `dir` here is already the right answer.
-            // This second lookup catches the rare case of an
-            // event arriving for a directory whose watch was
-            // about to be removed.
-            let bucket = config_bucket_for_dir(dir)?;
-            let _ = event_to_bucket; // keep helper available
-            Some(WatchEvent { bucket, path, kind })
+            let Some(name) = name else {
+                return Ok(Vec::new());
+            };
+            let path = dir.path.join(name);
+            match action {
+                WatchAction::AddDirectory(arrival) => {
+                    if dir.depth < MAX_WATCH_RECURSION_DEPTH {
+                        self.add_recursive_dir(dir.bucket, path, dir.depth + 1)?;
+                        if arrival == DirectoryArrival::Moved {
+                            return self.completed_events_under_dir(dir.bucket, &dir.path, name);
+                        }
+                    }
+                    Ok(Vec::new())
+                }
+                WatchAction::EmitFile(kind) => {
+                    if !is_indexable(&path) {
+                        return Ok(Vec::new());
+                    }
+                    Ok(vec![WatchEvent {
+                        bucket: dir.bucket,
+                        path,
+                        kind,
+                    }])
+                }
+                WatchAction::RemoveWatch | WatchAction::Ignore => Ok(Vec::new()),
+            }
+        }
+
+        fn add_recursive_dir(&mut self, bucket: Bucket, path: PathBuf, depth: usize) -> Result<()> {
+            if self.watched_paths.contains(&path) {
+                return Ok(());
+            }
+            if self.watched_paths.len() >= MAX_WATCHED_DIRECTORIES {
+                return Err(WatcherError::WatchLimitExceeded(MAX_WATCHED_DIRECTORIES));
+            }
+            let wd = self.inotify.watches().add(
+                &path,
+                WatchMask::CLOSE_WRITE | WatchMask::MOVED_TO | WatchMask::CREATE,
+            )?;
+            self.watched_paths.insert(path.clone());
+            self.descriptors.insert(
+                wd,
+                WatchedDir {
+                    bucket,
+                    path: path.clone(),
+                    depth,
+                },
+            );
+
+            if depth >= MAX_WATCH_RECURSION_DEPTH {
+                return Ok(());
+            }
+            for entry in std::fs::read_dir(&path)? {
+                let entry = entry?;
+                let file_type = entry.file_type()?;
+                if file_type.is_dir() {
+                    self.add_recursive_dir(bucket, entry.path(), depth + 1)?;
+                }
+            }
+            Ok(())
+        }
+
+        fn completed_events_under_dir(
+            &self,
+            bucket: Bucket,
+            parent: &std::path::Path,
+            name: &std::ffi::OsStr,
+        ) -> Result<Vec<WatchEvent>> {
+            let root = parent.join(name);
+            let mut events = Vec::new();
+            collect_completed_files(bucket, &root, 0, &mut events)?;
+            Ok(events)
+        }
+
+        fn remove_watch(&mut self, wd: &WatchDescriptor) {
+            if let Some(watched) = self.descriptors.remove(wd) {
+                self.watched_paths.remove(&watched.path);
+            }
         }
     }
 
-    /// Resolve a watched-directory path back to its [`Bucket`]
-    /// purely from the directory's basename. The inotify
-    /// runtime path is already known to be a configured bucket
-    /// root (we only added watches on those), so we trust the
-    /// basename and avoid pulling the whole `Config` through.
-    fn config_bucket_for_dir(dir: &std::path::Path) -> Option<Bucket> {
-        dir.file_name()
-            .and_then(|n| n.to_str())
-            .and_then(Bucket::from_tesla_dir_name)
+    fn raw_event_from_mask(mask: EventMask) -> RawWatchEvent {
+        if mask.contains(EventMask::IGNORED) {
+            return RawWatchEvent::WatchIgnored;
+        }
+        let is_directory = mask.contains(EventMask::ISDIR);
+        if is_directory && mask.contains(EventMask::MOVED_TO) {
+            return RawWatchEvent::DirectoryMovedTo;
+        }
+        if is_directory && mask.contains(EventMask::CREATE) {
+            return RawWatchEvent::DirectoryCreated;
+        }
+        if is_directory {
+            return RawWatchEvent::DirectoryOther;
+        }
+        if mask.contains(EventMask::CLOSE_WRITE) {
+            return RawWatchEvent::FileCloseWrite;
+        }
+        if mask.contains(EventMask::MOVED_TO) {
+            return RawWatchEvent::FileMovedTo;
+        }
+        if mask.contains(EventMask::CREATE) {
+            return RawWatchEvent::FileCreated;
+        }
+        RawWatchEvent::DirectoryOther
+    }
+
+    fn collect_completed_files(
+        bucket: Bucket,
+        dir: &std::path::Path,
+        depth: usize,
+        events: &mut Vec<WatchEvent>,
+    ) -> Result<()> {
+        if depth > MAX_WATCH_RECURSION_DEPTH {
+            return Ok(());
+        }
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            collect_completed_entry(bucket, depth, events, &entry)?;
+        }
+        Ok(())
+    }
+
+    fn collect_completed_entry(
+        bucket: Bucket,
+        depth: usize,
+        events: &mut Vec<WatchEvent>,
+        entry: &std::fs::DirEntry,
+    ) -> Result<()> {
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_completed_files(bucket, &entry.path(), depth + 1, events)
+        } else {
+            let path = entry.path();
+            if is_indexable(&path) {
+                events.push(WatchEvent {
+                    bucket,
+                    path,
+                    kind: WatchKind::Moved,
+                });
+            }
+            Ok(())
+        }
     }
 }
 
@@ -408,6 +589,13 @@ mod tests {
             event_to_bucket(Path::new("/srv/teslausb/TeslaCam/SentryClips/c.mp4"), &c,),
             Some(Bucket::Sentry),
         );
+        assert_eq!(
+            event_to_bucket(
+                Path::new("/srv/teslausb/TeslaCam/SavedClips/event-1/d.mp4"),
+                &c,
+            ),
+            Some(Bucket::Saved),
+        );
     }
 
     #[test]
@@ -423,6 +611,50 @@ mod tests {
         assert_eq!(
             event_to_bucket(Path::new("/srv/teslausb/TeslaCam/x.mp4"), &c,),
             None,
+        );
+        assert_eq!(
+            event_to_bucket(Path::new("/srv/teslausb/TeslaCam/SavedClips"), &c,),
+            None,
+        );
+    }
+
+    #[test]
+    fn watcher_action_only_emits_completed_file_events() {
+        assert_eq!(
+            classify_raw_event(RawWatchEvent::FileCloseWrite),
+            WatchAction::EmitFile(WatchKind::CloseWrite),
+        );
+        assert_eq!(
+            classify_raw_event(RawWatchEvent::FileMovedTo),
+            WatchAction::EmitFile(WatchKind::Moved),
+        );
+        assert_eq!(
+            classify_raw_event(RawWatchEvent::FileCreated),
+            WatchAction::Ignore,
+        );
+        assert_eq!(
+            classify_raw_event(RawWatchEvent::DirectoryOther),
+            WatchAction::Ignore,
+        );
+    }
+
+    #[test]
+    fn watcher_action_adds_dirs_without_emitting_file_event() {
+        assert_eq!(
+            classify_raw_event(RawWatchEvent::DirectoryCreated),
+            WatchAction::AddDirectory(DirectoryArrival::Created),
+        );
+        assert_eq!(
+            classify_raw_event(RawWatchEvent::DirectoryMovedTo),
+            WatchAction::AddDirectory(DirectoryArrival::Moved),
+        );
+    }
+
+    #[test]
+    fn watcher_action_removes_invalidated_watches() {
+        assert_eq!(
+            classify_raw_event(RawWatchEvent::WatchIgnored),
+            WatchAction::RemoveWatch,
         );
     }
 

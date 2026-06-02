@@ -1192,7 +1192,9 @@ mod tests {
         // distance to clear the 0.05 km min trip distance.
         let a = insert_clip(&mut conn, "a.mp4", "recent", Some(8_000_000), 2);
         insert_wp(&mut conn, a, 0, 0.0, 40.0, -75.0, 40.0, None, None, None);
-        insert_wp(&mut conn, a, 1, 1_000.0, 40.01, -75.0, 40.0, None, None, None);
+        insert_wp(
+            &mut conn, a, 1, 1_000.0, 40.01, -75.0, 40.0, None, None, None,
+        );
         let overrides = crate::mapping_overrides::MappingOverrides {
             trip_gap_seconds: 300,
             speed_limit_mps: SPEED_LIMIT_MPS,
@@ -1210,7 +1212,9 @@ mod tests {
         let mut conn = fresh_db();
         let a = insert_clip(&mut conn, "a.mp4", "recent", Some(9_000_000), 2);
         insert_wp(&mut conn, a, 0, 0.0, 40.0, -75.0, 40.0, None, None, None);
-        insert_wp(&mut conn, a, 1, 1_000.0, 40.01, -75.0, 40.0, None, None, None);
+        insert_wp(
+            &mut conn, a, 1, 1_000.0, 40.01, -75.0, 40.0, None, None, None,
+        );
         let overrides = crate::mapping_overrides::MappingOverrides {
             trip_gap_seconds: 300,
             speed_limit_mps: 0.0,
@@ -1230,7 +1234,9 @@ mod tests {
         // ~13.4 m/s = 30 mph — below the legacy 80-mph default,
         // above the custom 25-mph threshold (11.176 m/s).
         insert_wp(&mut conn, a, 0, 0.0, 40.0, -75.0, 13.4, None, None, None);
-        insert_wp(&mut conn, a, 1, 1_000.0, 40.01, -75.0, 13.4, None, None, None);
+        insert_wp(
+            &mut conn, a, 1, 1_000.0, 40.01, -75.0, 13.4, None, None, None,
+        );
         let overrides = crate::mapping_overrides::MappingOverrides {
             trip_gap_seconds: 300,
             speed_limit_mps: 25.0 * 0.44704,

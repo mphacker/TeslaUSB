@@ -210,11 +210,10 @@ pub async fn run(opts: RunOptions) -> Result<ShutdownReason> {
         return Ok(ShutdownReason::BootstrapOnly);
     }
 
-    let overrides_reader = std::sync::Arc::new(
-        crate::mapping_overrides::MappingOverridesReader::new(
+    let overrides_reader =
+        std::sync::Arc::new(crate::mapping_overrides::MappingOverridesReader::new(
             config.mapping_overrides_path.clone(),
-        ),
-    );
+        ));
 
     // Phase O — startup materialise pass. If the bootstrap
     // pass freshly indexed clips (or the v2 → v3 migration
@@ -265,14 +264,8 @@ pub async fn run(opts: RunOptions) -> Result<ShutdownReason> {
     // The *watcher* still runs on its own blocking thread
     // because `next_batch` blocks indefinitely on inotify.
     #[cfg(target_os = "linux")]
-    let reason = steady_state_linux(
-        &config,
-        &mut indexer,
-        &cleanup,
-        interval,
-        &overrides_reader,
-    )
-    .await?;
+    let reason =
+        steady_state_linux(&config, &mut indexer, &cleanup, interval, &overrides_reader).await?;
 
     #[cfg(not(target_os = "linux"))]
     let reason = steady_state_non_linux(&mut indexer, &cleanup, interval).await?;

@@ -47,12 +47,14 @@ DEFAULT_COMMAND: tuple[str, ...] = (
     "/usr/local/bin/tesla_gadget_rebind.sh",
 )
 
-# Default subprocess timeout. The script `sync`s, unbinds, sleeps the
-# settle interval (~2 s), rebinds, then waits (bounded) for the gadget
-# to come back healthy. 45 s comfortably covers the script's own 30 s
-# recovery deadline plus the settle/sync overhead; exceeding it means
-# "the rebind wedged" rather than "this is slow".
-DEFAULT_TIMEOUT_SECONDS: float = 45.0
+# Default subprocess timeout. The script `sync`s, SIGHUPs the media
+# ``teslafat`` instance and waits (bounded, ~15 s) for the re-walk to go
+# live, unbinds, sleeps the settle interval (~2 s), rebinds, then waits
+# (bounded, ~30 s) for the gadget to come back healthy. 70 s comfortably
+# covers the script's own ~15 s reload + ~30 s recovery deadlines plus
+# settle/sync overhead; exceeding it means "the rebind wedged" rather
+# than "this is slow".
+DEFAULT_TIMEOUT_SECONDS: float = 70.0
 
 
 @dataclass

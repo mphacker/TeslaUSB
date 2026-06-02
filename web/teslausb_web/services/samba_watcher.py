@@ -27,7 +27,6 @@ logger = logging.getLogger(__name__)
 _DEFAULT_DEBOUNCE_MS: int = 500
 _DEFAULT_POLL_INTERVAL_SECONDS: float = 1.0
 _DEFAULT_IGNORE_EXTENSIONS: tuple[str, ...] = (".tmp", ".part", ".swp", ".crdownload")
-_DEFAULT_WATCH_NAME: str = "TeslaCam"
 
 
 class CacheInvalidatorLike(Protocol):
@@ -261,19 +260,30 @@ class SambaWatcher:
 def _watched_paths(cfg: WebConfig) -> tuple[Path, ...]:
     if cfg.samba.shares:
         return tuple(share.path for share in cfg.samba.shares)
-    # Mirror samba_service._default_shares: when no explicit shares are
-    # configured, both default LUNs are exposed, so both must be watched.
-    # If media_root is an ancestor of (or equal to) teslacam_path —
-    # which happens in tests that stage a single backing tree — watch
-    # only media_root because it already covers TeslaCam recursively.
+    # The watcher exists to detect user-driven media changes (lock
+    # chimes, light shows, boombox sounds, music) arriving via the
+    # Samba share, so a cache invalidation re-presents the medium and
+    # Tesla re-reads the updated "special" folders. Every Tesla-read
+    # file the watcher cares about lives on the MEDIA tree.
+    #
+    # We deliberately do NOT watch the TeslaCam dashcam tree. Tesla
+    # writes a new clip to it roughly every minute and rotates
+    # RecentClips continuously, so polling it would:
+    #   (a) recursively stat thousands of dashcam clips every
+    #       `watcher_poll_interval_seconds`, pegging a CPU core on the
+    #       Pi Zero 2 W (observed: one gunicorn thread stuck at ~100%
+    #       CPU after the single-disk cutover), and
+    #   (b) fire a spurious cache invalidation on essentially every
+    #       Tesla write — each of which ejects + re-presents the medium
+    #       and pauses recording. Dashcam content never needs a
+    #       web-driven invalidation; Tesla manages its own view of it.
+    #
+    # When media_root is configured (the production single-disk /
+    # two-partition layout) we watch only it. Otherwise we fall back to
+    # backing_root for single-tree test/dev setups that stage all
+    # content under one directory.
     media_root = cfg.paths.media_root or cfg.paths.backing_root
-    teslacam_path = cfg.paths.backing_root / _DEFAULT_WATCH_NAME
-    try:
-        teslacam_path.relative_to(media_root)
-    except ValueError:
-        # teslacam_path is NOT under media_root — they're disjoint trees.
-        return (teslacam_path, media_root)
-    return (teslacam_path,) if media_root == teslacam_path else (media_root,)
+    return (media_root,)
 
 
 def make_samba_watcher(cfg: WebConfig, cache_invalidator: CacheInvalidatorLike) -> SambaWatcher:

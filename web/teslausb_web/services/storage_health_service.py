@@ -5,7 +5,7 @@ Background — what actually threatens the SD card backing the B-1 LUNs
 
 The B-1 device is a Raspberry Pi with a single SD card formatted ext4.
 Tesla's writes land on POSIX files in that ext4 filesystem (via the
-`teslafat` daemon's exFAT/FAT32 synthesis). There are **no** real FAT
+`teslafat` daemon's exFAT synthesis). There are **no** real FAT
 partitions to fsck; v1's per-partition Filesystem Health Check is
 inapplicable.
 

@@ -1,7 +1,7 @@
 """AC.6 — Storage settings blueprint.
 
-Renders a single settings page (LUN sizes + cleanup knobs) and
-applies submitted changes via :mod:`storage_stats` /
+Renders a single settings page (partition sizes + cleanup knobs)
+and applies submitted changes via :mod:`storage_stats` /
 :mod:`storage_config`. The blueprint is intentionally thin —
 all validation, persistence, and resize-helper invocation live
 in the service layer. This file just brokers HTTP ↔ services.

@@ -178,7 +178,7 @@ class TestSambaWatcherLifecycle:
         # backing/TeslaCam — so we watch only the ancestor (covers both).
         assert built.config.watched_paths == (tmp_path / "backing",)
 
-    def test_factory_watches_both_default_shares_when_media_root_disjoint(
+    def test_factory_watches_only_media_when_media_root_disjoint(
         self,
         tmp_path: Path,
         invalidator: RecordingInvalidator,
@@ -194,10 +194,11 @@ class TestSambaWatcherLifecycle:
             ),
         )
         built = make_samba_watcher(cfg, invalidator)
-        assert built.config.watched_paths == (
-            tmp_path / "backing" / "TeslaCam",
-            tmp_path / "media",
-        )
+        # The TeslaCam dashcam tree is deliberately NOT watched: Tesla
+        # churns it continuously, which would peg a CPU core and fire
+        # spurious invalidations. Only the media tree (lock chimes,
+        # light shows, boombox, music) is watched.
+        assert built.config.watched_paths == (tmp_path / "media",)
 
 
 class TestSambaWatcherEvents:

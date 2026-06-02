@@ -268,13 +268,14 @@ class PathsSection:
     """Filesystem locations the web app reads or writes."""
 
     backing_root: Path = _DEFAULT_BACKING_ROOT
-    # Backing root for the MEDIA LUN (teslafat-1) — everything Tesla
-    # reads from the second USB drive (Boombox, LightShow, LockChime,
-    # Chimes library, Wraps library, LicensePlate library) lives at
-    # the *root* of this path. See ``docs/02-LEARNINGS.md`` "Two-LUN
-    # media layout" for the full rationale. NOTE: the lock chime lives
-    # here (correct), but Tesla only re-reads a CHANGED LockChime.wav
-    # after a full USB re-enumeration (``gadget_rebind_script``), not
+    # Backing root for the MEDIA partition (partition 1 of the single
+    # teslafat-0 disk) — everything Tesla reads from the media partition
+    # (Boombox, LightShow, LockChime, Chimes library, Wraps library,
+    # LicensePlate library) lives at the *root* of this path. See
+    # ``docs/02-LEARNINGS.md`` "Two-LUN media layout" for the full
+    # rationale. NOTE: the lock chime lives here (correct), but Tesla
+    # only re-reads a CHANGED LockChime.wav after a full USB
+    # re-enumeration (``gadget_rebind_script``), not
     # after a soft SCSI medium-change (``cache_invalidate_script``).
     #
     # ``None`` means "fall back to ``backing_root``" — convenient for

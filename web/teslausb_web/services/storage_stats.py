@@ -3,18 +3,20 @@
 Bridges the Flask UI to the on-disk configuration without
 needing a worker-side IPC channel:
 
-* :func:`get_storage_stats` returns a snapshot of LUN sizing
-  (from :mod:`storage_config`), per-LUN backing-root disk
-  usage (via :func:`shutil.disk_usage`), and a total-SD
+* :func:`get_storage_stats` returns a snapshot of partition
+  sizing (from :mod:`storage_config`), per-partition backing-root
+  disk usage (via :func:`shutil.disk_usage`), and a total-SD
   capacity figure suitable for the cap calculation the web
   form enforces.
 
 * :func:`apply_storage_config` writes a new
   :class:`~storage_config.TeslausbConfig` to disk and invokes
-  the AC.3 ``teslausb-resize-lun`` helper for any LUN whose
-  size actually changed. Cleanup-section changes propagate to
-  the Rust worker via the next read of ``teslausb.toml``
-  (the worker re-reads the file every cleanup tick).
+  the AC.3 ``teslausb-resize-lun`` helper for any partition whose
+  size actually changed (the helper rewrites the matching
+  ``[[partition]]`` size in the single ``teslafat-0.toml``
+  DiskConfig). Cleanup-section changes propagate to the Rust
+  worker via the next read of ``teslausb.toml`` (the worker
+  re-reads the file every cleanup tick).
 
 This keeps the Python-layer storage workflow pure in terms of
 files + a narrow sudoers shellout — no socket protocol, no
@@ -55,7 +57,7 @@ RESIZE_HELPER: Final[Path] = Path("/usr/local/bin/teslausb-resize-lun")
 
 @dataclass(frozen=True, slots=True)
 class LunStats:
-    """Per-LUN usage snapshot.
+    """Per-partition usage snapshot.
 
     All bytes; UI converts to GB for display.
     """

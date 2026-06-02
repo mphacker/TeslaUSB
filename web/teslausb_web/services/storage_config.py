@@ -2,10 +2,11 @@
 
 Single source of truth for:
 
-* LUN-reported sizes (TeslaCam, Media) — operator-tunable via the
-  web UI. The existing `/etc/teslausb/teslafat-{0,1}.toml` files are
-  DERIVED from this file by the resize helper (`AC.3`).
-* The hard OS reserve (`os_reserve_gb`) — guarantees that LUN
+* Partition-reported sizes (TeslaCam, Media) — operator-tunable via the
+  web UI. The single `/etc/teslausb/teslafat-0.toml` DiskConfig (one disk,
+  two exFAT partitions) is DERIVED from this file by the resize helper
+  (`AC.3`), which rewrites the matching `[[partition]]` size.
+* The hard OS reserve (`os_reserve_gb`) — guarantees that partition
   allocation can never starve the rootfs. Documented in
   `docs/06-OPERATIONS.md`; operators may edit by hand but the web
   UI enforces the same minimum.

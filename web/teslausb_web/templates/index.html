@@ -384,8 +384,8 @@
         <div class="section-content">
             <form method="post" action="{{ url_for('settings.save_network_settings') }}">
                 <p style="font-size:0.85rem; color:var(--text-secondary); margin:0 0 12px">
-                    Enable Samba (SMB) network sharing so you can browse the two USB drive
-                    storage locations from your computer over WiFi.
+                    Enable Samba (SMB) network sharing so you can browse the
+                    TeslaCam and media partitions from your computer over WiFi.
                 </p>
 
                 <div class="form-group" style="margin-bottom:12px; padding:12px; background-color:var(--bg-info); border:1px solid var(--border-color); border-radius:var(--radius-md,8px)">
@@ -802,8 +802,8 @@ function dismissWifiStatus() {
 
     var SUBSYSTEMS = [
         { key: 'gadget',           label: 'USB Gadget' },
-        { key: 'teslafat_0',       label: 'TeslaFAT — TeslaCam (exFAT)' },
-        { key: 'teslafat_1',       label: 'TeslaFAT — Media (FAT32)' },
+        { key: 'teslafat_0',       label: 'TeslaCam (exFAT)' },
+        { key: 'teslafat_1',       label: 'Media (exFAT)' },
         { key: 'worker',           label: 'Background Worker' },
         { key: 'indexer',          label: 'Video Indexer' },
         { key: 'disk',             label: 'SD Card' },

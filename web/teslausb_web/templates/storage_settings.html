@@ -91,11 +91,12 @@
     <header class="storage-header">
         <h1 class="storage-title">Storage</h1>
         <p class="storage-copy">
-            Allocate how much of the SD card each USB drive presents to
+            Allocate how much of the SD card each partition presents to
             Tesla, and tune the auto-cleanup that keeps the TeslaCam
-            drive from filling up. Changes to a drive's size briefly
-            disconnect the USB gadget (~30–60&nbsp;s) while Tesla
-            re-enumerates.
+            partition from filling up. The gadget exposes a single USB
+            drive with two exFAT partitions (TeslaCam and Media). Changing
+            a partition's size briefly disconnects the USB gadget
+            (~30–60&nbsp;s) while Tesla re-enumerates.
         </p>
         <div class="storage-pill-row">
             <span class="storage-pill">SD total: {{ stats.sd_total_gb }} GB</span>
@@ -107,7 +108,7 @@
 
     <form method="post" action="{{ url_for('storage.save') }}" class="storage-form">
         <section class="storage-card">
-            <h2 class="storage-card-title">Drive sizes</h2>
+            <h2 class="storage-card-title">Partition sizes</h2>
             <p class="storage-help">
                 The sum of TeslaCam, Media, and OS reserve must not
                 exceed the SD card size. The OS reserve protects the
@@ -124,7 +125,7 @@
                 </div>
                 <div class="storage-field">
                     <label for="media_gb">
-                        <span>Media (FAT32) — GB</span>
+                        <span>Media (exFAT) — GB</span>
                         <span class="storage-field-copy">Used: {{ (stats.media.used_bytes // (1024*1024*1024)) }} GB</span>
                     </label>
                     <input id="media_gb" name="media_gb" type="number" min="1" value="{{ stats.media.advertised_gb }}" required>
@@ -139,18 +140,18 @@
             </div>
 
             <p class="storage-warn">
-                Shrinking a drive below its current usage is refused.
-                Size changes regenerate the synthesized FAT/exFAT
-                geometry over the same Linux directory tree — your
-                files are not touched, and Tesla will see the new
-                size on the next reconnect without any reformat.
+                Shrinking a partition below its current usage is refused.
+                Size changes regenerate the synthesized exFAT geometry
+                over the same Linux directory tree — your files are not
+                touched, and Tesla will see the new size on the next
+                reconnect without any reformat.
             </p>
         </section>
 
         <section class="storage-card">
             <h2 class="storage-card-title">Auto-cleanup (TeslaCam)</h2>
             <p class="storage-help">
-                The worker continuously sweeps the TeslaCam drive when
+                The worker continuously sweeps the TeslaCam partition when
                 free space dips below the target. Deletion priority:
                 <strong>Tier&nbsp;A</strong> — RecentClips with no GPS
                 or SEI data, then <strong>Tier&nbsp;B</strong> —

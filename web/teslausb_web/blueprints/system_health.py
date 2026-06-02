@@ -128,44 +128,56 @@ def _disk_block(cfg: WebConfig) -> dict[str, object]:
     }
 
 
-# Per-LUN TeslaFAT daemon configs live alongside the web app config.
-# Each instance N has a ``teslafat-N.toml`` declaring its volume label
-# and filesystem type (exfat for TeslaCam, fat32 for media). The matching
-# systemd unit is ``teslafat@N.service``.
+# Single partitioned-disk TeslaFAT config (ADR-0023). After the
+# single-LUN cutover there is ONE ``teslafat-0.toml`` describing a
+# partitioned disk via a ``[[partition]]`` array (index 0 = TeslaCam,
+# index 1 = media; both exFAT). The single ``teslafat@0.service`` daemon
+# serves every partition, so each partition row reflects that one unit's
+# state plus the partition's own label/filesystem.
 _TESLAFAT_CONFIG_DIR: Final[Path] = Path("/etc/teslausb")
+_TESLAFAT_DISK_UNIT: Final[str] = "teslafat@0.service"
 
 
-def _read_teslafat_lun_config(lun_index: int) -> dict[str, str]:
-    """Return ``{volume_label, fs_type}`` for LUN N, or empty dict on error."""
-    path = _TESLAFAT_CONFIG_DIR / f"teslafat-{lun_index}.toml"
+def _read_teslafat_partition_config(partition_index: int) -> dict[str, str]:
+    """Return ``{volume_label, fs_type}`` for partition N of the single
+    partitioned disk (``teslafat-0.toml``), or empty dict on error."""
+    path = _TESLAFAT_CONFIG_DIR / "teslafat-0.toml"
     try:
         with path.open("rb") as handle:
             data = tomllib.load(handle)
     except (OSError, tomllib.TOMLDecodeError):
         return {}
+    partitions = data.get("partition")
+    if not isinstance(partitions, list) or partition_index >= len(partitions):
+        return {}
+    part = partitions[partition_index]
+    if not isinstance(part, dict):
+        return {}
     out: dict[str, str] = {}
-    label = data.get("volume_label")
+    label = part.get("volume_label")
     if isinstance(label, str):
         out["volume_label"] = label
-    fs_type = data.get("fs_type")
+    fs_type = part.get("fs_type")
     if isinstance(fs_type, str):
         out["fs_type"] = fs_type
     return out
 
 
-def _teslafat_lun_block(lun_index: int) -> dict[str, object]:
-    """Per-LUN TeslaFAT daemon probe — systemd unit + LUN config."""
-    cfg_data = _read_teslafat_lun_config(lun_index)
-    label = cfg_data.get("volume_label", f"LUN {lun_index}")
+def _teslafat_partition_block(partition_index: int) -> dict[str, object]:
+    """Per-partition TeslaFAT probe. The single ``teslafat@0`` daemon
+    serves all partitions of the one USB disk, so each partition row
+    reflects that unit's state plus the partition's label/filesystem."""
+    cfg_data = _read_teslafat_partition_config(partition_index)
+    label = cfg_data.get("volume_label", f"Partition {partition_index}")
     fs_type = cfg_data.get("fs_type", "?")
     fs_display = {"exfat": "exFAT", "fat32": "FAT32"}.get(fs_type.lower(), fs_type)
-    unit = f"teslafat@{lun_index}.service"
+    unit = _TESLAFAT_DISK_UNIT
     state = _systemctl_is_active(unit)
     if state is None:
         return {
             "severity": SEV_UNKNOWN,
             "message": _truncate(f"Cannot probe {unit}"),
-            "lun_id": lun_index,
+            "partition_index": partition_index,
             "volume_label": label,
             "fs_type": fs_type,
             "unit": unit,
@@ -183,7 +195,7 @@ def _teslafat_lun_block(lun_index: int) -> dict[str, object]:
         "severity": severity,
         "message": message,
         "state": state,
-        "lun_id": lun_index,
+        "partition_index": partition_index,
         "volume_label": label,
         "fs_type": fs_type,
         "unit": unit,
@@ -494,9 +506,7 @@ _JOURNAL_TTL_SECONDS: Final[float] = 15.0
 _JOURNAL_LOOKBACK_SECONDS: Final[int] = 600  # 10 min
 _JOURNAL_UNITS: Final[tuple[str, ...]] = (
     "teslafat@0.service",
-    "teslafat@1.service",
     "nbd-attach@0.service",
-    "nbd-attach@1.service",
     "usb-gadget.service",
     "teslausb-worker.service",
     "teslausb-web.service",
@@ -569,8 +579,8 @@ def _build_health(cfg: WebConfig) -> dict[str, object]:
     """Compose the full payload, isolating per-subsystem crashes."""
     blocks: tuple[tuple[str, Callable[[WebConfig], dict[str, object]]], ...] = (
         ("disk", _disk_block),
-        ("teslafat_0", lambda _c: _teslafat_lun_block(0)),
-        ("teslafat_1", lambda _c: _teslafat_lun_block(1)),
+        ("teslafat_0", lambda _c: _teslafat_partition_block(0)),
+        ("teslafat_1", lambda _c: _teslafat_partition_block(1)),
         ("samba", _samba_block),
         ("gadget", _gadget_block),
         ("indexer", _indexer_block),

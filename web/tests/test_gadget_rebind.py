@@ -133,3 +133,31 @@ def test_rebind_is_single_flight() -> None:
     assert all(r.ok for r in results)
     # The lock guarantees the two shell-outs never overlap.
     assert concurrent["max"] == 1
+
+
+def test_reload_live_marker_contract_matches_daemon() -> None:
+    """The rebind script blocks on a journal token that the teslafat
+    daemon logs the instant its SIGHUP re-walk goes live, so the rebind
+    only ever re-presents the FRESH chime. The token is a cross-language
+    contract: the script's ``RELOAD_LIVE_MARKER`` default MUST equal the
+    Rust ``RELOAD_LIVE_MARKER`` constant. Guard against silent drift.
+    """
+    import re
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[2]
+    script = (repo_root / "scripts" / "tesla_gadget_rebind.sh").read_text(encoding="utf-8")
+    daemon = (repo_root / "rust" / "crates" / "teslafat" / "src" / "main.rs").read_text(
+        encoding="utf-8"
+    )
+
+    script_match = re.search(
+        r'RELOAD_LIVE_MARKER="\$\{RELOAD_LIVE_MARKER:-([A-Za-z0-9._-]+)\}"', script
+    )
+    daemon_match = re.search(r'const RELOAD_LIVE_MARKER: &str = "([A-Za-z0-9._-]+)";', daemon)
+    assert script_match is not None, "script RELOAD_LIVE_MARKER default not found"
+    assert daemon_match is not None, "daemon RELOAD_LIVE_MARKER const not found"
+    assert script_match.group(1) == daemon_match.group(1), (
+        "RELOAD_LIVE_MARKER drift: script="
+        f"{script_match.group(1)!r} daemon={daemon_match.group(1)!r}"
+    )

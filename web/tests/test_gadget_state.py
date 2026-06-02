@@ -1,13 +1,12 @@
 """Tests for teslausb_web.services.gadget_state.
 
-Probe behavior matrix:
+Probe behavior matrix (single LUN since the ADR-0023 cutover):
 
-| UDC file       | lun.0 backing | lun.1 backing | Expected token |
-|----------------|---------------|---------------|----------------|
-| has content    | has content   | has content   | present        |
-| empty / missing| (any)         | (any)         | unknown        |
-| has content    | empty/missing | (any)         | unknown        |
-| has content    | has content   | empty/missing | unknown        |
+| UDC file       | lun.0 backing | Expected token |
+|----------------|---------------|----------------|
+| has content    | has content   | present        |
+| empty / missing| (any)         | unknown        |
+| has content    | empty/missing | unknown        |
 
 We exercise the matrix by pointing the probe at a tmp_path so the
 test runs cleanly on any host (no /sys access required).
@@ -16,8 +15,6 @@ test runs cleanly on any host (no /sys access required).
 from __future__ import annotations
 
 from pathlib import Path
-
-import pytest
 
 from teslausb_web.services.gadget_state import gadget_mode_token
 
@@ -30,7 +27,7 @@ def _scaffold(
 ) -> Path:
     """Build a fake configfs g1 tree under ``root`` and return it."""
     if lun_backings is None:
-        lun_backings = {0: "/dev/nbd0", 1: "/dev/nbd1"}
+        lun_backings = {0: "/dev/nbd0"}
     root.mkdir(parents=True, exist_ok=True)
     if udc is not None:
         (root / "UDC").write_text(udc + "\n")
@@ -42,7 +39,7 @@ def _scaffold(
     return root
 
 
-def test_present_when_udc_bound_and_both_luns_backed(tmp_path: Path) -> None:
+def test_present_when_udc_bound_and_lun_backed(tmp_path: Path) -> None:
     root = _scaffold(tmp_path / "g1")
     assert gadget_mode_token(root) == "present"
 
@@ -57,25 +54,13 @@ def test_unknown_when_udc_empty(tmp_path: Path) -> None:
     assert gadget_mode_token(root) == "unknown"
 
 
-@pytest.mark.parametrize("missing_lun", [0, 1])
-def test_unknown_when_a_lun_has_no_backing_file(
-    tmp_path: Path, missing_lun: int
-) -> None:
-    root = _scaffold(
-        tmp_path / "g1",
-        lun_backings={0: "/dev/nbd0", 1: "/dev/nbd1", missing_lun: None},
-    )
+def test_unknown_when_lun_has_no_backing_file(tmp_path: Path) -> None:
+    root = _scaffold(tmp_path / "g1", lun_backings={0: None})
     assert gadget_mode_token(root) == "unknown"
 
 
-@pytest.mark.parametrize("empty_lun", [0, 1])
-def test_unknown_when_a_lun_backing_is_empty(
-    tmp_path: Path, empty_lun: int
-) -> None:
-    root = _scaffold(
-        tmp_path / "g1",
-        lun_backings={0: "/dev/nbd0", 1: "/dev/nbd1", empty_lun: ""},
-    )
+def test_unknown_when_lun_backing_is_empty(tmp_path: Path) -> None:
+    root = _scaffold(tmp_path / "g1", lun_backings={0: ""})
     assert gadget_mode_token(root) == "unknown"
 
 

@@ -3,12 +3,12 @@
 The B-1 architecture chains four pieces of state to present USB to
 the Tesla:
 
-    teslafat@{0,1}  →  /run/teslausb/teslafat-N.sock (NBD server)
+    teslafat@0  →  /run/teslausb/teslafat-0.sock (NBD server)
         ↓ (over NBD)
-    nbd-attach@{0,1}  →  /dev/nbd{0,1} (NBD client)
+    nbd-attach@0  →  /dev/nbd0 (NBD client)
         ↓ (block device)
     usb-gadget         →  configfs /sys/kernel/config/usb_gadget/g1
-        ↓ (LUN files)
+        ↓ (LUN file)
     UDC binding        →  /sys/kernel/config/usb_gadget/g1/UDC
 
 Any link in that chain can break independently. v1's web app had
@@ -17,11 +17,16 @@ shell script; B-1 has no such single source of truth, so we
 probe the actual kernel state at request time and synthesize a
 status token the dashboard template understands.
 
+After the ADR-0023 single-LUN cutover the gadget exposes ONE
+mass-storage LUN (``lun.0``) backed by ``/dev/nbd0`` — a single
+MBR-partitioned disk that Tesla sees as one USB drive with two
+exFAT partitions (TeslaCam + media). There is no ``lun.1``.
+
 State tokens returned (matches index.html's ``mode_token`` branches):
 
-* ``"present"``  — gadget bound to a UDC AND both LUN backing files
-                   point at real block devices. Tesla sees two USB
-                   drives.
+* ``"present"``  — gadget bound to a UDC AND the LUN backing file
+                   points at a real block device. Tesla sees the
+                   USB drive.
 * ``"unknown"``  — anything else (UDC empty, LUN missing, configfs
                    absent, sysfs unreadable). Dashboard shows the
                    orange "Status Unknown" card.
@@ -39,7 +44,8 @@ from pathlib import Path
 _GADGET_ROOT = Path("/sys/kernel/config/usb_gadget/g1")
 _UDC = _GADGET_ROOT / "UDC"
 _LUN_FILE_TEMPLATE = "functions/mass_storage.usb0/lun.{n}/file"
-_EXPECTED_LUNS = (0, 1)
+# Single LUN since the ADR-0023 cutover (one partitioned disk on nbd0).
+_EXPECTED_LUNS = (0,)
 
 
 def _read_text(path: Path) -> str | None:

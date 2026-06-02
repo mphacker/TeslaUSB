@@ -13,7 +13,10 @@ There is no Flask import in this module — see the package
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Final
+from typing import TYPE_CHECKING, Final
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # Tesla-camera filename suffixes we recognise. Keyed by canonical
 # camera id; the strings are what appears between the trailing ``-``
@@ -202,3 +205,4 @@ class DeleteOutcome:
     deleted_files: tuple[str, ...]
     deleted_count: int
     error_count: int
+    deleted_paths: tuple[Path, ...] = ()

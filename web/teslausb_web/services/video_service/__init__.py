@@ -232,12 +232,15 @@ class VideoService:
         structure = self.get_folder_structure(folder)
         sanitized_event = Path(event_name).name
         deleted: list[str] = []
+        deleted_paths: list[Path] = []
         errors = 0
         if structure == "flat":
             for clip in get_session_files(folder_path, sanitized_event):
+                clip_path = Path(clip.path)
                 try:
-                    safe_delete_clip(Path(clip.path), self._allowed_roots())
+                    safe_delete_clip(clip_path, self._allowed_roots())
                     deleted.append(clip.name)
+                    deleted_paths.append(clip_path)
                 except (DeletionError, PathSecurityError) as exc:
                     logger.warning("safe_delete_clip: %s: %s", clip.path, exc)
                     errors += 1
@@ -247,7 +250,10 @@ class VideoService:
                 raise FileNotFoundError(f"event not found: {folder}/{event_name}")
             # Snapshot filenames before delete so the response can list them.
             try:
-                deleted.extend(entry.name for entry in event_path.iterdir() if entry.is_file())
+                for entry in event_path.iterdir():
+                    if entry.is_file():
+                        deleted.append(entry.name)
+                        deleted_paths.append(entry)
             except OSError as exc:
                 logger.warning("safe_delete_clip: scan failed %s: %s", event_path, exc)
             safe_delete_clip(event_path, self._allowed_roots())
@@ -255,6 +261,7 @@ class VideoService:
             deleted_files=tuple(deleted),
             deleted_count=len(deleted),
             error_count=errors,
+            deleted_paths=tuple(deleted_paths),
         )
 
     # ------------------------------------------------------------------

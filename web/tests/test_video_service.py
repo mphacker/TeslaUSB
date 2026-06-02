@@ -199,7 +199,6 @@ class TestResolveClipPath:
         resolved = svc.resolve_clip_path("RecentClips/2025-03-01_09-15-30-front.mp4")
         assert resolved.path.name == "2025-03-01_09-15-30-front.mp4"
 
-
     def test_traversal_with_dotdot_blocked(self, tmp_path: Path) -> None:
         svc = _make_svc(tmp_path)
         with pytest.raises((FileNotFoundError, PathSecurityError)):
@@ -315,12 +314,14 @@ class TestSafeDelete:
         outcome = svc.safe_delete_clip("SentryClips", "2025-01-15_12-30-45")
         assert outcome.deleted_count > 0
         assert outcome.error_count == 0
+        assert any(path.name == "2025-01-15_12-30-45-front.mp4" for path in outcome.deleted_paths)
         assert not (svc.teslacam_root / "SentryClips" / "2025-01-15_12-30-45").exists()
 
     def test_delete_flat_session(self, tmp_path: Path) -> None:
         svc = _make_svc(tmp_path)
         outcome = svc.safe_delete_clip("RecentClips", "2025-03-01_09-15-30")
         assert outcome.deleted_count == 6
+        assert len(outcome.deleted_paths) == 6
         recent = svc.teslacam_root / "RecentClips"
         # Other session still intact
         assert (recent / "2025-03-01_09-16-00-back.mp4").exists()
@@ -369,7 +370,6 @@ class TestExtraCoverage:
             assert streamed == zip_path.read_bytes()
         finally:
             zip_path.unlink(missing_ok=True)
-
 
     def test_safe_delete_clip_on_file(self, tmp_path: Path) -> None:
         root = tmp_path / "root"

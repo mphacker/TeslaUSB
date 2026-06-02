@@ -24,6 +24,7 @@ B-1 adaptation notes:
 from __future__ import annotations
 
 import logging
+import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -40,6 +41,11 @@ from flask import (
 )
 
 from teslausb_web.blueprints.mapping import map_view as _mapping_map_view
+from teslausb_web.services.mapping_index_prune import (
+    PruneResult,
+    prune_deleted_clips,
+    prune_deleted_event_folder,
+)
 from teslausb_web.services.video_service import (
     DeletionError,
     EventSummary,
@@ -107,6 +113,7 @@ def _resolved_rel_path(resolved_abs: Path, teslacam_root: Path) -> str:
     """
     return resolved_abs.relative_to(teslacam_root).as_posix()
 
+
 logger = logging.getLogger(__name__)
 
 videos_bp = Blueprint("videos", __name__, url_prefix="/videos")
@@ -122,8 +129,53 @@ def _get_service() -> VideoService:
     return svc
 
 
+def _get_config() -> WebConfig:
+    cfg = cast("WebConfig", current_app.config.get("teslausb_config"))
+    if cfg is None:
+        raise RuntimeError("teslausb_config is not configured")
+    return cfg
+
+
 def _wants_json() -> bool:
     return request.headers.get("X-Requested-With") == "XMLHttpRequest"
+
+
+def _best_effort_prune_deleted_index(
+    folder: str,
+    event_name: str,
+    deleted_paths: tuple[Path, ...],
+    svc: VideoService,
+) -> PruneResult:
+    """Prune worker-index rows for already-deleted files, logging failures."""
+    cfg = _get_config()
+    try:
+        relative_paths = tuple(
+            path.resolve(strict=False).relative_to(cfg.paths.backing_root.resolve(strict=False))
+            for path in deleted_paths
+        )
+        if svc.get_folder_structure(folder) == "events":
+            event_dir = (
+                cfg.paths.backing_root / "TeslaCam" / Path(folder).name / Path(event_name).name
+            ).relative_to(cfg.paths.backing_root)
+            return prune_deleted_event_folder(
+                cfg.mapping.db_path,
+                cfg.paths.backing_root,
+                event_dir,
+                relative_paths,
+            )
+        return prune_deleted_clips(
+            cfg.mapping.db_path,
+            cfg.paths.backing_root,
+            relative_paths,
+        )
+    except (sqlite3.Error, OSError, ValueError) as exc:
+        logger.warning(
+            "delete_event: worker-index prune failed for %s/%s: %s",
+            folder,
+            event_name,
+            exc,
+        )
+        return PruneResult()
 
 
 def _serialize_event_summary(event: EventSummary) -> dict[str, object]:
@@ -350,6 +402,7 @@ def delete_event(folder: str, event_name: str) -> ResponseReturnValue:
     except DeletionError as exc:
         logger.error("delete_event: %s/%s failed: %s", folder, event_name, exc)
         return jsonify({"success": False, "error": str(exc)}), 500
+    _best_effort_prune_deleted_index(folder, event_name, outcome.deleted_paths, svc)
     return jsonify(
         {
             "success": True,

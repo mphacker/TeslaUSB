@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from http import HTTPStatus
 from typing import TYPE_CHECKING
 
@@ -67,6 +68,63 @@ def _seed_recent(cfg: WebConfig, session: str = "2025-03-01_09-15-30") -> None:
     recent.mkdir(parents=True, exist_ok=True)
     for cam in ("front", "back"):
         (recent / f"{session}-{cam}.mp4").write_bytes(_VALID_MP4)
+
+
+def _seed_mapping_index(cfg: WebConfig, event: str = "2025-01-15_12-30-45") -> None:
+    cfg.mapping.db_path.parent.mkdir(parents=True, exist_ok=True)
+    event_dir = f"TeslaCam/SentryClips/{event}"
+    clip_path = f"{event_dir}/{event}-front.mp4"
+    with sqlite3.connect(cfg.mapping.db_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE clips (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                relative_path TEXT NOT NULL UNIQUE,
+                bucket TEXT NOT NULL,
+                clip_started_utc INTEGER,
+                indexed_at_utc INTEGER NOT NULL,
+                waypoint_count INTEGER NOT NULL DEFAULT 0,
+                gps_waypoint_count INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE waypoints (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                clip_id INTEGER NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
+                frame_index INTEGER NOT NULL,
+                timestamp_ms REAL NOT NULL,
+                latitude_deg REAL NOT NULL,
+                longitude_deg REAL NOT NULL,
+                speed_mps REAL NOT NULL,
+                heading_deg REAL NOT NULL
+            );
+            CREATE TABLE clip_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_json_relative_path TEXT NOT NULL UNIQUE,
+                event_dir_relative_path TEXT NOT NULL,
+                bucket TEXT NOT NULL,
+                primary_clip_id INTEGER REFERENCES clips(id) ON DELETE SET NULL,
+                timestamp_utc INTEGER NOT NULL,
+                indexed_at_utc INTEGER NOT NULL
+            );
+            """
+        )
+        cursor = connection.execute(
+            "INSERT INTO clips(relative_path, bucket, clip_started_utc, indexed_at_utc) "
+            "VALUES (?, 'sentry', 1736944245, 1736944246)",
+            (clip_path,),
+        )
+        clip_id = cursor.lastrowid
+        connection.execute(
+            "INSERT INTO waypoints(clip_id, frame_index, timestamp_ms, latitude_deg, "
+            "longitude_deg, speed_mps, heading_deg) "
+            "VALUES (?, 0, 0.0, 30.0, -97.0, 1.0, 2.0)",
+            (clip_id,),
+        )
+        connection.execute(
+            "INSERT INTO clip_events(event_json_relative_path, event_dir_relative_path, "
+            "bucket, primary_clip_id, timestamp_utc, indexed_at_utc) "
+            "VALUES (?, ?, 'sentry', ?, 1736944245, 1736944246)",
+            (f"{event_dir}/event.json", event_dir, clip_id),
+        )
 
 
 @pytest.fixture
@@ -223,6 +281,22 @@ class TestDeleteEvent:
         assert not (
             cfg.paths.backing_root / "TeslaCam" / "SentryClips" / "2025-01-15_12-30-45"
         ).exists()
+
+    def test_delete_events_folder_prunes_worker_index(
+        self,
+        app: Flask,
+        client: FlaskClient,
+    ) -> None:
+        cfg: WebConfig = app.config["teslausb_config"]
+        _seed_mapping_index(cfg)
+
+        resp = client.post("/videos/delete_event/SentryClips/2025-01-15_12-30-45")
+
+        assert resp.status_code == HTTPStatus.OK
+        with sqlite3.connect(cfg.mapping.db_path) as connection:
+            assert connection.execute("SELECT COUNT(*) FROM clips").fetchone() == (0,)
+            assert connection.execute("SELECT COUNT(*) FROM waypoints").fetchone() == (0,)
+            assert connection.execute("SELECT COUNT(*) FROM clip_events").fetchone() == (0,)
 
     def test_delete_unknown_folder_404(self, client: FlaskClient) -> None:
         resp = client.post("/videos/delete_event/Nope/anything")

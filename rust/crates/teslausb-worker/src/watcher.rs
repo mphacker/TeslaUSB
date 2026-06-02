@@ -213,7 +213,7 @@ mod linux_impl {
     use inotify::{EventMask, Inotify, WatchDescriptor, WatchMask};
 
     use super::{
-        DirectoryArrival, RawWatchEvent, Result, WatchAction, WatchEvent, WatcherError,
+        DirectoryArrival, RawWatchEvent, Result, WatchAction, WatchEvent, WatchKind, WatcherError,
         classify_raw_event, is_completed_indexer_file,
     };
     use crate::config::Config;

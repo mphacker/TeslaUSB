@@ -119,6 +119,13 @@ from teslausb_web.services.lock_chime_service import (
     upload_chime_file,
     validate_tesla_wav,
 )
+from teslausb_web.services.map_view_prefs_service import (
+    MapViewPreferences,
+    MapViewPreferencesError,
+    MapViewPreferencesService,
+    SpeedUnits,
+    make_map_view_prefs_service,
+)
 from teslausb_web.services.mapping_queries import (
     ChartCount,
     DayRouteTrip,
@@ -248,6 +255,9 @@ __all__ = (
     "LicensePlateService",
     "LockChimeAudioError",
     "LockChimeFileError",
+    "MapViewPreferences",
+    "MapViewPreferencesError",
+    "MapViewPreferencesService",
     "MappingQueries",
     "MappingQueriesConfig",
     "MappingQueryError",
@@ -306,6 +316,7 @@ __all__ = (
     "Schedule",
     "ScheduleOperationResult",
     "SeverityChartPoint",
+    "SpeedUnits",
     "Stats",
     "SystemSettings",
     "SystemSettingsConfig",
@@ -341,6 +352,7 @@ __all__ = (
     "make_chime_group_manager",
     "make_chime_scheduler",
     "make_license_plate_service",
+    "make_map_view_prefs_service",
     "make_mapping_queries",
     "make_mapping_settings_service",
     "make_oauth_service",

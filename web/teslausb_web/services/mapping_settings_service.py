@@ -1,15 +1,15 @@
-"""JSON-backed mapping-settings service with mtime-cached snapshot.
+"""JSON-backed worker mapping-overrides service with mtime-cached snapshot.
 
-The user-editable settings (``trip_gap_minutes``, ``speed_limit_mph``,
-``speed_units``) live in a tiny JSON file alongside the worker DB. Hot-path
-callers (``MappingQueries``, ``derive_trip_events``) read the cached snapshot
-hundreds of times per query — so the load path is built around three
-properties:
+The materializer-affecting settings (``trip_gap_minutes`` and
+``speed_limit_mph``) live in a tiny JSON file alongside the worker DB.
+Hot-path callers (``MappingQueries``, ``derive_trip_events``) read the
+cached snapshot hundreds of times per query — so the load path is built
+around three properties:
 
 * **One ``stat()`` syscall per access** (no file read, no JSON parse
   when the file hasn't changed). ``os.stat`` is sub-microsecond on
   the Pi Zero 2 W.
-* **In-memory snapshot is a single ~32-byte frozen dataclass**;
+* **In-memory snapshot is a single ~24-byte frozen dataclass**;
   the speed-limit threshold is pre-converted to m/s at load time so
   derivation never re-multiplies.
 * **Atomic write on save** (temp + ``rename``) and the snapshot cache
@@ -31,7 +31,6 @@ import logging
 import os
 import threading
 from dataclasses import dataclass
-from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Final, cast
 
@@ -61,16 +60,6 @@ _DEFAULT_SPEED_LIMIT_MPH: Final[int] = 0
 _MPH_TO_MPS: Final[float] = 0.44704
 
 
-class SpeedUnits(StrEnum):
-    """Allowed display units for map speeds."""
-
-    MPH = "mph"
-    KPH = "kph"
-
-
-_DEFAULT_SPEED_UNITS: Final[SpeedUnits] = SpeedUnits.MPH
-
-
 class MappingSettingsError(ValueError):
     """Validation or persistence failed for mapping settings."""
 
@@ -86,14 +75,15 @@ class MappingSettings:
     trip_gap_minutes: int
     speed_limit_mph: int
     speed_limit_mps: float
-    speed_units: SpeedUnits
 
     @property
     def trip_gap_seconds(self) -> int:
+        """Return the trip gap threshold in seconds."""
         return self.trip_gap_minutes * 60
 
     @property
     def speed_limit_enabled(self) -> bool:
+        """Return whether speed-limit event derivation is enabled."""
         return self.speed_limit_mph > 0
 
 
@@ -101,7 +91,6 @@ _DEFAULT_SNAPSHOT: Final[MappingSettings] = MappingSettings(
     trip_gap_minutes=_DEFAULT_TRIP_GAP_MINUTES,
     speed_limit_mph=_DEFAULT_SPEED_LIMIT_MPH,
     speed_limit_mps=_DEFAULT_SPEED_LIMIT_MPH * _MPH_TO_MPS,
-    speed_units=_DEFAULT_SPEED_UNITS,
 )
 
 
@@ -134,6 +123,7 @@ class MappingSettingsService:
 
     @property
     def path(self) -> Path:
+        """Return the worker-shared overrides file path."""
         return self._path
 
     def get_settings(self) -> MappingSettings:
@@ -155,18 +145,15 @@ class MappingSettingsService:
         *,
         trip_gap_minutes: int,
         speed_limit_mph: int,
-        speed_units: SpeedUnits = _DEFAULT_SPEED_UNITS,
     ) -> MappingSettings:
         """Validate, persist atomically, and update the cache in-place."""
         snapshot = _build_snapshot(
             trip_gap_minutes=trip_gap_minutes,
             speed_limit_mph=speed_limit_mph,
-            speed_units=speed_units,
         )
         payload: dict[str, object] = {
             "schema_version": _SCHEMA_VERSION,
             "speed_limit_mph": snapshot.speed_limit_mph,
-            "speed_units": snapshot.speed_units.value,
             "trip_gap_minutes": snapshot.trip_gap_minutes,
         }
         with self._lock:
@@ -183,11 +170,10 @@ class MappingSettingsService:
                 logger.warning("Saved mapping settings but stat failed: %s", exc)
                 self._cached_stat = None
         logger.info(
-            "Saved mapping settings to %s (trip_gap=%d min, speed_limit=%d mph, units=%s)",
+            "Saved mapping settings to %s (trip_gap=%d min, speed_limit=%d mph)",
             self._path,
             snapshot.trip_gap_minutes,
             snapshot.speed_limit_mph,
-            snapshot.speed_units.value,
         )
         return snapshot
 
@@ -196,7 +182,6 @@ class MappingSettingsService:
         return {
             "trip_gap_minutes": snapshot.trip_gap_minutes,
             "speed_limit_mph": snapshot.speed_limit_mph,
-            "speed_units": snapshot.speed_units.value,
         }
 
     def _stat_or_missing(self) -> tuple[int, int]:
@@ -242,11 +227,9 @@ class MappingSettingsService:
 def _snapshot_from_mapping(payload: Mapping[str, object]) -> MappingSettings:
     trip_gap = _coerce_int(payload, "trip_gap_minutes", _DEFAULT_TRIP_GAP_MINUTES)
     speed_mph = _coerce_int(payload, "speed_limit_mph", _DEFAULT_SPEED_LIMIT_MPH)
-    speed_units = _coerce_speed_units(payload, "speed_units", _DEFAULT_SPEED_UNITS)
     return _build_snapshot(
         trip_gap_minutes=trip_gap,
         speed_limit_mph=speed_mph,
-        speed_units=speed_units,
     )
 
 
@@ -254,7 +237,6 @@ def _build_snapshot(
     *,
     trip_gap_minutes: int,
     speed_limit_mph: int,
-    speed_units: SpeedUnits,
 ) -> MappingSettings:
     if not _TRIP_GAP_MIN <= trip_gap_minutes <= _TRIP_GAP_MAX:
         raise MappingSettingsError(
@@ -270,7 +252,6 @@ def _build_snapshot(
         trip_gap_minutes=trip_gap_minutes,
         speed_limit_mph=speed_limit_mph,
         speed_limit_mps=speed_limit_mph * _MPH_TO_MPS,
-        speed_units=speed_units,
     )
 
 
@@ -291,22 +272,6 @@ def _coerce_int(payload: Mapping[str, object], key: str, default: int) -> int:
     raise MappingSettingsError(f"{key} must be an integer, got {value!r}")
 
 
-def _coerce_speed_units(
-    payload: Mapping[str, object],
-    key: str,
-    default: SpeedUnits,
-) -> SpeedUnits:
-    if key not in payload:
-        return default
-    value = payload[key]
-    if not isinstance(value, str):
-        raise MappingSettingsError(f"{key} must be 'mph' or 'kph', got {value!r}")
-    try:
-        return SpeedUnits(value.strip().lower())
-    except ValueError as exc:
-        raise MappingSettingsError(f"{key} must be 'mph' or 'kph', got {value!r}") from exc
-
-
 def _write_json_atomically(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_name(f"{path.name}{_TMP_SUFFIX}")
@@ -324,6 +289,7 @@ def _write_json_atomically(path: Path, payload: object) -> None:
 
 
 def make_mapping_settings_service(cfg: WebConfig) -> MappingSettingsService:
+    """Build a mapping settings service from application config."""
     return MappingSettingsService(cfg.mapping.overrides_path)
 
 
@@ -331,6 +297,5 @@ __all__ = (
     "MappingSettings",
     "MappingSettingsError",
     "MappingSettingsService",
-    "SpeedUnits",
     "make_mapping_settings_service",
 )

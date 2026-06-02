@@ -9,7 +9,13 @@ from typing import TYPE_CHECKING
 
 import pytest
 from teslausb_web.app import create_app
-from teslausb_web.config import PathsSection, SystemSettingsSection, WebConfig, WebSection
+from teslausb_web.config import (
+    MappingSection,
+    PathsSection,
+    SystemSettingsSection,
+    WebConfig,
+    WebSection,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -20,16 +26,24 @@ if TYPE_CHECKING:
 
 @pytest.fixture
 def app(tmp_path: Path) -> Flask:
+    state_dir = tmp_path / "state"
+    backing_root = tmp_path / "backing"
     cfg = WebConfig(
         web=WebSection(secret_key="x" * 32, max_upload_mb=8, max_chunk_mb=1),
         paths=PathsSection(
-            backing_root=tmp_path / "backing",
-            state_dir=tmp_path / "state",
+            backing_root=backing_root,
+            state_dir=state_dir,
             ipc_socket=tmp_path / "ipc" / "worker.sock",
             cache_invalidate_script=tmp_path / "invalidate.sh",
         ),
+        mapping=MappingSection(
+            db_path=state_dir / "index.sqlite3",
+            media_root=backing_root,
+            overrides_path=state_dir / "mapping_settings.json",
+            view_prefs_path=state_dir / "map_view_prefs.json",
+        ),
         system_settings=SystemSettingsSection(
-            state_path=tmp_path / "state" / "system_settings.json",
+            state_path=state_dir / "system_settings.json",
             default_log_level="INFO",
         ),
     )
@@ -146,19 +160,47 @@ class TestStubRoutes:
         assert response.status_code == HTTPStatus.FOUND
         assert response.headers["Location"] == "/settings/"
         svc = app.extensions["mapping_settings_service"]
+        prefs_svc = app.extensions["map_view_prefs_service"]
         snap = svc.get_settings()
         assert snap.trip_gap_minutes == 7
         assert snap.speed_limit_mph == 65
-        assert snap.speed_units == "kph"
-        # And the JSON file was actually written.
+        assert prefs_svc.get_preferences().speed_units == "kph"
+        # And the JSON files were actually written to their separate contracts.
         import json
 
         payload = json.loads(svc.path.read_text(encoding="utf-8"))
         assert payload == {
             "schema_version": 1,
             "speed_limit_mph": 65,
-            "speed_units": "kph",
             "trip_gap_minutes": 7,
+        }
+        prefs_payload = json.loads(prefs_svc.path.read_text(encoding="utf-8"))
+        assert prefs_payload == {"schema_version": 1, "speed_units": "kph"}
+
+    def test_units_only_change_does_not_touch_worker_overrides(self, client, app) -> None:
+        import json
+        import os
+        import time
+
+        svc = app.extensions["mapping_settings_service"]
+        prefs_svc = app.extensions["map_view_prefs_service"]
+        svc.save_settings(trip_gap_minutes=5, speed_limit_mph=0)
+        before_content = svc.path.read_text(encoding="utf-8")
+        old_time = time.time() - 30
+        os.utime(svc.path, (old_time, old_time))
+        before_mtime = svc.path.stat().st_mtime_ns
+
+        response = client.post(
+            "/settings/save/mapping",
+            data={"trip_gap_minutes": "5", "speed_limit_mph": "0", "speed_units": "kph"},
+        )
+
+        assert response.status_code == HTTPStatus.FOUND
+        assert svc.path.read_text(encoding="utf-8") == before_content
+        assert svc.path.stat().st_mtime_ns == before_mtime
+        assert json.loads(prefs_svc.path.read_text(encoding="utf-8")) == {
+            "schema_version": 1,
+            "speed_units": "kph",
         }
 
     def test_save_mapping_zero_speed_disables(self, client, app) -> None:
@@ -189,7 +231,10 @@ class TestStubRoutes:
         )
         assert response.status_code == HTTPStatus.FOUND
         svc = app.extensions["mapping_settings_service"]
-        assert svc.get_settings().speed_units == "mph"
+        prefs_svc = app.extensions["map_view_prefs_service"]
+        assert svc.get_settings().trip_gap_minutes == 5
+        assert prefs_svc.get_preferences().speed_units == "mph"
+        assert not prefs_svc.path.exists()
 
     def test_save_network_stub_redirects(self, client) -> None:
         response = client.post("/settings/save/network")

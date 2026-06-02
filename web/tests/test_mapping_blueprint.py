@@ -240,9 +240,13 @@ def app(tmp_path: Path, media_root: Path) -> Flask:
     state_dir = tmp_path / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     overrides_path = state_dir / "mapping_settings.json"
+    view_prefs_path = state_dir / "map_view_prefs.json"
     overrides_path.write_text(
-        '{"schema_version": 1, "trip_gap_minutes": 5, "speed_limit_mph": 80, '
-        '"speed_units": "kph"}\n',
+        '{"schema_version": 1, "trip_gap_minutes": 5, "speed_limit_mph": 80}\n',
+        encoding="utf-8",
+    )
+    view_prefs_path.write_text(
+        '{"schema_version": 1, "speed_units": "kph"}\n',
         encoding="utf-8",
     )
     cfg = WebConfig(
@@ -257,6 +261,7 @@ def app(tmp_path: Path, media_root: Path) -> Flask:
             db_path=db_path,
             media_root=media_root,
             overrides_path=overrides_path,
+            view_prefs_path=view_prefs_path,
         ),
         source_path=None,
     )
@@ -286,6 +291,7 @@ def empty_app(tmp_path: Path) -> Flask:
             db_path=db_path,
             media_root=media,
             overrides_path=state_dir / "mapping_settings.json",
+            view_prefs_path=state_dir / "map_view_prefs.json",
         ),
         source_path=None,
     )

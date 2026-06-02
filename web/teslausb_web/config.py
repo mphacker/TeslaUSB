@@ -124,7 +124,7 @@ _DEFAULT_SAMBA_BINARY_SMBCONTROL: Final[str] = "smbcontrol"
 _DEFAULT_SAMBA_BINARY_SYSTEMCTL: Final[str] = "systemctl"
 _DEFAULT_SAMBA_BINARY_SMBPASSWD: Final[str] = "smbpasswd"
 _DEFAULT_SAMBA_BINARY_PDBEDIT: Final[str] = "pdbedit"
-_DEFAULT_SAMBA_PASSWORD_USERNAME: Final[str] = "pi"
+_DEFAULT_SAMBA_PASSWORD_USERNAME: Final[str] = "pi"  # noqa: S105 - username, not a password.
 _DEFAULT_SAMBA_SUDO_PREFIX: Final[tuple[str, ...]] = ()
 _DEFAULT_SAMBA_INVALIDATE_DEBOUNCE_MS: Final[int] = 500
 _DEFAULT_SAMBA_WATCHER_POLL_INTERVAL_SECONDS: Final[float] = 1.0
@@ -137,7 +137,7 @@ _DEFAULT_SAMBA_IGNORE_EXTENSIONS: Final[tuple[str, ...]] = (
 _DEFAULT_WIFI_CREDENTIALS_FILENAME: Final[str] = "wifi_credentials.json"
 _DEFAULT_WIFI_CREDENTIALS_PATH: Path = _DEFAULT_STATE_DIR / _DEFAULT_WIFI_CREDENTIALS_FILENAME
 _DEFAULT_WIFI_AP_SSID: Final[str] = "TeslaUSB"
-_DEFAULT_WIFI_AP_PASSPHRASE: Final[str] = "tesla1234"
+_DEFAULT_WIFI_AP_PASSPHRASE: Final[str] = "tesla1234"  # noqa: S105 - documented default operator changes.
 _DEFAULT_WIFI_AP_IDLE_TIMEOUT_SECONDS: Final[int] = 600
 _WIFI_PASSPHRASE_MIN_LENGTH: Final[int] = 8
 _WIFI_PASSPHRASE_MAX_LENGTH: Final[int] = 63
@@ -180,7 +180,9 @@ _DEFAULT_CLOUD_SYNC_FOLDERS: Final[tuple[str, ...]] = (
 _DEFAULT_CLOUD_DEAD_LETTER_MAX_AGE_DAYS: Final[int] = 30
 _DEFAULT_MAPPING_DB_NAME: Final[str] = "index.sqlite3"
 _DEFAULT_MAPPING_OVERRIDES_FILENAME: Final[str] = "mapping_settings.json"
+_DEFAULT_MAPPING_VIEW_PREFS_FILENAME: Final[str] = "map_view_prefs.json"
 _DEFAULT_MAPPING_OVERRIDES_PATH: Path = _DEFAULT_STATE_DIR / _DEFAULT_MAPPING_OVERRIDES_FILENAME
+_DEFAULT_MAPPING_VIEW_PREFS_PATH: Path = _DEFAULT_STATE_DIR / _DEFAULT_MAPPING_VIEW_PREFS_FILENAME
 _DEFAULT_MAPPING_TRIP_GAP_MINUTES: Final[int] = 5
 _DEFAULT_MAPPING_HARSH_BRAKE_THRESHOLD: Final[float] = -4.0
 _DEFAULT_MAPPING_EMERGENCY_BRAKE_THRESHOLD: Final[float] = -7.0
@@ -319,7 +321,7 @@ class PathsSection:
         # against PurePosixPath so the validation works the same on
         # Windows dev boxes (where Path("/srv").is_absolute() == False
         # because there's no drive letter) and on Linux production.
-        assert self.media_root is not None  # set by __post_init__
+        assert self.media_root is not None  # noqa: S101 - set by __post_init__.
         for name, value in (
             ("backing_root", self.backing_root),
             ("media_root", self.media_root),
@@ -932,6 +934,7 @@ class MappingSection:
     db_path: Path = _DEFAULT_MAPPING_DB_PATH
     media_root: Path = _DEFAULT_MAPPING_MEDIA_ROOT
     overrides_path: Path = _DEFAULT_MAPPING_OVERRIDES_PATH
+    view_prefs_path: Path = _DEFAULT_MAPPING_VIEW_PREFS_PATH
     trip_gap_minutes: int = _DEFAULT_MAPPING_TRIP_GAP_MINUTES
     harsh_brake_threshold: float = _DEFAULT_MAPPING_HARSH_BRAKE_THRESHOLD
     emergency_brake_threshold: float = _DEFAULT_MAPPING_EMERGENCY_BRAKE_THRESHOLD
@@ -948,6 +951,7 @@ class MappingSection:
             ("db_path", self.db_path),
             ("media_root", self.media_root),
             ("overrides_path", self.overrides_path),
+            ("view_prefs_path", self.view_prefs_path),
         ):
             if not value.is_absolute() and not PurePosixPath(value.as_posix()).is_absolute():
                 raise ConfigError(None, f"[mapping] {name} must be absolute, got {value!r}")
@@ -1799,6 +1803,12 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
                 mapping_raw,
                 "overrides_path",
                 _DEFAULT_MAPPING_OVERRIDES_PATH,
+                source,
+            ),
+            view_prefs_path=_coerce_path(
+                mapping_raw,
+                "view_prefs_path",
+                _DEFAULT_MAPPING_VIEW_PREFS_PATH,
                 source,
             ),
             trip_gap_minutes=_coerce_int(

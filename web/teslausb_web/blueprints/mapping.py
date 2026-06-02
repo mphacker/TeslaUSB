@@ -20,6 +20,7 @@ from flask import (
     url_for,
 )
 
+from teslausb_web.services.map_view_prefs_service import MapViewPreferencesService
 from teslausb_web.services.mapping_queries import (
     ChartCount,
     DayPayload,
@@ -39,7 +40,6 @@ from teslausb_web.services.mapping_queries import (
     TripRow,
     TripTelemetryPoint,
 )
-from teslausb_web.services.mapping_settings_service import MappingSettingsService
 from teslausb_web.services.video_service import event_playback_target
 
 if TYPE_CHECKING:
@@ -468,10 +468,10 @@ def map_view() -> ResponseReturnValue:
         return redirect(target, code=HTTPStatus.FOUND)
     if not initial_date and latest_date:
         initial_date = latest_date
-    settings_service = current_app.extensions.get("mapping_settings_service")
-    if not isinstance(settings_service, MappingSettingsService):
-        raise RuntimeError("mapping_settings_service extension is not configured")
-    mapping_settings = settings_service.get_settings()
+    prefs_service = current_app.extensions.get("map_view_prefs_service")
+    if not isinstance(prefs_service, MapViewPreferencesService):
+        raise RuntimeError("map_view_prefs_service extension is not configured")
+    map_preferences = prefs_service.get_preferences()
     bootstrap = {
         "api": {
             "days": url_for("mapping.api_days"),
@@ -506,7 +506,7 @@ def map_view() -> ResponseReturnValue:
         "view": {
             "date": initial_date,
             "latest_date": latest_date or "",
-            "speed_units": mapping_settings.speed_units.value,
+            "speed_units": map_preferences.speed_units.value,
             "video_stream_template": "/videos/stream/__PATH__",
         },
         "features": {

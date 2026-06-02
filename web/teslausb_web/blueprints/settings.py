@@ -44,10 +44,14 @@ from teslausb_web.blueprints.storage_health import (
     current_snapshot as _storage_health_snapshot,  # noqa: F401
 )
 from teslausb_web.services.gadget_state import gadget_mode_token
+from teslausb_web.services.map_view_prefs_service import (
+    MapViewPreferencesError,
+    MapViewPreferencesService,
+    SpeedUnits,
+)
 from teslausb_web.services.mapping_settings_service import (
     MappingSettingsError,
     MappingSettingsService,
-    SpeedUnits,
 )
 from teslausb_web.services.samba_password_service import (
     SambaPasswordCommandError,
@@ -96,6 +100,13 @@ def _get_mapping_settings_service() -> MappingSettingsService:
     return service
 
 
+def _get_map_view_prefs_service() -> MapViewPreferencesService:
+    service = current_app.extensions.get("map_view_prefs_service")
+    if not isinstance(service, MapViewPreferencesService):
+        raise RuntimeError("map_view_prefs_service extension is not configured")
+    return service
+
+
 def _get_samba_password_service() -> SambaPasswordService:
     service = current_app.extensions.get("samba_password_service")
     if not isinstance(service, SambaPasswordService):
@@ -118,7 +129,7 @@ def _coerce_speed_units_form_field(raw: str | None) -> SpeedUnits:
     try:
         return SpeedUnits(raw.strip().lower())
     except ValueError as exc:
-        raise MappingSettingsError("Map speed display units must be mph or kph") from exc
+        raise MapViewPreferencesError("Map speed display units must be mph or kph") from exc
 
 
 def _redirect_to_index() -> Response:
@@ -294,7 +305,9 @@ def _share_paths_for_display() -> list[dict[str, str]]:
 def _index_context() -> dict[str, object]:
     wifi_status, ap_status, ap_config = _wifi_context()
     mapping_service = _get_mapping_settings_service()
+    prefs_service = _get_map_view_prefs_service()
     mapping_snapshot = mapping_service.get_settings()
+    map_preferences = prefs_service.get_preferences()
     samba_on = _samba_on()
     share_paths = _share_paths_for_display()
     # Storage-health snapshot is intentionally NOT taken on the render
@@ -309,7 +322,10 @@ def _index_context() -> dict[str, object]:
         "wifi_status": wifi_status,
         "ap_status": ap_status,
         "ap_config": ap_config,
-        "cfg_mapping": mapping_service.serialize_for_template(mapping_snapshot),
+        "cfg_mapping": {
+            **mapping_service.serialize_for_template(mapping_snapshot),
+            **prefs_service.serialize_for_template(map_preferences),
+        },
         "cfg_network": {
             "samba_password": "",
             "samba_enabled": samba_on,
@@ -405,8 +421,9 @@ def force_ap() -> ResponseReturnValue:
 
 @settings_dashboard_bp.route("/settings/save/mapping", methods=["POST"])
 def save_mapping_settings() -> ResponseReturnValue:
-    """Persist mapping thresholds. Worker picks them up on next tick."""
-    service = _get_mapping_settings_service()
+    """Persist mapping thresholds and web-only map display preferences."""
+    settings_service = _get_mapping_settings_service()
+    prefs_service = _get_map_view_prefs_service()
     try:
         trip_gap = _coerce_int_form_field(
             "Trip gap (minutes)",
@@ -417,18 +434,20 @@ def save_mapping_settings() -> ResponseReturnValue:
             request.form.get("speed_limit_mph"),
         )
         speed_units = _coerce_speed_units_form_field(request.form.get("speed_units"))
-        snapshot = service.save_settings(
-            trip_gap_minutes=trip_gap,
-            speed_limit_mph=speed_mph,
-            speed_units=speed_units,
-        )
-    except MappingSettingsError as exc:
+        snapshot = settings_service.get_settings()
+        if snapshot.trip_gap_minutes != trip_gap or snapshot.speed_limit_mph != speed_mph:
+            snapshot = settings_service.save_settings(
+                trip_gap_minutes=trip_gap,
+                speed_limit_mph=speed_mph,
+            )
+        preferences = prefs_service.save_preferences(speed_units=speed_units)
+    except (MappingSettingsError, MapViewPreferencesError) as exc:
         flash(f"Invalid mapping settings: {exc}", "error")
         return _redirect_to_index()
     flash(
         f"Mapping settings saved (trip gap {snapshot.trip_gap_minutes} min, "
         f"speed alert {snapshot.speed_limit_mph} mph, "
-        f"map speeds shown in {snapshot.speed_units.value}"
+        f"map speeds shown in {preferences.speed_units.value}"
         f"{' — disabled' if not snapshot.speed_limit_enabled else ''}).",
         "success",
     )

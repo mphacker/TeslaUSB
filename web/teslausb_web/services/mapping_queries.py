@@ -34,7 +34,7 @@ from teslausb_web.services.mapping_event_derivation import (
     derive_trip_events,
     is_autopilot_engaged,
 )
-from teslausb_web.services.mapping_settings_service import MappingSettings, SpeedUnits
+from teslausb_web.services.mapping_settings_service import MappingSettings
 from teslausb_web.services.mapping_sql import (
     _SEVERITY_INFO,
     EventRow,
@@ -1442,7 +1442,6 @@ class MappingQueries:
             trip_gap_minutes=max(1, self._config.trip_gap_seconds // 60),
             speed_limit_mph=mph,
             speed_limit_mps=self._config.speed_limit_mps,
-            speed_units=SpeedUnits.MPH,
         )
 
     def _stat_db(self) -> tuple[int, int]:

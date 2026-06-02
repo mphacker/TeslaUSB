@@ -20,7 +20,6 @@ from teslausb_web.services.mapping_settings_service import (
     MappingSettings,
     MappingSettingsError,
     MappingSettingsService,
-    SpeedUnits,
     make_mapping_settings_service,
 )
 
@@ -36,7 +35,6 @@ def test_missing_file_returns_defaults(overrides_path: Path) -> None:
     assert snap.trip_gap_minutes == 5
     assert snap.speed_limit_mph == 0
     assert snap.speed_limit_mps == 0.0
-    assert snap.speed_units is SpeedUnits.MPH
     assert snap.speed_limit_enabled is False
     assert snap.trip_gap_seconds == 300
 
@@ -46,21 +44,19 @@ def test_save_round_trip_and_cache(overrides_path: Path) -> None:
     snap = svc.save_settings(
         trip_gap_minutes=7,
         speed_limit_mph=65,
-        speed_units=SpeedUnits.KPH,
     )
     assert snap.trip_gap_minutes == 7
     assert snap.speed_limit_mph == 65
     assert snap.speed_limit_mps == pytest.approx(65 * 0.44704)
-    assert snap.speed_units is SpeedUnits.KPH
     assert snap.speed_limit_enabled is True
 
     payload = json.loads(overrides_path.read_text(encoding="utf-8"))
     assert payload == {
         "schema_version": 1,
         "speed_limit_mph": 65,
-        "speed_units": "kph",
         "trip_gap_minutes": 7,
     }
+    assert set(payload) == {"schema_version", "speed_limit_mph", "trip_gap_minutes"}
 
     # Second read returns the cached snapshot — same object identity
     # to prove no re-parse happened.
@@ -79,11 +75,13 @@ def test_get_settings_only_stats_when_unchanged(overrides_path: Path) -> None:
         assert read_spy.call_count == 0
 
 
-def test_external_mutation_invalidates_cache(overrides_path: Path) -> None:
+def test_external_mutation_invalidates_cache_and_ignores_legacy_speed_units(
+    overrides_path: Path,
+) -> None:
     svc = MappingSettingsService(overrides_path)
     svc.save_settings(trip_gap_minutes=5, speed_limit_mph=0)
     snap1 = svc.get_settings()
-    # Simulate an external change with a bumped mtime.
+    # Simulate an external legacy file with the now-ignored display preference.
     overrides_path.write_text(
         '{"schema_version": 1, "trip_gap_minutes": 9, "speed_limit_mph": 75, '
         '"speed_units": "kph"}\n',
@@ -99,7 +97,6 @@ def test_external_mutation_invalidates_cache(overrides_path: Path) -> None:
     assert snap2 is not snap1
     assert snap2.trip_gap_minutes == 9
     assert snap2.speed_limit_mph == 75
-    assert snap2.speed_units is SpeedUnits.KPH
 
 
 def test_validation_rejects_negative_speed(overrides_path: Path) -> None:
@@ -120,26 +117,6 @@ def test_validation_rejects_overlarge_trip_gap(overrides_path: Path) -> None:
         svc.save_settings(trip_gap_minutes=61, speed_limit_mph=0)
 
 
-def test_missing_speed_units_defaults_to_mph(overrides_path: Path) -> None:
-    overrides_path.write_text(
-        '{"schema_version": 1, "trip_gap_minutes": 5, "speed_limit_mph": 0}\n',
-        encoding="utf-8",
-    )
-    svc = MappingSettingsService(overrides_path)
-    assert svc.get_settings().speed_units is SpeedUnits.MPH
-
-
-def test_validation_rejects_unknown_speed_units(overrides_path: Path) -> None:
-    overrides_path.write_text(
-        '{"schema_version": 1, "trip_gap_minutes": 5, "speed_limit_mph": 0, '
-        '"speed_units": "mps"}\n',
-        encoding="utf-8",
-    )
-    svc = MappingSettingsService(overrides_path)
-    with pytest.raises(MappingSettingsError, match="speed_units"):
-        svc.get_settings()
-
-
 def test_unsupported_schema_version_raises(overrides_path: Path) -> None:
     overrides_path.write_text(
         '{"schema_version": 99, "trip_gap_minutes": 5, "speed_limit_mph": 0}\n',
@@ -150,18 +127,13 @@ def test_unsupported_schema_version_raises(overrides_path: Path) -> None:
         svc.get_settings()
 
 
-def test_relative_path_rejected(tmp_path: Path) -> None:
+def test_relative_path_rejected() -> None:
     with pytest.raises(MappingSettingsError, match="absolute"):
         MappingSettingsService(Path("mapping_settings.json"))
 
 
 def test_factory_uses_cfg_overrides_path(tmp_path: Path) -> None:
-    from teslausb_web.config import (
-        MappingSection,
-        PathsSection,
-        WebConfig,
-        WebSection,
-    )
+    from teslausb_web.config import MappingSection, PathsSection, WebConfig, WebSection
 
     overrides = tmp_path / "state" / "mapping_settings.json"
     cfg = WebConfig(
@@ -175,6 +147,7 @@ def test_factory_uses_cfg_overrides_path(tmp_path: Path) -> None:
             db_path=tmp_path / "db.sqlite3",
             media_root=tmp_path / "back",
             overrides_path=overrides,
+            view_prefs_path=tmp_path / "state" / "map_view_prefs.json",
         ),
         source_path=None,
     )
@@ -184,5 +157,4 @@ def test_factory_uses_cfg_overrides_path(tmp_path: Path) -> None:
         trip_gap_minutes=5,
         speed_limit_mph=0,
         speed_limit_mps=0.0,
-        speed_units=SpeedUnits.MPH,
     )

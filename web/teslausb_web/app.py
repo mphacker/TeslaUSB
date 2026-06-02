@@ -55,17 +55,16 @@ from teslausb_web.services.cache_invalidation import CacheInvalidator
 from teslausb_web.services.chime_group_service import make_chime_group_manager
 from teslausb_web.services.chime_scheduler import make_chime_scheduler
 from teslausb_web.services.cloud_archive import make_cloud_archive_service
+from teslausb_web.services.cloud_generic_remote_service import make_generic_remote_service
 from teslausb_web.services.cloud_oauth_service import CloudOAuthService, make_oauth_service
 from teslausb_web.services.cloud_rclone_service import CloudRcloneService, make_rclone_service
 from teslausb_web.services.gadget_rebind import GadgetRebinder
 from teslausb_web.services.jobs_service import CloudSyncAdapterProtocol, make_jobs_service
 from teslausb_web.services.license_plate_service import make_license_plate_service
 from teslausb_web.services.light_show_service import make_light_show_service
+from teslausb_web.services.map_view_prefs_service import make_map_view_prefs_service
 from teslausb_web.services.mapping_queries import MappingQueries, make_mapping_queries
-from teslausb_web.services.mapping_settings_service import (
-    MappingSettingsService,
-    make_mapping_settings_service,
-)
+from teslausb_web.services.mapping_settings_service import make_mapping_settings_service
 from teslausb_web.services.music_service import make_music_service
 from teslausb_web.services.photo_plate_service import make_photo_plate_service
 from teslausb_web.services.samba_password_service import make_samba_password_service
@@ -484,10 +483,6 @@ def _register_cloud_rclone_services(app: Flask, cfg: WebConfig) -> None:
     oauth_service = app.extensions.get("cloud_oauth_service")
     if not isinstance(oauth_service, CloudOAuthService):
         raise RuntimeError("cloud_oauth_service must be registered before cloud_rclone_service")
-    from teslausb_web.services.cloud_generic_remote_service import (
-        make_generic_remote_service,
-    )
-
     generic_remote_service = make_generic_remote_service(cfg)
     app.extensions["cloud_generic_remote_service"] = generic_remote_service
     app.extensions["cloud_rclone_service"] = make_rclone_service(
@@ -520,9 +515,10 @@ def _register_wrap_services(app: Flask, cfg: WebConfig) -> None:
 
 
 def _register_mapping_services(app: Flask, cfg: WebConfig) -> None:
-    """Register the read-only worker-DB query service and live settings store."""
+    """Register mapping query, override, and view-preference services."""
     settings_service = make_mapping_settings_service(cfg)
     app.extensions["mapping_settings_service"] = settings_service
+    app.extensions["map_view_prefs_service"] = make_map_view_prefs_service(cfg)
     app.extensions["mapping_queries"] = make_mapping_queries(
         cfg,
         settings_provider=settings_service.get_settings,

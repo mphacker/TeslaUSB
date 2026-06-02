@@ -191,13 +191,18 @@ function sentryEventHtml(ev) {
     const folder = (ev.event_folder || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     const sourceFolder = (ev.source_folder || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     const isFolderEvent = (evType === 'sentry' || evType === 'saved');
+    // A saved/sentry event is only *folder-backed* when it carries a real
+    // event folder. Raw clip_events whose primary clip is missing (null FK)
+    // surface as saved/sentry with an empty folder; rendering folder-style
+    // Play/Download/Delete buttons for them produces no-op clicks and broken
+    // ZIP/delete URLs. Such events still have a playable video_path, so they
+    // fall through to the direct-video controls below.
+    const folderBacked = isFolderEvent && !!folder;
     let metaHtml = '';
     let metaIsLazy = false;
-    if (isFolderEvent) {
-        if (folder) {
-            metaHtml = '<span class="st-meta-loading">Loading details…</span>';
-            metaIsLazy = true;
-        }
+    if (folderBacked) {
+        metaHtml = '<span class="st-meta-loading">Loading details…</span>';
+        metaIsLazy = true;
     } else {
         metaHtml = ev.description || ev.severity || '';
     }
@@ -209,15 +214,18 @@ function sentryEventHtml(ev) {
     html += '><div class="st-dot ' + info.dot + '"></div><div class="st-card">';
     html += '<div class="st-type">' + info.label + '</div><div class="st-date">' + formatLocalTime(ev.timestamp) + '</div>';
     html += '<div class="st-meta"' + (metaIsLazy ? ' data-lazy-meta="1"' : '') + '>' + metaHtml + '</div><div class="st-actions">';
-    if (isFolderEvent) {
+    if (folderBacked) {
         html += '<button class="vp-btn st-btn-play" type="button" title="Play" aria-label="Play event clip">' + ICON_PLAY + '</button>';
         html += '<button class="vp-btn st-btn-dl" type="button" title="Download ZIP" aria-label="Download event ZIP">' + ICON_DOWNLOAD + '</button>';
+    } else if (isFolderEvent) {
+        if (videoPath) html += '<button class="vp-btn st-btn-play" type="button" title="Play" aria-label="Play event clip">' + ICON_PLAY + '</button>';
+        if (hasCoords) html += '<button class="vp-btn st-btn-map" type="button" title="Show on Map" aria-label="Show event on map" data-lat="' + ev.lat + '" data-lon="' + ev.lon + '">' + ICON_MAP_PIN + '</button>';
     } else if (hasCoords) {
         html += '<button class="vp-btn st-btn-map" type="button" title="Show on Map" aria-label="Show event on map" data-lat="' + ev.lat + '" data-lon="' + ev.lon + '">' + ICON_MAP_PIN + '</button>';
     } else if (videoPath) {
         html += '<button class="vp-btn st-btn-play" type="button" title="Play" aria-label="Play event clip">' + ICON_PLAY + '</button>';
     }
-    if (isFolderEvent) {
+    if (folderBacked) {
         html += '<button class="vp-btn vp-btn-danger st-btn-del" type="button" title="Delete" aria-label="Delete event">' + ICON_TRASH + '</button>';
     }
     return html + '</div></div></div>';

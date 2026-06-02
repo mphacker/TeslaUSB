@@ -584,6 +584,59 @@ class TestMaterialisedHotPath:
         assert days[0].event_count == 1
         assert queries.query_latest_date() == "2024-06-06"
 
+    def test_clip_event_without_primary_clip_has_no_video_path(
+        self, tmp_path: Path
+    ) -> None:
+        # A clip_event whose primary clip was overwritten by Tesla keeps its
+        # event.json row but the FK is nulled (ON DELETE SET NULL). The event
+        # must still surface (so the day/pin count is honest) but with a null
+        # video_path, so the timeline renders no folder-style Play/Download/
+        # Delete buttons that would dead-click. Only the map button (coords)
+        # is offered. This guards the folderBacked gating in
+        # video_panel_timelines.js.
+        db_path = tmp_path / "index.sqlite3"
+        event_epoch = _epoch(2024, 6, 7, 11, 0)
+        _seed_db(db_path, [])
+        _create_empty_materialised_tables(db_path)
+        _create_clip_events_table(db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "INSERT INTO clip_events(event_json_relative_path, "
+                "event_dir_relative_path, bucket, primary_clip_id, "
+                "timestamp_utc, est_lat, est_lon, reason, city, camera, "
+                "indexed_at_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "SavedClips/2024-06-07_11-00-00/event.json",
+                    "SavedClips/2024-06-07_11-00-00",
+                    "saved",
+                    None,
+                    event_epoch,
+                    37.5,
+                    -122.5,
+                    "user_honk",
+                    "palo_alto",
+                    "front",
+                    event_epoch + 1,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        queries = MappingQueries(
+            config=MappingQueriesConfig(db_path=db_path, media_root=tmp_path / "media")
+        )
+
+        events = queries.query_events(date="2024-06-07", limit=10)
+        assert len(events) == 1
+        event = events[0]
+        assert event.event_type == "saved"
+        assert event.video_path is None
+        assert event.frame_offset is None
+        assert event.lat == 37.5
+        assert event.lon == -122.5
+        assert queries.query_day_payload("2024-06-07").events == events
+
     def test_missing_clip_events_table_is_empty(self, tmp_path: Path) -> None:
         db_path = tmp_path / "index.sqlite3"
         _seed_db(db_path, [])

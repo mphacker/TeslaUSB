@@ -18,6 +18,13 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final
 
+from teslausb_web.services.mapping_clip_events import (
+    _CLIP_EVENT_TABLE,
+    _clip_event_row_from_sql,
+    _query_clip_event_day_counts,
+    _query_clip_events,
+    _query_clip_events_for_day,
+)
 from teslausb_web.services.mapping_event_derivation import (
     EVENT_SENTRY,
     SEVERITY_CRITICAL,
@@ -28,6 +35,14 @@ from teslausb_web.services.mapping_event_derivation import (
     is_autopilot_engaged,
 )
 from teslausb_web.services.mapping_settings_service import MappingSettings
+from teslausb_web.services.mapping_sql import (
+    _SEVERITY_INFO,
+    EventRow,
+    _append_time_bbox_clauses,
+    _optional_float,
+    _table_exists,
+    _video_url_path,
+)
 from teslausb_web.services.mapping_trip_derivation import (
     AbsoluteWaypoint,
     TripGroup,
@@ -67,19 +82,10 @@ _PLAYABLE_TRIPS_TTL_SECONDS: Final[float] = 60.0
 _SNAPSHOT_CACHE_TTL_SECONDS: Final[float] = 60.0
 _DEFAULT_TRIP_LIMIT: Final[int] = 50
 _DEFAULT_EVENT_LIMIT: Final[int] = 100
-_DEFAULT_EVENT_OVERVIEW_LIMIT: Final[int] = 5000
 _DEFAULT_DAY_LIMIT: Final[int] = 60
 _DEFAULT_MIN_DISTANCE_KM: Final[float] = 0.05
 _DEFAULT_EPSILON_METERS: Final[float] = 8.0
 _DEFAULT_MAX_POINTS_PER_TRIP: Final[int] = 200
-_CLIP_EVENT_TABLE: Final[str] = "clip_events"
-_EVENT_SAVED: Final[str] = "saved"
-_EVENT_CLIP: Final[str] = "clip_event"
-_SEVERITY_INFO: Final[str] = "info"
-_CLIP_EVENT_FRAME_RATE: Final[float] = 36.0
-_CLIP_EVENT_TYPE_SQL: Final[str] = (
-    "CASE ce.bucket WHEN 'sentry' THEN 'sentry' WHEN 'saved' THEN 'saved' ELSE 'clip_event' END"
-)
 _MAX_PLAYABLE_CACHE_ENTRIES: Final[int] = 64
 _PLAYABLE_CACHE_TRIMMED_SIZE: Final[int] = 32
 _MIN_RENDERABLE_POINTS: Final[int] = 2
@@ -93,7 +99,7 @@ _SPEED_DRIVING_MIN_MPS: Final[float] = 0.5
 _SEVERITY_PALETTE: Final[dict[str, str]] = {
     SEVERITY_CRITICAL: "#dc3545",
     SEVERITY_WARNING: "#ffc107",
-    "info": "#17a2b8",
+    _SEVERITY_INFO: "#17a2b8",
 }
 
 
@@ -147,21 +153,6 @@ class RouteWaypoint:
     video_path: str | None
     frame_offset: int | None
     gap_after: bool = False
-
-
-@dataclass(frozen=True, slots=True)
-class EventRow:
-    id: int
-    trip_id: int | None
-    timestamp: str
-    lat: float | None
-    lon: float | None
-    event_type: str
-    severity: str
-    description: str | None
-    video_path: str | None
-    frame_offset: int | None
-    metadata: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1810,68 +1801,6 @@ def _metrics_from_trip_row(
     )
 
 
-def _video_url_path(relative_path: str | None) -> str | None:
-    """Strip the leading ``TeslaCam/`` segment for URL emission.
-
-    Worker stores ``relative_path`` rooted at ``backing_root`` so
-    every clip path begins with ``TeslaCam/``. The videos blueprint,
-    however, allow-lists ``backing_root/TeslaCam`` as its single
-    root and joins the URL ``<path:filepath>`` underneath it — so
-    sending the raw DB value would resolve to
-    ``<backing_root>/TeslaCam/TeslaCam/...`` and 404.
-
-    Strip exactly one leading ``TeslaCam/`` so the emitted
-    ``video_path`` matches the videos blueprint's contract. The
-    raw DB value is preserved for internal use (``_video_path_exists``,
-    cleanup queries) which join under ``backing_root`` directly.
-    """
-    if not relative_path:
-        return relative_path
-    normalised = relative_path.replace("\\", "/").lstrip("/")
-    prefix = "TeslaCam/"
-    if normalised.startswith(prefix):
-        return normalised[len(prefix) :]
-    return normalised
-
-
-def _table_exists(connection: sqlite3.Connection, table_name: str) -> bool:
-    row = connection.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-        (table_name,),
-    ).fetchone()
-    return row is not None
-
-
-def _query_clip_event_day_counts(connection: sqlite3.Connection) -> tuple[sqlite3.Row, ...]:
-    if not _table_exists(connection, _CLIP_EVENT_TABLE):
-        return ()
-    return tuple(
-        connection.execute(
-            "SELECT date(timestamp_utc, 'unixepoch') AS day, "
-            "       COUNT(*) AS event_count, "
-            "       SUM(CASE WHEN bucket = ? THEN 1 ELSE 0 END) AS sentry_count "
-            "  FROM clip_events "
-            " GROUP BY day",
-            (EVENT_SENTRY,),
-        ).fetchall()
-    )
-
-
-def _query_clip_events_for_day(
-    connection: sqlite3.Connection, date_str: str
-) -> tuple[sqlite3.Row, ...]:
-    return _query_clip_events(
-        connection,
-        event_type=None,
-        severity=None,
-        bbox=None,
-        date_from=None,
-        date_to=None,
-        date=date_str,
-        limit=_DEFAULT_EVENT_OVERVIEW_LIMIT,
-    )
-
-
 def _query_detected_events(  # noqa: PLR0913
     connection: sqlite3.Connection,
     *,
@@ -1926,96 +1855,6 @@ def _detected_event_sql(where_sql: str) -> str:
     )
 
 
-def _query_clip_events(  # noqa: PLR0913
-    connection: sqlite3.Connection,
-    *,
-    event_type: str | None,
-    severity: str | None,
-    bbox: tuple[float, float, float, float] | None,
-    date_from: str | None,
-    date_to: str | None,
-    date: str | None,
-    limit: int,
-) -> tuple[sqlite3.Row, ...]:
-    if not _table_exists(connection, _CLIP_EVENT_TABLE):
-        return ()
-    if severity is not None and severity != _SEVERITY_INFO:
-        return ()
-    clauses, params = _clip_event_clauses(event_type, bbox, date_from, date_to, date)
-    where_sql = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-    params.append(limit)
-    return tuple(connection.execute(_clip_event_sql(where_sql), params).fetchall())
-
-
-def _clip_event_clauses(
-    event_type: str | None,
-    bbox: tuple[float, float, float, float] | None,
-    date_from: str | None,
-    date_to: str | None,
-    date: str | None,
-) -> tuple[list[str], list[object]]:
-    clauses: list[str] = []
-    params: list[object] = []
-    if event_type is not None:
-        clauses.append(f"{_CLIP_EVENT_TYPE_SQL} = ?")
-        params.append(event_type)
-    _append_time_bbox_clauses(
-        clauses, params, "ce", "est_lat", "est_lon", bbox, date_from, date_to, date
-    )
-    return clauses, params
-
-
-def _append_time_bbox_clauses(  # noqa: PLR0913
-    clauses: list[str],
-    params: list[object],
-    alias: str,
-    lat_column: str,
-    lon_column: str,
-    bbox: tuple[float, float, float, float] | None,
-    date_from: str | None,
-    date_to: str | None,
-    date: str | None,
-) -> None:
-    if date is not None:
-        clauses.append(f"date({alias}.timestamp_utc, 'unixepoch') = ?")
-        params.append(date)
-    if date_from is not None:
-        clauses.append(
-            f"strftime('%Y-%m-%dT%H:%M:%S+00:00', {alias}.timestamp_utc, 'unixepoch') >= ?"
-        )
-        params.append(date_from)
-    if date_to is not None:
-        clauses.append(
-            f"strftime('%Y-%m-%dT%H:%M:%S+00:00', {alias}.timestamp_utc, 'unixepoch') <= ?"
-        )
-        params.append(date_to)
-    if bbox is not None:
-        min_lat, min_lon, max_lat, max_lon = bbox
-        clauses.append(
-            f"{alias}.{lat_column} IS NOT NULL AND {alias}.{lon_column} IS NOT NULL "
-            f"AND {alias}.{lat_column} BETWEEN ? AND ? "
-            f"AND {alias}.{lon_column} BETWEEN ? AND ?"
-        )
-        params.extend([min_lat, max_lat, min_lon, max_lon])
-
-
-def _clip_event_sql(where_sql: str) -> str:
-    return (
-        "SELECT ce.id, ce.bucket, ce.timestamp_utc, ce.est_lat, ce.est_lon, "  # noqa: S608
-        "       ce.reason, ce.city, ce.camera, "
-        "       pc.relative_path AS primary_clip_path, "
-        "       pc.clip_started_utc AS primary_clip_started_utc, "
-        "       fc.id AS legacy_trip_id "
-        "  FROM clip_events ce "
-        "  LEFT JOIN clips pc ON pc.id = ce.primary_clip_id "
-        "  LEFT JOIN clip_trip_map m ON m.clip_id = ce.primary_clip_id "
-        "  LEFT JOIN trips t ON t.id = m.trip_id "
-        "  LEFT JOIN clips fc ON fc.id = t.start_clip_id "
-        f"{where_sql} "
-        " ORDER BY ce.timestamp_utc DESC, ce.id DESC LIMIT ?"
-    )
-
-
 def _detected_event_row_from_sql(row: sqlite3.Row) -> EventRow:
     return EventRow(
         id=int(row["id"]),
@@ -2030,55 +1869,6 @@ def _detected_event_row_from_sql(row: sqlite3.Row) -> EventRow:
         frame_offset=int(row["frame_index"]) if row["frame_index"] is not None else None,
         metadata=None,
     )
-
-
-def _clip_event_row_from_sql(row: sqlite3.Row) -> EventRow:
-    return EventRow(
-        id=-int(row["id"]),
-        trip_id=int(row["legacy_trip_id"]) if row["legacy_trip_id"] is not None else None,
-        timestamp=epoch_to_iso(int(row["timestamp_utc"])),
-        lat=_optional_float(row["est_lat"]),
-        lon=_optional_float(row["est_lon"]),
-        event_type=_clip_event_type(str(row["bucket"])),
-        severity=_SEVERITY_INFO,
-        description=_clip_event_description(row["reason"], row["city"], row["camera"]),
-        video_path=_video_url_path(row["primary_clip_path"]),
-        frame_offset=_clip_event_frame_offset(row),
-        metadata=None,
-    )
-
-
-def _clip_event_type(bucket: str) -> str:
-    if bucket == EVENT_SENTRY:
-        return EVENT_SENTRY
-    if bucket == _EVENT_SAVED:
-        return _EVENT_SAVED
-    return _EVENT_CLIP
-
-
-def _clip_event_description(reason: object, city: object, camera: object) -> str:
-    parts = [_humanized_text(reason, default="Event clip")]
-    for value in (city, camera):
-        text = _humanized_text(value, default="")
-        if text:
-            parts.append(text)
-    return " | ".join(parts)
-
-
-def _humanized_text(value: object, *, default: str) -> str:
-    if value is None:
-        return default
-    text = str(value).strip()
-    if not text:
-        return default
-    return text.replace("_", " ").replace("-", " ").title()
-
-
-def _clip_event_frame_offset(row: sqlite3.Row) -> int | None:
-    if row["primary_clip_path"] is None or row["primary_clip_started_utc"] is None:
-        return None
-    delta_seconds = float(row["timestamp_utc"]) - float(row["primary_clip_started_utc"])
-    return max(0, round(delta_seconds * _CLIP_EVENT_FRAME_RATE))
 
 
 def _sort_event_rows(rows: Sequence[EventRow]) -> tuple[EventRow, ...]:
@@ -2457,14 +2247,6 @@ def _cutoff_day_string(days: int) -> str:
 
 def _iso_day(epoch_seconds: float) -> str:
     return datetime.fromtimestamp(epoch_seconds, tz=UTC).date().isoformat()
-
-
-def _optional_float(value: object) -> float | None:
-    if value is None:
-        return None
-    if isinstance(value, int | float | str):
-        return float(value)
-    raise TypeError(f"Expected numeric SQLite value, got {type(value).__name__}")
 
 
 def _percentage(part: int, whole: int) -> float:

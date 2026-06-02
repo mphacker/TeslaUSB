@@ -21,6 +21,7 @@ These tests verify that:
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -30,7 +31,6 @@ from teslausb_web.config import (
     FeaturesSection,
     LicensePlateSection,
     PathsSection,
-    StorageRetentionSection,
     SystemSettingsSection,
     WebConfig,
     WebSection,
@@ -90,8 +90,11 @@ def test_cloud_archive_scaffold_now_renders_real_page(app: Flask) -> None:
     html = resp.get_data(as_text=True)
     assert resp.status_code == 200
     assert 'id="syncNowBtn"' in html
-    assert 'id="oauthStartBtn"' in html
+    assert 'id="rcloneCmd"' in html
+    assert 'id="rcloneTokenInput"' in html
+    assert 'id="genericFormConnectBtn"' in html
     assert "window.syncNow = async function()" in html
+    assert "window.testConnection = async function()" in html
 
 
 def test_license_plates_page_renders_real_template(tmp_path: Path) -> None:
@@ -109,8 +112,11 @@ def test_license_plates_page_renders_real_template(tmp_path: Path) -> None:
     resp = app.test_client().get("/license_plates/")
     html = resp.get_data(as_text=True)
     assert resp.status_code == 200
-    assert '<h1 class="plates-title">License Plates</h1>' in html
-    assert 'type="module" src="/static/js/license_plates.js"' in html
+    assert "License Plates" in html
+    assert "<h2>Custom License Plates</h2>" in html
+    assert 'id="plateUploadControls"' in html
+    assert "const MAX_FILE_SIZE" in html
+    assert "license_plates.js" not in html
 
 
 def test_storage_settings_page_renders_real_template(tmp_path: Path) -> None:
@@ -152,11 +158,17 @@ def test_advanced_settings_page_renders_real_template(tmp_path: Path) -> None:
     html = resp.get_data(as_text=True)
     assert resp.status_code == 200
     assert "System Health" in html
-    for forbidden in ("mode_control", "current_mode", "quick_edit", "fsck", "loopback"):
+    assert "Last offline fsck (root, boot-time)" in html
+    # Root SD-card fsck/e2fsck health is a real B-1 feature.
+    # Only v1 mode/loopback UI is forbidden.
+    for forbidden in ("mode_control", "current_mode", "quick_edit", "loopback"):
         assert forbidden not in html
     assert "cdn.jsdelivr.net" not in html
     assert "unpkg.com" not in html
-    assert "#" not in html.split("<style>", 1)[1].split("</style>", 1)[0]
+    styles = re.findall(r"<style>(.*?)</style>", html, flags=re.S)
+    assert styles
+    for style in styles:
+        assert re.search(r":[^;\n]*#[0-9a-fA-F]{6}\b|:[^;\n]*#[0-9a-fA-F]{3}\b", style) is None
 
 
 def test_base_template_renders_without_error(app: Flask) -> None:

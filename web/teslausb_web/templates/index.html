@@ -198,10 +198,10 @@
             font-variant-numeric: tabular-nums;
         }
         #live-metrics-card .metric-tile.warn {
-            border-color: var(--accent-warning, #ff9800);
+            border-color: var(--ds-accent-warning);
         }
         #live-metrics-card .metric-tile.error {
-            border-color: var(--accent-error, #f44336);
+            border-color: var(--ds-accent-danger);
         }
     </style>
 
@@ -1044,10 +1044,9 @@ function dismissWifiStatus() {
         // USB I/O = nbd0, the single block device the mass-storage
         // gadget exposes to Tesla. It is one MBR-partitioned disk with
         // two exFAT partitions (TeslaCam + Media), so a single nbd
-        // device carries all USB traffic. The v1 build used loop0 for a
-        // loopback image file; B-1 does not have a loopback image (the
-        // disk is NBD-backed by the teslafat daemon) so loop0 was
-        // always 0.
+        // device carries all USB traffic. Older builds used loop0 for
+        // an image-backed block file; B-1 uses the teslafat daemon, so
+        // loop0 was always 0.
         //
         // Tesla writes are bursty (each ~1-min dashcam segment is
         // flushed by the camera SoC in a short burst), so the

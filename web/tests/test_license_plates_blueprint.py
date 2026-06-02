@@ -150,8 +150,10 @@ class TestIndexRoute:
         html = response.get_data(as_text=True)
         assert response.status_code == HTTPStatus.OK
         assert "License Plates" in html
-        assert "license_plates.js" in html
-        assert "Front gate" in html
+        assert "<h2>Custom License Plates</h2>" in html
+        assert 'id="plateUploadControls"' in html
+        assert "const MAX_FILE_SIZE" in html
+        assert "license_plates.js" not in html
         assert "current_mode" not in html
         assert "quick_edit" not in html
         assert "mode_control" not in html

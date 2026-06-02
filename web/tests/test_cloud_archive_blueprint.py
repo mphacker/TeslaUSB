@@ -299,24 +299,40 @@ def test_index_template_html_assertions(client: FlaskClient) -> None:
     assert html.count("<svg") >= 10
     assert "<script>" in html
     assert 'id="syncNowBtn"' in html
-    assert 'id="oauthStartBtn"' in html
+    assert 'id="rcloneCmd"' in html
+    assert 'id="rcloneTokenInput"' in html
+    assert 'id="rcloneSubmitBtn"' in html
+    assert 'id="genericFormConnectBtn"' in html
+    assert "window.syncNow = async function()" in html
+    assert "window.testConnection = async function()" in html
     assert html.count("aria-label=") >= 2
-    assert re.search(r"(?<![&(])#[0-9a-fA-F]{3,6}\b", template_source) is None
+    styles = re.findall(r"<style>(.*?)</style>", template_source, flags=re.S)
+    assert styles
+    for style in styles:
+        assert re.search(r":[^;\n]*#[0-9a-fA-F]{6}\b|:[^;\n]*#[0-9a-fA-F]{3}\b", style) is None
     assert 1880 <= len(template_source.splitlines()) <= 2310
 
 
-def test_index_template_restores_v1_ui_sections(client: FlaskClient) -> None:
-    html = client.get("/cloud/").get_data(as_text=True)
+def test_index_template_renders_b1_cloud_controls(client: FlaskClient) -> None:
+    response = client.get("/cloud/")
+    html = response.get_data(as_text=True)
 
-    assert "providerCardGrid" in html
-    assert "Provider authorization" in html
-    assert "Bandwidth limit:" in html
+    assert response.status_code == HTTPStatus.OK
+    for marker in (
+        'id="providerSelect"',
+        'id="rcloneSetup"',
+        'id="rcloneCmd"',
+        'id="rcloneTokenInput"',
+        'id="genericSetup"',
+        'id="genericFormConnectBtn"',
+        'id="syncSettingsForm"',
+        'id="cloudRetryMaxAttempts"',
+        'id="syncQueueSection"',
+    ):
+        assert marker in html
+    assert "rclone authorize" in html
     assert "Retry attempts before giving up" in html
-    assert "Dead Letters" in html
-    # Schedule editor + Reconcile placeholder sections were removed for
-    # v1 parity (operator H5 hardware test); the corresponding backend
-    # routes were never wired in Phase 5, so the placeholder UI was
-    # creating an Issue 2 visual regression versus v1.
+    assert "oauthStartBtn" not in html
     assert "Upload Schedule" not in html
     assert "Reconcile now" not in html
 
@@ -358,20 +374,15 @@ def test_save_settings_persists_and_redirects(
             _read_sync_recent_with_telemetry_setting,
         )
 
-        assert "RecentClips" in _read_sync_folders_setting(
-            archive_service.config, connection
+        assert "RecentClips" in _read_sync_folders_setting(archive_service.config, connection)
+        assert _read_priority_order_setting(archive_service.config, connection) == (
+            "SavedClips",
+            "SentryClips",
+            "RecentClips",
         )
-        assert _read_priority_order_setting(
-            archive_service.config, connection
-        ) == ("SavedClips", "SentryClips", "RecentClips")
         assert _read_sync_non_event_setting(archive_service.config, connection) is False
-        assert (
-            _read_sync_recent_with_telemetry_setting(archive_service.config, connection)
-            is True
-        )
-        assert (
-            _read_retry_max_attempts_setting(archive_service.config, connection) == 7
-        )
+        assert _read_sync_recent_with_telemetry_setting(archive_service.config, connection) is True
+        assert _read_retry_max_attempts_setting(archive_service.config, connection) == 7
 
 
 def test_api_sync_now_success_invalidates_once(
@@ -629,9 +640,7 @@ def test_api_connect_generic_form_persists_remote(
     invalidator.schedule.assert_called_once_with()
 
 
-def test_api_connect_generic_config_block_persists_remote(
-    client: FlaskClient, app: Flask
-) -> None:
+def test_api_connect_generic_config_block_persists_remote(client: FlaskClient, app: Flask) -> None:
     generic = app.extensions["cloud_generic_remote_service"]
     block = "[my-nas]\ntype = sftp\nhost = nas.local\nuser = pi\npass = obscured\n"
     response = client.post(
@@ -829,13 +838,9 @@ def test_api_mkdir_rejects_missing_path(client: FlaskClient) -> None:
     assert response.status_code == HTTPStatus.BAD_REQUEST
 
 
-def test_api_mkdir_invokes_rclone(
-    client: FlaskClient, rclone_service: CloudRcloneService
-) -> None:
+def test_api_mkdir_invokes_rclone(client: FlaskClient, rclone_service: CloudRcloneService) -> None:
     with patch.object(rclone_service, "mkdir", return_value=None) as mock_mkdir:
-        response = client.post(
-            "/cloud/api/mkdir", headers=_XHR, json={"path": "MyCar/Sentry"}
-        )
+        response = client.post("/cloud/api/mkdir", headers=_XHR, json={"path": "MyCar/Sentry"})
     assert response.status_code == HTTPStatus.OK
     assert response.get_json()["path"] == "MyCar/Sentry"
     mock_mkdir.assert_called_once_with("MyCar/Sentry")
@@ -1029,9 +1034,7 @@ def test_api_archive_cleanup_runs_cleanup(
     from teslausb_web.services.cloud_archive import cloud_cleanup as cc
 
     def _fake(_service: object) -> cc.CloudCleanupResult:
-        return cc.CloudCleanupResult(
-            triggered=True, deleted_count=3, bytes_freed=4096, reason="ok"
-        )
+        return cc.CloudCleanupResult(triggered=True, deleted_count=3, bytes_freed=4096, reason="ok")
 
     monkeypatch.setattr(cc, "run_cloud_cleanup", _fake)
     response = client.post("/cloud/api/archive_cleanup", headers=_XHR)

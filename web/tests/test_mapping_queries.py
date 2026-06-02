@@ -108,6 +108,23 @@ CREATE TABLE clip_trip_map (
 );
 """
 
+_CLIP_EVENTS_DDL = """
+CREATE TABLE clip_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_json_relative_path TEXT NOT NULL UNIQUE,
+    event_dir_relative_path TEXT NOT NULL,
+    bucket TEXT NOT NULL,
+    primary_clip_id INTEGER REFERENCES clips(id) ON DELETE SET NULL,
+    timestamp_utc INTEGER NOT NULL,
+    est_lat REAL,
+    est_lon REAL,
+    reason TEXT,
+    city TEXT,
+    camera TEXT,
+    indexed_at_utc INTEGER NOT NULL
+);
+"""
+
 
 def _fail_derivation(*_args: object, **_kwargs: object) -> NoReturn:
     raise AssertionError("Python derivation fallback must not run")
@@ -174,6 +191,29 @@ def _create_empty_materialised_tables(db_path: Path) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def _create_clip_events_table(db_path: Path) -> None:
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(_CLIP_EVENTS_DDL)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _clip_id_for_path(db_path: Path, relative_path: str) -> int:
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT id FROM clips WHERE relative_path = ?",
+            (relative_path,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        raise AssertionError(f"clip not found: {relative_path}")
+    return int(row[0])
 
 
 def _epoch(year: int, month: int, day: int, hour: int = 12, minute: int = 0) -> int:
@@ -472,6 +512,89 @@ class TestMaterialisedHotPath:
         assert len(queries.query_trips(limit=10, offset=0, min_distance_km=0.0)) == 1
         assert group_trips_calls == 1
         assert "materialised trips/events tables missing" in caplog.text
+
+    def test_clip_events_surface_as_events_and_latest_day(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "index.sqlite3"
+        clip_path = "SavedClips/2024-06-06_10-00-00/2024-06-06_10-00-00-front.mp4"
+        event_epoch = _epoch(2024, 6, 6, 10, 0)
+        _seed_db(
+            db_path,
+            [
+                {
+                    "relative_path": clip_path,
+                    "bucket": "saved",
+                    "clip_started_utc": event_epoch - 5,
+                    "waypoints": [],
+                }
+            ],
+        )
+        _create_empty_materialised_tables(db_path)
+        _create_clip_events_table(db_path)
+        clip_id = _clip_id_for_path(db_path, clip_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "INSERT INTO clip_events(event_json_relative_path, event_dir_relative_path, "
+                "bucket, primary_clip_id, timestamp_utc, est_lat, est_lon, reason, city, "
+                "camera, indexed_at_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "SavedClips/2024-06-06_10-00-00/event.json",
+                    "SavedClips/2024-06-06_10-00-00",
+                    "saved",
+                    clip_id,
+                    event_epoch,
+                    37.25,
+                    -122.25,
+                    "user_honk",
+                    "palo_alto",
+                    "front",
+                    event_epoch + 1,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        queries = MappingQueries(
+            config=MappingQueriesConfig(db_path=db_path, media_root=tmp_path / "media")
+        )
+
+        events = queries.query_events(date="2024-06-06", limit=10)
+        assert len(events) == 1
+        event = events[0]
+        assert event.event_type == "saved"
+        assert event.lat == 37.25
+        assert event.lon == -122.25
+        assert event.video_path == clip_path
+        assert event.frame_offset == 180
+        assert event.description == "User Honk | Palo Alto | Front"
+        assert queries.query_events(event_type="saved", limit=10) == events
+        assert (
+            queries.query_events(
+                bbox=(37.0, -123.0, 38.0, -122.0),
+                limit=10,
+            )
+            == events
+        )
+
+        payload = queries.query_day_payload("2024-06-06")
+        assert payload.trips == ()
+        assert payload.events == events
+        days = queries.query_days(limit=10, min_distance_km=0.0)
+        assert days[0].date == "2024-06-06"
+        assert days[0].event_count == 1
+        assert queries.query_latest_date() == "2024-06-06"
+
+    def test_missing_clip_events_table_is_empty(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "index.sqlite3"
+        _seed_db(db_path, [])
+        _create_empty_materialised_tables(db_path)
+        queries = MappingQueries(
+            config=MappingQueriesConfig(db_path=db_path, media_root=tmp_path / "media")
+        )
+
+        assert queries.query_events(event_type="saved", limit=10) == ()
+        assert queries.query_day_payload("2024-06-06").events == ()
+        assert queries.query_days(limit=10, min_distance_km=0.0) == ()
 
 
 # ---------------------------------------------------------------------------

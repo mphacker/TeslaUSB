@@ -67,10 +67,19 @@ _PLAYABLE_TRIPS_TTL_SECONDS: Final[float] = 60.0
 _SNAPSHOT_CACHE_TTL_SECONDS: Final[float] = 60.0
 _DEFAULT_TRIP_LIMIT: Final[int] = 50
 _DEFAULT_EVENT_LIMIT: Final[int] = 100
+_DEFAULT_EVENT_OVERVIEW_LIMIT: Final[int] = 5000
 _DEFAULT_DAY_LIMIT: Final[int] = 60
 _DEFAULT_MIN_DISTANCE_KM: Final[float] = 0.05
 _DEFAULT_EPSILON_METERS: Final[float] = 8.0
 _DEFAULT_MAX_POINTS_PER_TRIP: Final[int] = 200
+_CLIP_EVENT_TABLE: Final[str] = "clip_events"
+_EVENT_SAVED: Final[str] = "saved"
+_EVENT_CLIP: Final[str] = "clip_event"
+_SEVERITY_INFO: Final[str] = "info"
+_CLIP_EVENT_FRAME_RATE: Final[float] = 36.0
+_CLIP_EVENT_TYPE_SQL: Final[str] = (
+    "CASE ce.bucket WHEN 'sentry' THEN 'sentry' WHEN 'saved' THEN 'saved' ELSE 'clip_event' END"
+)
 _MAX_PLAYABLE_CACHE_ENTRIES: Final[int] = 64
 _PLAYABLE_CACHE_TRIMMED_SIZE: Final[int] = 32
 _MIN_RENDERABLE_POINTS: Final[int] = 2
@@ -621,6 +630,7 @@ class MappingQueries:
                     (date_str,),
                 ).fetchall()
                 latest = self._latest_date_locked(connection)
+                clip_event_rows = _query_clip_events_for_day(connection, date_str)
                 if not trip_rows:
                     # No trips for this day; still load any standalone
                     # events recorded against the date (e.g. sentry-only
@@ -636,7 +646,10 @@ class MappingQueries:
                         " ORDER BY timestamp_utc DESC, id DESC",
                         (date_str,),
                     ).fetchall()
-                    events = self._build_events_for_day({}, event_rows)
+                    events = _sort_event_rows(
+                        self._build_events_for_day({}, event_rows)
+                        + tuple(_clip_event_row_from_sql(row) for row in clip_event_rows)
+                    )
                     return DayPayload(
                         date=date_str,
                         trips=(),
@@ -718,7 +731,10 @@ class MappingQueries:
                     waypoints=stamped,
                 ),
             )
-        events_out = self._build_events_for_day(clips_by_trip, event_rows)
+        events_out = _sort_event_rows(
+            self._build_events_for_day(clips_by_trip, event_rows)
+            + tuple(_clip_event_row_from_sql(row) for row in clip_event_rows)
+        )
         return DayPayload(
             date=date_str,
             trips=tuple(trips_out),
@@ -736,12 +752,14 @@ class MappingQueries:
         day-navigation bounds, matching :meth:`query_latest_date`. Only
         reached on the materialised SQL path, where both tables exist.
         """
+        selects = [
+            "SELECT MAX(start_utc) AS ts FROM trips",
+            "SELECT MAX(timestamp_utc) AS ts FROM detected_events",
+        ]
+        if _table_exists(connection, _CLIP_EVENT_TABLE):
+            selects.append("SELECT MAX(timestamp_utc) AS ts FROM clip_events")
         row = connection.execute(
-            "SELECT date(MAX(ts), 'unixepoch') FROM ("
-            "    SELECT MAX(start_utc) AS ts FROM trips"
-            "    UNION ALL"
-            "    SELECT MAX(timestamp_utc) AS ts FROM detected_events"
-            ")",
+            "SELECT date(MAX(ts), 'unixepoch') FROM (" + " UNION ALL ".join(selects) + ")",  # noqa: S608
         ).fetchone()
         if row is None or row[0] is None:
             return None
@@ -915,68 +933,31 @@ class MappingQueries:
         date_to: str | None,
         date: str | None,
     ) -> tuple[EventRow, ...]:
-        clauses: list[str] = []
-        params: list[object] = []
-        if event_type is not None:
-            clauses.append("e.event_type = ?")
-            params.append(event_type)
-        if severity is not None:
-            clauses.append("e.severity = ?")
-            params.append(severity)
-        if date is not None:
-            # Match the snapshot behaviour: a single-day filter uses the
-            # event's own timestamp day (UTC) regardless of whether it's
-            # attached to a trip.
-            clauses.append("date(e.timestamp_utc, 'unixepoch') = ?")
-            params.append(date)
-        if date_from is not None:
-            clauses.append("strftime('%Y-%m-%dT%H:%M:%S+00:00', e.timestamp_utc, 'unixepoch') >= ?")
-            params.append(date_from)
-        if date_to is not None:
-            clauses.append("strftime('%Y-%m-%dT%H:%M:%S+00:00', e.timestamp_utc, 'unixepoch') <= ?")
-            params.append(date_to)
-        if bbox is not None:
-            min_lat, min_lon, max_lat, max_lon = bbox
-            clauses.append(
-                "e.latitude_deg IS NOT NULL AND e.longitude_deg IS NOT NULL "
-                "AND e.latitude_deg BETWEEN ? AND ? "
-                "AND e.longitude_deg BETWEEN ? AND ?",
-            )
-            params.extend([min_lat, max_lat, min_lon, max_lon])
-        where_sql = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-        params.extend([limit, offset])
-        sql = (
-            "SELECT e.id, e.trip_id, e.clip_id, e.event_type, e.severity, "  # noqa: S608
-            "       e.timestamp_utc, e.latitude_deg, e.longitude_deg, "
-            "       e.description, e.frame_index, "
-            "       fc.id AS legacy_trip_id, "
-            "       ec.relative_path AS event_clip_path "
-            "  FROM detected_events e "
-            "  LEFT JOIN trips t ON t.id = e.trip_id "
-            "  LEFT JOIN clips fc ON fc.id = t.start_clip_id "
-            "  LEFT JOIN clips ec ON ec.id = e.clip_id "
-            f"{where_sql} "
-            " ORDER BY e.timestamp_utc DESC, e.id DESC "
-            " LIMIT ? OFFSET ?"
-        )
+        query_cap = limit + offset
         with self.open_db() as connection:
-            rows = connection.execute(sql, params).fetchall()
-        return tuple(
-            EventRow(
-                id=int(r["id"]),
-                trip_id=int(r["legacy_trip_id"]) if r["legacy_trip_id"] is not None else None,
-                timestamp=epoch_to_iso(int(r["timestamp_utc"])),
-                lat=_optional_float(r["latitude_deg"]),
-                lon=_optional_float(r["longitude_deg"]),
-                event_type=str(r["event_type"]),
-                severity=str(r["severity"]),
-                description=str(r["description"] or "") or None,
-                video_path=_video_url_path(r["event_clip_path"]),
-                frame_offset=int(r["frame_index"]) if r["frame_index"] is not None else None,
-                metadata=None,
+            detected_rows = _query_detected_events(
+                connection,
+                event_type=event_type,
+                severity=severity,
+                bbox=bbox,
+                date_from=date_from,
+                date_to=date_to,
+                date=date,
+                limit=query_cap,
             )
-            for r in rows
-        )
+            clip_rows = _query_clip_events(
+                connection,
+                event_type=event_type,
+                severity=severity,
+                bbox=bbox,
+                date_from=date_from,
+                date_to=date_to,
+                date=date,
+                limit=query_cap,
+            )
+        rows = tuple(_detected_event_row_from_sql(row) for row in detected_rows)
+        rows += tuple(_clip_event_row_from_sql(row) for row in clip_rows)
+        return _sort_event_rows(rows)[offset : offset + limit]
 
     def query_days(
         self,
@@ -1045,6 +1026,7 @@ class MappingQueries:
                 " GROUP BY day",
                 (EVENT_SENTRY,),
             ).fetchall()
+            clip_event_rows = _query_clip_event_day_counts(connection)
 
         per_day: dict[str, _DaySqlAccumulator] = {}
         for row in trip_rows:
@@ -1066,6 +1048,11 @@ class MappingQueries:
             entry.event_count += int(row["event_count"] or 0)
             entry.sentry_count += int(row["sentry_count"] or 0)
         for row in standalone_event_rows:
+            day = str(row["day"])
+            entry = per_day.setdefault(day, _DaySqlAccumulator())
+            entry.event_count += int(row["event_count"] or 0)
+            entry.sentry_count += int(row["sentry_count"] or 0)
+        for row in clip_event_rows:
             day = str(row["day"])
             entry = per_day.setdefault(day, _DaySqlAccumulator())
             entry.event_count += int(row["event_count"] or 0)
@@ -1749,9 +1736,9 @@ def _load_materialised(connection: sqlite3.Connection) -> _MaterialisedData | No
 
 def _snapshot_from_materialised(  # noqa: PLR0913
     *,
-    clips: Sequence,
-    sentry_clips: Sequence,
-    waypoints_by_clip: dict,
+    clips: Sequence[WorkerClip],
+    sentry_clips: Sequence[WorkerClip],
+    waypoints_by_clip: dict[int, tuple[WorkerWaypoint, ...]],
     trip_rows: Sequence[sqlite3.Row],
     trip_clip_map: dict[int, list[int]],
     trip_events: dict[int, list[sqlite3.Row]],
@@ -1847,9 +1834,260 @@ def _video_url_path(relative_path: str | None) -> str | None:
     return normalised
 
 
+def _table_exists(connection: sqlite3.Connection, table_name: str) -> bool:
+    row = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _query_clip_event_day_counts(connection: sqlite3.Connection) -> tuple[sqlite3.Row, ...]:
+    if not _table_exists(connection, _CLIP_EVENT_TABLE):
+        return ()
+    return tuple(
+        connection.execute(
+            "SELECT date(timestamp_utc, 'unixepoch') AS day, "
+            "       COUNT(*) AS event_count, "
+            "       SUM(CASE WHEN bucket = ? THEN 1 ELSE 0 END) AS sentry_count "
+            "  FROM clip_events "
+            " GROUP BY day",
+            (EVENT_SENTRY,),
+        ).fetchall()
+    )
+
+
+def _query_clip_events_for_day(
+    connection: sqlite3.Connection, date_str: str
+) -> tuple[sqlite3.Row, ...]:
+    return _query_clip_events(
+        connection,
+        event_type=None,
+        severity=None,
+        bbox=None,
+        date_from=None,
+        date_to=None,
+        date=date_str,
+        limit=_DEFAULT_EVENT_OVERVIEW_LIMIT,
+    )
+
+
+def _query_detected_events(  # noqa: PLR0913
+    connection: sqlite3.Connection,
+    *,
+    event_type: str | None,
+    severity: str | None,
+    bbox: tuple[float, float, float, float] | None,
+    date_from: str | None,
+    date_to: str | None,
+    date: str | None,
+    limit: int,
+) -> tuple[sqlite3.Row, ...]:
+    clauses, params = _detected_event_clauses(event_type, severity, bbox, date_from, date_to, date)
+    where_sql = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    params.append(limit)
+    return tuple(connection.execute(_detected_event_sql(where_sql), params).fetchall())
+
+
+def _detected_event_clauses(  # noqa: PLR0913
+    event_type: str | None,
+    severity: str | None,
+    bbox: tuple[float, float, float, float] | None,
+    date_from: str | None,
+    date_to: str | None,
+    date: str | None,
+) -> tuple[list[str], list[object]]:
+    clauses: list[str] = []
+    params: list[object] = []
+    if event_type is not None:
+        clauses.append("e.event_type = ?")
+        params.append(event_type)
+    if severity is not None:
+        clauses.append("e.severity = ?")
+        params.append(severity)
+    _append_time_bbox_clauses(
+        clauses, params, "e", "latitude_deg", "longitude_deg", bbox, date_from, date_to, date
+    )
+    return clauses, params
+
+
+def _detected_event_sql(where_sql: str) -> str:
+    return (
+        "SELECT e.id, e.trip_id, e.clip_id, e.event_type, e.severity, "  # noqa: S608
+        "       e.timestamp_utc, e.latitude_deg, e.longitude_deg, "
+        "       e.description, e.frame_index, "
+        "       fc.id AS legacy_trip_id, ec.relative_path AS event_clip_path "
+        "  FROM detected_events e "
+        "  LEFT JOIN trips t ON t.id = e.trip_id "
+        "  LEFT JOIN clips fc ON fc.id = t.start_clip_id "
+        "  LEFT JOIN clips ec ON ec.id = e.clip_id "
+        f"{where_sql} "
+        " ORDER BY e.timestamp_utc DESC, e.id DESC LIMIT ?"
+    )
+
+
+def _query_clip_events(  # noqa: PLR0913
+    connection: sqlite3.Connection,
+    *,
+    event_type: str | None,
+    severity: str | None,
+    bbox: tuple[float, float, float, float] | None,
+    date_from: str | None,
+    date_to: str | None,
+    date: str | None,
+    limit: int,
+) -> tuple[sqlite3.Row, ...]:
+    if not _table_exists(connection, _CLIP_EVENT_TABLE):
+        return ()
+    if severity is not None and severity != _SEVERITY_INFO:
+        return ()
+    clauses, params = _clip_event_clauses(event_type, bbox, date_from, date_to, date)
+    where_sql = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    params.append(limit)
+    return tuple(connection.execute(_clip_event_sql(where_sql), params).fetchall())
+
+
+def _clip_event_clauses(
+    event_type: str | None,
+    bbox: tuple[float, float, float, float] | None,
+    date_from: str | None,
+    date_to: str | None,
+    date: str | None,
+) -> tuple[list[str], list[object]]:
+    clauses: list[str] = []
+    params: list[object] = []
+    if event_type is not None:
+        clauses.append(f"{_CLIP_EVENT_TYPE_SQL} = ?")
+        params.append(event_type)
+    _append_time_bbox_clauses(
+        clauses, params, "ce", "est_lat", "est_lon", bbox, date_from, date_to, date
+    )
+    return clauses, params
+
+
+def _append_time_bbox_clauses(  # noqa: PLR0913
+    clauses: list[str],
+    params: list[object],
+    alias: str,
+    lat_column: str,
+    lon_column: str,
+    bbox: tuple[float, float, float, float] | None,
+    date_from: str | None,
+    date_to: str | None,
+    date: str | None,
+) -> None:
+    if date is not None:
+        clauses.append(f"date({alias}.timestamp_utc, 'unixepoch') = ?")
+        params.append(date)
+    if date_from is not None:
+        clauses.append(
+            f"strftime('%Y-%m-%dT%H:%M:%S+00:00', {alias}.timestamp_utc, 'unixepoch') >= ?"
+        )
+        params.append(date_from)
+    if date_to is not None:
+        clauses.append(
+            f"strftime('%Y-%m-%dT%H:%M:%S+00:00', {alias}.timestamp_utc, 'unixepoch') <= ?"
+        )
+        params.append(date_to)
+    if bbox is not None:
+        min_lat, min_lon, max_lat, max_lon = bbox
+        clauses.append(
+            f"{alias}.{lat_column} IS NOT NULL AND {alias}.{lon_column} IS NOT NULL "
+            f"AND {alias}.{lat_column} BETWEEN ? AND ? "
+            f"AND {alias}.{lon_column} BETWEEN ? AND ?"
+        )
+        params.extend([min_lat, max_lat, min_lon, max_lon])
+
+
+def _clip_event_sql(where_sql: str) -> str:
+    return (
+        "SELECT ce.id, ce.bucket, ce.timestamp_utc, ce.est_lat, ce.est_lon, "  # noqa: S608
+        "       ce.reason, ce.city, ce.camera, "
+        "       pc.relative_path AS primary_clip_path, "
+        "       pc.clip_started_utc AS primary_clip_started_utc, "
+        "       fc.id AS legacy_trip_id "
+        "  FROM clip_events ce "
+        "  LEFT JOIN clips pc ON pc.id = ce.primary_clip_id "
+        "  LEFT JOIN clip_trip_map m ON m.clip_id = ce.primary_clip_id "
+        "  LEFT JOIN trips t ON t.id = m.trip_id "
+        "  LEFT JOIN clips fc ON fc.id = t.start_clip_id "
+        f"{where_sql} "
+        " ORDER BY ce.timestamp_utc DESC, ce.id DESC LIMIT ?"
+    )
+
+
+def _detected_event_row_from_sql(row: sqlite3.Row) -> EventRow:
+    return EventRow(
+        id=int(row["id"]),
+        trip_id=int(row["legacy_trip_id"]) if row["legacy_trip_id"] is not None else None,
+        timestamp=epoch_to_iso(int(row["timestamp_utc"])),
+        lat=_optional_float(row["latitude_deg"]),
+        lon=_optional_float(row["longitude_deg"]),
+        event_type=str(row["event_type"]),
+        severity=str(row["severity"]),
+        description=str(row["description"] or "") or None,
+        video_path=_video_url_path(row["event_clip_path"]),
+        frame_offset=int(row["frame_index"]) if row["frame_index"] is not None else None,
+        metadata=None,
+    )
+
+
+def _clip_event_row_from_sql(row: sqlite3.Row) -> EventRow:
+    return EventRow(
+        id=-int(row["id"]),
+        trip_id=int(row["legacy_trip_id"]) if row["legacy_trip_id"] is not None else None,
+        timestamp=epoch_to_iso(int(row["timestamp_utc"])),
+        lat=_optional_float(row["est_lat"]),
+        lon=_optional_float(row["est_lon"]),
+        event_type=_clip_event_type(str(row["bucket"])),
+        severity=_SEVERITY_INFO,
+        description=_clip_event_description(row["reason"], row["city"], row["camera"]),
+        video_path=_video_url_path(row["primary_clip_path"]),
+        frame_offset=_clip_event_frame_offset(row),
+        metadata=None,
+    )
+
+
+def _clip_event_type(bucket: str) -> str:
+    if bucket == EVENT_SENTRY:
+        return EVENT_SENTRY
+    if bucket == _EVENT_SAVED:
+        return _EVENT_SAVED
+    return _EVENT_CLIP
+
+
+def _clip_event_description(reason: object, city: object, camera: object) -> str:
+    parts = [_humanized_text(reason, default="Event clip")]
+    for value in (city, camera):
+        text = _humanized_text(value, default="")
+        if text:
+            parts.append(text)
+    return " | ".join(parts)
+
+
+def _humanized_text(value: object, *, default: str) -> str:
+    if value is None:
+        return default
+    text = str(value).strip()
+    if not text:
+        return default
+    return text.replace("_", " ").replace("-", " ").title()
+
+
+def _clip_event_frame_offset(row: sqlite3.Row) -> int | None:
+    if row["primary_clip_path"] is None or row["primary_clip_started_utc"] is None:
+        return None
+    delta_seconds = float(row["timestamp_utc"]) - float(row["primary_clip_started_utc"])
+    return max(0, round(delta_seconds * _CLIP_EVENT_FRAME_RATE))
+
+
+def _sort_event_rows(rows: Sequence[EventRow]) -> tuple[EventRow, ...]:
+    return tuple(sorted(rows, key=lambda row: (row.timestamp, row.id), reverse=True))
+
+
 def _derived_event_from_row(
     row: sqlite3.Row,
-    trip_clips: Sequence,
+    trip_clips: Sequence[WorkerClip | None],
 ) -> DerivedEvent:
     """Materialise a `DerivedEvent` from a `detected_events` row."""
     clip_id = row["clip_id"]
@@ -2224,7 +2462,9 @@ def _iso_day(epoch_seconds: float) -> str:
 def _optional_float(value: object) -> float | None:
     if value is None:
         return None
-    return float(value)
+    if isinstance(value, int | float | str):
+        return float(value)
+    raise TypeError(f"Expected numeric SQLite value, got {type(value).__name__}")
 
 
 def _percentage(part: int, whole: int) -> float:

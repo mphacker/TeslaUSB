@@ -1,8 +1,11 @@
 /* ── Video Browser Panel ── */
 .video-panel {
+    --video-panel-width: 340px;
+    --video-panel-touch-target: 2.75rem;
+    --video-panel-slide-duration: 0.3s;
     position: absolute;
     top: 0; right: 0; bottom: 0;
-    width: 340px;
+    width: var(--video-panel-width);
     z-index: 1500;
     background: var(--bg-secondary);
     border-left: 1px solid var(--border-color, var(--border));
@@ -10,7 +13,7 @@
     display: flex;
     flex-direction: column;
     transform: translateX(100%);
-    transition: transform 0.3s ease;
+    transition: transform var(--video-panel-slide-duration) ease;
 }
 .video-panel.open { transform: translateX(0); }
 [data-theme="dark"] .video-panel {
@@ -180,10 +183,43 @@
 .st-meta { font-size: 11px; color: var(--text-muted, var(--text-secondary)); margin-top: 4px; }
 .st-actions { display: flex; gap: 4px; margin-top: 8px; }
 .st-actions .vp-btn { width: 28px; height: 28px; font-size: 13px; }
-@media (max-width: 1023px) {
+@media (max-width: 767px) {
+    body.video-panel-mobile-open { overflow: hidden !important; }
     .video-panel {
-        width: 100vw;
-        padding-bottom: var(--bottomtab-height, 56px);
+        position: fixed;
+        inset: 0;
+        width: auto;
+        max-width: none;
+        box-sizing: border-box;
+        border-left: 0;
+        border-radius: 0;
+        padding-bottom: env(safe-area-inset-bottom);
+        transform: translateY(100%);
+    }
+    .video-panel.open { transform: translateY(0); }
+    .video-panel-header { padding: var(--space-2, 0.5rem) var(--space-3, 0.75rem); }
+    .video-panel-header .close-btn {
+        min-width: var(--video-panel-touch-target);
+        min-height: var(--video-panel-touch-target);
+        padding: 0;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        margin-left: auto;
+    }
+    .video-panel-list {
+        overscroll-behavior: contain;
+        -webkit-overflow-scrolling: touch;
+    }
+    .vp-tab,
+    .vp-folder-row select {
+        min-height: var(--video-panel-touch-target);
+        font-size: var(--text-base, 1rem);
+    }
+    .vp-btn,
+    .st-actions .vp-btn {
+        width: var(--video-panel-touch-target);
+        height: var(--video-panel-touch-target);
     }
 }
 @media (prefers-reduced-motion: reduce) {

@@ -158,6 +158,105 @@ document.addEventListener('keydown', (e) => {
     if (header) header.style.cursor = 'grab';
 });
 
+const VIDEO_PANEL_MOBILE_QUERY = '(max-width: 767px)';
+const VIDEO_PANEL_FOCUSABLE = [
+    'button:not([disabled])',
+    'select:not([disabled])',
+    'a[href]',
+    'video[controls]',
+    '[tabindex]:not([tabindex="-1"])',
+].join(',');
+let videoPanelPreviousFocus = null;
+
+function isVideoPanelMobile() {
+    return window.matchMedia && window.matchMedia(VIDEO_PANEL_MOBILE_QUERY).matches;
+}
+
+function videoPanelIsOpen(panel) {
+    return panel && panel.classList.contains('open');
+}
+
+function syncVideoPanelAccessibility() {
+    const panel = document.getElementById('videoPanel');
+    const button = document.getElementById('btnVideos');
+    if (!panel || !button) return;
+    const isOpen = videoPanelIsOpen(panel);
+    const isMobileOpen = isOpen && isVideoPanelMobile();
+    button.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+    panel.setAttribute('aria-hidden', isOpen ? 'false' : 'true');
+    panel.setAttribute('aria-modal', isMobileOpen ? 'true' : 'false');
+    document.body.classList.toggle('video-panel-mobile-open', isMobileOpen);
+    manageVideoPanelFocus(panel, isOpen);
+}
+
+function manageVideoPanelFocus(panel, isOpen) {
+    if (!isVideoPanelMobile()) return;
+    if (isOpen) {
+        videoPanelPreviousFocus = document.activeElement;
+        const closeButton = panel.querySelector('.video-panel-header .close-btn');
+        if (closeButton) closeButton.focus({ preventScroll: true });
+        return;
+    }
+    if (videoPanelPreviousFocus && document.contains(videoPanelPreviousFocus)) {
+        videoPanelPreviousFocus.focus({ preventScroll: true });
+    }
+    videoPanelPreviousFocus = null;
+}
+
+function videoPanelFocusableElements(panel) {
+    return Array.from(panel.querySelectorAll(VIDEO_PANEL_FOCUSABLE))
+        .filter(el => el.offsetParent !== null || el === document.activeElement);
+}
+
+function handleVideoPanelKeydown(e) {
+    const panel = document.getElementById('videoPanel');
+    if (!isVideoPanelMobile() || !videoPanelIsOpen(panel)) return;
+    if (e.key === 'Escape' && typeof toggleVideoPanel === 'function') {
+        e.preventDefault();
+        toggleVideoPanel();
+        return;
+    }
+    if (e.key !== 'Tab') return;
+    const focusable = videoPanelFocusableElements(panel);
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (e.shiftKey && (!panel.contains(document.activeElement) || document.activeElement === first)) {
+        e.preventDefault();
+        last.focus({ preventScroll: true });
+    } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus({ preventScroll: true });
+    }
+}
+
+function installVideoPanelAccessibility() {
+    const panel = document.getElementById('videoPanel');
+    const button = document.getElementById('btnVideos');
+    if (!panel || !button) return;
+    button.setAttribute('aria-controls', 'videoPanel');
+    panel.setAttribute('role', 'dialog');
+    panel.setAttribute('aria-modal', 'false');
+    new MutationObserver(syncVideoPanelAccessibility)
+        .observe(panel, { attributes: true, attributeFilter: ['class'] });
+    document.addEventListener('keydown', handleVideoPanelKeydown);
+    if (window.matchMedia) {
+        const mobileQuery = window.matchMedia(VIDEO_PANEL_MOBILE_QUERY);
+        if (mobileQuery.addEventListener) {
+            mobileQuery.addEventListener('change', syncVideoPanelAccessibility);
+        } else if (mobileQuery.addListener) {
+            mobileQuery.addListener(syncVideoPanelAccessibility);
+        }
+    }
+    syncVideoPanelAccessibility();
+}
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', installVideoPanelAccessibility, { once: true });
+} else {
+    installVideoPanelAccessibility();
+}
+
 function _interpolateWaypoint(a, b, alpha) {
     // Blend continuous fields linearly between two adjacent waypoints.
     // Stepwise fields (gear/blinker/AP) take the value of the earlier

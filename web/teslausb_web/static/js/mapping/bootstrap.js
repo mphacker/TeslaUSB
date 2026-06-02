@@ -262,17 +262,28 @@ const disambigHighlightLayer = L.layerGroup().addTo(map);
 // on Leaflet's popupclose event firing in every code path.
 let disambigPopupOpen = false;
 
-// User-controllable per-event-type visibility. ``null`` means
-// "show all"; otherwise it's a Set of enabled event types.
-// Persisted to localStorage so the user's preferred filter state
-// survives page reloads.
-const EVENT_TYPES_STORAGE_KEY = 'mapping.enabledEventTypes';
+// User-controllable per-event-type visibility, persisted to localStorage
+// so the filter survives reloads. See the deny-list rationale below.
+const EVENT_TYPES_STORAGE_KEY = 'mapping.disabledEventTypes';
+const LEGACY_EVENT_TYPES_STORAGE_KEY = 'mapping.enabledEventTypes';
 
-let enabledEventTypes = (function () {
+// Event-type map filter persists the types the user explicitly turned
+// OFF (a deny-list), NOT the ones left on. A deny-list is the correct
+// model because the universe of event types grows over time (new
+// detectors, saved-clip/honk events): an allow-list silently hides any
+// type introduced after the user last touched the filters — which is
+// exactly how a saved-clip honk pin vanished for users with a stale
+// allow-list. With a deny-list, unknown/new types default to visible.
+// An empty set means "show everything".
+let disabledEventTypes = (function () {
     try {
+        // One-time cleanup: the old allow-list key can't be faithfully
+        // migrated (we don't know the full type universe at load), so drop
+        // it and default to all-visible rather than misreading it.
+        localStorage.removeItem(LEGACY_EVENT_TYPES_STORAGE_KEY);
         const raw = localStorage.getItem(EVENT_TYPES_STORAGE_KEY);
-        if (raw === null) return null;  // never set → show all
+        if (raw === null) return new Set();
         const parsed = JSON.parse(raw);
-        return Array.isArray(parsed) ? new Set(parsed) : null;
-    } catch (e) { return null; }
+        return Array.isArray(parsed) ? new Set(parsed) : new Set();
+    } catch (e) { return new Set(); }
 })();

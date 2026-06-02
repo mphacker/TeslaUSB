@@ -401,12 +401,11 @@ function makePill({ label, count, type, active, color, master }) {
 }
 
 function isTypeEnabled(t) {
-    return enabledEventTypes === null || enabledEventTypes.has(t);
+    return !disabledEventTypes.has(t);
 }
 
 function isAllEventsEnabled(presentTypes) {
-    if (enabledEventTypes === null) return true;
-    return presentTypes.every(t => enabledEventTypes.has(t));
+    return presentTypes.every(t => !disabledEventTypes.has(t));
 }
 
 function toggleEventFilter(type) {
@@ -414,18 +413,17 @@ function toggleEventFilter(type) {
         allEvents.map(e => e.event_type || 'unknown')));
 
     if (type === null) {
-        // Master toggle: if all on, turn all off; else turn all on.
+        // Master toggle: if every present type is on, turn them all off;
+        // otherwise turn everything back on.
         if (isAllEventsEnabled(presentTypes)) {
-            enabledEventTypes = new Set();
+            disabledEventTypes = new Set(presentTypes);
         } else {
-            enabledEventTypes = null;
+            disabledEventTypes = new Set();
         }
+    } else if (disabledEventTypes.has(type)) {
+        disabledEventTypes.delete(type);
     } else {
-        if (enabledEventTypes === null) {
-            enabledEventTypes = new Set(presentTypes);
-        }
-        if (enabledEventTypes.has(type)) enabledEventTypes.delete(type);
-        else enabledEventTypes.add(type);
+        disabledEventTypes.add(type);
     }
     persistEventTypeFilter();
     rebuildEventFilterPills();
@@ -434,12 +432,12 @@ function toggleEventFilter(type) {
 
 function persistEventTypeFilter() {
     try {
-        if (enabledEventTypes === null) {
+        if (disabledEventTypes.size === 0) {
             localStorage.removeItem(EVENT_TYPES_STORAGE_KEY);
         } else {
             localStorage.setItem(
                 EVENT_TYPES_STORAGE_KEY,
-                JSON.stringify(Array.from(enabledEventTypes)),
+                JSON.stringify(Array.from(disabledEventTypes)),
             );
         }
     } catch (e) { /* localStorage may be disabled; ignore */ }

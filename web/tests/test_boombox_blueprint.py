@@ -236,7 +236,8 @@ def test_index_route_renders_boombox_template(client: FlaskClient, boombox_dir: 
     assert "cdn.jsdelivr.net" not in html
     assert "unpkg.com" not in html
     assert "<svg" in html
-    assert "boombox.js" in html
+    assert "boomboxDropZone" in html
+    assert "boomboxUploadForm" in html
     assert "sound.mp3" in html
 
 

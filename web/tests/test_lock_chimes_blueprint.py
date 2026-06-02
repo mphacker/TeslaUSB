@@ -251,6 +251,7 @@ def test_get_index_renders_template(client) -> None:
     assert "Lock Chimes" in html
     assert "/static/vendor/lamejs/lame.min.js" in html
     assert "/static/js/audio_trimmer.js" in html
+    assert "cdn.jsdelivr" not in html
 
 
 def test_get_index_strips_removed_mode_terms(client) -> None:
@@ -352,6 +353,7 @@ def test_get_index_render_contains_no_emoji_icons(client) -> None:
         0x2022,
     }
     assert all(ord(char) not in forbidden_codepoints for char in html)
+    assert 'class="bi' not in html
 
 
 def test_play_active_chime_returns_wav(client, active_path: Path) -> None:

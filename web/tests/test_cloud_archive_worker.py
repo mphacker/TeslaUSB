@@ -39,12 +39,15 @@ def test_worker_start_sync_requires_credentials(tmp_path: Path) -> None:
         pass
     oauth = MagicMock()
     oauth.load_credentials.return_value = None
-    service = CloudArchiveService(config=config, rclone_service=MagicMock(), oauth_service=oauth)
+    rclone = MagicMock()
+    rclone.has_configured_remote.return_value = False
+    service = CloudArchiveService(config=config, rclone_service=rclone, oauth_service=oauth)
 
     ok, message = service.start_sync()
 
     assert ok is False
     assert message == "No cloud provider configured"
+    rclone.has_configured_remote.assert_called_once_with()
 
 
 def test_worker_start_wake_and_stop(tmp_path: Path) -> None:

@@ -9,11 +9,12 @@ work end-to-end without the legacy Python indexer/migrations.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import pytest
+from teslausb_web.services import mapping_queries
 from teslausb_web.services.mapping_queries import (
     MappingQueries,
     MappingQueriesConfig,
@@ -69,6 +70,48 @@ CREATE INDEX waypoints_by_clip_frame ON waypoints(clip_id, frame_index);
 INSERT INTO meta(key, value) VALUES ('schema_version', '2');
 """
 
+_MATERIALISED_DDL = """
+CREATE TABLE trips (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    start_utc INTEGER NOT NULL,
+    end_utc INTEGER NOT NULL,
+    start_clip_id INTEGER NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
+    end_clip_id INTEGER NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
+    start_lat REAL,
+    start_lon REAL,
+    end_lat REAL,
+    end_lon REAL,
+    distance_km REAL NOT NULL DEFAULT 0,
+    duration_seconds INTEGER NOT NULL DEFAULT 0,
+    waypoint_count INTEGER NOT NULL DEFAULT 0,
+    event_count INTEGER NOT NULL DEFAULT 0,
+    video_count INTEGER NOT NULL DEFAULT 0,
+    bucket TEXT NOT NULL DEFAULT 'recent'
+);
+CREATE TABLE detected_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trip_id INTEGER REFERENCES trips(id) ON DELETE CASCADE,
+    clip_id INTEGER REFERENCES clips(id) ON DELETE SET NULL,
+    event_type TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    timestamp_utc INTEGER NOT NULL,
+    latitude_deg REAL,
+    longitude_deg REAL,
+    speed_mps REAL,
+    metadata_json TEXT,
+    description TEXT NOT NULL DEFAULT '',
+    frame_index INTEGER
+);
+CREATE TABLE clip_trip_map (
+    clip_id INTEGER PRIMARY KEY REFERENCES clips(id) ON DELETE CASCADE,
+    trip_id INTEGER NOT NULL REFERENCES trips(id) ON DELETE CASCADE
+);
+"""
+
+
+def _fail_derivation(*_args: object, **_kwargs: object) -> NoReturn:
+    raise AssertionError("Python derivation fallback must not run")
+
 
 def _seed_db(
     db_path: Path,
@@ -119,6 +162,15 @@ def _seed_db(
                         wp.get("autopilot"),
                     ),
                 )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _create_empty_materialised_tables(db_path: Path) -> None:
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(_MATERIALISED_DDL)
         conn.commit()
     finally:
         conn.close()
@@ -348,6 +400,81 @@ class TestEventDerivation:
 
 
 # ---------------------------------------------------------------------------
+# Materialised-table hot path
+# ---------------------------------------------------------------------------
+
+
+class TestMaterialisedHotPath:
+    def test_empty_materialised_tables_do_not_run_python_derivation(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        db_path = tmp_path / "index.sqlite3"
+        _seed_db(
+            db_path,
+            [
+                {
+                    "relative_path": "RecentClips/present-front.mp4",
+                    "bucket": "recent",
+                    "clip_started_utc": _epoch(2024, 6, 4, 9),
+                    "waypoints": [{"lat": 37.0, "lon": -122.0}],
+                }
+            ],
+        )
+        _create_empty_materialised_tables(db_path)
+        caplog.set_level("WARNING")
+        monkeypatch.setattr(mapping_queries, "group_trips", _fail_derivation)
+        monkeypatch.setattr(mapping_queries, "derive_trip_events", _fail_derivation)
+        monkeypatch.setattr(mapping_queries, "derive_sentry_events", _fail_derivation)
+        queries = MappingQueries(
+            config=MappingQueriesConfig(db_path=db_path, media_root=tmp_path / "media")
+        )
+
+        assert queries.query_trips(limit=10, offset=0, min_distance_km=0.0) == ()
+        assert queries.query_events(limit=10, offset=0) == ()
+        assert queries.query_days(limit=10, min_distance_km=0.0) == ()
+        assert queries.query_latest_date() is None
+        assert queries.query_day_payload("2024-06-04").trips == ()
+        assert queries.get_event_chart_data().by_type == ()
+        assert "Python derivation fallback" not in caplog.text
+
+    def test_missing_materialised_tables_keep_prebootstrap_derivation(
+        self,
+        worker_db_factory: WorkerDbFactory,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level("WARNING")
+        original_group_trips = mapping_queries.group_trips
+        group_trips_calls = 0
+
+        def counted_group_trips(
+            clips: Sequence[mapping_queries.WorkerClip], gap_seconds: int
+        ) -> tuple[mapping_queries.TripGroup, ...]:
+            nonlocal group_trips_calls
+            group_trips_calls += 1
+            return original_group_trips(clips, gap_seconds)
+
+        monkeypatch.setattr(mapping_queries, "group_trips", counted_group_trips)
+        queries = worker_db_factory(
+            [
+                {
+                    "relative_path": "RecentClips/prebootstrap-front.mp4",
+                    "bucket": "recent",
+                    "clip_started_utc": _epoch(2024, 6, 5, 9),
+                    "waypoints": [{"lat": 37.0, "lon": -122.0}],
+                }
+            ]
+        )
+
+        assert len(queries.query_trips(limit=10, offset=0, min_distance_km=0.0)) == 1
+        assert group_trips_calls == 1
+        assert "materialised trips/events tables missing" in caplog.text
+
+
+# ---------------------------------------------------------------------------
 # Aggregates & misc
 # ---------------------------------------------------------------------------
 
@@ -528,9 +655,7 @@ class TestLatestDate:
     def test_none_when_empty(self, worker_db_factory: WorkerDbFactory) -> None:
         assert worker_db_factory([]).query_latest_date() is None
 
-    def test_returns_trip_day_when_only_trips(
-        self, worker_db_factory: WorkerDbFactory
-    ) -> None:
+    def test_returns_trip_day_when_only_trips(self, worker_db_factory: WorkerDbFactory) -> None:
         q = worker_db_factory(
             [
                 {
@@ -543,9 +668,7 @@ class TestLatestDate:
         )
         assert q.query_latest_date() == "2024-06-02"
 
-    def test_event_only_later_day_wins_over_trip(
-        self, worker_db_factory: WorkerDbFactory
-    ) -> None:
+    def test_event_only_later_day_wins_over_trip(self, worker_db_factory: WorkerDbFactory) -> None:
         # A driving trip on the 1st, then a sentry-only event two days
         # later. The latest date must be the event-only day, not the trip
         # day — the original trips-only MAX() regressed this.
@@ -566,4 +689,3 @@ class TestLatestDate:
             ]
         )
         assert q.query_latest_date() == "2024-06-03"
-

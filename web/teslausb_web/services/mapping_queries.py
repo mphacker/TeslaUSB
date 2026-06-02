@@ -33,6 +33,7 @@ from teslausb_web.services.mapping_trip_derivation import (
     TripGroup,
     TripMetrics,
     WorkerClip,
+    WorkerWaypoint,
     bucket_to_folder,
     cap_indices_uniform,
     compute_trip_metrics,
@@ -56,6 +57,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_MATERIALISED_TABLES: Final[tuple[str, ...]] = (
+    "trips",
+    "detected_events",
+    "clip_trip_map",
+)
 _TRIP_GAP_SECONDS_DEFAULT: Final[int] = 300
 _PLAYABLE_TRIPS_TTL_SECONDS: Final[float] = 60.0
 _SNAPSHOT_CACHE_TTL_SECONDS: Final[float] = 60.0
@@ -342,9 +348,7 @@ class MappingQueries:
         # younger than the TTL even if the DB has rolled forward — the
         # worker writes constantly during recording, so mtime-only
         # invalidation would defeat the cache. The TTL bounds staleness.
-        self._day_payload_cache: dict[
-            str, tuple[int, int, float, DayPayload]
-        ] = {}
+        self._day_payload_cache: dict[str, tuple[int, int, float, DayPayload]] = {}
         self._day_payload_lock = threading.RLock()
 
     @contextmanager
@@ -412,14 +416,10 @@ class MappingQueries:
             # trip's own ISO start (computed in SQL via the same
             # `strftime` shape `epoch_to_iso` produces) to keep parity
             # with the snapshot path.
-            clauses.append(
-                "strftime('%Y-%m-%dT%H:%M:%S+00:00', t.start_utc, 'unixepoch') >= ?"
-            )
+            clauses.append("strftime('%Y-%m-%dT%H:%M:%S+00:00', t.start_utc, 'unixepoch') >= ?")
             params.append(date_from)
         if date_to is not None:
-            clauses.append(
-                "strftime('%Y-%m-%dT%H:%M:%S+00:00', t.start_utc, 'unixepoch') <= ?"
-            )
+            clauses.append("strftime('%Y-%m-%dT%H:%M:%S+00:00', t.start_utc, 'unixepoch') <= ?")
             params.append(date_to)
         if bbox is not None:
             min_lat, min_lon, max_lat, max_lon = bbox
@@ -809,14 +809,10 @@ class MappingQueries:
                 ).fetchone()
         except sqlite3.OperationalError as exc:
             if "no such table" not in str(exc).lower():
-                raise MappingQueryError(
-                    f"Failed to query waypoints for video: {exc}"
-                ) from exc
+                raise MappingQueryError(f"Failed to query waypoints for video: {exc}") from exc
             row = None
         except sqlite3.Error as exc:
-            raise MappingQueryError(
-                f"Failed to query waypoints for video: {exc}"
-            ) from exc
+            raise MappingQueryError(f"Failed to query waypoints for video: {exc}") from exc
         if row is not None and row["real_trip_id"] is not None:
             real_trip_id = int(row["real_trip_id"])
             entries = self._load_trip_waypoints_for_real_id(real_trip_id)
@@ -837,19 +833,13 @@ class MappingQueries:
                 clips = load_clips_for_trip(connection, real_trip_id)
                 if not clips:
                     return ()
-                waypoints_by_clip = load_waypoints_by_clip(
-                    connection, [clip.id for clip in clips]
-                )
+                waypoints_by_clip = load_waypoints_by_clip(connection, [clip.id for clip in clips])
         except sqlite3.OperationalError as exc:
             if "no such table" in str(exc).lower():
                 return None
-            raise MappingQueryError(
-                f"Failed to load trip waypoints: {exc}"
-            ) from exc
+            raise MappingQueryError(f"Failed to load trip waypoints: {exc}") from exc
         except sqlite3.Error as exc:
-            raise MappingQueryError(
-                f"Failed to load trip waypoints: {exc}"
-            ) from exc
+            raise MappingQueryError(f"Failed to load trip waypoints: {exc}") from exc
         trip = TripGroup(id=clips[0].id, clips=clips)
         return flatten_trip_waypoints(trip, waypoints_by_clip)
 
@@ -861,10 +851,7 @@ class MappingQueries:
             for clip in materialised.trip.clips:
                 if _video_url_path(clip.relative_path) == target:
                     return materialised.trip.id, _stamp_gap_waypoints(
-                        tuple(
-                            _route_waypoint_from_entry(entry)
-                            for entry in materialised.waypoints
-                        )
+                        tuple(_route_waypoint_from_entry(entry) for entry in materialised.waypoints)
                     )
         return None, ()
 
@@ -943,14 +930,10 @@ class MappingQueries:
             clauses.append("date(e.timestamp_utc, 'unixepoch') = ?")
             params.append(date)
         if date_from is not None:
-            clauses.append(
-                "strftime('%Y-%m-%dT%H:%M:%S+00:00', e.timestamp_utc, 'unixepoch') >= ?"
-            )
+            clauses.append("strftime('%Y-%m-%dT%H:%M:%S+00:00', e.timestamp_utc, 'unixepoch') >= ?")
             params.append(date_from)
         if date_to is not None:
-            clauses.append(
-                "strftime('%Y-%m-%dT%H:%M:%S+00:00', e.timestamp_utc, 'unixepoch') <= ?"
-            )
+            clauses.append("strftime('%Y-%m-%dT%H:%M:%S+00:00', e.timestamp_utc, 'unixepoch') <= ?")
             params.append(date_to)
         if bbox is not None:
             min_lat, min_lon, max_lat, max_lon = bbox
@@ -1012,9 +995,7 @@ class MappingQueries:
             raise MappingQueryError(f"Failed to query days: {exc}") from exc
         return self._query_days_via_snapshot(limit=cap, threshold=threshold)
 
-    def _compute_days_via_sql(
-        self, *, limit: int, threshold: float
-    ) -> tuple[DayRow, ...]:
+    def _compute_days_via_sql(self, *, limit: int, threshold: float) -> tuple[DayRow, ...]:
         """Per-day rollups computed in SQL.
 
         Three index-friendly aggregates:
@@ -1105,9 +1086,7 @@ class MappingQueries:
         out.sort(key=lambda r: r.date, reverse=True)
         return tuple(out[:limit])
 
-    def _query_days_via_snapshot(
-        self, *, limit: int, threshold: float
-    ) -> tuple[DayRow, ...]:
+    def _query_days_via_snapshot(self, *, limit: int, threshold: float) -> tuple[DayRow, ...]:
         snapshot = self._load_snapshot()
         per_day: dict[str, _DayAccumulator] = {}
         for materialised in snapshot.trips:
@@ -1142,19 +1121,14 @@ class MappingQueries:
         try:
             with self.open_db() as connection:
                 has_trips = connection.execute(
-                    "SELECT 1 FROM sqlite_master "
-                    "WHERE type='table' AND name='trips'",
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='trips'",
                 ).fetchone()
         except sqlite3.Error as exc:
-            raise MappingQueryError(
-                f"Failed to query day routes: {exc}"
-            ) from exc
+            raise MappingQueryError(f"Failed to query day routes: {exc}") from exc
         if has_trips is None:
             return self._query_day_routes_via_snapshot(date_str, threshold)
         payload = self._compute_day_payload(date_str)
-        return tuple(
-            trip for trip in payload.trips if trip.distance_km >= threshold
-        )
+        return tuple(trip for trip in payload.trips if trip.distance_km >= threshold)
 
     def _query_day_routes_via_snapshot(
         self, date_str: str, threshold: float
@@ -1177,14 +1151,10 @@ class MappingQueries:
             results = self._compute_playable_via_sql(date_str)
         except sqlite3.OperationalError as exc:
             if "no such table" not in str(exc).lower():
-                raise MappingQueryError(
-                    f"Failed to query playable trips: {exc}"
-                ) from exc
+                raise MappingQueryError(f"Failed to query playable trips: {exc}") from exc
             results = self._playable_via_snapshot(date_str)
         except sqlite3.Error as exc:
-            raise MappingQueryError(
-                f"Failed to query playable trips: {exc}"
-            ) from exc
+            raise MappingQueryError(f"Failed to query playable trips: {exc}") from exc
         self._store_playable_trips_cache(date_str, results)
         return results
 
@@ -1234,9 +1204,7 @@ class MappingQueries:
             out.append(
                 PlayableTrip(
                     id=trip.id,
-                    is_playable=_trip_is_playable(
-                        trip, self._config.media_root, file_cache
-                    ),
+                    is_playable=_trip_is_playable(trip, self._config.media_root, file_cache),
                 ),
             )
         return tuple(out)
@@ -1267,9 +1235,7 @@ class MappingQueries:
             raise MappingQueryError(f"Failed to query stats: {exc}") from exc
         return self._get_stats_via_snapshot(clip_counts, total_waypoints)
 
-    def _get_stats_via_sql(
-        self, clip_counts: _ClipCounts, total_waypoints: int
-    ) -> Stats:
+    def _get_stats_via_sql(self, clip_counts: _ClipCounts, total_waypoints: int) -> Stats:
         with self.open_db() as connection:
             trip_agg = connection.execute(
                 "SELECT COUNT(*) AS trip_count, "
@@ -1305,9 +1271,7 @@ class MappingQueries:
             indexer_status=None,
         )
 
-    def _get_stats_via_snapshot(
-        self, clip_counts: _ClipCounts, total_waypoints: int
-    ) -> Stats:
+    def _get_stats_via_snapshot(self, clip_counts: _ClipCounts, total_waypoints: int) -> Stats:
         snapshot = self._load_snapshot()
         total_events = sum(len(item.events) for item in snapshot.trips) + len(
             snapshot.sentry_events
@@ -1332,13 +1296,9 @@ class MappingQueries:
             return self._get_driving_stats_via_sql()
         except sqlite3.OperationalError as exc:
             if "no such table" not in str(exc).lower():
-                raise MappingQueryError(
-                    f"Failed to query driving stats: {exc}"
-                ) from exc
+                raise MappingQueryError(f"Failed to query driving stats: {exc}") from exc
         except sqlite3.Error as exc:
-            raise MappingQueryError(
-                f"Failed to query driving stats: {exc}"
-            ) from exc
+            raise MappingQueryError(f"Failed to query driving stats: {exc}") from exc
         return self._get_driving_stats_via_snapshot()
 
     def _get_driving_stats_via_sql(self) -> DrivingStats:
@@ -1518,9 +1478,12 @@ class MappingQueries:
             with self.open_db() as connection:
                 clips = load_clips(connection, require_gps=True)
                 sentry_clips = load_sentry_clips(connection)
-                clip_ids = [clip.id for trip in group_trips(clips, 0) for clip in trip.clips]
-                waypoints_by_clip = load_waypoints_by_clip(connection, clip_ids)
                 materialised_data = _load_materialised(connection)
+                if materialised_data is not None:
+                    clip_ids = _clip_ids_from_trip_map(materialised_data.trip_clip_map)
+                else:
+                    clip_ids = tuple(clip.id for clip in clips)
+                waypoints_by_clip = load_waypoints_by_clip(connection, clip_ids)
         except sqlite3.Error as exc:
             raise MappingQueryError(f"Failed to read worker DB: {exc}") from exc
         if materialised_data is not None:
@@ -1533,9 +1496,24 @@ class MappingQueries:
                 trip_events=materialised_data.trip_events,
                 sentry_events=materialised_data.sentry_events,
             )
+        return self._build_prebootstrap_snapshot(
+            clips=clips,
+            sentry_clips=sentry_clips,
+            waypoints_by_clip=waypoints_by_clip,
+            settings=settings,
+        )
+
+    def _build_prebootstrap_snapshot(
+        self,
+        *,
+        clips: Sequence[WorkerClip],
+        sentry_clips: Sequence[WorkerClip],
+        waypoints_by_clip: dict[int, tuple[WorkerWaypoint, ...]],
+        settings: MappingSettings,
+    ) -> _Snapshot:
         logger.warning(
-            "materialised trips/events tables empty; falling back to Python "
-            "derivation (worker bootstrap likely still running)",
+            "materialised trips/events tables missing; using transitional "
+            "Python derivation fallback (worker bootstrap not complete)",
         )
         trips = group_trips(clips, settings.trip_gap_seconds)
         materialised: list[_MaterialisedTrip] = []
@@ -1709,18 +1687,28 @@ class _MaterialisedData:
     sentry_events: tuple[sqlite3.Row, ...]
 
 
+def _missing_materialised_tables(connection: sqlite3.Connection) -> tuple[str, ...]:
+    rows = connection.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (?, ?, ?)",
+        _MATERIALISED_TABLES,
+    ).fetchall()
+    existing = {str(row["name"]) for row in rows}
+    return tuple(name for name in _MATERIALISED_TABLES if name not in existing)
+
+
+def _clip_ids_from_trip_map(trip_clip_map: dict[int, list[int]]) -> tuple[int, ...]:
+    return tuple(sorted({clip_id for clip_ids in trip_clip_map.values() for clip_id in clip_ids}))
+
+
 def _load_materialised(connection: sqlite3.Connection) -> _MaterialisedData | None:
     """Read the worker-materialised trips/events tables.
 
-    Returns ``None`` if the ``trips`` table is empty or absent (signals
-    the caller to fall back to Python derivation). The "absent" case
-    happens in older test fixtures that only seed the v2-era
-    ``clips``/``waypoints`` schema.
+    Returns ``None`` only when the worker has not created the
+    materialised schema yet. Existing-but-empty tables are authoritative
+    steady-state data and must produce an empty snapshot instead of
+    triggering query-time Python trip/event derivation.
     """
-    has_trips = connection.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='trips'",
-    ).fetchone()
-    if has_trips is None:
+    if _missing_materialised_tables(connection):
         return None
     trip_rows = connection.execute(
         "SELECT id, start_utc, end_utc, start_clip_id, end_clip_id, "
@@ -1728,8 +1716,6 @@ def _load_materialised(connection: sqlite3.Connection) -> _MaterialisedData | No
         "       distance_km, duration_seconds, video_count, bucket "
         "  FROM trips ORDER BY start_utc ASC, id ASC",
     ).fetchall()
-    if not trip_rows:
-        return None
     trip_clip_map: dict[int, list[int]] = {}
     for row in connection.execute(
         "SELECT clip_id, trip_id FROM clip_trip_map ORDER BY trip_id, clip_id",

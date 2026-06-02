@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 
 from teslausb_web.services.video_service._filesystem import (
     count_videos,
+    event_playback_target,
     get_session_files,
     group_flat_sessions,
     is_valid_mp4,
@@ -323,5 +324,6 @@ __all__ = (
     "SessionGroup",
     "VideoService",
     "assert_inside",
+    "event_playback_target",
     "make_video_service",
 )

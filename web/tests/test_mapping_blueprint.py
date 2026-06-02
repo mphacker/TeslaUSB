@@ -343,14 +343,29 @@ class TestUrlMap:
 
 
 class TestMapView:
-    def test_index_page_renders(self, client: FlaskClient) -> None:
+    def test_index_redirects_to_latest_day(self, client: FlaskClient) -> None:
+        # Bare "/" must land the operator on the most-recent day with data
+        # (Trip B is on 2024-06-02) instead of an empty map.
         response = client.get("/")
+        assert response.status_code == HTTPStatus.FOUND
+        assert "date=2024-06-02" in response.headers["Location"]
+
+    def test_index_page_renders(self, client: FlaskClient) -> None:
+        response = client.get("/?date=2024-06-02")
         assert response.status_code == HTTPStatus.OK
         body = response.get_data(as_text=True)
         # The template injects the bootstrap config that contains every
         # JSON-API URL. A few sentinel keys must be present.
         assert "__DATE__" in body
         assert "__TRIP_ID__" in body
+
+    def test_index_renders_without_redirect_when_empty(
+        self, empty_client: FlaskClient
+    ) -> None:
+        # No data -> nothing to redirect to; the empty map must still render.
+        response = empty_client.get("/")
+        assert response.status_code == HTTPStatus.OK
+        assert "__DATE__" in response.get_data(as_text=True)
 
 
 # ---------------------------------------------------------------------------

@@ -551,24 +551,25 @@ class MappingQueries:
         return flatten_trip_waypoints(trip, waypoints_by_clip)
 
     def query_latest_date(self) -> str | None:
-        """Return the most-recent trip's UTC date as ``YYYY-MM-DD``, or None.
+        """Return the most-recent UTC date with data as ``YYYY-MM-DD``, or None.
 
-        Trivially cheap (single MAX() on `trips.start_utc`). Used by the
-        page route to redirect bare ``/`` requests to the latest day so the
-        user lands directly on rendered data instead of an empty map.
+        Derived from :meth:`query_days` so "latest date" stays a single
+        source of truth with "which days have data": it unions trips,
+        trip-attached events, standalone (sentry) events, and — like every
+        other query method — transparently degrades from the materialised
+        SQL tables to the Python snapshot during the worker's bootstrap
+        window. A bare distance threshold of ``0`` is used so event-only
+        days (e.g. a sentry- or horn-triggered day with no qualifying
+        driving trip) still count, matching what the day view will render.
+
+        Used by the page route to redirect bare ``/`` requests to the
+        latest day so the operator lands on rendered data, never an empty
+        map.
         """
-        try:
-            with self.open_db() as connection:
-                row = connection.execute(
-                    "SELECT date(MAX(start_utc), 'unixepoch') FROM trips",
-                ).fetchone()
-        except sqlite3.OperationalError:
+        days = self.query_days(limit=1, min_distance_km=0.0)
+        if not days:
             return None
-        except sqlite3.Error as exc:
-            raise MappingQueryError(f"Failed to query latest date: {exc}") from exc
-        if row is None or row[0] is None:
-            return None
-        return str(row[0])
+        return days[0].date
 
     def query_day_payload(self, date_str: str) -> DayPayload:
         """Cached single-day payload (RDP-simplified + cap)."""
@@ -727,8 +728,20 @@ class MappingQueries:
 
     @staticmethod
     def _latest_date_locked(connection: sqlite3.Connection) -> str | None:
+        """Newest UTC date with data, embedded in each day payload.
+
+        Unions ``trips.start_utc`` with ``detected_events.timestamp_utc``
+        so an event-only newest day (e.g. sentry- or horn-triggered) is
+        reflected in ``DayPayload.latest_date`` and the front-end's
+        day-navigation bounds, matching :meth:`query_latest_date`. Only
+        reached on the materialised SQL path, where both tables exist.
+        """
         row = connection.execute(
-            "SELECT date(MAX(start_utc), 'unixepoch') FROM trips",
+            "SELECT date(MAX(ts), 'unixepoch') FROM ("
+            "    SELECT MAX(start_utc) AS ts FROM trips"
+            "    UNION ALL"
+            "    SELECT MAX(timestamp_utc) AS ts FROM detected_events"
+            ")",
         ).fetchone()
         if row is None or row[0] is None:
             return None
@@ -1427,7 +1440,9 @@ class MappingQueries:
             fsd_usage_pct=round(_percentage(fsd_waypoints, total_waypoints), 1),
             total_events=len(all_events),
             warning_events=warning_events,
-            events_per_100mi=round(_events_per_100mi(warning_events, total_distance * _KM_TO_MI), 1),
+            events_per_100mi=round(
+                _events_per_100mi(warning_events, total_distance * _KM_TO_MI), 1
+            ),
         )
 
     def get_event_chart_data(self) -> EventChartData:

@@ -18,10 +18,11 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from teslausb_web.services.video_service._models import (
     CAMERA_KEYS,
@@ -34,6 +35,9 @@ from teslausb_web.services.video_service._models import (
     SessionGroup,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
 logger = logging.getLogger(__name__)
 
 # MP4 ``ftyp`` box magic — required by valid MP4. Encrypted-by-Tesla
@@ -44,6 +48,10 @@ _BYTES_PER_MIB: Final[int] = 1024 * 1024
 _VIDEO_EXTENSIONS: Final[tuple[str, ...]] = (".mp4",)
 _EVENT_NAME_FORMAT: Final[str] = "%Y-%m-%d_%H-%M-%S"
 _DATETIME_DISPLAY: Final[str] = "%Y-%m-%d %I:%M:%S %p"
+# Tesla front clips are ~1 minute; reject seek offsets beyond this as
+# evidence of clock skew / a mismatched event.json and fall back to the
+# clip start so playback never lands past the end of the file.
+_MAX_CLIP_SEEK_SECONDS: Final[float] = 120.0
 _SPLIT_PARTS_EXPECTED: Final[int] = 2
 
 
@@ -162,7 +170,8 @@ def parse_event_lightweight(event_path: Path, event_name: str) -> EventSummary |
         camera_videos, total_size, latest_mtime = _scan_camera_videos(event_path)
         if not camera_videos.any_present():
             return None
-        timestamp = _event_timestamp(event_name, latest_mtime)
+        timestamp = _resolve_event_timestamp(metadata, event_name, latest_mtime)
+        lat, lon = _parse_latlon(metadata)
         return EventSummary(
             name=event_name,
             timestamp=timestamp,
@@ -171,6 +180,8 @@ def parse_event_lightweight(event_path: Path, event_name: str) -> EventSummary |
             camera_videos=camera_videos,
             city=str(metadata.get("city", "") or ""),
             reason=str(metadata.get("reason", "") or ""),
+            lat=lat,
+            lon=lon,
         )
     except OSError as exc:
         logger.debug("parse_event_lightweight: %s: %s", event_path, exc)
@@ -187,8 +198,9 @@ def parse_event_full(event_path: Path, event_name: str) -> EventDetails | None:
         clips = _parse_clips(event_path)
         if not camera_videos.any_present() and not clips:
             return None
-        timestamp = _event_timestamp(event_name, latest_mtime)
+        timestamp = _resolve_event_timestamp(metadata, event_name, latest_mtime)
         starting_clip_index = _pick_starting_clip(clips, timestamp)
+        lat, lon = _parse_latlon(metadata)
         return EventDetails(
             name=event_name,
             path=str(event_path),
@@ -201,6 +213,8 @@ def parse_event_full(event_path: Path, event_name: str) -> EventDetails | None:
             metadata=metadata,
             city=str(metadata.get("city", "") or ""),
             reason=str(metadata.get("reason", "") or ""),
+            lat=lat,
+            lon=lon,
             clips=clips,
             starting_clip_index=starting_clip_index,
         )
@@ -542,6 +556,73 @@ def _event_timestamp(event_name: str, fallback_mtime: float) -> float:
     return dt.timestamp()
 
 
+def _event_json_timestamp(metadata: dict[str, object]) -> float | None:
+    """Parse the authoritative event moment from event.json ``timestamp``.
+
+    Tesla writes the real trigger moment (e.g. the instant the horn was
+    pressed) into event.json, while the enclosing folder name records the
+    later instant Tesla finished closing the event. The folder name can
+    therefore be tens of seconds after the moment the operator cares about,
+    so event.json is the authoritative source for both the displayed time
+    and the playback seek target.
+    """
+    raw = metadata.get("timestamp")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.timestamp()
+
+
+def _resolve_event_timestamp(
+    metadata: dict[str, object], event_name: str, fallback_mtime: float
+) -> float:
+    """Event moment, preferring event.json over the folder name."""
+    from_json = _event_json_timestamp(metadata)
+    if from_json is not None:
+        return from_json
+    return _event_timestamp(event_name, fallback_mtime)
+
+
+def _parse_latlon(metadata: dict[str, object]) -> tuple[float | None, float | None]:
+    """Parse ``est_lat``/``est_lon`` (Tesla writes them as strings).
+
+    Returns ``(None, None)`` when either coordinate is missing, malformed,
+    non-finite, or a null-island ``0,0`` placeholder.
+    """
+    lat = _coerce_finite_float(metadata.get("est_lat"))
+    lon = _coerce_finite_float(metadata.get("est_lon"))
+    if lat is None or lon is None:
+        return None, None
+    if lat == 0.0 and lon == 0.0:
+        return None, None
+    return lat, lon
+
+
+def _coerce_finite_float(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        candidate = float(value)
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            candidate = float(text)
+        except ValueError:
+            return None
+    else:
+        return None
+    if not math.isfinite(candidate):
+        return None
+    return candidate
+
+
 def _pick_starting_clip(clips: tuple[Clip, ...], event_timestamp: float) -> int:
     if not clips:
         return 0
@@ -552,3 +633,49 @@ def _pick_starting_clip(clips: tuple[Clip, ...], event_timestamp: float) -> int:
         else:
             break
     return starting
+
+
+def event_playback_target(
+    event_dir: Path, event_name: str, front_clip_names: Sequence[str]
+) -> tuple[int, float]:
+    """Choose which front clip to open and where to seek for an event.
+
+    Tesla splits an event into ~1-minute front clips. The moment the
+    operator cares about (read from event.json) usually lands inside the
+    LAST clip, not the first — opening clip 0 at offset 0 starts playback
+    minutes before the trigger (the horn-honk misalignment). Returns
+    ``(index, seek_seconds)`` into ``front_clip_names``, which must be in
+    chronological order. Fails safe to ``(0, 0.0)`` when the event time or
+    clip timestamps cannot be resolved.
+    """
+    if not front_clip_names:
+        return 0, 0.0
+    metadata = _read_event_json(event_dir)
+    event_ts = _resolve_event_timestamp(metadata, event_name, 0.0)
+    if event_ts <= 0.0:
+        return 0, 0.0
+    starts = [_clip_start_timestamp(name) for name in front_clip_names]
+    index = 0
+    for i, start in enumerate(starts):
+        if start is not None and start <= event_ts:
+            index = i
+        elif start is not None and start > event_ts:
+            break
+    chosen_start = starts[index]
+    if chosen_start is None:
+        return index, 0.0
+    seek = max(0.0, event_ts - chosen_start)
+    if seek > _MAX_CLIP_SEEK_SECONDS:
+        return index, 0.0
+    return index, seek
+
+
+def _clip_start_timestamp(clip_name: str) -> float | None:
+    ts_str, _camera = _split_clip_filename(clip_name)
+    if ts_str is None:
+        return None
+    try:
+        dt = datetime.strptime(ts_str, _EVENT_NAME_FORMAT).replace(tzinfo=UTC)
+    except ValueError:
+        return None
+    return dt.timestamp()

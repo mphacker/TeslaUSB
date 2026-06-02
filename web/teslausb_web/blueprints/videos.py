@@ -137,6 +137,9 @@ def _serialize_event_summary(event: EventSummary) -> dict[str, object]:
         out["city"] = event.city
     if event.reason:
         out["reason"] = event.reason
+    if event.lat is not None and event.lon is not None:
+        out["lat"] = event.lat
+        out["lon"] = event.lon
     return out
 
 

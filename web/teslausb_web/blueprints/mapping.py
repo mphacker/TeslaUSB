@@ -39,6 +39,7 @@ from teslausb_web.services.mapping_queries import (
     TripRow,
     TripTelemetryPoint,
 )
+from teslausb_web.services.video_service import event_playback_target
 
 if TYPE_CHECKING:
     from flask.typing import ResponseReturnValue
@@ -91,6 +92,8 @@ class _EventClipListing:
     structure: str
     first_front: str
     front_clips: tuple[str, ...]
+    event_clip_index: int = 0
+    event_seek_seconds: float = 0.0
 
 
 def _cfg() -> WebConfig:
@@ -370,12 +373,15 @@ def _event_clip_listing(folder: str, event_name: str) -> _EventClipListing:
                 if path.is_file() and path.name.endswith(".mp4") and "-front" in path.name
             )
         )
+        clip_index, seek_seconds = event_playback_target(event_dir, safe_event, front_files)
         return _EventClipListing(
             folder=safe_folder,
             event=safe_event,
             structure="events",
             first_front=front_files[0] if front_files else "",
             front_clips=tuple(f"{safe_folder}/{safe_event}/{name}" for name in front_files),
+            event_clip_index=clip_index,
+            event_seek_seconds=seek_seconds,
         )
     flat_clip = root / f"{safe_event}{_FRONT_CLIP_SUFFIX}"
     if flat_clip.is_file():
@@ -476,6 +482,9 @@ def map_view() -> ResponseReturnValue:
             "date": initial_date,
             "latest_date": latest_date or "",
             "video_stream_template": "/videos/stream/__PATH__",
+        },
+        "features": {
+            "cloud_archive_enabled": _cfg().features.cloud_archive_enabled,
         },
     }
     return render_template(
@@ -733,5 +742,7 @@ def api_event_clips(folder: str, event_name: str) -> ResponseReturnValue:
             "structure": listing.structure,
             "first_front": listing.first_front,
             "front_clips": list(listing.front_clips),
+            "event_clip_index": listing.event_clip_index,
+            "event_seek_seconds": listing.event_seek_seconds,
         }
     )

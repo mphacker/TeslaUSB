@@ -923,6 +923,7 @@
 <script>
 const BOOTSTRAP = {{ mapping_bootstrap | tojson }};
 const LUCIDE_SPRITE = BOOTSTRAP.assets.sprite;
+const CLOUD_ARCHIVE_ENABLED = !!(BOOTSTRAP.features && BOOTSTRAP.features.cloud_archive_enabled);
 const iconMarkup = (iconId, className = 'nav-icon') => `<svg class="${className}" aria-hidden="true"><use href="${LUCIDE_SPRITE}#${iconId}"></use></svg>`;
 const ICON_CLOSE = iconMarkup('icon-x'), ICON_TRASH = iconMarkup('icon-trash-2'), ICON_DOWNLOAD = iconMarkup('icon-download'), ICON_CLOUD = iconMarkup('icon-cloud'), ICON_PLAY = iconMarkup('icon-play');
 const ICON_MAP_PIN = iconMarkup('icon-map-pin'), ICON_CHEVRON_LEFT = iconMarkup('icon-chevron-left'), ICON_CHEVRON_RIGHT = iconMarkup('icon-chevron-right'), ICON_SPINNING = iconMarkup('icon-refresh-cw', 'nav-icon spinning-icon'), ICON_CHECK = iconMarkup('icon-check-circle');
@@ -2107,6 +2108,7 @@ function toggleSpeedLegend() {
 async function renderDay() {
     tripLayer.clearLayers();
     fsdLayer.clearLayers();
+    clearVpLocateMarker();
     const bounds = [];
 
     const trips = currentDayData && currentDayData.trips ? currentDayData.trips : [];
@@ -2653,7 +2655,7 @@ function openVideoOverlay(waypoint, clickPoint, routeWps, tripId) {
                 <button class="nav-btn" onclick="navigateClip(-1)" title="Previous clip" aria-label="Previous clip">${ICON_CHEVRON_LEFT}</button>
                 <button class="nav-btn" onclick="navigateClip(1)" title="Next clip" aria-label="Next clip">${ICON_CHEVRON_RIGHT}</button>
                 <button class="nav-btn" onclick="overlayDownload()" title="Download ZIP" aria-label="Download ZIP">${ICON_DOWNLOAD}</button>
-                <button class="nav-btn nav-btn-cloud" id="archiveNavBtn" onclick="overlayArchive()" title="Archive to Cloud" aria-label="Archive to cloud">${ICON_CLOUD}</button>
+                ${CLOUD_ARCHIVE_ENABLED ? `<button class="nav-btn nav-btn-cloud" id="archiveNavBtn" onclick="overlayArchive()" title="Archive to Cloud" aria-label="Archive to cloud">${ICON_CLOUD}</button>` : ''}
                 <button class="nav-btn" onclick="overlayFullscreen()" title="Fullscreen video" aria-label="Fullscreen video"><svg class="nav-icon"><use href="${LUCIDE_SPRITE}#icon-maximize"></use></svg></button>
                 <button class="nav-btn" id="overlayMaximizeBtn" onclick="toggleOverlayMaximize()" title="Maximize" aria-label="Maximize video overlay"><svg class="nav-icon"><use href="${LUCIDE_SPRITE}#icon-maximize-2"></use></svg></button>
                 <button class="nav-btn nav-btn-danger" onclick="overlayDelete()" title="Delete" aria-label="Delete event">${ICON_TRASH}</button>
@@ -3729,6 +3731,8 @@ async function loadVideoList(append) {
             const cameras = Object.keys(ev.camera_videos || {}).length;
             const reason = ev.reason || '';
             const safeReason = reason.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+            const hasCoords = (typeof ev.lat === 'number' && isFinite(ev.lat) &&
+                               typeof ev.lon === 'number' && isFinite(ev.lon));
 
             card.innerHTML =
                 '<div class="vp-clip-info">' +
@@ -3737,11 +3741,14 @@ async function loadVideoList(append) {
                     (reason ? '<div class="vp-clip-reason">' + safeReason + '</div>' : '') +
                 '</div>' +
                 '<div class="vp-actions">' +
-                    (ev.city
-                        ? '<button class="vp-btn vp-btn-map" type="button" title="Show on Map" aria-label="Show clip on map">' + ICON_MAP_PIN + '</button>'
-                        : '<button class="vp-btn vp-btn-play" type="button" title="Play" aria-label="Play clip">' + ICON_PLAY + '</button>') +
+                    '<button class="vp-btn vp-btn-play" type="button" title="Play" aria-label="Play clip">' + ICON_PLAY + '</button>' +
+                    (hasCoords
+                        ? '<button class="vp-btn vp-btn-map" type="button" title="Show on Map" aria-label="Show clip location on map">' + ICON_MAP_PIN + '</button>'
+                        : '') +
                     '<button class="vp-btn vp-btn-dl" type="button" title="Download ZIP" aria-label="Download clip ZIP">' + ICON_DOWNLOAD + '</button>' +
-                    '<button class="vp-btn vp-btn-archive" type="button" title="Archive to Cloud" aria-label="Archive clip to cloud">' + ICON_CLOUD + '</button>' +
+                    (CLOUD_ARCHIVE_ENABLED
+                        ? '<button class="vp-btn vp-btn-archive" type="button" title="Archive to Cloud" aria-label="Archive clip to cloud">' + ICON_CLOUD + '</button>'
+                        : '') +
                     '<button class="vp-btn vp-btn-danger vp-btn-del" type="button" title="Delete" aria-label="Delete clip">' + ICON_TRASH + '</button>' +
                 '</div>';
 
@@ -3749,6 +3756,10 @@ async function loadVideoList(append) {
             card.dataset.folder = folder;
             card.dataset.name = name;
             card.dataset.structure = vpFolderStructure;
+            if (hasCoords) {
+                card.dataset.lat = String(ev.lat);
+                card.dataset.lon = String(ev.lon);
+            }
             list.appendChild(card);
         });
 
@@ -3793,6 +3804,49 @@ function vpPlay(folder, name, structure) {
     openVideoFromPanel(folder, name);
 }
 
+// Transient marker dropped by vpLocate so the operator can see exactly
+// where an All-Clips item was recorded. Kept module-level so each locate
+// replaces the previous one and a day render can clear it.
+let vpLocateMarker = null;
+
+function clearVpLocateMarker() {
+    if (vpLocateMarker) {
+        try { map.removeLayer(vpLocateMarker); } catch (e) { /* already gone */ }
+        vpLocateMarker = null;
+    }
+}
+
+function vpLocate(clip) {
+    const lat = parseFloat(clip.dataset.lat);
+    const lon = parseFloat(clip.dataset.lon);
+    if (isNaN(lat) || isNaN(lon)) return;
+    const name = clip.dataset.name || '';
+
+    // Best-effort: switch to the clip's own day so the surrounding
+    // route/events render, then centre + drop the locate marker.
+    const dayMatch = name.match(/^(\d{4}-\d{2}-\d{2})/);
+    const targetDay = dayMatch ? dayMatch[1] : null;
+
+    const focus = function () {
+        if (videoPanelOpen) toggleVideoPanel();
+        clearVpLocateMarker();
+        map.setView([lat, lon], 16);
+        vpLocateMarker = L.marker([lat, lon], { icon: makeEventIcon('saved') }).addTo(map);
+        const label = name.replace(/_/g, ' ').substring(0, 19) || 'Clip location';
+        vpLocateMarker.bindPopup(
+            '<div class="event-popup"><strong>' +
+            label.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') +
+            '</strong></div>'
+        ).openPopup();
+    };
+
+    if (targetDay && targetDay !== currentDate) {
+        Promise.resolve(loadDay(targetDay)).then(focus).catch(focus);
+    } else {
+        focus();
+    }
+}
+
 async function openVideoFromPanel(folder, eventName) {
     // Close the video panel to see the map
     if (videoPanelOpen) toggleVideoPanel();
@@ -3809,23 +3863,33 @@ async function openVideoFromPanel(folder, eventName) {
             return;
         }
 
-        // Look up waypoints for this clip directly from the DB
-        const firstPath = frontClips[0];
+        // The trigger moment (from event.json) usually lands in the LAST
+        // clip, not the first — the server resolves which clip + offset so
+        // playback starts at the honk/event rather than minutes before it.
+        let clipIdx = data.event_clip_index || 0;
+        if (clipIdx < 0 || clipIdx >= frontClips.length) clipIdx = 0;
+        const targetPath = frontClips[clipIdx];
+        const seekSeconds = data.event_seek_seconds || 0;
+
+        // Look up waypoints for the target clip directly from the DB
         let waypoints = [];
         try {
-            const wpResp = await fetch(`${BOOTSTRAP.api.waypoints_for_clip}?path=${encodeURIComponent(firstPath)}`);
+            const wpResp = await fetch(`${BOOTSTRAP.api.waypoints_for_clip}?path=${encodeURIComponent(targetPath)}`);
             const wpData = await wpResp.json();
             waypoints = wpData.waypoints || [];
         } catch(e) {
             console.warn('Waypoint lookup failed:', e);
         }
 
-        // Open overlay with the first front clip
+        // Open overlay with the target clip
         const wp = waypoints.length > 0
-            ? (waypoints.find(w => w.video_path && firstPath.includes(getBasePath(w.video_path))) || waypoints[0])
-            : { video_path: firstPath, frame_offset: 0 };
+            ? (waypoints.find(w => w.video_path && targetPath.includes(getBasePath(w.video_path))) || waypoints[0])
+            : { video_path: targetPath, frame_offset: 0 };
         // Ensure video_path points to the actual clip
-        wp.video_path = firstPath;
+        wp.video_path = targetPath;
+        // frame_offset is expressed in frames (~36 fps); convert the
+        // server-supplied seek seconds so the overlay seeks to the moment.
+        if (seekSeconds > 0) wp.frame_offset = Math.round(seekSeconds * 36);
 
         const clickPoint = { x: window.innerWidth / 3, y: window.innerHeight / 4 };
         openVideoOverlay(wp, clickPoint, waypoints);
@@ -3977,7 +4041,7 @@ document.getElementById('vpList').addEventListener('click', function(e) {
     var name = clip.dataset.name;
     var structure = clip.dataset.structure;
     if (btn.classList.contains('vp-btn-play')) vpPlay(folder, name, structure);
-    else if (btn.classList.contains('vp-btn-map')) vpPlay(folder, name, structure);
+    else if (btn.classList.contains('vp-btn-map')) vpLocate(clip);
     else if (btn.classList.contains('vp-btn-dl')) vpDownload(folder, name);
     else if (btn.classList.contains('vp-btn-archive')) vpArchive(folder, name, btn);
     else if (btn.classList.contains('vp-btn-del')) vpDelete(folder, name);

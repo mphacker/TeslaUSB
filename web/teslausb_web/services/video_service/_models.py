@@ -143,6 +143,8 @@ class EventSummary:
     camera_videos: CameraVideos
     city: str = ""
     reason: str = ""
+    lat: float | None = None
+    lon: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +162,8 @@ class EventDetails:
     metadata: dict[str, object] = field(default_factory=dict)
     city: str = ""
     reason: str = ""
+    lat: float | None = None
+    lon: float | None = None
     clips: tuple[Clip, ...] = ()
     starting_clip_index: int = 0
 

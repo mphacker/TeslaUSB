@@ -514,3 +514,56 @@ class TestPlayableCache:
             q.playable_trips_for_date(f"2024-02-{day:02d}")
         # After trimming, the internal map must be <= 64 entries.
         assert len(q._playable_trips_cache) <= 64  # whitebox check
+
+
+class TestLatestDate:
+    """``query_latest_date`` is the bare-``/`` landing redirect target.
+
+    It must agree with the day view about which days have data — including
+    event-only days — and must degrade through the same SQL→snapshot ladder
+    as every other query (here exercised via the schema-v2 fixture, which
+    has no materialised ``trips`` table and so runs the snapshot path).
+    """
+
+    def test_none_when_empty(self, worker_db_factory: WorkerDbFactory) -> None:
+        assert worker_db_factory([]).query_latest_date() is None
+
+    def test_returns_trip_day_when_only_trips(
+        self, worker_db_factory: WorkerDbFactory
+    ) -> None:
+        q = worker_db_factory(
+            [
+                {
+                    "relative_path": "RecentClips/a-front.mp4",
+                    "bucket": "recent",
+                    "clip_started_utc": _epoch(2024, 6, 2, 9),
+                    "waypoints": [{"lat": 37.0, "lon": -122.0, "speed_mps": 10.0}],
+                }
+            ]
+        )
+        assert q.query_latest_date() == "2024-06-02"
+
+    def test_event_only_later_day_wins_over_trip(
+        self, worker_db_factory: WorkerDbFactory
+    ) -> None:
+        # A driving trip on the 1st, then a sentry-only event two days
+        # later. The latest date must be the event-only day, not the trip
+        # day — the original trips-only MAX() regressed this.
+        q = worker_db_factory(
+            [
+                {
+                    "relative_path": "RecentClips/trip-front.mp4",
+                    "bucket": "recent",
+                    "clip_started_utc": _epoch(2024, 6, 1, 10),
+                    "waypoints": [{"lat": 37.0, "lon": -122.0, "speed_mps": 10.0}],
+                },
+                {
+                    "relative_path": "SentryClips/2024-06-03_20-00-00/front.mp4",
+                    "bucket": "sentry",
+                    "clip_started_utc": _epoch(2024, 6, 3, 20),
+                    "waypoints": [],
+                },
+            ]
+        )
+        assert q.query_latest_date() == "2024-06-03"
+

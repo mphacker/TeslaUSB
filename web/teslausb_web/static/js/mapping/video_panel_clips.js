@@ -320,9 +320,16 @@ document.getElementById('vpList').addEventListener('click', function(e) {
         } else if (btn.classList.contains('st-btn-map')) {
             var lat = parseFloat(btn.dataset.lat);
             var lon = parseFloat(btn.dataset.lon);
-            if (!isNaN(lat) && !isNaN(lon)) {
-                map.setView([lat, lon], 16);
-                toggleVideoPanel();
+            if (isNaN(lat) || isNaN(lon)) return;
+            // Load the event's own day first so its trip routes render and
+            // the operator can click elsewhere on the route to play video —
+            // not just see a lone pin. Mirrors vpLocate() for All-Clips.
+            var evDate = stEvent.dataset.date;
+            var center = function () { map.setView([lat, lon], 16); toggleVideoPanel(); };
+            if (evDate && evDate !== currentDate) {
+                Promise.resolve(loadDay(evDate)).then(center).catch(center);
+            } else {
+                center();
             }
         } else if (btn.classList.contains('st-btn-del')) {
             vpDelete(folder, name).then(function() {

@@ -186,8 +186,26 @@ CREATE INDEX clip_events_by_timestamp ON clip_events(timestamp_utc DESC);
 CREATE INDEX clip_events_by_dir ON clip_events(event_dir_relative_path);
 CREATE INDEX clip_events_by_primary_clip ON clip_events(primary_clip_id);
 ",
+    // v5 -> v6: separate raw local-wall-clock from corrected UTC.
+    //
+    // Tesla's `event.json` `timestamp` has NO timezone and is
+    // the car's LOCAL wall-clock, but it was being stored in
+    // `clip_events.timestamp_utc` verbatim — so an event sat in
+    // the wrong UTC day relative to its own GPS-derived trip
+    // (which is true UTC), splitting a honk and its drive route
+    // across two day buckets. `timestamp_local_naive` preserves
+    // the raw wall-clock seconds (interpreted as if UTC) so the
+    // local↔UTC offset can be re-derived idempotently on every
+    // re-link against the primary clip's SEI `clip_started_utc`;
+    // `timestamp_utc` now holds the CORRECTED true-UTC instant.
+    // Backfilled equal to the existing value; the next index /
+    // re-link pass recomputes the correction.
+    "\
+ALTER TABLE clip_events ADD COLUMN timestamp_local_naive INTEGER;
+UPDATE clip_events SET timestamp_local_naive = timestamp_utc;
+",
 ];
 
 /// Current schema version. Bump when appending to the
 /// `MIGRATIONS` constant.
-pub const CURRENT_SCHEMA_VERSION: u32 = 5;
+pub const CURRENT_SCHEMA_VERSION: u32 = 6;

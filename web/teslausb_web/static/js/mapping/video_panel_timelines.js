@@ -209,7 +209,14 @@ function sentryEventHtml(ev) {
     const hasCoords = ev.lat != null && ev.lon != null && (ev.lat !== 0 || ev.lon !== 0);
     const videoPath = (ev.video_path || '').replace(/"/g, '&quot;');
     const frameOffset = ev.frame_offset || 0;
-    let html = '<div class="st-event" data-folder="' + sourceFolder + '" data-name="' + folder + '" data-video-path="' + videoPath + '" data-frame-offset="' + frameOffset + '" data-event-type="' + evType + '"';
+    // UTC day-bucket of this event, so "Show on Map" can load the matching
+    // day (and its trip routes) before centering — the Events tab is a
+    // global timeline, so an event may belong to a different day than the
+    // one currently rendered. ev.timestamp is a UTC ISO string, so its
+    // leading YYYY-MM-DD is exactly the day key used by /api/day/*; slicing
+    // avoids re-parsing through a local-timezone Date (which would shift it).
+    const evDate = (ev.timestamp || '').slice(0, 10);
+    let html = '<div class="st-event" data-folder="' + sourceFolder + '" data-name="' + folder + '" data-video-path="' + videoPath + '" data-frame-offset="' + frameOffset + '" data-event-type="' + evType + '" data-date="' + evDate + '"';
     if (hasCoords) html += ' data-lat="' + ev.lat + '" data-lon="' + ev.lon + '"';
     html += '><div class="st-dot ' + info.dot + '"></div><div class="st-card">';
     html += '<div class="st-type">' + info.label + '</div><div class="st-date">' + formatLocalTime(ev.timestamp) + '</div>';

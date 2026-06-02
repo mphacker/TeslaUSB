@@ -25,24 +25,36 @@ impl Store {
     pub fn record_clip_event(&mut self, event: &ClipEventRecord) -> Result<()> {
         let indexed_at = system_time_to_unix_seconds(SystemTime::now())?;
         let tx = self.conn.transaction()?;
-        let primary_clip_id = best_clip_id_for_event(
-            &tx,
-            &event.event_dir_relative_path,
-            event.metadata.timestamp_utc,
-        )?;
+        // Explicit-offset event.json rows are already true UTC and must
+        // never be anchor-corrected; encode that as a NULL local-naive so
+        // relink leaves them untouched. No-offset rows keep their raw
+        // wall-clock so the offset can be re-derived idempotently.
+        let (timestamp_utc, local_naive) = if event.metadata.timestamp_has_offset {
+            (event.metadata.timestamp_utc, None)
+        } else {
+            let raw = event.metadata.timestamp_local_naive;
+            let corrected = match dir_tz_offset(&tx, &event.event_dir_relative_path)? {
+                Some(offset) => raw - offset,
+                None => event.metadata.timestamp_utc,
+            };
+            (corrected, Some(raw))
+        };
+        let primary_clip_id =
+            best_clip_id_for_event(&tx, &event.event_dir_relative_path, timestamp_utc)?;
         let event_json = path_to_db_str(&event.event_json_relative_path);
         let event_dir = path_to_db_str(&event.event_dir_relative_path);
         tx.execute(
             "INSERT INTO clip_events (
                 event_json_relative_path, event_dir_relative_path, bucket,
-                primary_clip_id, timestamp_utc, est_lat, est_lon,
+                primary_clip_id, timestamp_utc, timestamp_local_naive, est_lat, est_lon,
                 reason, city, camera, indexed_at_utc
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(event_json_relative_path) DO UPDATE SET
                 event_dir_relative_path = excluded.event_dir_relative_path,
                 bucket = excluded.bucket,
                 primary_clip_id = excluded.primary_clip_id,
                 timestamp_utc = excluded.timestamp_utc,
+                timestamp_local_naive = excluded.timestamp_local_naive,
                 est_lat = excluded.est_lat,
                 est_lon = excluded.est_lon,
                 reason = excluded.reason,
@@ -54,7 +66,8 @@ impl Store {
                 event_dir,
                 event.bucket.as_db_str(),
                 primary_clip_id,
-                event.metadata.timestamp_utc,
+                timestamp_utc,
+                local_naive,
                 event.metadata.est_lat,
                 event.metadata.est_lon,
                 event.metadata.reason.as_deref(),
@@ -94,25 +107,92 @@ pub(super) fn link_clip_events_for_clip(
 fn relink_clip_events_in_dir(tx: &rusqlite::Transaction<'_>, event_dir: &Path) -> Result<()> {
     let event_dir_db = path_to_db_str(event_dir);
     let mut stmt = tx.prepare(
-        "SELECT event_json_relative_path, timestamp_utc
+        "SELECT event_json_relative_path, timestamp_local_naive, timestamp_utc
          FROM clip_events
          WHERE event_dir_relative_path = ?1",
     )?;
     let rows = stmt.query_map(params![event_dir_db], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, Option<i64>>(1)?,
+            r.get::<_, i64>(2)?,
+        ))
     })?;
     let events = rows.collect::<std::result::Result<Vec<_>, _>>()?;
     drop(stmt);
-    for (event_json, timestamp_utc) in events {
+    // Re-derive the directory's local↔UTC offset from the immutable clip
+    // filenames + true SEI starts, then recompute every anchorable event's
+    // UTC and re-select its primary clip against that corrected instant.
+    let offset = dir_tz_offset(tx, event_dir)?;
+    for (event_json, local_naive, current_utc) in events {
+        // A NULL local-naive marks an explicit-offset (already-true-UTC)
+        // row; leave it untouched. Otherwise correct only when an anchor
+        // offset is available, never folding a prior correction back in.
+        let timestamp_utc = match (local_naive, offset) {
+            (Some(raw), Some(off)) => raw - off,
+            _ => current_utc,
+        };
         let primary_clip_id = best_clip_id_for_event(tx, event_dir, timestamp_utc)?;
         tx.execute(
             "UPDATE clip_events
-             SET primary_clip_id = ?1
-             WHERE event_json_relative_path = ?2",
-            params![primary_clip_id, event_json],
+             SET primary_clip_id = ?1, timestamp_utc = ?2
+             WHERE event_json_relative_path = ?3",
+            params![primary_clip_id, timestamp_utc, event_json],
         )?;
     }
     Ok(())
+}
+
+/// Consensus local↔UTC offset (seconds east of UTC, rounded to 15 min)
+/// for an event directory, derived from its front clips' immutable
+/// filename wall-clock stamps versus their true SEI `clip_started_utc`.
+///
+/// Taking the most common offset across all anchored front clips in the
+/// directory tolerates a single clip with a bad/missing SEI start.
+/// Returns `None` when no front clip in the directory carries a usable
+/// (in-range) anchor, in which case the caller must not correct.
+fn dir_tz_offset(tx: &rusqlite::Transaction<'_>, event_dir: &Path) -> Result<Option<i64>> {
+    let pattern = like_pattern_for_event_dir(event_dir);
+    let mut stmt = tx.prepare(
+        "SELECT relative_path, clip_started_utc
+         FROM clips
+         WHERE relative_path LIKE ?1 ESCAPE '\\'
+           AND relative_path LIKE '%-front.mp4'
+           AND clip_started_utc IS NOT NULL",
+    )?;
+    let rows = stmt.query_map(params![pattern], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+    })?;
+    let anchors = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(stmt);
+    let mut counts: Vec<(i64, u32)> = Vec::new();
+    for (relative_path, clip_started_utc) in anchors {
+        let Some(file_name) = Path::new(&relative_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+        else {
+            continue;
+        };
+        let Some(file_local_naive) = crate::clip_event::parse_clip_name_local_naive(file_name)
+        else {
+            continue;
+        };
+        let Some(offset) =
+            crate::clip_event::rounded_tz_offset(file_local_naive, clip_started_utc)
+        else {
+            continue;
+        };
+        match counts.iter_mut().find(|(value, _)| *value == offset) {
+            Some(entry) => entry.1 += 1,
+            None => counts.push((offset, 1)),
+        }
+    }
+    // Most frequent offset wins; ties break toward the numerically
+    // smaller offset for determinism.
+    Ok(counts
+        .into_iter()
+        .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
+        .map(|(offset, _)| offset))
 }
 
 fn best_clip_id_for_event(

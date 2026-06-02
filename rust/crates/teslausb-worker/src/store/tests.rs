@@ -748,6 +748,8 @@ fn clip_event_record(path: &str, event_dir: &str, timestamp_utc: i64) -> ClipEve
         bucket: Bucket::Saved,
         metadata: ClipEventMetadata {
             timestamp_utc,
+            timestamp_local_naive: timestamp_utc,
+            timestamp_has_offset: false,
             est_lat: Some(42.5414),
             est_lon: Some(-83.1234),
             reason: Some("user_interaction_honk".to_string()),
@@ -816,6 +818,43 @@ fn migration_from_v4_to_v5_preserves_existing_rows() {
     assert_eq!(store.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
     assert_eq!(store.clip_count().unwrap(), 1);
     assert_eq!(store.clip_event_count().unwrap(), 0);
+}
+
+#[test]
+fn migration_from_v5_to_v6_backfills_local_naive_column() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("v5.sqlite3");
+    {
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        for sql in &super::schema::MIGRATIONS[..5] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, '5')",
+            params![META_KEY_SCHEMA_VERSION],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO clip_events (
+                event_json_relative_path, event_dir_relative_path, bucket,
+                timestamp_utc, indexed_at_utc
+             ) VALUES ('SavedClips/e/event.json', 'SavedClips/e', 'saved', 1234, 100)",
+            [],
+        )
+        .unwrap();
+    }
+    let store = Store::open(&db).unwrap();
+    assert_eq!(store.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+    let local_naive: i64 = store
+        .conn
+        .query_row(
+            "SELECT timestamp_local_naive FROM clip_events",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(local_naive, 1234, "v6 backfill seeds local_naive from prior utc");
 }
 
 #[test]
@@ -920,4 +959,114 @@ fn clip_events_survive_materializer_rebuild_all() {
         .rebuild_trips_now(&crate::mapping_overrides::MappingOverrides::default())
         .unwrap();
     assert_eq!(store.clip_event_count().unwrap(), 1);
+}
+
+#[test]
+fn record_clip_event_corrects_local_wall_clock_to_true_utc() {
+    // Regression for the honk-route split: Tesla event.json stores a
+    // tz-naive LOCAL wall-clock (here 2026-06-01T20:10:35, EDT), but the
+    // drive's clips carry true-UTC SEI starts (2026-06-02T00:07:03Z).
+    // Anchoring against the primary clip must shift the stored
+    // timestamp_utc forward by 4h so the event lands in the same UTC day
+    // as its trip route.
+    let mut store = Store::open_in_memory().unwrap();
+    let started = UNIX_EPOCH + Duration::from_secs(1_780_358_823); // 2026-06-02T00:07:03Z
+    store
+        .record_clip(
+            Bucket::Saved,
+            Path::new("SavedClips/2026-06-01_20-10-53/2026-06-01_20-07-54-front.mp4"),
+            &walk(Some(started), vec![]),
+        )
+        .unwrap();
+    store
+        .record_clip_event(&ClipEventRecord {
+            event_json_relative_path: Path::new("SavedClips/2026-06-01_20-10-53/event.json")
+                .to_path_buf(),
+            event_dir_relative_path: Path::new("SavedClips/2026-06-01_20-10-53").to_path_buf(),
+            bucket: Bucket::Saved,
+            metadata: ClipEventMetadata {
+                timestamp_utc: 1_780_344_635,
+                timestamp_local_naive: 1_780_344_635, // 2026-06-01T20:10:35 wall-clock
+                timestamp_has_offset: false,
+                est_lat: Some(42.5414),
+                est_lon: Some(-83.1466),
+                reason: Some("user_interaction_honk".to_string()),
+                city: Some("Troy".to_string()),
+                camera: Some("front".to_string()),
+            },
+        })
+        .unwrap();
+    let (stored_utc, stored_local): (i64, i64) = store
+        .conn
+        .query_row(
+            "SELECT timestamp_utc, timestamp_local_naive FROM clip_events",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(stored_utc, 1_780_359_035); // 2026-06-02T00:10:35Z (corrected)
+    assert_eq!(stored_local, 1_780_344_635); // raw wall-clock preserved
+}
+
+#[test]
+fn clip_event_without_anchor_keeps_best_effort_utc() {
+    // No primary clip → nothing to anchor against → the best-effort UTC
+    // from event.json alone is kept verbatim (no spurious correction).
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .record_clip_event(&clip_event_record(
+            "SavedClips/2026-06-01_20-11-00/event.json",
+            "SavedClips/2026-06-01_20-11-00",
+            1_780_345_835,
+        ))
+        .unwrap();
+    let stored_utc: i64 = store
+        .conn
+        .query_row("SELECT timestamp_utc FROM clip_events", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(stored_utc, 1_780_345_835);
+}
+
+#[test]
+fn explicit_offset_event_is_not_anchor_corrected() {
+    // An event.json that carried an explicit offset is already true UTC.
+    // Even with an EDT anchor clip present, the stored UTC must be kept
+    // verbatim and timestamp_local_naive must be NULL so re-link skips it.
+    let mut store = Store::open_in_memory().unwrap();
+    let started = UNIX_EPOCH + Duration::from_secs(1_780_358_823); // 2026-06-02T00:07:03Z
+    store
+        .record_clip(
+            Bucket::Saved,
+            Path::new("SavedClips/2026-06-01_20-10-53/2026-06-01_20-07-54-front.mp4"),
+            &walk(Some(started), vec![]),
+        )
+        .unwrap();
+    store
+        .record_clip_event(&ClipEventRecord {
+            event_json_relative_path: Path::new("SavedClips/2026-06-01_20-10-53/event.json")
+                .to_path_buf(),
+            event_dir_relative_path: Path::new("SavedClips/2026-06-01_20-10-53").to_path_buf(),
+            bucket: Bucket::Saved,
+            metadata: ClipEventMetadata {
+                timestamp_utc: 1_780_359_035, // already true UTC (offset was present)
+                timestamp_local_naive: 1_780_344_635,
+                timestamp_has_offset: true,
+                est_lat: None,
+                est_lon: None,
+                reason: None,
+                city: None,
+                camera: None,
+            },
+        })
+        .unwrap();
+    let (stored_utc, stored_local): (i64, Option<i64>) = store
+        .conn
+        .query_row(
+            "SELECT timestamp_utc, timestamp_local_naive FROM clip_events",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(stored_utc, 1_780_359_035, "explicit-offset UTC kept verbatim");
+    assert_eq!(stored_local, None, "explicit-offset rows store NULL local-naive");
 }

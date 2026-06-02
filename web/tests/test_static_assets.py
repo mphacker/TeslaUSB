@@ -1,14 +1,8 @@
-"""Tests for the v1-ported static asset bundle.
+"""Tests for static assets required by the B-1 web UI.
 
-Phase 5.3 copies the entire ``scripts/web/static/`` tree from v1
-``main`` into ``teslausb_web/static/``. Because the UI design system
-mandates byte-for-byte parity with v1, these tests verify the
-critical assets are present, are non-empty, and (for the few we can
-re-derive byte sums for) byte-identical to the v1 originals.
-
-For binary parity verification across the full set, see
-``scripts/check.sh --hygiene`` and the screenshot-diff acceptance
-gate in Phase H5. This test module is the cheap pre-flight gate.
+These tests verify that critical assets referenced by B-1 templates
+and JavaScript are present, non-empty, and have the expected file
+formats for browser/runtime use.
 """
 
 from __future__ import annotations
@@ -21,12 +15,10 @@ import teslausb_web
 PACKAGE_DIR: Path = Path(teslausb_web.__file__).parent
 STATIC_DIR: Path = PACKAGE_DIR / "static"
 
-# Files that MUST exist for the UI to work. Anything missing here
-# would cause an immediate visual regression on the v1->B-1 parity
-# screenshot diff (Phase H5 acceptance gate).
+# Files that MUST exist for the B-1 UI paths used by templates and JavaScript.
 REQUIRED_FILES: tuple[str, ...] = (
     "tile-cache-sw.js",
-    "dashcam.proto",
+    "vendor/dashcam-mp4/dashcam.proto",
     "fonts/inter-variable.woff2",
     "icons/lucide-sprite.svg",
     "css/analytics.css",
@@ -34,10 +26,10 @@ REQUIRED_FILES: tuple[str, ...] = (
     "css/bootstrap-icons-subset.css",
     "css/style.css",
     "js/audio_trimmer.js",
-    "js/dashcam-mp4.js",
     "js/main.js",
     "js/music.js",
-    "js/protobuf.min.js",
+    "vendor/dashcam-mp4/dashcam-mp4.js",
+    "vendor/protobuf/protobuf.min.js",
     "vendor/chartjs/chart.umd.min.js",
     "vendor/leaflet/MarkerCluster.css",
     "vendor/leaflet/MarkerCluster.Default.css",
@@ -97,7 +89,7 @@ def test_marker_icons_are_png() -> None:
 def test_protobuf_descriptor_is_protobuf_source() -> None:
     # The dashcam.proto descriptor is the protobuf source schema for
     # the embedded SEI metadata. It must declare a syntax line.
-    proto = STATIC_DIR / "dashcam.proto"
+    proto = STATIC_DIR / "vendor" / "dashcam-mp4" / "dashcam.proto"
     text = proto.read_text(encoding="utf-8")
     assert "syntax" in text, "dashcam.proto missing syntax declaration"
 

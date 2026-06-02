@@ -945,8 +945,8 @@
     </div>
 </div>
 
-<script src="{{ url_for('static', filename='js/protobuf.min.js') }}"></script>
-<script src="{{ url_for('static', filename='js/dashcam-mp4.js') }}"></script>
+<script src="{{ url_for('static', filename='vendor/protobuf/protobuf.min.js') }}"></script>
+<script src="{{ url_for('static', filename='vendor/dashcam-mp4/dashcam-mp4.js') }}"></script>
 <script>
     const folder = "{{ folder }}";
     const eventName = "{{ event.name }}";
@@ -1328,7 +1328,7 @@
     // Initialize SEI parsing
     async function initSEI() {
         try {
-            const result = await DashcamHelpers.initProtobuf('{{ url_for("static", filename="dashcam.proto") }}');
+            const result = await DashcamHelpers.initProtobuf('{{ url_for("static", filename="vendor/dashcam-mp4/dashcam.proto") }}');
             seiType = result.SeiMetadata;
             enumFields = result.enumFields;
         } catch (err) {

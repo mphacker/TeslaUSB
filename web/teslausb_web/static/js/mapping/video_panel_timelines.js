@@ -34,18 +34,6 @@ function renderEvents() {
     return bounds;
 }
 
-// --- View Switching ---
-
-function toggleFsdOverlay() {
-    fsdVisible = !fsdVisible;
-    document.getElementById('btnFsd').classList.toggle('active', fsdVisible);
-    if (fsdVisible) {
-        fsdLayer.addTo(map);
-    } else {
-        map.removeLayer(fsdLayer);
-    }
-}
-
 // --- Indexer (legacy, removed in B-1) ---
 // Indexing is performed by the Rust worker (teslausb-worker.service)
 // against /var/lib/teslausb/index.sqlite3. The web UI is now a pure

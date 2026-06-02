@@ -105,7 +105,6 @@ async function loadDay(date, options) {
     // previous day's routes/events while the new day loads (and so
     // a fetch failure doesn't leave inconsistent map state).
     tripLayer.clearLayers();
-    fsdLayer.clearLayers();
     eventCluster.clearLayers();
 
     beginMapLoading();
@@ -236,7 +235,6 @@ function renderEmptyState() {
     allEvents = [];
 
     tripLayer.clearLayers();
-    fsdLayer.clearLayers();
     eventCluster.clearLayers();
     rebuildEventFilterPills();
 }

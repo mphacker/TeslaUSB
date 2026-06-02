@@ -154,9 +154,7 @@ L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
 const sharedCanvasRenderer = L.canvas({ padding: 0.2 });
 const tripLayer = L.layerGroup().addTo(map);
 const eventCluster = L.markerClusterGroup({ maxClusterRadius: 40, spiderfyOnMaxZoom: true }).addTo(map);
-const fsdLayer = L.layerGroup();
 
-let fsdVisible = false;
 let speedLegendVisible = false;
 
 // Day-based state (replaces the trip-by-trip model). ``allDays`` is

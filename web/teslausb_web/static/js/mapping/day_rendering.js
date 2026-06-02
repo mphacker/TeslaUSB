@@ -9,7 +9,6 @@
 
 async function renderDay() {
     tripLayer.clearLayers();
-    fsdLayer.clearLayers();
     clearVpLocateMarker();
     const bounds = [];
 
@@ -165,30 +164,6 @@ function renderTripOnDay(trip, bounds) {
             color: seg.color, weight: 4, opacity: 0.9,
             interactive: false,
         }).addTo(tripLayer);
-    }
-
-    // FSD overlay segments — break on autopilot_state change OR on a
-    // gap_after boundary so a long drive with stable autopilot state
-    // doesn't render a single overlay line that crosses a gap.
-    let segStart = 0;
-    for (let i = 1; i <= valid.length; i++) {
-        const isEnd = i === valid.length;
-        const prevAp = valid[i - 1].autopilot_state;
-        const gapAtPrev = !!valid[i - 1].gap_after;
-        const curAp = isEnd ? null : valid[i].autopilot_state;
-        if (isEnd || gapAtPrev || prevAp !== curAp) {
-            const segCoords = allLatLngs.slice(segStart, i);
-            if (segCoords.length >= 2) {
-                const engaged = ['SELF_DRIVING', 'AUTOSTEER'].includes(
-                    valid[segStart].autopilot_state);
-                L.polyline(segCoords, {
-                    renderer: sharedCanvasRenderer,
-                    color: engaged ? '#28a745' : '#6c757d',
-                    weight: 6, opacity: 0.7, interactive: false,
-                }).addTo(fsdLayer);
-            }
-            segStart = i;
-        }
     }
 
     // Start/end markers. Use the trip metadata coords if present,

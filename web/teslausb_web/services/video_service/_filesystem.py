@@ -9,9 +9,11 @@ The Tesla camera filename convention is::
 
 where ``{camera}`` is one of ``front``, ``back``, ``left_repeater``,
 ``right_repeater``, ``left_pillar``, ``right_pillar``. Two special
-filenames also appear: ``event.mp4`` (the synthesised grid view that
-Tesla writes for SavedClips/SentryClips events) and ``event.json``
-(metadata: city, reason, timestamp, est_lat, est_lon).
+filenames also appear: ``event.mp4`` (a stitched all-camera grid view
+that is NOT written by Tesla -- Tesla records only per-camera segments;
+``event.mp4`` is produced by third-party TeslaCam tooling, so its codec
+is not guaranteed to be browser-playable) and ``event.json`` (metadata:
+city, reason, timestamp, est_lat, est_lon).
 """
 
 from __future__ import annotations

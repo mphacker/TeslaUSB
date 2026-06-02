@@ -420,9 +420,10 @@ def _grid_view_event_listing(
     """Build a listing for an event folder with no per-camera segments.
 
     Some Sentry/Saved events are stored as a single grid-view ``event.mp4``
-    (the stitched all-camera view Tesla writes for short detections) with no
-    ``<timestamp>-front.mp4`` segments. The lone grid clip is the playable
-    video; the overlay plays it directly without camera switching.
+    (a stitched all-camera view produced by third-party TeslaCam tooling, not
+    written by Tesla itself) with no ``<timestamp>-front.mp4`` segments. The
+    lone grid clip is the playable video; the overlay plays it directly
+    without camera switching.
     """
     grid_clips = tuple(
         sorted(

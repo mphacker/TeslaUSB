@@ -34,6 +34,8 @@ const DAY_MAX: u32 = 31;
 const HOUR_MAX: u32 = 23;
 const MINUTE_MAX: u32 = 59;
 const SECOND_MAX: u32 = 60;
+const OFFSET_HH_LEN: usize = 2;
+const OFFSET_HHMM_LEN: usize = 4;
 
 /// Parsed content of a Tesla `event.json` file.
 #[derive(Debug, Clone, PartialEq)]
@@ -215,8 +217,8 @@ fn coord_to_f64(value: Option<JsonCoord>) -> Option<f64> {
 
 fn parse_timestamp_utc(raw: &str) -> Option<i64> {
     let trimmed = raw.trim();
-    let without_z = trimmed.strip_suffix('Z').unwrap_or(trimmed);
-    let (date, time) = without_z.split_once('T')?;
+    let (date, time_and_offset) = trimmed.split_once('T')?;
+    let (time, offset_seconds) = split_utc_offset(time_and_offset)?;
     let date_parts = parse_parts::<DATE_PARTS>(date, '-')?;
     let time_parts = parse_parts::<TIME_PARTS>(time, ':')?;
     let year = i32::try_from(date_parts[0]).ok()?;
@@ -226,12 +228,49 @@ fn parse_timestamp_utc(raw: &str) -> Option<i64> {
     let minute = u32::try_from(time_parts[1]).ok()?;
     let second = u32::try_from(time_parts[2]).ok()?;
     validate_datetime(month, day, hour, minute, second)?;
-    Some(
-        days_from_civil(year, month, day) * SECONDS_PER_DAY
-            + i64::from(hour) * SECONDS_PER_HOUR
-            + i64::from(minute) * SECONDS_PER_MINUTE
-            + i64::from(second),
-    )
+    let civil_seconds = days_from_civil(year, month, day) * SECONDS_PER_DAY
+        + i64::from(hour) * SECONDS_PER_HOUR
+        + i64::from(minute) * SECONDS_PER_MINUTE
+        + i64::from(second);
+    Some(civil_seconds - offset_seconds)
+}
+
+/// Splits the post-`T` portion into the bare `HH:MM:SS` time and the
+/// timezone offset in seconds east of UTC (the caller subtracts it to
+/// reach UTC). Accepts a trailing `Z`, `±HH`, `±HHMM`, or `±HH:MM`; a
+/// missing offset is treated as UTC per Tesla's documented `event.json`
+/// contract.
+fn split_utc_offset(time_and_offset: &str) -> Option<(&str, i64)> {
+    if let Some(bare) = time_and_offset.strip_suffix('Z') {
+        return Some((bare, 0));
+    }
+    let Some(sign_index) = time_and_offset.rfind(['+', '-']) else {
+        return Some((time_and_offset, 0));
+    };
+    let (time, offset) = time_and_offset.split_at(sign_index);
+    let east_of_utc = offset.starts_with('+');
+    let magnitude = parse_offset_magnitude(&offset[1..])?;
+    Some((time, if east_of_utc { magnitude } else { -magnitude }))
+}
+
+/// Parses an unsigned timezone offset (`HH`, `HHMM`, or `HH:MM`) into
+/// seconds.
+fn parse_offset_magnitude(magnitude: &str) -> Option<i64> {
+    let digits: String = magnitude.chars().filter(|c| *c != ':').collect();
+    let (hours_str, minutes_str) = match digits.len() {
+        OFFSET_HH_LEN => (&digits[..OFFSET_HH_LEN], None),
+        OFFSET_HHMM_LEN => (&digits[..OFFSET_HH_LEN], Some(&digits[OFFSET_HH_LEN..])),
+        _ => return None,
+    };
+    let hours: u32 = hours_str.parse().ok()?;
+    let minutes: u32 = match minutes_str {
+        Some(value) => value.parse().ok()?,
+        None => 0,
+    };
+    if hours > HOUR_MAX || minutes > MINUTE_MAX {
+        return None;
+    }
+    Some(i64::from(hours) * SECONDS_PER_HOUR + i64::from(minutes) * SECONDS_PER_MINUTE)
 }
 
 fn parse_parts<const N: usize>(raw: &str, delimiter: char) -> Option<[i64; N]> {
@@ -330,5 +369,53 @@ mod tests {
     fn missing_timestamp_is_an_error() {
         let err = parse_event_json(br#"{"reason":"sentry"}"#).unwrap_err();
         assert!(matches!(err, ClipEventParseError::MissingTimestamp));
+    }
+
+    #[test]
+    fn timestamp_z_suffix_and_no_offset_are_both_utc() {
+        assert_eq!(
+            parse_timestamp_utc("2026-06-01T20:10:35"),
+            Some(1_780_344_635)
+        );
+        assert_eq!(
+            parse_timestamp_utc("2026-06-01T20:10:35Z"),
+            Some(1_780_344_635)
+        );
+    }
+
+    #[test]
+    fn timestamp_negative_offset_converts_to_utc() {
+        // 16:10:35 at -04:00 is 20:10:35 UTC.
+        assert_eq!(
+            parse_timestamp_utc("2026-06-01T16:10:35-04:00"),
+            Some(1_780_344_635)
+        );
+    }
+
+    #[test]
+    fn timestamp_positive_half_hour_offset_converts_to_utc() {
+        // 01:40:35 on 06-02 at +05:30 is 20:10:35 UTC on 06-01.
+        assert_eq!(
+            parse_timestamp_utc("2026-06-02T01:40:35+05:30"),
+            Some(1_780_344_635)
+        );
+    }
+
+    #[test]
+    fn timestamp_compact_offset_matches_colon_offset() {
+        assert_eq!(
+            parse_timestamp_utc("2026-06-01T16:10:35-0400"),
+            parse_timestamp_utc("2026-06-01T16:10:35-04:00"),
+        );
+        assert_eq!(
+            parse_timestamp_utc("2026-06-01T16:10:35-04"),
+            Some(1_780_344_635)
+        );
+    }
+
+    #[test]
+    fn timestamp_rejects_malformed_offset() {
+        assert_eq!(parse_timestamp_utc("2026-06-01T20:10:35+9"), None);
+        assert_eq!(parse_timestamp_utc("2026-06-01T20:10:35+99:99"), None);
     }
 }

@@ -124,7 +124,7 @@ fn best_clip_id_for_event(
     tx.query_row(
         "SELECT id
          FROM clips
-         WHERE relative_path LIKE ?1
+         WHERE relative_path LIKE ?1 ESCAPE '\\'
            AND relative_path NOT LIKE '%-back.mp4'
            AND relative_path NOT LIKE '%-left_repeater.mp4'
            AND relative_path NOT LIKE '%-right_repeater.mp4'
@@ -158,6 +158,46 @@ fn like_pattern_for_event_dir(event_dir: &Path) -> String {
         };
         prefix.push(separator);
     }
-    prefix.push('%');
-    prefix
+    // Tesla event directory names embed `_` (e.g. `2026-06-01_20-11-00`),
+    // which is a single-character wildcard in SQL `LIKE`. Escape the
+    // literal prefix (paired with `ESCAPE '\'` in the query) so it can
+    // never match a sibling clip in a differently named directory; the
+    // trailing `%` stays an intentional wildcard.
+    let mut pattern = escape_like_literal(&prefix);
+    pattern.push('%');
+    pattern
+}
+
+fn escape_like_literal(value: &str) -> String {
+    const LIKE_ESCAPE: char = '\\';
+
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if matches!(ch, LIKE_ESCAPE | '%' | '_') {
+            escaped.push(LIKE_ESCAPE);
+        }
+        escaped.push(ch);
+    }
+    escaped
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::{escape_like_literal, like_pattern_for_event_dir};
+
+    #[test]
+    fn escapes_like_wildcards_in_dir_prefix() {
+        // Underscores in the Tesla dir name must be escaped so the
+        // prefix matches one directory, not any single-char variant.
+        let pattern = like_pattern_for_event_dir(Path::new("SavedClips/2026-06-01_20-11-00"));
+        assert!(pattern.ends_with("20-11-00/%"));
+        assert!(pattern.contains("2026-06-01\\_20-11-00"));
+    }
+
+    #[test]
+    fn escapes_percent_and_backslash() {
+        assert_eq!(escape_like_literal("a%b_c\\d"), "a\\%b\\_c\\\\d");
+    }
 }

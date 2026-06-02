@@ -89,6 +89,15 @@ async function loadVideoList(append) {
     }
 }
 
+function vpChangeFolder() {
+    // Switching folders must restart paging: the new folder's first
+    // page is page 1. Reusing a stale vpPage (e.g. left at 2+ after
+    // scrolling another folder) skips early items — a SavedClips folder
+    // with a single event would then render empty. Mirrors vpShowClips().
+    resetVpPaging();
+    loadVideoList();
+}
+
 function vpPlay(folder, name, structure) {
     openVideoFromPanel(folder, name);
 }

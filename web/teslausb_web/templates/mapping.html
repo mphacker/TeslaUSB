@@ -81,7 +81,7 @@
             <button class="close-btn" onclick="toggleVideoPanel()" aria-label="Close video panel"><svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-x"></use></svg></button>
         </div>
         <div class="vp-folder-row" id="vpFolderRow" style="display: none;">
-            <select id="vpFolder" onchange="loadVideoList()">
+            <select id="vpFolder" onchange="vpChangeFolder()">
                 <option value="RecentClips">Recent Clips</option>
                 <option value="SavedClips">Saved Clips</option>
                 <option value="SentryClips">Sentry Clips</option>

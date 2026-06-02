@@ -159,8 +159,35 @@ CREATE INDEX clip_trip_map_by_trip ON clip_trip_map(trip_id);
 ALTER TABLE detected_events ADD COLUMN description TEXT NOT NULL DEFAULT '';
 ALTER TABLE detected_events ADD COLUMN frame_index INTEGER;
 ",
+    // v4 -> v5: raw Tesla event.json metadata.
+    //
+    // SavedClips/SentryClips event directories carry an
+    // `event.json` file whose timestamp/reason/location are
+    // authored by the car and must survive trip/materializer
+    // rebuilds. This is a raw index table, not a derived table:
+    // `Materializer::rebuild_all` may clear `trips` and
+    // `detected_events`, but it must never wipe these rows.
+    "\
+CREATE TABLE clip_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_json_relative_path TEXT NOT NULL UNIQUE,
+    event_dir_relative_path TEXT NOT NULL,
+    bucket TEXT NOT NULL,
+    primary_clip_id INTEGER REFERENCES clips(id) ON DELETE SET NULL,
+    timestamp_utc INTEGER NOT NULL,
+    est_lat REAL,
+    est_lon REAL,
+    reason TEXT,
+    city TEXT,
+    camera TEXT,
+    indexed_at_utc INTEGER NOT NULL
+);
+CREATE INDEX clip_events_by_timestamp ON clip_events(timestamp_utc DESC);
+CREATE INDEX clip_events_by_dir ON clip_events(event_dir_relative_path);
+CREATE INDEX clip_events_by_primary_clip ON clip_events(primary_clip_id);
+",
 ];
 
 /// Current schema version. Bump when appending to the
 /// `MIGRATIONS` constant.
-pub const CURRENT_SCHEMA_VERSION: u32 = 4;
+pub const CURRENT_SCHEMA_VERSION: u32 = 5;

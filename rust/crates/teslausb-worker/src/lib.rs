@@ -25,6 +25,7 @@
 
 pub mod cleanup;
 pub mod cleanup_sweep;
+pub mod clip_event;
 pub mod cloud_keep;
 pub mod config;
 pub mod indexer;

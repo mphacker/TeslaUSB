@@ -107,6 +107,20 @@ pub fn is_indexable(path: &Path) -> bool {
     }
 }
 
+/// Returns `true` for Tesla event metadata files.
+#[must_use]
+pub fn is_event_json(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("event.json"))
+}
+
+/// Returns `true` if a completed file should be sent to the indexer.
+#[must_use]
+pub fn is_completed_indexer_file(path: &Path) -> bool {
+    is_indexable(path) || is_event_json(path)
+}
+
 /// Camera-angle suffixes Tesla writes per clip group. Front is
 /// canonical: only front carries the GPS + SEI metadata the
 /// indexer needs, and indexing the others would create
@@ -200,7 +214,7 @@ mod linux_impl {
 
     use super::{
         DirectoryArrival, RawWatchEvent, Result, WatchAction, WatchEvent, WatcherError,
-        classify_raw_event, is_indexable,
+        classify_raw_event, is_completed_indexer_file,
     };
     use crate::config::Config;
     use crate::store::Bucket;
@@ -328,7 +342,7 @@ mod linux_impl {
                     Ok(Vec::new())
                 }
                 WatchAction::EmitFile(kind) => {
-                    if !is_indexable(&path) {
+                    if !is_completed_indexer_file(&path) {
                         return Ok(Vec::new());
                     }
                     Ok(vec![WatchEvent {
@@ -447,7 +461,7 @@ mod linux_impl {
             collect_completed_files(bucket, &entry.path(), depth + 1, events)
         } else {
             let path = entry.path();
-            if is_indexable(&path) {
+            if is_completed_indexer_file(&path) {
                 events.push(WatchEvent {
                     bucket,
                     path,
@@ -518,6 +532,16 @@ mod tests {
     fn is_indexable_accepts_mp4() {
         assert!(is_indexable(Path::new("/srv/RecentClips/a.mp4")));
         assert!(is_indexable(Path::new("/srv/RecentClips/a.MP4")));
+    }
+
+    #[test]
+    fn is_event_json_accepts_metadata_file() {
+        assert!(is_event_json(Path::new(
+            "/srv/SentryClips/event/event.json"
+        )));
+        assert!(is_completed_indexer_file(Path::new(
+            "/srv/SentryClips/event/event.json"
+        )));
     }
 
     #[test]

@@ -5,6 +5,8 @@ use std::time::SystemTime;
 
 use thiserror::Error;
 
+use crate::clip_event::ClipEventMetadata;
+
 use super::bucket::Bucket;
 
 /// Row returned by [`super::Store::list_clips_in_bucket_older_than`]
@@ -37,6 +39,19 @@ impl ClipRecord {
     pub const fn has_gps(&self) -> bool {
         self.gps_waypoint_count > 0
     }
+}
+
+/// Row payload inserted into the persistent `clip_events` table.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClipEventRecord {
+    /// Path to `event.json`, relative to `backing_root`.
+    pub event_json_relative_path: PathBuf,
+    /// Event directory path, relative to `backing_root`.
+    pub event_dir_relative_path: PathBuf,
+    /// Tesla bucket the event directory lives in.
+    pub bucket: Bucket,
+    /// Parsed Tesla metadata.
+    pub metadata: ClipEventMetadata,
 }
 
 /// Errors emitted by the store layer.

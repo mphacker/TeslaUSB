@@ -9,6 +9,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use crate::sei::ClipWalk;
 
 use super::bucket::Bucket;
+use super::clip_events::link_clip_events_for_clip;
 use super::helpers::{
     clip_record_from_row, path_to_db_str, system_time_to_unix_seconds, upsert_clip_row,
 };
@@ -259,6 +260,7 @@ impl Store {
                 ])?;
             }
         }
+        link_clip_events_for_clip(&tx, relative_path)?;
         tx.commit()?;
         // Out-of-transaction UPSERT into meta is fine: it's a
         // best-effort hint to the supervisor; missing it would

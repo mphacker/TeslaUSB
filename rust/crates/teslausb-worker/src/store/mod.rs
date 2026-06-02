@@ -46,6 +46,7 @@
 #![allow(clippy::doc_markdown)]
 
 mod bucket;
+mod clip_events;
 mod helpers;
 mod schema;
 mod store_impl;
@@ -57,7 +58,7 @@ mod tests;
 pub use bucket::Bucket;
 pub use schema::CURRENT_SCHEMA_VERSION;
 pub use store_impl::Store;
-pub use types::{ClipRecord, Result, StoreError};
+pub use types::{ClipEventRecord, ClipRecord, Result, StoreError};
 
 /// Test-only accessor for the ordered migration list. Lets
 /// sibling modules (the materialiser tests) stand up a raw

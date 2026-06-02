@@ -23,9 +23,10 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
+use crate::clip_event::{ClipEventParseError, parse_event_json};
 use crate::config::Config;
 use crate::sei::{WalkError, walk_clip};
-use crate::store::{Bucket, Store, StoreError};
+use crate::store::{Bucket, ClipEventRecord, Store, StoreError};
 use crate::watcher::{WatchEvent, WatchKind};
 
 /// Errors emitted by the indexer service. Per-clip parse
@@ -67,6 +68,12 @@ pub struct BootstrapSummary {
     /// back to a non-front sibling — the group is silently
     /// dropped until Tesla writes the front sibling (or never).
     pub skipped_no_front: u32,
+    /// Tesla `event.json` files found by the recursive bootstrap.
+    pub event_json_seen: u32,
+    /// Tesla `event.json` files successfully parsed and stored.
+    pub event_json_indexed: u32,
+    /// Tesla `event.json` files skipped due to read/parse errors.
+    pub event_json_failed: u32,
 }
 
 /// Glue service that owns the [`Store`] and applies SEI
@@ -140,7 +147,8 @@ impl Indexer {
             // stored in per-event subdirectories, so this walk is
             // intentionally recursive but explicitly bounded.
             let mut groups: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
-            collect_indexable_clips(&root, &root, 0, &mut groups)?;
+            let mut event_jsons = Vec::new();
+            collect_indexer_files(&root, &root, 0, &mut groups, &mut event_jsons)?;
             for (_, paths) in groups {
                 let Some(canonical) = pick_canonical_clip(&paths) else {
                     // Group has no front sibling. Per the
@@ -172,6 +180,21 @@ impl Indexer {
                     }
                 }
             }
+            for event_json in event_jsons {
+                summary.event_json_seen += 1;
+                match self.record_event_json_file(bucket, &event_json) {
+                    Ok(()) => summary.event_json_indexed += 1,
+                    Err(RecordEventJsonError::Store(e)) => return Err(IndexerError::Store(e)),
+                    Err(e) => {
+                        summary.event_json_failed += 1;
+                        warn!(
+                            path = %event_json.display(),
+                            error = %e,
+                            "bootstrap: event.json parse failed; skipping metadata",
+                        );
+                    }
+                }
+            }
         }
         info!(
             seen = summary.seen,
@@ -179,6 +202,9 @@ impl Indexer {
             skipped = summary.skipped,
             skipped_no_front = summary.skipped_no_front,
             failed = summary.failed,
+            event_json_seen = summary.event_json_seen,
+            event_json_indexed = summary.event_json_indexed,
+            event_json_failed = summary.event_json_failed,
             "indexer bootstrap complete",
         );
         Ok(summary)
@@ -195,6 +221,9 @@ impl Indexer {
     /// Returns `Err` on an underlying store error. Parse
     /// failures are not propagated.
     pub fn handle_event(&mut self, event: &WatchEvent) -> Result<bool> {
+        if crate::watcher::is_event_json(&event.path) {
+            return self.handle_event_json_event(event);
+        }
         if !crate::watcher::is_indexable(&event.path) {
             return Ok(false);
         }
@@ -299,6 +328,51 @@ impl Indexer {
         self.config.indexer.debounce()
     }
 
+    fn handle_event_json_event(&mut self, event: &WatchEvent) -> Result<bool> {
+        let now = Instant::now();
+        if self.is_debounced(&event.path, now) {
+            return Ok(false);
+        }
+        self.remember_handled(event.path.clone(), now);
+        match self.record_event_json_file(event.bucket, &event.path) {
+            Ok(()) => Ok(true),
+            Err(RecordEventJsonError::Store(e)) => Err(IndexerError::Store(e)),
+            Err(e) => {
+                warn!(
+                    path = %event.path.display(),
+                    error = %e,
+                    "event.json metadata not indexed",
+                );
+                Ok(false)
+            }
+        }
+    }
+
+    fn record_event_json_file(
+        &mut self,
+        bucket: Bucket,
+        path: &Path,
+    ) -> std::result::Result<(), RecordEventJsonError> {
+        let bytes = std::fs::read(path).map_err(|source| RecordEventJsonError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let metadata = parse_event_json(&bytes).map_err(RecordEventJsonError::Parse)?;
+        let event_json_relative_path = relative_to_backing_root(path, &self.config.backing_root);
+        let event_dir_relative_path = event_json_relative_path
+            .parent()
+            .map_or_else(PathBuf::new, Path::to_path_buf);
+        let record = ClipEventRecord {
+            event_json_relative_path,
+            event_dir_relative_path,
+            bucket,
+            metadata,
+        };
+        self.store
+            .record_clip_event(&record)
+            .map_err(RecordEventJsonError::Store)
+    }
+
     fn walk_and_record(
         &mut self,
         bucket: Bucket,
@@ -328,11 +402,12 @@ impl Indexer {
     }
 }
 
-fn collect_indexable_clips(
+fn collect_indexer_files(
     root: &Path,
     dir: &Path,
     depth: usize,
     groups: &mut HashMap<PathBuf, Vec<PathBuf>>,
+    event_jsons: &mut Vec<PathBuf>,
 ) -> Result<()> {
     let entries = std::fs::read_dir(dir).map_err(|e| IndexerError::Io {
         path: dir.to_path_buf(),
@@ -343,7 +418,7 @@ fn collect_indexable_clips(
             path: dir.to_path_buf(),
             source: e,
         })?;
-        collect_indexable_entry(root, depth, groups, &entry)?;
+        collect_indexable_entry(root, depth, groups, event_jsons, &entry)?;
     }
     Ok(())
 }
@@ -352,6 +427,7 @@ fn collect_indexable_entry(
     root: &Path,
     depth: usize,
     groups: &mut HashMap<PathBuf, Vec<PathBuf>>,
+    event_jsons: &mut Vec<PathBuf>,
     entry: &std::fs::DirEntry,
 ) -> Result<()> {
     let path = entry.path();
@@ -360,9 +436,9 @@ fn collect_indexable_entry(
         source: e,
     })?;
     if file_type.is_dir() {
-        collect_indexable_dir(root, &path, depth, groups)
+        collect_indexable_dir(root, &path, depth, groups, event_jsons)
     } else {
-        collect_indexable_file(path, groups);
+        collect_indexable_file(path, groups, event_jsons);
         Ok(())
     }
 }
@@ -372,6 +448,7 @@ fn collect_indexable_dir(
     path: &Path,
     depth: usize,
     groups: &mut HashMap<PathBuf, Vec<PathBuf>>,
+    event_jsons: &mut Vec<PathBuf>,
 ) -> Result<()> {
     if depth >= MAX_BOOTSTRAP_RECURSION_DEPTH {
         debug!(
@@ -382,11 +459,17 @@ fn collect_indexable_dir(
         );
         return Ok(());
     }
-    collect_indexable_clips(root, path, depth + 1, groups)
+    collect_indexer_files(root, path, depth + 1, groups, event_jsons)
 }
 
-fn collect_indexable_file(path: PathBuf, groups: &mut HashMap<PathBuf, Vec<PathBuf>>) {
-    if crate::watcher::is_indexable(&path) {
+fn collect_indexable_file(
+    path: PathBuf,
+    groups: &mut HashMap<PathBuf, Vec<PathBuf>>,
+    event_jsons: &mut Vec<PathBuf>,
+) {
+    if crate::watcher::is_event_json(&path) {
+        event_jsons.push(path);
+    } else if crate::watcher::is_indexable(&path) {
         let base = clip_group_key(&path);
         groups.entry(base).or_default().push(path);
     }
@@ -400,6 +483,19 @@ enum WalkAndRecordError {
     Store(StoreError),
     #[error("refusing to index non-front clip: {0}")]
     NonFront(PathBuf),
+}
+
+#[derive(Debug, Error)]
+enum RecordEventJsonError {
+    #[error("i/o error reading {path:?}: {source}")]
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("{0}")]
+    Parse(ClipEventParseError),
+    #[error("{0}")]
+    Store(StoreError),
 }
 
 /// Convert an absolute clip path into the relative path the
@@ -792,6 +888,48 @@ mod tests {
         assert!(indexer.last_handled.len() <= MAX_DEBOUNCE_ENTRIES);
         // The newest entry survived.
         assert!(indexer.last_handled.contains_key(Path::new("/p/new.mp4")));
+    }
+
+    #[test]
+    fn bootstrap_indexes_event_json_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = make_config(dir.path());
+        let event_dir = cfg.bucket_root(Bucket::Saved).join("2026-06-01_20-11-00");
+        std::fs::create_dir_all(&event_dir).unwrap();
+        std::fs::write(
+            event_dir.join("event.json"),
+            br#"{"timestamp":"2026-06-01T20:10:35","est_lat":"42.5414","est_lon":"-83.1234"}"#,
+        )
+        .unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let mut indexer = Indexer::new(cfg, store);
+        let s = indexer.bootstrap().unwrap();
+        assert_eq!(s.event_json_seen, 1);
+        assert_eq!(s.event_json_indexed, 1);
+        assert_eq!(indexer.store().clip_event_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn handle_event_indexes_event_json_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = make_config(dir.path());
+        let event_dir = cfg.bucket_root(Bucket::Sentry).join("2026-06-01_20-11-00");
+        std::fs::create_dir_all(&event_dir).unwrap();
+        let path = event_dir.join("event.json");
+        std::fs::write(
+            &path,
+            br#"{"timestamp":"2026-06-01T20:10:35","reason":"sentry"}"#,
+        )
+        .unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let mut indexer = Indexer::new(cfg, store);
+        let ev = WatchEvent {
+            bucket: Bucket::Sentry,
+            path,
+            kind: WatchKind::CloseWrite,
+        };
+        assert!(indexer.handle_event(&ev).unwrap());
+        assert_eq!(indexer.store().clip_event_count().unwrap(), 1);
     }
 
     #[test]

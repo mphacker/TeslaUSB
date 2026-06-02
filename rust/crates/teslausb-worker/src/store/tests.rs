@@ -22,7 +22,8 @@ use teslausb_core::sei::tesla::SeiMessage;
 use super::bucket::Bucket;
 use super::schema::{CURRENT_SCHEMA_VERSION, META_KEY_SCHEMA_VERSION};
 use super::store_impl::Store;
-use super::types::StoreError;
+use super::types::{ClipEventRecord, StoreError};
+use crate::clip_event::ClipEventMetadata;
 use crate::sei::{ClipWalk, Waypoint};
 
 fn msg_with_gps(lat: f64, lon: f64) -> SeiMessage {
@@ -738,4 +739,185 @@ fn migration_v4_adds_description_and_frame_index_columns() {
         .unwrap();
     assert_eq!(desc, "Harsh braking detected (-4.50 m/s^2)");
     assert_eq!(fi, 42);
+}
+
+fn clip_event_record(path: &str, event_dir: &str, timestamp_utc: i64) -> ClipEventRecord {
+    ClipEventRecord {
+        event_json_relative_path: Path::new(path).to_path_buf(),
+        event_dir_relative_path: Path::new(event_dir).to_path_buf(),
+        bucket: Bucket::Saved,
+        metadata: ClipEventMetadata {
+            timestamp_utc,
+            est_lat: Some(42.5414),
+            est_lon: Some(-83.1234),
+            reason: Some("user_interaction_honk".to_string()),
+            city: Some("Detroit".to_string()),
+            camera: Some("front".to_string()),
+        },
+    }
+}
+
+#[test]
+fn migration_v5_creates_clip_events_table() {
+    let store = Store::open_in_memory().unwrap();
+    assert_eq!(store.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+    let table = "clip_events";
+    let n: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'table' AND name = ?1",
+            params![table],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 1, "expected table {table} after v5 migration");
+    for index in [
+        "clip_events_by_timestamp",
+        "clip_events_by_dir",
+        "clip_events_by_primary_clip",
+    ] {
+        let n: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name = ?1",
+                params![index],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "expected index {index} after v5 migration");
+    }
+}
+
+#[test]
+fn migration_from_v4_to_v5_preserves_existing_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("v4.sqlite3");
+    {
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        for sql in &super::schema::MIGRATIONS[..4] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, '4')",
+            params![META_KEY_SCHEMA_VERSION],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO clips (relative_path, bucket, indexed_at_utc)
+             VALUES ('SavedClips/event/a-front.mp4', 'saved', 100)",
+            [],
+        )
+        .unwrap();
+    }
+    let store = Store::open(&db).unwrap();
+    assert_eq!(store.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+    assert_eq!(store.clip_count().unwrap(), 1);
+    assert_eq!(store.clip_event_count().unwrap(), 0);
+}
+
+#[test]
+fn record_clip_event_persists_event_json_metadata() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .record_clip_event(&clip_event_record(
+            "SavedClips/2026-06-01_20-11-00/event.json",
+            "SavedClips/2026-06-01_20-11-00",
+            1_780_345_835,
+        ))
+        .unwrap();
+    let row: (String, i64, f64, f64, String, String, String) = store
+        .conn
+        .query_row(
+            "SELECT bucket, timestamp_utc, est_lat, est_lon, reason, city, camera
+             FROM clip_events",
+            [],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(row.0, "saved");
+    assert_eq!(row.1, 1_780_345_835);
+    assert_eq!(row.2, 42.5414);
+    assert_eq!(row.3, -83.1234);
+    assert_eq!(row.4, "user_interaction_honk");
+    assert_eq!(row.5, "Detroit");
+    assert_eq!(row.6, "front");
+}
+
+#[test]
+fn record_clip_event_links_to_existing_clip_in_event_dir() {
+    let mut store = Store::open_in_memory().unwrap();
+    let started = UNIX_EPOCH + Duration::from_secs(1_780_345_800);
+    let clip_id = store
+        .record_clip(
+            Bucket::Saved,
+            Path::new("SavedClips/2026-06-01_20-11-00/2026-06-01_20-10-00-front.mp4"),
+            &walk(Some(started), vec![]),
+        )
+        .unwrap();
+    store
+        .record_clip_event(&clip_event_record(
+            "SavedClips/2026-06-01_20-11-00/event.json",
+            "SavedClips/2026-06-01_20-11-00",
+            1_780_345_835,
+        ))
+        .unwrap();
+    let linked: i64 = store
+        .conn
+        .query_row("SELECT primary_clip_id FROM clip_events", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(linked, clip_id);
+}
+
+#[test]
+fn record_clip_relinks_preexisting_clip_event() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .record_clip_event(&clip_event_record(
+            "SavedClips/2026-06-01_20-11-00/event.json",
+            "SavedClips/2026-06-01_20-11-00",
+            1_780_345_835,
+        ))
+        .unwrap();
+    let started = UNIX_EPOCH + Duration::from_secs(1_780_345_800);
+    let clip_id = store
+        .record_clip(
+            Bucket::Saved,
+            Path::new("SavedClips/2026-06-01_20-11-00/2026-06-01_20-10-00-front.mp4"),
+            &walk(Some(started), vec![]),
+        )
+        .unwrap();
+    let linked: i64 = store
+        .conn
+        .query_row("SELECT primary_clip_id FROM clip_events", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(linked, clip_id);
+}
+
+#[test]
+fn clip_events_survive_materializer_rebuild_all() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .record_clip_event(&clip_event_record(
+            "SentryClips/2026-06-01_20-11-00/event.json",
+            "SentryClips/2026-06-01_20-11-00",
+            1_780_345_835,
+        ))
+        .unwrap();
+    store
+        .rebuild_trips_now(&crate::mapping_overrides::MappingOverrides::default())
+        .unwrap();
+    assert_eq!(store.clip_event_count().unwrap(), 1);
 }

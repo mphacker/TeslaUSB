@@ -230,6 +230,11 @@ def media_root(tmp_path: Path) -> Path:
     sentry = root / "SentryClips" / "2024-06-01_18-00-00"
     sentry.mkdir(parents=True)
     (sentry / "2024-06-01_18-00-00-front.mp4").write_bytes(b"y" * 2048)
+    # Grid-view-only event: a Sentry "event.mp4" composite with no per-camera
+    # "-front" segments. Must still resolve to a playable clip.
+    grid_event = root / "SentryClips" / "2024-06-02_09-00-00"
+    grid_event.mkdir(parents=True)
+    (grid_event / "event.mp4").write_bytes(b"z" * 4096)
     return root
 
 
@@ -716,6 +721,18 @@ class TestEventClips:
         payload = response.get_json()
         assert payload["structure"] == "events"
         assert payload["front_clips"]
+
+    def test_lists_grid_view_only_event_clip(self, client: FlaskClient) -> None:
+        # An event stored only as a grid-view event.mp4 (no per-camera
+        # "-front" segments) must still resolve to a playable clip so the
+        # overlay plays it directly instead of requesting a non-existent
+        # "-front.mp4" variant.
+        response = client.get("/api/event-clips/SentryClips/2024-06-02_09-00-00")
+        assert response.status_code == HTTPStatus.OK
+        payload = response.get_json()
+        assert payload["structure"] == "events"
+        assert payload["front_clips"] == ["SentryClips/2024-06-02_09-00-00/event.mp4"]
+        assert payload["first_front"] == "event.mp4"
 
     def test_missing_event_returns_404_with_empty_clips(self, client: FlaskClient) -> None:
         response = client.get("/api/event-clips/RecentClips/2099-01-01")

@@ -5,6 +5,17 @@ function getBasePath(videoPath) {
     return angle ? videoPath.replace(`-${angle}.mp4`, '') : videoPath.replace('.mp4', '');
 }
 
+// True when a clip belongs to a multi-camera family (filename ends in
+// "-<angle>.mp4" for one of CAMERA_ANGLES). Single-file clips such as a
+// Sentry/Saved grid-view "event.mp4" have no camera-angle suffix and no
+// sibling angles to switch between, so the overlay must play them as-is
+// rather than synthesising a non-existent "-front.mp4" variant.
+function isMultiCameraClip(videoPath) {
+    if (!videoPath) return false;
+    const filename = videoPath.split('/').pop();
+    return CAMERA_ANGLES.some(a => filename.includes('-' + a + '.'));
+}
+
 // Issue #184 Wave 3 — Phase D. Monotonic sequence tagged on each
 // overlay open. Used by the lazy telemetry fetch to discard a
 // stale response when the user opens a different clip before the
@@ -128,6 +139,10 @@ function wireVideoLoadingIndicator(video) {
 // the user almost always wants front first and can switch from there.
 function preferFrontVariant(waypoint, allWaypoints) {
     if (!waypoint || !waypoint.video_path) return waypoint;
+    // Standalone single-file clips (e.g. a Sentry/Saved grid-view
+    // "event.mp4") have no per-camera variants; never rewrite them to a
+    // "-front.mp4" path that doesn't exist on disk.
+    if (!isMultiCameraClip(waypoint.video_path)) return waypoint;
     const base = getBasePath(waypoint.video_path);
     if (waypoint.video_path.endsWith(`${base.split('/').pop()}-front.mp4`) ||
         waypoint.video_path.endsWith('-front.mp4')) {
@@ -285,21 +300,28 @@ function openVideoOverlay(waypoint, clickPoint, routeWps, tripId) {
     overlay.style.left = left + 'px';
     overlay.style.top = top + 'px';
 
-    const cameraBtns = CAMERA_ANGLES.map(a => {
-        const active = a === overlayCurrentAngle ? ' active' : '';
-        const lbl = CAMERA_LABELS[a];
-        const icon = CAMERA_ICONS[a];
-        return `<button class="cam-btn${active}" data-angle="${a}" title="${lbl}" aria-label="${lbl}">`
-             + `<svg class="cam-icon"><use href="${LUCIDE_SPRITE}#${icon}"></use></svg>`
-             + `<span class="cam-label">${lbl}</span></button>`;
-    }).join('');
+    // Single-file clips (e.g. a Sentry/Saved grid-view "event.mp4") have no
+    // per-camera variants, so there is nothing to switch between — omit the
+    // camera switcher entirely rather than render dead buttons that 404.
+    let camSwitcherHtml = '';
+    if (isMultiCameraClip(waypoint.video_path)) {
+        const cameraBtns = CAMERA_ANGLES.map(a => {
+            const active = a === overlayCurrentAngle ? ' active' : '';
+            const lbl = CAMERA_LABELS[a];
+            const icon = CAMERA_ICONS[a];
+            return `<button class="cam-btn${active}" data-angle="${a}" title="${lbl}" aria-label="${lbl}">`
+                 + `<svg class="cam-icon"><use href="${LUCIDE_SPRITE}#${icon}"></use></svg>`
+                 + `<span class="cam-label">${lbl}</span></button>`;
+        }).join('');
+        camSwitcherHtml = `<div class="cam-switcher" id="camSwitcher">${cameraBtns}</div>`;
+    }
 
     overlay.innerHTML = `
         <div class="video-overlay-header">
             <span id="overlayTitle"></span>
             <button class="close-btn" onclick="closeVideoOverlay()" aria-label="Close video overlay">${ICON_CLOSE}</button>
         </div>
-        <div class="cam-switcher" id="camSwitcher">${cameraBtns}</div>
+        ${camSwitcherHtml}
         <div class="video-overlay-stage">
             <video id="overlayVideo" controls autoplay muted controlslist="nofullscreen" disablepictureinpicture></video>
             <div class="overlay-hud" id="overlayHud">

@@ -414,6 +414,36 @@ def _event_details(folder: str, event_name: str) -> _EventDetails:
     )
 
 
+def _grid_view_event_listing(
+    folder: str, event: str, event_dir: Path
+) -> _EventClipListing:
+    """Build a listing for an event folder with no per-camera segments.
+
+    Some Sentry/Saved events are stored as a single grid-view ``event.mp4``
+    (the stitched all-camera view Tesla writes for short detections) with no
+    ``<timestamp>-front.mp4`` segments. The lone grid clip is the playable
+    video; the overlay plays it directly without camera switching.
+    """
+    grid_clips = tuple(
+        sorted(
+            path.name
+            for path in event_dir.iterdir()
+            if path.is_file() and path.suffix == ".mp4"
+        )
+    )
+    if not grid_clips:
+        raise MappingNotFoundError(
+            "Video file no longer exists. Tesla may have overwritten it. Try re-indexing."
+        )
+    return _EventClipListing(
+        folder=folder,
+        event=event,
+        structure="events",
+        first_front=grid_clips[0],
+        front_clips=tuple(f"{folder}/{event}/{name}" for name in grid_clips),
+    )
+
+
 def _event_clip_listing(folder: str, event_name: str) -> _EventClipListing:
     safe_folder = _safe_segment(folder, field_name="folder")
     safe_event = _safe_segment(event_name, field_name="event_name")
@@ -427,12 +457,14 @@ def _event_clip_listing(folder: str, event_name: str) -> _EventClipListing:
                 if path.is_file() and path.name.endswith(".mp4") and "-front" in path.name
             )
         )
+        if not front_files:
+            return _grid_view_event_listing(safe_folder, safe_event, event_dir)
         clip_index, seek_seconds = event_playback_target(event_dir, safe_event, front_files)
         return _EventClipListing(
             folder=safe_folder,
             event=safe_event,
             structure="events",
-            first_front=front_files[0] if front_files else "",
+            first_front=front_files[0],
             front_clips=tuple(f"{safe_folder}/{safe_event}/{name}" for name in front_files),
             event_clip_index=clip_index,
             event_seek_seconds=seek_seconds,

@@ -8,29 +8,26 @@
 //! [`Region`] list owned by each concrete implementation.
 //!
 //! The [`Geometry`] trait is the seam consumed by the
-//! `synth::read` dispatcher introduced in Phase 2.6: given an
-//! incoming byte offset (from the NBD wire) the dispatcher calls
-//! [`Geometry::region_at`] to decide which sub-synthesizer
-//! ([`crate::fs::fat32::geometry`] for FAT32 BPB, future modules
-//! for the FAT table, directory entries, etc.) should produce the
-//! bytes for that offset.
+//! `synth::read` dispatcher: given an incoming byte offset (from
+//! the NBD wire) the dispatcher calls [`Geometry::region_at`] to
+//! decide which sub-synthesizer (`crate::fs::exfat::geometry` for
+//! the exFAT boot region, the FAT table, directory entries, etc.)
+//! should produce the bytes for that offset.
 //!
 //! ## Why a trait?
 //!
-//! FAT32 and `exFAT` share a region-map shape (header → metadata
-//! tables → data), but the *count* and *kind* of regions differ.
+//! The region map has a shared shape (header → metadata tables →
+//! data), but the *count* and *kind* of regions are exFAT-specific.
 //! A trait lets the dispatcher and integration tests be written
 //! once and parameterised over `<G: Geometry>` (charter §"Best
 //! Architecture Practices" — dependency-inversion seam).
 //!
 //! ## Region kinds are FS-narrow
 //!
-//! [`RegionKind`] enumerates FAT32-relevant variants for Phase 2.1.
-//! `exFAT` Phase 2.8 will extend the enum with its own variants
-//! (allocation bitmap, upcase table, etc.). The enum is internal
-//! and pre-1.0, so extension is fair game; downstream `match` arms
-//! get a `clippy::non_exhaustive_omitted_patterns` warning if they
-//! forget a new variant.
+//! [`RegionKind`] enumerates the exFAT region variants. The enum
+//! is internal and pre-1.0, so extension is fair game; downstream
+//! `match` arms get a `clippy::non_exhaustive_omitted_patterns`
+//! warning if they forget a new variant.
 
 use core::fmt;
 use core::ops::Range;
@@ -154,24 +151,12 @@ impl Region {
 
 /// Tag identifying which on-disk structure lives in a [`Region`].
 ///
-/// New variants land alongside their owning Phase 2.x increment —
-/// the FAT32 boot sector / `FsInfo` / FAT table / data variants
-/// are all defined now even though only the geometry computes them
-/// in Phase 2.1; the corresponding `synthesize` modules land in
-/// 2.2 – 2.5 and consume these variants.
-///
-/// `exFAT` boot-region variants land in Phase 2.8 alongside the
-/// `fs::exfat::geometry` and `fs::exfat::boot_sector` modules.
-/// Subsequent exFAT phases (2.9+) will extend this enum with
-/// `AllocationBitmap`, `UpcaseTable`, and friends.
+/// The exFAT boot-region variants are produced by
+/// `fs::exfat::geometry`; the allocation bitmap and up-case table
+/// live inside the cluster heap and are served from the
+/// [`Self::Data`] region by the exFAT synth.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RegionKind {
-    /// FAT32 boot sector (sector 0 of the reserved region).
-    Fat32BootSector,
-    /// FAT32 `FsInfo` sector (typically sector 1).
-    Fat32FsInfo,
-    /// FAT32 backup boot sector (typically sector 6).
-    Fat32BackupBootSector,
     /// exFAT main boot region — 12 contiguous 512-byte sectors at
     /// the start of the volume (sectors 0..12). Contains, in order:
     /// the main boot sector, 8 main extended boot sectors, the main
@@ -200,9 +185,6 @@ pub enum RegionKind {
 impl fmt::Display for RegionKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Fat32BootSector => f.write_str("fat32-boot-sector"),
-            Self::Fat32FsInfo => f.write_str("fat32-fsinfo"),
-            Self::Fat32BackupBootSector => f.write_str("fat32-backup-boot-sector"),
             Self::ExfatMainBootRegion => f.write_str("exfat-main-boot-region"),
             Self::ExfatBackupBootRegion => f.write_str("exfat-backup-boot-region"),
             Self::Reserved => f.write_str("reserved"),
@@ -215,8 +197,7 @@ impl fmt::Display for RegionKind {
 /// Shared geometry surface for every B-1 synthesized filesystem.
 ///
 /// See the module-level doc for the rationale; see
-/// [`crate::fs::fat32::geometry::Fat32Geometry`] for the Phase 2.1
-/// implementation.
+/// `crate::fs::exfat::geometry` for the exFAT implementation.
 pub trait Geometry {
     /// Bytes per logical sector. Always [`SECTOR_SIZE_BYTES`] for
     /// the current geometries; a future variable-sector geometry
@@ -231,16 +212,15 @@ pub trait Geometry {
     /// the volume size in bytes the geometry was constructed for.
     fn total_sectors(&self) -> u64;
 
-    /// Bytes per data cluster. For FAT32 this is
+    /// Bytes per data cluster.
+    ///
     /// `sectors_per_cluster × sector_size_bytes`.
     fn bytes_per_cluster(&self) -> u32;
 
     /// Number of allocatable clusters in the data region.
     ///
-    /// For FAT32 this must lie in `[65_525, 0x0FFF_FFF5]` (Microsoft
-    /// FAT spec §3.1 minimum + 28-bit cluster number reserved
-    /// range); [`crate::fs::fat32::geometry::Fat32Geometry`]
-    /// enforces this on construction.
+    /// `crate::fs::exfat::geometry` enforces the exFAT bounds on
+    /// construction.
     fn data_cluster_count(&self) -> u32;
 
     /// Ordered, gap-free region map.
@@ -448,18 +428,18 @@ mod tests {
             bytes_per_cluster: 512,
             data_cluster_count: 0,
             regions: vec![
-                region(0, 1024, RegionKind::Fat32BootSector),
+                region(0, 1024, RegionKind::ExfatMainBootRegion),
                 region(1024, 2048, RegionKind::FatTable { index: 0 }),
                 region(3072, 100 * 512 - 3072, RegionKind::Data),
             ],
         };
         assert_eq!(
             geo.region_at(0).map(|r| r.kind),
-            Some(RegionKind::Fat32BootSector)
+            Some(RegionKind::ExfatMainBootRegion)
         );
         assert_eq!(
             geo.region_at(1023).map(|r| r.kind),
-            Some(RegionKind::Fat32BootSector)
+            Some(RegionKind::ExfatMainBootRegion)
         );
         assert_eq!(
             geo.region_at(1024).map(|r| r.kind),
@@ -494,7 +474,7 @@ mod tests {
     #[test]
     fn validate_region_map_accepts_a_well_formed_map() {
         let regions = vec![
-            region(0, 1024, RegionKind::Fat32BootSector),
+            region(0, 1024, RegionKind::ExfatMainBootRegion),
             region(1024, 2048, RegionKind::FatTable { index: 0 }),
             region(3072, 5120, RegionKind::Data),
         ];
@@ -524,7 +504,7 @@ mod tests {
     #[test]
     fn validate_region_map_rejects_zero_length_region() {
         let regions = vec![
-            region(0, 1024, RegionKind::Fat32BootSector),
+            region(0, 1024, RegionKind::ExfatMainBootRegion),
             region(1024, 0, RegionKind::Reserved),
             region(1024, 1024, RegionKind::Data),
         ];
@@ -537,7 +517,7 @@ mod tests {
     #[test]
     fn validate_region_map_rejects_gap() {
         let regions = vec![
-            region(0, 1024, RegionKind::Fat32BootSector),
+            region(0, 1024, RegionKind::ExfatMainBootRegion),
             region(2048, 1024, RegionKind::Data),
         ];
         assert_eq!(
@@ -553,7 +533,7 @@ mod tests {
     #[test]
     fn validate_region_map_rejects_overlap() {
         let regions = vec![
-            region(0, 1024, RegionKind::Fat32BootSector),
+            region(0, 1024, RegionKind::ExfatMainBootRegion),
             region(512, 1024, RegionKind::Data),
         ];
         assert_eq!(
@@ -581,13 +561,12 @@ mod tests {
     #[test]
     fn region_kind_display_is_kebab_case() {
         assert_eq!(
-            format!("{}", RegionKind::Fat32BootSector),
-            "fat32-boot-sector"
+            format!("{}", RegionKind::ExfatMainBootRegion),
+            "exfat-main-boot-region"
         );
-        assert_eq!(format!("{}", RegionKind::Fat32FsInfo), "fat32-fsinfo");
         assert_eq!(
-            format!("{}", RegionKind::Fat32BackupBootSector),
-            "fat32-backup-boot-sector"
+            format!("{}", RegionKind::ExfatBackupBootRegion),
+            "exfat-backup-boot-region"
         );
         assert_eq!(format!("{}", RegionKind::Reserved), "reserved");
         assert_eq!(

@@ -1,0 +1,51 @@
+# /etc/systemd/system/recording-watchdog.service
+#
+# Oneshot wrapper around /usr/local/sbin/recording-watchdog.sh, driven
+# by recording-watchdog.timer. Each timer tick fires this service, which
+# runs one iteration of the fault-detection logic and exits.
+#
+# Installed by setup-lib/13-recording-watchdog.sh.
+
+[Unit]
+Description=TeslaUSB recording watchdog (USB/NBD fault auto-recovery)
+Documentation=https://github.com/mphacker/TeslaUSB
+# The re-present primitive needs the gadget composed and the NBD backing
+# attached; ordering after them avoids spurious "backend dead" logs at
+# the very start of boot (the observe-only baseline tolerates it anyway).
+After=usb-gadget.service nbd-attach@0.service teslafat@0.service
+Wants=usb-gadget.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/recording-watchdog.sh
+
+# A wedged tick must never run forever. Type=oneshot defaults to an
+# INFINITE start timeout; a slow/hung re-present could otherwise hold the
+# service active and stop the timer (OnUnitActiveSec) from re-firing.
+# The re-present primitive bounds its own waits (~settle + 30s recovery),
+# so a tick that actuates can take ~35s; 120s leaves comfortable margin
+# while still reaping a true hang. tesla_gadget_rebind.sh traps SIGTERM
+# and re-presents the gadget if reaped mid-rebind, so a reaped tick can
+# never leave TeslaCam detached.
+TimeoutStartSec=120
+
+# The watchdog itself must never be the thing that gets OOM-killed.
+OOMScoreAdjust=-900
+
+# Never starve the watchdog of CPU/IO.
+Nice=-5
+IOSchedulingClass=realtime
+IOSchedulingPriority=4
+
+# Lock the script down — it reads sysfs/journal, writes /run/teslausb/,
+# and invokes the (root-owned) re-present primitive. No full-FS writes.
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/run/teslausb /run/log
+PrivateTmp=yes
+# NoNewPrivileges must be 'no': the re-present primitive writes the
+# configfs UDC/LUN files which require the full root capability set.
+NoNewPrivileges=no
+
+[Install]
+WantedBy=multi-user.target

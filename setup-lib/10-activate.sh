@@ -78,6 +78,7 @@ B1_ENABLE_UNITS=(
   NetworkManager.service
   watchdog.service
   wifi-watchdog.timer
+  recording-watchdog.timer
 )
 export B1_ENABLE_UNITS
 
@@ -102,6 +103,7 @@ B1_START_ORDER=(
   gadget-recovery.service
   watchdog.service
   wifi-watchdog.timer
+  recording-watchdog.timer
 )
 export B1_START_ORDER
 

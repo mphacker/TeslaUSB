@@ -14,15 +14,15 @@
 //! present, the data-region read path consults the source for
 //! each cluster's bytes instead of zero-filling.
 //!
-//! ## Why a separate trait (not a method on `Fat32Layout`)
+//! ## Why a separate trait (not a method on `ExfatLayout`)
 //!
 //! Three independent implementations are anticipated:
 //!
-//! 1. **`Fat32Layout` / `ExfatLayout`** (Phases 2.17 / 2.18) —
-//!    serves the pre-computed directory cluster bytes from a
+//! 1. **`ExfatLayout`** — serves the pre-computed directory
+//!    cluster bytes from a
 //!    `BTreeMap<u32, Vec<u8>>`. File-content clusters fall
 //!    through to zero-fill at this layer.
-//! 2. **`DirTreeMaterializer`** (Phase 2.19, lives in
+//! 2. **`DirTreeMaterializer`** (lives in
 //!    `teslafat`) — wraps a layout and additionally opens the
 //!    backing file for any cluster that maps to a file
 //!    placement, serving real file bytes via `pread`-style
@@ -31,8 +31,7 @@
 //!    with zeros for tests that want to assert "no
 //!    materializer" behaviour without `Option::None` plumbing.
 //!
-//! The trait is FS-agnostic by design: cluster numbering is
-//! shared between FAT32 and exFAT, and the source contract
+//! The trait is FS-agnostic by design: the source contract
 //! talks in bytes within a single cluster, not in FS-specific
 //! entry kinds.
 //!

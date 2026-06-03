@@ -3,8 +3,7 @@
 //!
 //! Phase 3.1 and 3.2 ship the *decoders* — given an NBD write,
 //! they classify each byte into a typed per-region chunk
-//! ([`crate::fs::fat32::parse::DecodedWrite`] /
-//! [`crate::fs::exfat::parse::DecodedWrite`]). Phase 3.3 ships
+//! ([`crate::fs::exfat::parse::DecodedWrite`]). Phase 3.3 ships
 //! the *POSIX writer*, which routes a `(relative_path,
 //! byte_in_file, &[u8])` onto disk. This module is the bridge
 //! between them: given a `DataCluster { cluster_number, .. }`

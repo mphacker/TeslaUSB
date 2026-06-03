@@ -1,22 +1,19 @@
-//! Phase 2.19 — `SynthBackend`: production [`BlockBackend`]
-//! that serves a real FAT32 or `exFAT` view of an on-disk
+//! `SynthBackend`: production [`BlockBackend`]
+//! that serves a real `exFAT` view of an on-disk
 //! backing tree.
 //!
 //! ## Pipeline
 //!
-//! 1. [`crate::backing_walker::walk`] (Phase 2.15) walks
+//! 1. [`crate::backing_walker::walk`] walks
 //!    `cfg.backing_root` and produces a
 //!    [`teslausb_core::fs::backing_tree::BackingTree`] describing
 //!    every subdirectory + file the synthesizer must surface.
-//! 2. [`teslausb_core::fs::fat32::layout::Fat32Layout::plan`]
-//!    (Phase 2.17) or
-//!    [`teslausb_core::fs::exfat::layout::ExfatLayout::plan`]
-//!    (Phase 2.18) allocates cluster extents for every directory
+//! 2. [`teslausb_core::fs::exfat::layout::ExfatLayout::plan`]
+//!    allocates cluster extents for every directory
 //!    and file, materializes the directory cluster bytes, and
 //!    records each file's `FilePlacement` (first cluster,
 //!    size, backing path).
-//! 3. [`teslausb_core::fs::fat32::synth::Fat32Synth::new`] /
-//!    [`teslausb_core::fs::exfat::synth::ExfatSynth::new`] +
+//! 3. [`teslausb_core::fs::exfat::synth::ExfatSynth::new`] +
 //!    `with_data_source` / `with_layout` build the in-memory
 //!    metadata + directory-cluster dispatchers.
 //! 4. [`SynthBackend::read`] dispatches the NBD read by (a)
@@ -31,7 +28,7 @@
 //! The layout's own [`teslausb_core::fs::data_cluster_source::DataClusterSource`]
 //! impl handles directory clusters and zero-fills file clusters.
 //! Wrapping the layout in a materializer that also performs
-//! blocking file I/O would force `Fat32Synth::read` (a pure-CPU
+//! blocking file I/O would force `ExfatSynth::read` (a pure-CPU
 //! sync function) to call `File::open` + `seek` + `read` inside
 //! the synth dispatcher's loop. That makes the synth's contract
 //! (no I/O) leaky and complicates testing.
@@ -51,28 +48,26 @@
 //! locked in by ADR-0003 is also a current-thread runtime;
 //! blocking file reads in `read` therefore block the runtime
 //! deliberately, matching the serial nature of the underlying
-//! medium. Phase 3+ will revisit this when a write path is
-//! added.
+//! medium.
 //!
 //! ## Write semantics
 //!
-//! As of Phase 3.5e, writes route through an FS-specific state
-//! machine ([`Fat32WriteState`] / [`ExfatWriteState`]) selected
-//! at [`SynthBackend::open`] time. Writes to the boot region or
-//! reserved sectors are swallowed as metadata that the synth
-//! itself owns; FAT-table writes update the in-memory FAT;
+//! Writes route through the [`ExfatWriteState`] state machine
+//! selected at [`SynthBackend::open`] time. Writes to the boot
+//! region or reserved sectors are swallowed as metadata that the
+//! synth itself owns; FAT-table writes update the in-memory FAT;
 //! directory-cluster writes are decoded to discover new files
 //! and route subsequent data-cluster writes to `.partial` files
 //! on the backing tree, finalized atomically on `flush`. See
-//! `backend::fat32_write` and `backend::exfat_write` for
-//! details.
+//! `backend::exfat_write` for details.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
-use std::sync::{Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, SystemTime};
 
 use teslausb_core::backend::{BackendError, BackendResult, BlockBackend, WriteFlags, check_bounds};
@@ -84,16 +79,12 @@ use teslausb_core::fs::exfat::layout::{
 };
 use teslausb_core::fs::exfat::synth::{ExfatSynth, ExfatSynthError};
 use teslausb_core::fs::exfat::upcase_table::{UPCASE_TABLE_SIZE_BYTES, UpcaseTable};
-use teslausb_core::fs::fat32::geometry::Fat32Geometry;
-use teslausb_core::fs::fat32::layout::{Fat32Layout, LayoutError as Fat32LayoutError};
-use teslausb_core::fs::fat32::synth::{Fat32Synth, Fat32SynthError};
 use teslausb_core::fs::geometry::{Geometry, GeometryError};
 
 use crate::backend::dir_tree::{DirTreeError, DirTreeWriter};
 use crate::backend::exfat_write::ExfatWriteState;
-use crate::backend::fat32_write::Fat32WriteState;
 use crate::backing_walker::{WalkError, walk};
-use crate::config::{Config, FsType};
+use crate::config::Config;
 use crate::retention;
 
 /// One GiB in bytes; used to convert `volume_size_gb` (the
@@ -111,21 +102,17 @@ const BYTES_PER_GIB: u64 = 1024 * 1024 * 1024;
 pub enum SynthBackendError {
     /// Walking `backing_root` failed.
     Walk(WalkError),
-    /// Computing the FAT32 / `exFAT` geometry for
+    /// Computing the `exFAT` geometry for
     /// `volume_size_gb * 1 GiB` failed.
     Geometry(GeometryError),
-    /// The FAT32 layout planner rejected the tree.
-    Fat32Layout(Fat32LayoutError),
-    /// The FAT32 synthesizer rejected the geometry or label.
-    Fat32Synth(Fat32SynthError),
     /// The `exFAT` layout planner rejected the tree.
     ExfatLayout(ExfatLayoutError),
     /// The `exFAT` synthesizer rejected the geometry, label,
     /// or layout.
     ExfatSynth(ExfatSynthError),
     /// The configured `volume_label` is too long for the
-    /// `exFAT` 11-UTF-16-code-unit limit. (FAT32's 11-byte
-    /// ASCII limit is already enforced by [`Config::load`]; this
+    /// `exFAT` 11-UTF-16-code-unit limit. (The 11-byte ASCII
+    /// limit is already enforced by [`Config::load`]; this
     /// catches the rarer case where 11 ASCII bytes encode to >11
     /// UTF-16 code units, which cannot happen for ASCII but
     /// could happen if the validation rule ever loosens.)
@@ -134,14 +121,10 @@ pub enum SynthBackendError {
         /// encodes to.
         encoded_len: usize,
     },
-    /// Constructing the [`DirTreeWriter`] (Phase 3.5c write
-    /// path) failed — typically because `backing_root` is not a
+    /// Constructing the [`DirTreeWriter`] write
+    /// path failed — typically because `backing_root` is not a
     /// directory.
     DirTree(DirTreeError),
-    /// Phase 4.4: the `file_extents` `RwLock` was poisoned by a
-    /// panic in another thread holding the read or write guard.
-    /// Recovery requires a daemon restart.
-    LockPoisoned,
 }
 
 impl fmt::Display for SynthBackendError {
@@ -149,8 +132,6 @@ impl fmt::Display for SynthBackendError {
         match self {
             Self::Walk(err) => write!(f, "walking backing_root: {err}"),
             Self::Geometry(err) => write!(f, "computing volume geometry: {err}"),
-            Self::Fat32Layout(err) => write!(f, "planning FAT32 layout: {err}"),
-            Self::Fat32Synth(err) => write!(f, "building FAT32 synthesizer: {err}"),
             Self::ExfatLayout(err) => write!(f, "planning exFAT layout: {err}"),
             Self::ExfatSynth(err) => write!(f, "building exFAT synthesizer: {err}"),
             Self::LabelTooLong { encoded_len } => write!(
@@ -159,7 +140,6 @@ impl fmt::Display for SynthBackendError {
                  exFAT allows at most 11",
             ),
             Self::DirTree(err) => write!(f, "building DirTreeWriter: {err}"),
-            Self::LockPoisoned => write!(f, "file_extents lock poisoned by panicked thread"),
         }
     }
 }
@@ -169,11 +149,9 @@ impl std::error::Error for SynthBackendError {
         match self {
             Self::Walk(err) => Some(err),
             Self::Geometry(err) => Some(err),
-            Self::Fat32Layout(err) => Some(err),
-            Self::Fat32Synth(err) => Some(err),
             Self::ExfatLayout(err) => Some(err),
             Self::ExfatSynth(err) => Some(err),
-            Self::LabelTooLong { .. } | Self::LockPoisoned => None,
+            Self::LabelTooLong { .. } => None,
             Self::DirTree(err) => Some(err),
         }
     }
@@ -226,7 +204,7 @@ struct FileExtent {
 ///
 /// See the module docs for the pipeline.
 pub struct SynthBackend {
-    inner: SynthInner,
+    inner: Box<ExfatSynth>,
     /// File extents sorted ascending by `first_byte`. Each
     /// extent is unique (no overlap) because the cluster
     /// allocator hands out disjoint extents.
@@ -243,34 +221,26 @@ pub struct SynthBackend {
     /// path.
     backing_root: PathBuf,
     size: u64,
-    /// Phase 3.5c (FAT32) / Phase 3.5e (exFAT) write-side state.
-    write_state: Mutex<WriteState>,
-}
-
-/// FS-specific write-side state machine selected at
-/// [`SynthBackend::open`] time. Both FAT32 (Phase 3.5c) and
-/// `exFAT` (Phase 3.5e) variants own a state machine; there is
-/// no read-only fallback because every supported filesystem now
-/// has a write path.
-#[derive(Debug)]
-enum WriteState {
-    Fat32(Fat32WriteState),
-    Exfat(ExfatWriteState),
-}
-
-enum SynthInner {
-    Fat32(Box<Fat32Synth>),
-    Exfat(Box<ExfatSynth>),
+    /// exFAT write-side state.
+    write_state: Mutex<ExfatWriteState>,
+    /// Set once after a poisoned lock has been observed and
+    /// recovered, so the recovery path logs the (catastrophic but
+    /// recoverable) event exactly once instead of on every
+    /// subsequent NBD request at host read/write rate.
+    poison_logged: AtomicBool,
+    /// Count of in-bounds writes whose backing apply/flush failed and
+    /// were dropped to keep the gadget alive (MAJOR 3). An in-bounds
+    /// write must never surface as an NBD `EIO` — that makes the
+    /// Tesla flag the drive and stop recording. The count is surfaced
+    /// for health/diagnostics; the first fault logs loudly, the rest
+    /// at `trace` to avoid flooding the log at host write rate.
+    write_faults: AtomicU64,
 }
 
 impl fmt::Debug for SynthBackend {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let kind = match &self.inner {
-            SynthInner::Fat32(_) => "Fat32",
-            SynthInner::Exfat(_) => "Exfat",
-        };
         f.debug_struct("SynthBackend")
-            .field("fs_type", &kind)
+            .field("fs_type", &"exfat")
             .field("size", &self.size)
             .field(
                 "file_count",
@@ -355,88 +325,7 @@ impl SynthBackend {
             );
         }
         let serial = compute_volume_serial(&cfg.volume_label);
-        match cfg.fs_type {
-            FsType::Fat32 => Self::open_fat32(cfg, volume_size, &tree, serial),
-            FsType::Exfat => Self::open_exfat(cfg, volume_size, &tree, serial),
-        }
-    }
-
-    fn open_fat32(
-        cfg: &Config,
-        volume_size: u64,
-        tree: &BackingTree,
-        serial: u32,
-    ) -> Result<Self, SynthBackendError> {
-        let geometry =
-            Fat32Geometry::for_volume_size(volume_size).map_err(SynthBackendError::Geometry)?;
-        let layout = Fat32Layout::plan(&geometry, cfg.volume_label.as_bytes(), tree)
-            .map_err(SynthBackendError::Fat32Layout)?;
-        let bytes_per_cluster = layout.bytes_per_cluster();
-        let first_data_byte = layout.first_data_byte();
-        let file_extents = build_file_extents(
-            layout.files().iter().map(|f| ExtentInput {
-                allocation: f.allocation,
-                size_bytes: f.size_bytes,
-                backing_path: f.backing_path.clone(),
-            }),
-            first_data_byte,
-            bytes_per_cluster,
-        );
-        // Build pre-existing extents for the Phase 3.5c
-        // write-side cluster map. Skip empty files (no clusters
-        // allocated → nothing to seed); skip files we can't
-        // relativize against the backing root (defensive — every
-        // backing_path is rooted at cfg.backing_root by
-        // construction).
-        let mut pre_existing_extents: Vec<crate::backend::fat32_write::PreExistingExtent> =
-            Vec::new();
-        for f in layout.files() {
-            if f.allocation.is_empty() {
-                continue;
-            }
-            let Ok(relative) = f.backing_path.strip_prefix(&cfg.backing_root) else {
-                tracing::warn!(
-                    backing_path = %f.backing_path.display(),
-                    backing_root = %cfg.backing_root.display(),
-                    "skipping file: backing_path not under backing_root"
-                );
-                continue;
-            };
-            pre_existing_extents.push(crate::backend::fat32_write::PreExistingExtent {
-                first_cluster: f.allocation.first_cluster,
-                cluster_count: f.allocation.cluster_count,
-                first_byte_in_file: 0,
-                file_size_bytes: f.size_bytes,
-                relative_path: relative.to_path_buf(),
-            });
-        }
-        let dir_tree =
-            DirTreeWriter::new(cfg.backing_root.clone()).map_err(SynthBackendError::DirTree)?;
-        let mut fat32_write =
-            Fat32WriteState::new(geometry.clone(), dir_tree, &pre_existing_extents);
-        if let Some(ref spill_dir) = cfg.spill_dir {
-            fat32_write = fat32_write.with_disk_spill(
-                spill_dir.clone(),
-                crate::backend::pending_spill::DEFAULT_DISK_SPILL_BYTES,
-            );
-        }
-        let synth = Fat32Synth::new(
-            geometry,
-            cfg.volume_label.as_bytes(),
-            serial,
-            Some(layout.free_cluster_count()),
-            layout.next_free_cluster_hint(),
-            layout.chains(),
-        )
-        .map_err(SynthBackendError::Fat32Synth)?;
-        let synth = synth.with_data_source(Box::new(layout));
-        Ok(Self {
-            inner: SynthInner::Fat32(Box::new(synth)),
-            file_extents: RwLock::new(file_extents),
-            backing_root: cfg.backing_root.clone(),
-            size: volume_size,
-            write_state: Mutex::new(WriteState::Fat32(fat32_write)),
-        })
+        Self::open_exfat(cfg, volume_size, &tree, serial)
     }
 
     fn open_exfat(
@@ -458,10 +347,16 @@ impl SynthBackend {
         let upcase = UpcaseTable::ascii_identity();
         let bytes_per_cluster = geometry.bytes_per_cluster();
         let bitmap_first = synth.bitmap_first_cluster();
-        let bitmap_clusters = synth.bitmap_cluster_count();
         let upcase_first = synth.upcase_first_cluster();
         let upcase_clusters = synth.upcase_cluster_count();
-        let bitmap_size_bytes = u64::from(bitmap_clusters) * u64::from(bytes_per_cluster);
+        // Spec-minimal DataLength (ceil(ClusterCount/8)) — what a real
+        // mkfs.exfat advertises — not the whole-cluster storage
+        // footprint. The bitmap entry is the only consumer of this
+        // value (it sizes the directory entry's DataLength, not any
+        // allocation), and the synth's own no-layout root uses the
+        // same minimal size, so this keeps both paths consistent
+        // (ADR-0028 review, MINOR 7).
+        let bitmap_size_bytes = synth.bitmap_data_length_bytes();
         let upcase_size_bytes = UPCASE_TABLE_SIZE_BYTES as u64;
         let first_free = upcase_first.saturating_add(upcase_clusters);
         let metadata = ExfatLayoutMetadata {
@@ -482,14 +377,13 @@ impl SynthBackend {
                 size_bytes: f.size_bytes,
                 backing_path: f.backing_path.clone(),
             }),
-            // exFAT cluster numbering starts at 2 just like FAT32 —
+            // exFAT cluster numbering starts at 2 —
             // cluster N lives at cluster_heap_byte_offset + (N - 2) * bpc.
             first_data_byte_for_cluster_two(first_data_byte, bytes_per_cluster),
             bytes_per_cluster,
         );
-        // Build pre-existing extents for the Phase 3.5e exFAT
-        // write-side cluster map. Same shape and semantics as
-        // the FAT32 path: skip empty files (no clusters) and
+        // Build pre-existing extents for the exFAT
+        // write-side cluster map: skip empty files (no clusters) and
         // skip files that can't be relativised against the
         // backing root.
         let mut pre_existing_extents: Vec<crate::backend::exfat_write::PreExistingExfatExtent> =
@@ -520,6 +414,12 @@ impl SynthBackend {
         // Tesla's clip-entry writes resolve from the first one after
         // a remount (2026-06-01 recording-outage fix).
         let dir_placements = layout.dir_placements().to_vec();
+        // Snapshot the root directory's full cluster chain too: when
+        // the root's entry sets exceed one cluster it is FAT-chained
+        // (fixed root cluster -> overflow run -> EOC), and the
+        // resolver must seed every root cluster so a host write into
+        // an overflow cluster resolves to the root directory.
+        let root_chain = layout.root_cluster_chain();
         let synth = synth
             .with_layout(layout)
             .map_err(SynthBackendError::ExfatSynth)?;
@@ -531,7 +431,7 @@ impl SynthBackend {
             ExfatWriteState::new(geometry.clone(), dir_tree, &pre_existing_extents)
                 .with_allocation_bitmap(bitmap_first_cluster, bitmap_cluster_count);
         if let Some(source) = synth.directory_byte_source() {
-            exfat_write = exfat_write.with_directory_seed(source, &dir_placements);
+            exfat_write = exfat_write.with_directory_seed(source, &root_chain, &dir_placements);
         }
         if let Some(ref spill_dir) = cfg.spill_dir {
             exfat_write = exfat_write.with_disk_spill(
@@ -540,11 +440,13 @@ impl SynthBackend {
             );
         }
         Ok(Self {
-            inner: SynthInner::Exfat(Box::new(synth)),
+            inner: Box::new(synth),
             file_extents: RwLock::new(file_extents),
             backing_root: cfg.backing_root.clone(),
             size: volume_size,
-            write_state: Mutex::new(WriteState::Exfat(exfat_write)),
+            write_state: Mutex::new(exfat_write),
+            poison_logged: AtomicBool::new(false),
+            write_faults: AtomicU64::new(0),
         })
     }
 
@@ -570,13 +472,6 @@ impl SynthBackend {
             .map_or_else(|p| p.into_inner().len(), |g| g.len())
     }
 
-    /// Whether this backend is serving a FAT32 view (as opposed
-    /// to `exFAT`). Useful for startup logging.
-    #[must_use]
-    pub fn is_fat32(&self) -> bool {
-        matches!(self.inner, SynthInner::Fat32(_))
-    }
-
     /// Whether the volume is quiescent — no host write is
     /// mid-flight (no unresolved dir entry, no out-of-order data
     /// awaiting an owner, no `.partial` awaiting flush).
@@ -589,10 +484,9 @@ impl SynthBackend {
     /// when the write machine's state is uncertain).
     #[must_use]
     pub fn is_quiescent(&self) -> bool {
-        self.write_state.lock().is_ok_and(|state| match &*state {
-            WriteState::Fat32(s) => s.is_quiescent(),
-            WriteState::Exfat(s) => s.is_quiescent(),
-        })
+        self.write_state
+            .lock()
+            .is_ok_and(|state| state.is_quiescent())
     }
 
     /// Test-only: force the write machine to look mid-write so the
@@ -602,10 +496,7 @@ impl SynthBackend {
     #[cfg(test)]
     pub(crate) fn mark_inflight_for_test(&self) {
         if let Ok(mut state) = self.write_state.lock() {
-            match &mut *state {
-                WriteState::Fat32(s) => s.mark_inflight_for_test(),
-                WriteState::Exfat(s) => s.mark_inflight_for_test(),
-            }
+            state.mark_inflight_for_test();
         }
     }
 
@@ -698,10 +589,7 @@ impl SynthBackend {
         // the write lock for the swap; reads will block briefly.
         let mut surviving: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
         collect_file_paths(&tree.root, &mut surviving);
-        let mut guard = self
-            .file_extents
-            .write()
-            .map_err(|_| SynthBackendError::LockPoisoned)?;
+        let mut guard = self.extents_guard_mut();
         guard.retain(|ext| surviving.contains(&ext.backing_path));
         let live_extents = guard.len();
         drop(guard);
@@ -720,15 +608,92 @@ impl SynthBackend {
         })
     }
 
-    fn read_sync(&self, offset: u64, buf: &mut [u8]) -> BackendResult<()> {
-        match &self.inner {
-            SynthInner::Fat32(s) => s.read(offset, buf).map_err(|e| {
-                BackendError::Io(std::io::Error::other(format!("fat32 synth: {e}")))
-            })?,
-            SynthInner::Exfat(s) => s.read(offset, buf).map_err(|e| {
-                BackendError::Io(std::io::Error::other(format!("exfat synth: {e}")))
-            })?,
+    /// Acquire the `file_extents` read guard, recovering it if a
+    /// prior panic poisoned the lock. A poisoned lock must NEVER
+    /// become an NBD `EIO`: the same backend type serves the
+    /// `TeslaCam` recording partition, and surfacing an error to the
+    /// host makes the Tesla flag the drive and stop recording. The
+    /// snapshot is overwrite-on-reload and reads tolerate a
+    /// partially-updated view (worst case: zero-fill), so serving
+    /// the recovered guard is strictly safer than failing.
+    fn extents_guard(&self) -> RwLockReadGuard<'_, Vec<FileExtent>> {
+        self.file_extents
+            .read()
+            .unwrap_or_else(|poisoned| self.recover_poison(poisoned, "file_extents"))
+    }
+
+    /// Acquire the `file_extents` write guard, recovering a
+    /// poisoned lock for the same reason as [`Self::extents_guard`].
+    fn extents_guard_mut(&self) -> RwLockWriteGuard<'_, Vec<FileExtent>> {
+        self.file_extents
+            .write()
+            .unwrap_or_else(|poisoned| self.recover_poison(poisoned, "file_extents"))
+    }
+
+    /// Acquire the `write_state` guard, recovering a poisoned lock
+    /// so a panic on one request can never wedge the write path
+    /// into a permanent EIO that stops recording.
+    fn write_state_guard(&self) -> MutexGuard<'_, ExfatWriteState> {
+        self.write_state
+            .lock()
+            .unwrap_or_else(|poisoned| self.recover_poison(poisoned, "write_state"))
+    }
+
+    /// Recover the inner guard from a [`PoisonError`], logging the
+    /// event at most once across the backend's lifetime to avoid
+    /// flooding the log at host request rate once a lock is
+    /// poisoned (a poisoned lock stays poisoned).
+    fn recover_poison<G>(&self, poisoned: PoisonError<G>, lock: &str) -> G {
+        if !self.poison_logged.swap(true, Ordering::Relaxed) {
+            tracing::error!(
+                lock,
+                "synth backend lock poisoned by a prior panic; recovering the guard to \
+                 keep serving the gadget (a poisoned lock must never become an NBD EIO \
+                 that makes the Tesla flag the drive and stop recording)"
+            );
         }
+        poisoned.into_inner()
+    }
+
+    /// Record and swallow a backing write/flush fault on an in-bounds
+    /// request so it never becomes an NBD `EIO`.
+    ///
+    /// MAJOR 3: backing-disk `ENOSPC`/`EACCES`, a missing `.partial`,
+    /// or a cluster-map/dir-tree error during `apply_write`/`flush`
+    /// must not propagate to the host. The Tesla treats any `EIO` on
+    /// the drive as a fault, flags it, and stops recording. Dropping
+    /// the write (the file degrades to zero-fill on read via the
+    /// tolerant overlay) keeps the gadget alive, which the operator
+    /// invariant ranks strictly above MEDIA write fidelity. The
+    /// `.partial` finalize path is state-preserving (it re-queues
+    /// failed paths), so a dropped flush is retried on the next one.
+    fn tolerate_write_fault(&self, op: &str, offset: u64, len: usize, err: &BackendError) {
+        let prior = self.write_faults.fetch_add(1, Ordering::Relaxed);
+        if prior == 0 {
+            tracing::warn!(
+                op,
+                offset,
+                len,
+                %err,
+                "in-bounds backing write fault dropped to keep the gadget alive; an in-bounds \
+                 write must never become an NBD EIO that stops TeslaCam recording"
+            );
+        } else {
+            tracing::trace!(op, offset, len, %err, total_faults = prior + 1, "write fault dropped");
+        }
+    }
+
+    /// Number of in-bounds write/flush faults dropped to preserve the
+    /// gadget (MAJOR 3). Exposed for health/diagnostics surfacing.
+    #[must_use]
+    pub fn write_fault_count(&self) -> u64 {
+        self.write_faults.load(Ordering::Relaxed)
+    }
+
+    fn read_sync(&self, offset: u64, buf: &mut [u8]) -> BackendResult<()> {
+        self.inner
+            .read(offset, buf)
+            .map_err(|e| BackendError::Io(std::io::Error::other(format!("exfat synth: {e}"))))?;
         // Overlay file content for every extent that overlaps
         // the requested range. Extents are sorted by first_byte
         // so a binary-search lower bound would let us skip the
@@ -738,10 +703,7 @@ impl SynthBackend {
         // the optimisation to a future increment if profiling
         // shows it matters.
         let read_end = offset.saturating_add(buf.len() as u64);
-        let extents = self
-            .file_extents
-            .read()
-            .map_err(|_| BackendError::Io(std::io::Error::other("file_extents lock poisoned")))?;
+        let extents = self.extents_guard();
         for extent in extents.iter() {
             if extent.end_byte <= offset {
                 continue;
@@ -761,14 +723,8 @@ impl SynthBackend {
         // already persisted the new files to the backing tree.
         // See `ExfatWriteState::overlay_read` for the full
         // rationale and the hardware bug (H3-2) it fixes.
-        let guard = self
-            .write_state
-            .lock()
-            .map_err(|_| BackendError::Io(std::io::Error::other("write lock poisoned")))?;
-        match &*guard {
-            WriteState::Fat32(state) => state.overlay_read(offset, buf),
-            WriteState::Exfat(state) => state.overlay_read(offset, buf),
-        }
+        let guard = self.write_state_guard();
+        guard.overlay_read(offset, buf);
         Ok(())
     }
 }
@@ -791,44 +747,39 @@ impl BlockBackend for SynthBackend {
         if buf.is_empty() {
             return Ok(());
         }
-        let mut guard = self
-            .write_state
-            .lock()
-            .map_err(|_| BackendError::Io(std::io::Error::other("write lock poisoned")))?;
-        match &mut *guard {
-            WriteState::Fat32(state) => {
-                state.apply_write(offset, buf)?;
+        let mut guard = self.write_state_guard();
+        // In-bounds write faults are swallowed (logged + counted) so a
+        // backing ENOSPC/EACCES/etc. never becomes an NBD EIO that
+        // stops TeslaCam recording. See `tolerate_write_fault`.
+        let result = guard
+            .apply_write(offset, buf)
+            .map_err(BackendError::from)
+            .and_then(|()| {
                 if flags.contains(WriteFlags::FUA) {
-                    state.flush()?;
+                    guard.flush().map_err(BackendError::from)
+                } else {
+                    Ok(())
                 }
-            }
-            WriteState::Exfat(state) => {
-                state.apply_write(offset, buf)?;
-                if flags.contains(WriteFlags::FUA) {
-                    state.flush()?;
-                }
-            }
+            });
+        if let Err(err) = result {
+            self.tolerate_write_fault("write", offset, buf.len(), &err);
         }
         Ok(())
     }
 
     async fn flush(&self) -> BackendResult<()> {
-        let mut guard = self
-            .write_state
-            .lock()
-            .map_err(|_| BackendError::Io(std::io::Error::other("write lock poisoned")))?;
-        match &mut *guard {
-            WriteState::Fat32(state) => state.flush()?,
-            WriteState::Exfat(state) => state.flush()?,
+        let mut guard = self.write_state_guard();
+        let result = guard.flush().map_err(BackendError::from);
+        if let Err(err) = result {
+            self.tolerate_write_fault("flush", 0, 0, &err);
         }
         Ok(())
     }
 }
 
-/// Adapter input shared between the FAT32 and `exFAT` paths.
-/// Both layouts expose the same three fields under different
-/// types, so [`build_file_extents`] takes this normalized form
-/// to share the index-construction logic.
+/// Normalized adapter input for the exFAT layout's file
+/// placements, so [`build_file_extents`] can share the
+/// index-construction logic.
 struct ExtentInput {
     allocation: Allocation,
     size_bytes: u64,
@@ -866,13 +817,10 @@ fn build_file_extents(
     by_first_byte.into_values().collect()
 }
 
-/// FAT32's `first_data_byte` from
-/// [`Fat32Layout::first_data_byte`] is already the byte offset
-/// of cluster 2. `exFAT`'s
-/// [`ExfatLayout::cluster_heap_byte_offset`] is the byte offset
-/// of cluster 2 as well (the cluster heap is indexed from 2).
+/// `exFAT`'s [`ExfatLayout::cluster_heap_byte_offset`] is the
+/// byte offset of cluster 2 (the cluster heap is indexed from 2).
 /// This helper exists to make the alignment explicit at the
-/// call sites and to give a single place to revisit if either
+/// call sites and to give a single place to revisit if the
 /// layout's cluster-numbering convention shifts.
 const fn first_data_byte_for_cluster_two(
     cluster_heap_byte_offset: u64,
@@ -928,20 +876,68 @@ fn overlay_file_extent(extent: &FileExtent, read_offset: u64, buf: &mut [u8]) ->
             "overlay target slice out of bounds",
         )));
     };
-    let mut file = File::open(&extent.backing_path)?;
-    file.seek(SeekFrom::Start(file_offset_start))?;
-    file.read_exact(target)?;
+    // Tolerant overlay: a backing file that vanished, was truncated,
+    // or errors mid-read must NEVER fail the NBD read. teslafat must
+    // never EIO a valid in-partition read — a clip removed by
+    // retention or the privileged delete helper between the walk and
+    // this read (or a MEDIA file replaced underfoot) would otherwise
+    // surface to the host as `nbd0: Other side returned error (5)`,
+    // which makes the Tesla flag the drive and stop recording. Serve
+    // the bytes we can read and leave the synth's existing zero-fill
+    // in place for any shortfall, so the host always gets a clean read.
+    let mut file = match File::open(&extent.backing_path) {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!(
+                path = %extent.backing_path.display(),
+                error = %e,
+                "overlay: backing file open failed; serving zero-fill"
+            );
+            return Ok(());
+        }
+    };
+    if let Err(e) = file.seek(SeekFrom::Start(file_offset_start)) {
+        tracing::warn!(
+            path = %extent.backing_path.display(),
+            error = %e,
+            "overlay: backing file seek failed; serving zero-fill"
+        );
+        return Ok(());
+    }
+    let mut done = 0usize;
+    while done < target.len() {
+        let Some(dst) = target.get_mut(done..) else {
+            break;
+        };
+        match file.read(dst) {
+            // Clean EOF: the backing file is shorter than the layout
+            // recorded (e.g. it shrank since the walk). The remaining
+            // target bytes keep the synth's zero-fill.
+            Ok(0) => break,
+            Ok(n) => done += n,
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => {
+                tracing::warn!(
+                    path = %extent.backing_path.display(),
+                    error = %e,
+                    read_bytes = done,
+                    "overlay: backing file read failed; serving partial + zero-fill"
+                );
+                break;
+            }
+        }
+    }
     Ok(())
 }
 
-/// Derive a stable 32-bit volume serial from the configured
+/// Derive a deterministic 32-bit volume serial from the configured
 /// volume label using FNV-1a.
 ///
-/// Tesla treats the serial as a stable identifier across boots
-/// (it caches mount state per-serial), so deriving it from a
-/// config value that itself rarely changes keeps the serial
-/// stable without persisting state. Zero is forbidden by
-/// `mkfs.vfat` convention; the fallback constant is arbitrary.
+/// Deriving the serial from the label makes it reproducible across
+/// boots without persisting any state, so the same backing volume
+/// presents the same serial each time it is synthesized. Zero is
+/// avoided by `mkfs.vfat` convention; the fallback constant is
+/// arbitrary.
 fn compute_volume_serial(label: &str) -> u32 {
     let mut hash: u32 = 0x811c_9dc5;
     for &b in label.as_bytes() {
@@ -972,78 +968,63 @@ mod tests {
         fs::write(path, bytes).unwrap();
     }
 
-    fn sample_cfg(backing_root: PathBuf, fs_type: FsType) -> Config {
+    fn sample_cfg(backing_root: PathBuf) -> Config {
         Config {
             backing_root,
             volume_size_gb: 4,
             volume_label: "TESTLABEL".to_string(),
             cluster_size: None,
-            fs_type,
+            fs_type: crate::config::FsType::Exfat,
             retention: crate::config::RetentionConfig::default(),
             spill_dir: None,
             reload_on_sighup: true,
         }
     }
 
+    /// A poisoned lock must NEVER surface as an NBD `EIO`: that
+    /// makes the Tesla flag the drive and stop recording. After a
+    /// panic poisons both inner locks, reads/writes/flushes must
+    /// still return `Ok` (recovered guard), not `BackendError::Io`.
     #[tokio::test]
-    async fn fat32_open_walks_backing_root_and_size_matches_config() {
+    async fn poisoned_locks_recover_instead_of_returning_eio() {
         let dir = tempfile::tempdir().unwrap();
         write_file(&dir.path().join("alpha.mp4"), &[0x11; 8192]);
-        let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Fat32);
+        let cfg = sample_cfg(dir.path().to_path_buf());
         let backend = SynthBackend::open(&cfg).expect("open ok");
-        assert!(backend.is_fat32());
-        assert_eq!(backend.size(), 4 * BYTES_PER_GIB);
-        assert!(
-            backend.file_count() >= 1,
-            "expected at least one file extent, got {}",
-            backend.file_count()
-        );
+
+        // Poison write_state by panicking while its guard is held.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _g = backend.write_state.lock().unwrap();
+            panic!("intentional poison of write_state");
+        }));
+        // Poison file_extents the same way.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _g = backend.file_extents.write().unwrap();
+            panic!("intentional poison of file_extents");
+        }));
+
+        let mut buf = vec![0u8; 512];
+        backend
+            .read(0, &mut buf)
+            .await
+            .expect("read must recover a poisoned lock, not EIO");
+        backend
+            .write(0, &[0u8; 512], WriteFlags::NONE)
+            .await
+            .expect("write must recover a poisoned lock, not EIO");
+        backend
+            .flush()
+            .await
+            .expect("flush must recover a poisoned lock, not EIO");
     }
 
     #[tokio::test]
-    async fn fat32_read_at_offset_zero_returns_boot_sector_signature() {
+    async fn read_past_end_of_file_returns_zero_padding() {
         let dir = tempfile::tempdir().unwrap();
-        let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Fat32);
-        let backend = SynthBackend::open(&cfg).expect("open ok");
-        let mut sector = [0u8; 512];
-        backend.read(0, &mut sector).await.expect("read ok");
-        // Boot sector signature at 0x1FE/0x1FF is 0x55 0xAA per
-        // fatgen103 §3. This is the cheapest invariant that
-        // proves we wired up the FAT32 synthesizer correctly.
-        assert_eq!(sector[510], 0x55, "boot sig byte 0: {:#x}", sector[510]);
-        assert_eq!(sector[511], 0xAA, "boot sig byte 1: {:#x}", sector[511]);
-    }
-
-    #[tokio::test]
-    async fn fat32_read_of_file_cluster_returns_backing_bytes() {
-        let dir = tempfile::tempdir().unwrap();
-        let payload: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
-        write_file(&dir.path().join("data.bin"), &payload);
-        let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Fat32);
-        let backend = SynthBackend::open(&cfg).expect("open ok");
-        // Read the first file extent's first cluster from the
-        // volume. The single backing file lives at a known
-        // first_cluster which we can recover from the backend's
-        // own extent table.
-        let extent_first = backend
-            .extents_snapshot()
-            .into_iter()
-            .next()
-            .expect("at least one extent")
-            .first_byte;
-        let mut buf = vec![0u8; payload.len()];
-        backend.read(extent_first, &mut buf).await.expect("read ok");
-        assert_eq!(buf, payload, "file content overlay mismatch");
-    }
-
-    #[tokio::test]
-    async fn fat32_read_past_end_of_file_returns_zero_padding() {
-        let dir = tempfile::tempdir().unwrap();
-        // 100 bytes — well below a single cluster (≥ 512 bytes
-        // on the smallest FAT32 volume).
+        // 100 bytes — well below a single cluster.
         let payload = vec![0xAAu8; 100];
         write_file(&dir.path().join("short.bin"), &payload);
-        let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Fat32);
+        let cfg = sample_cfg(dir.path().to_path_buf());
         let backend = SynthBackend::open(&cfg).expect("open ok");
         let extent = backend
             .extents_snapshot()
@@ -1069,20 +1050,114 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fat32_write_to_boot_sector_is_accepted_as_metadata() {
-        // Phase 3.5c: FAT32 writes are now wired through
-        // Fat32WriteState. Writes to metadata regions (boot
-        // sector, FSInfo, reserved) are swallowed silently;
-        // they don't fail. The actual file content survives a
-        // round-trip via tests in `fat32_write::tests` and
-        // tests/synth_write_integration.rs.
+    async fn read_of_vanished_backing_file_returns_zeros_not_eio() {
+        // Regression (INCIDENT 2026-06-02): a backing file removed by
+        // retention or the privileged delete helper BETWEEN the walk
+        // and an on-demand overlay read must NOT surface as NBD_EIO
+        // (`nbd0: Other side returned error (5)`), which makes the
+        // Tesla flag the drive and stop recording. The vanished file's
+        // region must read back as the synth's zero-fill.
         let dir = tempfile::tempdir().unwrap();
-        let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Fat32);
+        let path = dir.path().join("data.bin");
+        write_file(&path, &[0x33u8; 4096]);
+        let cfg = sample_cfg(dir.path().to_path_buf());
         let backend = SynthBackend::open(&cfg).expect("open ok");
+        let extent_first = backend
+            .extents_snapshot()
+            .into_iter()
+            .next()
+            .expect("at least one extent")
+            .first_byte;
+        // Simulate the file disappearing after the walk indexed it.
+        fs::remove_file(&path).unwrap();
+        let mut buf = vec![0xFFu8; 4096];
         backend
-            .write(0, &[0u8; 16], WriteFlags::NONE)
+            .read(extent_first, &mut buf)
             .await
-            .expect("metadata write should be accepted");
+            .expect("read must not EIO on a vanished backing file");
+        assert!(
+            buf.iter().all(|&b| b == 0),
+            "vanished backing file must read back as zero-fill, not an error"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_of_shrunk_backing_file_serves_available_then_zero() {
+        // Regression: a backing file truncated/shrunk after the walk
+        // recorded its size must serve the bytes that remain and
+        // zero-fill the shortfall — never EIO the whole read.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.bin");
+        write_file(&path, &[0x44u8; 4096]);
+        let cfg = sample_cfg(dir.path().to_path_buf());
+        let backend = SynthBackend::open(&cfg).expect("open ok");
+        let extent_first = backend
+            .extents_snapshot()
+            .into_iter()
+            .next()
+            .expect("at least one extent")
+            .first_byte;
+        // File shrinks to 100 bytes after the walk recorded 4096.
+        write_file(&path, &[0x44u8; 100]);
+        let mut buf = vec![0xFFu8; 4096];
+        backend
+            .read(extent_first, &mut buf)
+            .await
+            .expect("read must not EIO on a shrunk backing file");
+        assert_eq!(
+            &buf[..100],
+            &[0x44u8; 100],
+            "available backing bytes must be served"
+        );
+        assert!(
+            buf[100..].iter().all(|&b| b == 0),
+            "shortfall must be zero-filled, not an error"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_of_unreadable_backing_file_returns_zeros_not_eio() {
+        // Regression (INCIDENT 2026-06-02/03, confirmed root cause): the
+        // MEDIA partition's LightShow/ files were mode 0600 owned by `pi`,
+        // while teslafat runs as the `teslausb` service user. The startup
+        // walk stats them through the 0755 directories and records an
+        // extent, but the on-demand overlay `File::open` fails with EACCES
+        // at read time. The deployed build mapped that to
+        // `nbd0: Other side returned error (5)` at the SAME sector every
+        // boot — a deterministic, fixed-LBA EIO. A present-but-unreadable
+        // backing file must read back as the synth's zero-fill, never EIO.
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lightshow.bin");
+        write_file(&path, &[0x5Au8; 4096]);
+        let cfg = sample_cfg(dir.path().to_path_buf());
+        let backend = SynthBackend::open(&cfg).expect("open ok");
+        let extent_first = backend
+            .extents_snapshot()
+            .into_iter()
+            .next()
+            .expect("at least one extent")
+            .first_byte;
+        // Drop all permission bits so a non-privileged service user cannot
+        // open it — exactly the 0600-pi-vs-teslausb mismatch on the device.
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        // Skip when the process bypasses mode bits (running as root, or a
+        // filesystem that ignores permissions): the EACCES path is not
+        // reproducible here and the assertion would be vacuous.
+        if fs::File::open(&path).is_ok() {
+            return;
+        }
+        let mut buf = vec![0xFFu8; 4096];
+        backend
+            .read(extent_first, &mut buf)
+            .await
+            .expect("read must not EIO on an unreadable (0600) backing file");
+        assert!(
+            buf.iter().all(|&b| b == 0),
+            "unreadable backing file must read back as zero-fill, not an error"
+        );
     }
 
     #[tokio::test]
@@ -1093,7 +1168,7 @@ mod tests {
         // clusters / FAT / dirs are exercised by
         // exfat_write::tests.
         let dir = tempfile::tempdir().unwrap();
-        let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Exfat);
+        let cfg = sample_cfg(dir.path().to_path_buf());
         let backend = SynthBackend::open(&cfg).expect("open ok");
         backend
             .write(0, &[0u8; 16], WriteFlags::NONE)
@@ -1104,7 +1179,7 @@ mod tests {
     #[tokio::test]
     async fn flush_succeeds_with_no_state() {
         let dir = tempfile::tempdir().unwrap();
-        let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Fat32);
+        let cfg = sample_cfg(dir.path().to_path_buf());
         let backend = SynthBackend::open(&cfg).expect("open ok");
         backend.flush().await.expect("flush ok");
     }
@@ -1112,7 +1187,7 @@ mod tests {
     #[tokio::test]
     async fn read_out_of_bounds_returns_out_of_bounds() {
         let dir = tempfile::tempdir().unwrap();
-        let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Fat32);
+        let cfg = sample_cfg(dir.path().to_path_buf());
         let backend = SynthBackend::open(&cfg).expect("open ok");
         let mut buf = [0u8; 16];
         let err = backend
@@ -1126,16 +1201,15 @@ mod tests {
     async fn exfat_open_walks_backing_root_and_size_matches_config() {
         let dir = tempfile::tempdir().unwrap();
         write_file(&dir.path().join("clip.mp4"), &[0x22; 4096]);
-        let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Exfat);
+        let cfg = sample_cfg(dir.path().to_path_buf());
         let backend = SynthBackend::open(&cfg).expect("open ok");
-        assert!(!backend.is_fat32());
         assert_eq!(backend.size(), 4 * BYTES_PER_GIB);
     }
 
     #[tokio::test]
     async fn exfat_read_at_offset_zero_returns_main_boot_sector_signature() {
         let dir = tempfile::tempdir().unwrap();
-        let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Exfat);
+        let cfg = sample_cfg(dir.path().to_path_buf());
         let backend = SynthBackend::open(&cfg).expect("open ok");
         let mut sector = [0u8; 512];
         backend.read(0, &mut sector).await.expect("read ok");
@@ -1146,11 +1220,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exfat_allocation_bitmap_entry_advertises_spec_minimal_data_length() {
+        // MINOR 7 regression: the allocation-bitmap directory entry's
+        // DataLength must be ceil(ClusterCount/8) — what a real
+        // mkfs.exfat advertises — NOT the whole-cluster storage
+        // footprint. Pre-fix it advertised a full cluster.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = sample_cfg(dir.path().to_path_buf());
+        let backend = SynthBackend::open(&cfg).expect("open ok");
+
+        let geometry =
+            ExfatGeometry::for_volume_size(4 * BYTES_PER_GIB).expect("4 GiB exFAT geometry");
+        let sector = u64::from(teslausb_core::fs::geometry::SECTOR_SIZE_BYTES);
+        let root_offset = u64::from(geometry.cluster_heap_offset_sectors()) * sector;
+
+        // The first root-directory entry is the allocation bitmap
+        // (type 0x81); its DataLength is an 8-byte LE field at 0x18.
+        let mut entry = [0u8; 32];
+        backend
+            .read(root_offset, &mut entry)
+            .await
+            .expect("read root bitmap entry");
+        assert_eq!(entry[0], 0x81, "first root entry is the allocation bitmap");
+        let data_length = u64::from_le_bytes(entry[0x18..0x20].try_into().unwrap());
+
+        let expected = u64::from(geometry.cluster_count()).div_ceil(8);
+        assert_eq!(
+            data_length, expected,
+            "bitmap DataLength must be ceil(ClusterCount/8)"
+        );
+        assert!(
+            data_length < u64::from(geometry.bytes_per_cluster()),
+            "for this geometry the spec-minimal bitmap is smaller than one \
+             cluster, proving the entry is no longer over-stated to a full cluster"
+        );
+    }
+
+    #[tokio::test]
     async fn exfat_read_of_file_cluster_returns_backing_bytes() {
         let dir = tempfile::tempdir().unwrap();
         let payload: Vec<u8> = (0..2048u32).map(|i| ((i * 7) % 251) as u8).collect();
         write_file(&dir.path().join("recording.h265"), &payload);
-        let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Exfat);
+        let cfg = sample_cfg(dir.path().to_path_buf());
         let backend = SynthBackend::open(&cfg).expect("open ok");
         let extent_first = backend
             .extents_snapshot()
@@ -1188,7 +1299,7 @@ mod tests {
     async fn backing_root_must_exist() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("does-not-exist");
-        let cfg = sample_cfg(missing, FsType::Fat32);
+        let cfg = sample_cfg(missing);
         let err = SynthBackend::open(&cfg).expect_err("open should fail");
         assert!(matches!(err, SynthBackendError::Walk(_)));
     }
@@ -1229,7 +1340,7 @@ mod tests {
             7200,
         );
 
-        let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Fat32);
+        let cfg = sample_cfg(dir.path().to_path_buf());
         let backend = SynthBackend::open(&cfg).expect("open ok");
 
         let aged_present = backend.extents_snapshot().iter().any(|e| {
@@ -1272,7 +1383,7 @@ mod tests {
             86_400 * 365,
         );
 
-        let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Fat32);
+        let cfg = sample_cfg(dir.path().to_path_buf());
         let backend = SynthBackend::open(&cfg).expect("open ok");
 
         let sentry_present = backend
@@ -1306,7 +1417,7 @@ mod tests {
             86_400 * 365,
         );
 
-        let mut cfg = sample_cfg(dir.path().to_path_buf(), FsType::Fat32);
+        let mut cfg = sample_cfg(dir.path().to_path_buf());
         cfg.retention.recentclips_hide_after_seconds = 0;
         let backend = SynthBackend::open(&cfg).expect("open ok");
 
@@ -1318,30 +1429,6 @@ mod tests {
             present,
             "hide_after_seconds = 0 must mean retention disabled"
         );
-    }
-
-    #[tokio::test]
-    async fn retention_hides_aged_recentclips_in_exfat_layout_too() {
-        // Symmetric assertion for the exFAT path — both layout
-        // planners must consume the filtered tree.
-        let dir = tempfile::tempdir().unwrap();
-        write_file(&dir.path().join("RecentClips/old.mp4"), &[0xAA; 4096]);
-        write_file(&dir.path().join("RecentClips/new.mp4"), &[0xBB; 4096]);
-        backdate(&dir.path().join("RecentClips/old.mp4"), 7200);
-
-        let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Exfat);
-        let backend = SynthBackend::open(&cfg).expect("open ok");
-
-        let old_present = backend
-            .extents_snapshot()
-            .iter()
-            .any(|e| e.backing_path.ends_with("RecentClips/old.mp4"));
-        let new_present = backend
-            .extents_snapshot()
-            .iter()
-            .any(|e| e.backing_path.ends_with("RecentClips/new.mp4"));
-        assert!(!old_present, "exFAT layout must also honor retention");
-        assert!(new_present);
     }
 
     #[tokio::test]
@@ -1362,7 +1449,7 @@ mod tests {
         write_file(&dir.path().join("RecentClips/kept.mp4"), &[0xBB; 4096]);
         backdate(&dir.path().join("RecentClips/hidden.mp4"), 7200);
 
-        let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Fat32);
+        let cfg = sample_cfg(dir.path().to_path_buf());
         let backend = SynthBackend::open(&cfg).expect("open ok");
 
         // No extent in the layout names the hidden file.
@@ -1391,7 +1478,7 @@ mod tests {
         write_file(&dir.path().join("RecentClips/fresh.mp4"), &[0xBB; 4096]);
         backdate(&dir.path().join("RecentClips/old.mp4"), 7200);
 
-        let mut cfg = sample_cfg(dir.path().to_path_buf(), FsType::Fat32);
+        let mut cfg = sample_cfg(dir.path().to_path_buf());
         cfg.retention.recentclips_hide_after_seconds = 0;
         let backend = SynthBackend::open(&cfg).expect("open ok");
         assert!(
@@ -1433,7 +1520,7 @@ mod tests {
         write_file(&dir.path().join("RecentClips/clip.mp4"), &[0xAA; 4096]);
         backdate(&dir.path().join("RecentClips/clip.mp4"), 7200);
 
-        let mut cfg = sample_cfg(dir.path().to_path_buf(), FsType::Fat32);
+        let mut cfg = sample_cfg(dir.path().to_path_buf());
         cfg.retention.recentclips_hide_after_seconds = 3600;
         let backend = SynthBackend::open(&cfg).expect("open ok");
 
@@ -1449,7 +1536,7 @@ mod tests {
     async fn reload_retention_returns_walk_error_if_root_removed() {
         let dir = tempfile::tempdir().unwrap();
         write_file(&dir.path().join("RecentClips/x.mp4"), &[0xAA; 1024]);
-        let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Fat32);
+        let cfg = sample_cfg(dir.path().to_path_buf());
         let backend = SynthBackend::open(&cfg).expect("open ok");
         let kept = dir; // keep alive
         // Force a walk failure by handing the backend a now-empty

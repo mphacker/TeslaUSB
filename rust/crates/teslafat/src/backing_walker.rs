@@ -40,6 +40,7 @@
 //! exact `backing_path` formatting.
 
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -296,6 +297,44 @@ fn walk_dir(
     subdirs.sort_by(|a, b| name_cmp(&a.name, &b.name));
     files.sort_by(|a, b| name_cmp(&a.name, &b.name));
 
+    // Enforce per-directory case-insensitive uniqueness. FAT32 and
+    // exFAT both fold names case-insensitively at the directory-entry
+    // layer (the exFAT synth uses an ASCII-only upcase table —
+    // ADR-0009 — so `to_ascii_uppercase` is the matching fold). Two
+    // backing entries that fold to the same key (`Foo.mp4` vs
+    // `foo.mp4`, or a directory and a file of the same folded name)
+    // would synthesize into a single ambiguous namespace where the
+    // driver can shadow one entry, mis-route reads, or surface a
+    // corrupt listing to Tesla. Keep the first entry in the already
+    // deterministic (case-sensitive) sort order and warn-and-skip the
+    // rest. Subdirectories are considered before files so a dir/file
+    // collision resolves deterministically.
+    let mut seen: HashSet<String> = HashSet::new();
+    subdirs.retain(|d| {
+        if seen.insert(d.name.to_ascii_uppercase()) {
+            true
+        } else {
+            tracing::warn!(
+                name = %d.name,
+                dir = %path.display(),
+                "skipping backing subdirectory whose case-insensitive name collides with an earlier entry",
+            );
+            false
+        }
+    });
+    files.retain(|file| {
+        if seen.insert(file.name.to_ascii_uppercase()) {
+            true
+        } else {
+            tracing::warn!(
+                name = %file.name,
+                dir = %path.display(),
+                "skipping backing file whose case-insensitive name collides with an earlier entry",
+            );
+            false
+        }
+    });
+
     let mtime = meta.modified().map_err(|e| WalkError::Io {
         path: path.to_path_buf(),
         source: e,
@@ -313,13 +352,12 @@ fn walk_dir(
 /// Byte-wise comparison of two leaf names.
 ///
 /// FAT32 and exFAT both store names case-insensitively at the
-/// directory-entry layer (exFAT via the upcase table). Sorting
-/// case-insensitively here would mean two distinct backing
-/// entries `Foo.mp4` and `foo.mp4` map to adjacent dir entries —
-/// already a problem at synthesis time, but not one the walker
-/// has authority to resolve. Sort case-sensitively (byte order)
-/// and let the planner (Phase 2.16) detect the collision when
-/// it builds the dir-entry array.
+/// directory-entry layer (exFAT via the upcase table). Sorting is
+/// kept case-sensitive (byte order) for stable, platform-independent
+/// cluster assignment; the case-insensitive *collision* between two
+/// distinct backing entries (`Foo.mp4` vs `foo.mp4`) is resolved
+/// separately in [`walk_dir`], which warns and skips the later
+/// colliding entry so the synthesized namespace stays unambiguous.
 fn name_cmp(a: &str, b: &str) -> Ordering {
     a.cmp(b)
 }
@@ -430,6 +468,40 @@ mod tests {
         write(dir.path().join("v.mp4"), b"x").unwrap();
         let tree = walk(dir.path()).unwrap();
         assert_eq!(tree.root.name, "");
+    }
+
+    // MAJOR 5: two backing entries whose names fold to the same
+    // case-insensitive key must NOT both reach synthesis, where the
+    // shared FAT/exFAT namespace would shadow one of them and surface
+    // an ambiguous (potentially corrupt) listing to Tesla. The walker
+    // keeps the first in deterministic byte-sort order and skips the
+    // rest. Unix-only: a case-insensitive host filesystem (Windows,
+    // macOS default) cannot hold both files to begin with.
+    #[cfg(unix)]
+    #[test]
+    fn skips_case_insensitive_duplicate_files() {
+        let dir = fixture_root();
+        write(dir.path().join("Front.mp4"), b"x").unwrap();
+        write(dir.path().join("front.mp4"), b"yy").unwrap();
+        let tree = walk(dir.path()).unwrap();
+        let names: Vec<&str> = tree.root.files.iter().map(|f| f.name.as_str()).collect();
+        // Byte-sort puts uppercase 'F' (0x46) before lowercase 'f'
+        // (0x66), so `Front.mp4` is kept and `front.mp4` is skipped.
+        assert_eq!(names, vec!["Front.mp4"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skips_directory_colliding_with_file_name() {
+        let dir = fixture_root();
+        create_dir_all(dir.path().join("Clip")).unwrap();
+        write(dir.path().join("clip"), b"x").unwrap();
+        let tree = walk(dir.path()).unwrap();
+        // Subdirectories are deduplicated first, so the directory wins
+        // and the colliding file is dropped.
+        assert_eq!(tree.root.subdirs.len(), 1);
+        assert_eq!(tree.root.subdirs[0].name, "Clip");
+        assert!(tree.root.files.is_empty());
     }
 
     // ---- rejection cases -------------------------------------

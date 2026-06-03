@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 import zipfile
 from io import BytesIO
 from pathlib import Path
@@ -110,6 +112,22 @@ def test_upload_files_saves_multiple_supported_files(
     assert result.message == "Successfully uploaded 2 file(s)"
     assert (light_show_folder / "show.fseq").read_bytes() == b"fseq"
     assert (light_show_folder / "audio.mp3").read_bytes() == b"mp3"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes are not enforced on Windows")
+def test_upload_files_publishes_gadget_readable_files(
+    service: LightShowService,
+    light_show_folder: Path,
+) -> None:
+    # Regression: published files must be readable by the teslafat gadget user
+    # (a different user than this web process). tempfile.mkstemp() defaults to
+    # 0600, which previously made the MEDIA partition unreadable and caused a
+    # deterministic NBD I/O error when the car read the light-show file.
+    service.upload_files([_upload("show.fseq", b"fseq")])
+
+    mode = stat.S_IMODE((light_show_folder / "show.fseq").stat().st_mode)
+    assert mode & stat.S_IROTH, f"published file mode {mode:#o} is not other-readable"
+    assert mode & stat.S_IRGRP, f"published file mode {mode:#o} is not group-readable"
 
 
 def test_upload_files_returns_false_when_no_candidates(service: LightShowService) -> None:

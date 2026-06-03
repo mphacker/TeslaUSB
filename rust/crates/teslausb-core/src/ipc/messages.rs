@@ -181,7 +181,7 @@ pub struct StatusBody {
     pub lun_id: u8,
     /// Daemon lifecycle state.
     pub state: DaemonState,
-    /// FAT32 volume label currently presented to Tesla.
+    /// `exFAT` volume label currently presented to Tesla.
     pub volume_label: String,
     /// Size of the synthesized volume in bytes.
     pub volume_size_bytes: u64,

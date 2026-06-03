@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import io
 import os
+import stat
 import struct
 import zlib
 from typing import TYPE_CHECKING, cast
@@ -76,6 +77,20 @@ class TestUpload:
         assert result.success is True
         assert result.file_count == 1
         assert (plates_folder / "MI.png").is_file()
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX file modes are not enforced on Windows")
+    def test_publishes_gadget_readable_plate(
+        self, service: PhotoPlateService, plates_folder: Path
+    ) -> None:
+        # Regression: published plates must be readable by the teslafat gadget
+        # user (a different user than this web process). tempfile.mkstemp()
+        # defaults to 0600, which previously made the MEDIA partition unreadable
+        # and caused a deterministic NBD I/O error when the car read the plate.
+        service.upload_files(_fake_uploads(_FakeUpload("MI.png", _png_bytes(420, 75))))
+
+        mode = stat.S_IMODE((plates_folder / "MI.png").stat().st_mode)
+        assert mode & stat.S_IROTH, f"published plate mode {mode:#o} is not other-readable"
+        assert mode & stat.S_IRGRP, f"published plate mode {mode:#o} is not group-readable"
 
     def test_accepts_exact_492x75_png(self, service: PhotoPlateService) -> None:
         upload = _FakeUpload("Italy.png", _png_bytes(492, 75))

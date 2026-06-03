@@ -1,0 +1,20 @@
+# /etc/systemd/system/recording-watchdog.timer
+#
+# Fires recording-watchdog.service every 30 s. AccuracySec=1s keeps the
+# tick crisp so a UDC drop is confirmed (2 ticks) and recovered inside
+# ~60-90 s, and a kernel NBD fault is recovered on the next tick.
+#
+# Installed by setup-lib/13-recording-watchdog.sh.
+
+[Unit]
+Description=TeslaUSB recording watchdog (30 s tick)
+Documentation=https://github.com/mphacker/TeslaUSB
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=30s
+AccuracySec=1s
+Unit=recording-watchdog.service
+
+[Install]
+WantedBy=timers.target

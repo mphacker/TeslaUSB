@@ -44,12 +44,6 @@ pub const MAX_PRIMARY_PARTITIONS: usize = 4;
 /// partition; there is no exFAT-specific MBR type byte.
 pub const PARTITION_TYPE_EXFAT: u8 = 0x07;
 
-/// Partition type byte for a FAT32 volume addressed via LBA
-/// (`0x0C`). Used for any partition the operator keeps on FAT32
-/// during the all-exFAT migration (ADR-0023); both Tesla and Linux
-/// mount the FAT32 volume found inside such a partition.
-pub const PARTITION_TYPE_FAT32_LBA: u8 = 0x0C;
-
 /// Sectors per MiB at the universal 512-byte logical sector size.
 pub const SECTORS_PER_MIB: u32 = (1024 * 1024) / SECTOR_SIZE_BYTES;
 

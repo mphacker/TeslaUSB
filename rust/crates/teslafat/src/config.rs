@@ -2,7 +2,7 @@
 //!
 //! Schema is enforced at parse time via `#[serde(deny_unknown_fields)]`
 //! and re-validated after parse by an internal `validate` helper for
-//! the semantic constraints `serde` alone cannot express (FAT32
+//! the semantic constraints `serde` alone cannot express (exFAT
 //! label length, volume-size range, power-of-two cluster size).
 //! Both paths surface their failure as `anyhow::Error` so the
 //! binary boundary can attach the config path with `with_context`.
@@ -21,26 +21,42 @@ use serde::Deserialize;
 const VOLUME_SIZE_GB_MIN: u32 = 4;
 const VOLUME_SIZE_GB_MAX: u32 = 2048;
 
-/// Filesystem flavour to synthesize on the NBD export.
+/// Filesystem flavour synthesized on the NBD export.
 ///
-/// Defaults to [`FsType::Fat32`] (Tesla's classic compatibility
-/// target). [`FsType::Exfat`] is supported for very large
-/// volumes where the FAT32 32 KiB cluster size becomes wasteful;
-/// firmware support for exFAT on the dashcam volume varies by
-/// vehicle model and Tesla firmware version, so the default is
-/// conservative.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
+/// The project is **exFAT-only**; FAT32 support was removed (see
+/// `docs/adr`). This enum has a single variant and exists purely
+/// so the deployed on-disk config (`fs_type = "exfat"`, written by
+/// `setup-lib/11-gadget.sh`) keeps parsing after the removal — a
+/// config parse failure stops the daemon and therefore stops the
+/// car recording, the #1 invariant. The custom [`Deserialize`]
+/// accepts `"exfat"` (and rejects `"fat32"` with a clear error)
+/// so an operator who hand-edits a stale value gets a diagnostic
+/// instead of a silent fallback. This is a temporary back-compat
+/// shim; drop the field entirely once every fleet config has been
+/// regenerated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FsType {
-    /// Synthesize a FAT32 volume (default).
-    Fat32,
-    /// Synthesize an `exFAT` volume.
+    /// Synthesize an `exFAT` volume (the only supported flavour).
+    #[default]
     Exfat,
 }
 
-impl Default for FsType {
-    fn default() -> Self {
-        Self::Fat32
+impl<'de> Deserialize<'de> for FsType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        match raw.as_str() {
+            "exfat" => Ok(Self::Exfat),
+            "fat32" => Err(serde::de::Error::custom(
+                "fs_type = \"fat32\" is no longer supported; this project is exFAT-only. \
+                 Set fs_type = \"exfat\" (or remove the key) and regenerate the gadget config.",
+            )),
+            other => Err(serde::de::Error::custom(format!(
+                "unknown fs_type {other:?}; the only supported value is \"exfat\"",
+            ))),
+        }
     }
 }
 const CLUSTER_SIZE_MIN: u32 = 512;
@@ -81,8 +97,8 @@ pub struct Config {
     /// not extend `RecentClips` retention (time-based).
     pub volume_size_gb: u32,
 
-    /// Volume label shown in Tesla's UI / file managers. FAT32
-    /// limits this to 11 ASCII characters; longer is rejected.
+    /// Volume label shown in Tesla's UI / file managers. exFAT
+    /// limits this to 11 characters; longer is rejected.
     #[serde(default = "default_label")]
     pub volume_label: String,
 
@@ -92,9 +108,10 @@ pub struct Config {
     #[serde(default)]
     pub cluster_size: Option<u32>,
 
-    /// Filesystem flavour to synthesize on the NBD export.
-    /// Defaults to [`FsType::Fat32`] (Tesla's compatibility
-    /// target). See [`FsType`] for the available options.
+    /// Filesystem flavour synthesized on the NBD export. Always
+    /// `exFAT`; the key is a parsed-but-fixed back-compat shim for
+    /// deployed configs (see [`FsType`]). Defaults to
+    /// [`FsType::Exfat`] when absent.
     #[serde(default)]
     pub fs_type: FsType,
 
@@ -267,7 +284,7 @@ impl Config {
         }
         ensure!(
             self.volume_label.len() <= VOLUME_LABEL_MAX,
-            "volume_label must be <= {VOLUME_LABEL_MAX} chars (FAT32 limit): {:?}",
+            "volume_label must be <= {VOLUME_LABEL_MAX} chars (exFAT limit): {:?}",
             self.volume_label,
         );
         Ok(())
@@ -291,7 +308,7 @@ pub struct DiskConfig {
     pub nbd: NbdConfig,
 
     /// MBR disk signature written at byte offset 440 of sector 0.
-    /// Defaults to [`DEFAULT_DISK_SIGNATURE`]. Must be non-zero so
+    /// Defaults to `DEFAULT_DISK_SIGNATURE`. Must be non-zero so
     /// the host treats the disk as initialised.
     #[serde(default = "default_disk_signature")]
     pub disk_signature: u32,
@@ -310,7 +327,7 @@ impl DiskConfig {
     ///
     /// Returns `Err` if the file cannot be read, is not valid TOML,
     /// contains an unknown field, declares zero or more than
-    /// [`PARTITION_MAX`] partitions, has an out-of-range NBD
+    /// `PARTITION_MAX` partitions, has an out-of-range NBD
     /// handshake timeout or empty socket path, or any partition
     /// fails its own [`Config`] validation.
     pub fn load(path: &Path) -> Result<Self> {
@@ -396,7 +413,7 @@ volume_size_gb = 64
         assert_eq!(cfg.volume_size_gb, 64);
         assert_eq!(cfg.volume_label, DEFAULT_LABEL);
         assert_eq!(cfg.cluster_size, None);
-        assert_eq!(cfg.fs_type, FsType::Fat32);
+        assert_eq!(cfg.fs_type, FsType::Exfat);
         assert_eq!(
             cfg.retention.recentclips_hide_after_seconds,
             DEFAULT_HIDE_AFTER_S
@@ -441,15 +458,16 @@ recentclips_hide_after_seconds = 7200
     }
 
     #[test]
-    fn parses_fat32_fs_type_explicitly() {
+    fn rejects_fat32_fs_type_with_clear_error() {
         let raw = "\
 backing_root = \"/var/teslacam\"
 volume_size_gb = 64
 fs_type = \"fat32\"
 ";
-        let cfg: Config = toml::from_str(raw).unwrap();
-        cfg.validate().unwrap();
-        assert_eq!(cfg.fs_type, FsType::Fat32);
+        let err = toml::from_str::<Config>(raw).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("fat32"), "got: {err}");
+        assert!(msg.contains("exFAT-only"), "got: {err}");
     }
 
     #[test]

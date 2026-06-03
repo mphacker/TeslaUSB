@@ -17,18 +17,11 @@
 //!   `NullBackend` / `MockBackend` impls (Phase 1.4). Used by the
 //!   `teslafat` NBD transmission loop in Phase 1.5+ and by the
 //!   real file-backed backend that follows.
-//! * [`fs`] — filesystem geometry trait + FAT32 implementation
-//!   (Phase 2.1). Consumed by `teslafat`'s read-dispatcher
-//!   (forthcoming in Phase 2.6).
+//! * [`fs`] — filesystem geometry trait + exFAT implementation.
+//!   Consumed by `teslafat`'s read-dispatcher.
 //! * [`sei`] — Tesla SEI extraction (Phase 4b.1): MP4 box scanner
 //!   plus AVCC NAL iterator plus H.264 emulation-prevention strip;
 //!   SEI payload framing + Tesla protobuf demarshal land in 4b.1b/c.
-//!
-//! ## Planned additions
-//!
-//! * Phase 2.2+ — `fs::fat32::boot_sector`, `fsinfo`, `fat_table`,
-//!   `directory`, `synth` (read dispatcher).
-//! * Phase 2.8+ — `fs::exfat::*` parallel modules.
 
 pub mod backend;
 pub mod fs;

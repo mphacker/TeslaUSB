@@ -6,8 +6,8 @@
 //! directory, then drives the NBD newstyle handshake +
 //! transmission protocol over a real `tokio::net::UnixStream` from
 //! the test process. The backend ([`teslafat::backend::SynthBackend`],
-//! wrapped in [`teslafat::backend::ReloadableBackend`]) synthesises a
-//! FAT32 view of the (empty) backing tree, so the smoke test asserts:
+//! wrapped in [`teslafat::backend::ReloadableBackend`]) synthesises an
+//! exFAT view of the (empty) backing tree, so the smoke test asserts:
 //!
 //! 1. The daemon binds the configured socket and accepts a real
 //!    Unix-domain client.
@@ -16,8 +16,8 @@
 //!    [`teslafat::server::serve`] → handshake plumbing is wired
 //!    end-to-end through the binary's `main`.
 //! 3. A `NBD_CMD_READ` of 4 KiB at offset 0 returns the synthesized
-//!    FAT32 boot sector (jump `EB 58 90`, `MSWIN4.1`, `FAT32   `,
-//!    `55 AA`) — proving the transmission loop dispatches commands
+//!    exFAT boot sector (jump `EB 76 90`, `EXFAT   `, `55 AA`) —
+//!    proving the transmission loop dispatches commands
 //!    against the live `SynthBackend` view.
 //! 4. The daemon exits cleanly on `SIGTERM` with no clients
 //!    connected — proving the signal-handling + accept-loop
@@ -672,13 +672,12 @@ async fn connect_with_retry(path: &Path) -> UnixStream {
 ///
 /// The READ targets the first byte of partition 1 (one 1 MiB
 /// alignment unit in, past the MBR/gap), which for the synthesized
-/// FAT32 volume is the boot sector: we assert the fixed `EB 58 90`
-/// jump, the `MSWIN4.1` OEM tag, the `FAT32   ` filesystem tag, and
-/// the `55 AA` end signature all arrive byte-exact over the NBD wire
-/// — proving the partitioned synth view (not a zero placeholder) is
-/// being served.
+/// exFAT volume is the boot sector: we assert the fixed `EB 76 90`
+/// jump, the `EXFAT   ` FileSystemName tag, and the `55 AA` end
+/// signature all arrive byte-exact over the NBD wire — proving the
+/// partitioned synth view (not a zero placeholder) is being served.
 #[test]
-fn daemon_serves_fat_boot_sector_via_nbd_handshake_and_read() {
+fn daemon_serves_exfat_boot_sector_via_nbd_handshake_and_read() {
     let handle = start_daemon(4);
 
     let rt = smoke_runtime();
@@ -704,18 +703,13 @@ fn daemon_serves_fat_boot_sector_via_nbd_handshake_and_read() {
     assert_eq!(payload.len(), 4096, "READ payload length");
     assert_eq!(
         &payload[0x00..0x03],
-        &[0xEB, 0x58, 0x90],
+        &[0xEB, 0x76, 0x90],
         "boot sector jump instruction mismatch",
     );
     assert_eq!(
         &payload[0x03..0x0B],
-        b"MSWIN4.1",
-        "boot sector OEM name mismatch",
-    );
-    assert_eq!(
-        &payload[0x52..0x5A],
-        b"FAT32   ",
-        "boot sector filesystem-type tag mismatch",
+        b"EXFAT   ",
+        "boot sector FileSystemName mismatch",
     );
     assert_eq!(
         &payload[0x1FE..0x200],

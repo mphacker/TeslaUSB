@@ -48,6 +48,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _COPY_CHUNK_BYTES: Final[int] = 65_536
+# Published license-plate PNGs are read by teslafat (USB gadget) as the
+# `teslausb` service user; tempfile.mkstemp() creates 0600 temp files, so
+# restore a gadget-readable mode before publishing or the car cannot read it.
+_PUBLISHED_FILE_MODE: Final[int] = 0o644
 _BYTES_PER_KIB: Final[int] = 1_024
 _LIGHTSHOW_ROOT_DIRNAME: Final[str] = "lightshow"
 _PLATES_DIRNAME: Final[str] = "LicensePlate"
@@ -338,6 +342,7 @@ class PhotoPlateService:
                     f"{_PLATE_DIMENSIONS_NA[0]}x{_PLATE_DIMENSIONS_NA[1]} (NA) or "
                     f"{_PLATE_DIMENSIONS_EU[0]}x{_PLATE_DIMENSIONS_EU[1]} (EU) spec"
                 )
+            os.chmod(temp_path, _PUBLISHED_FILE_MODE)  # noqa: PTH101 - readable by teslafat gadget user
             os.replace(temp_path, destination)  # noqa: PTH105 - atomic publish contract
         except _SizeLimitExceeded:
             _safe_unlink(temp_path)

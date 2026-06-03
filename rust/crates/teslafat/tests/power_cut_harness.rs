@@ -1,4 +1,4 @@
-//! Phase 3.6 — Power-cut harness.
+//! Phase 3.6 — Power-cut harness (exFAT).
 //!
 //! Simulates a `kill -9 teslafat` mid-write by tearing down the
 //! [`SynthBackend`] without calling [`BlockBackend::flush`], then
@@ -8,13 +8,13 @@
 //! 1. Stale `.partial` files left by the previous run are
 //!    discarded by `SynthBackend::open` (Phase 3.6 recovery
 //!    routine).
-//! 2. The synthesized FAT32 view on the restarted backend does
+//! 2. The synthesized exFAT view on the restarted backend does
 //!    NOT expose any `.partial` filenames to Tesla (the walker
 //!    skips them).
 //! 3. Files that were finalized (FUA or explicit `flush`) before
 //!    the kill survive the restart and appear in the synthesized
 //!    view byte-identical to their pre-crash content.
-//! 4. A randomised 100-iteration "kill at a random byte" stress
+//! 4. A randomised 100-iteration "kill at a random stage" stress
 //!    run leaves the backing tree consistent after every restart
 //!    (no orphaned `.partial`, no half-finalized files).
 //! 5. Recovery is idempotent — running it a second time on a
@@ -24,6 +24,11 @@
 //! These tests close `docs/00-PLAN.md` row 3.6:
 //! *"`kill -9 teslafat` mid-write; on restart, partial files have
 //! `.partial` suffix and are not visible to Tesla."*
+//!
+//! The recovery routine under test (`DirTreeWriter::recover_partials`)
+//! is filesystem-family-agnostic; the exFAT byte-level writes here
+//! mirror the kernel operations a Tesla issues, exactly as the
+//! Phase 3.5e write state machine consumes them.
 
 #![allow(
     clippy::cast_possible_truncation,
@@ -42,16 +47,17 @@ use teslafat::backend::dir_tree::{DirTreeWriter, PARTIAL_SUFFIX};
 use teslafat::config::{Config, FsType, RetentionConfig};
 use teslausb_core::backend::{BlockBackend, WriteFlags};
 use teslausb_core::fs::cluster_layout::FIRST_DATA_CLUSTER;
-use teslausb_core::fs::fat32::directory::{
-    FileAttributes, ShortName, Timestamps, synthesize_lfn_sequence, synthesize_sfn_entry,
+use teslausb_core::fs::exfat::dir_decode::{DecodedExfatEntry, decode_directory_cluster};
+use teslausb_core::fs::exfat::directory::{
+    FileAttributes, FileEntrySetParams, FileTimestamps, encode_file_entry_set,
 };
-use teslausb_core::fs::fat32::geometry::{Fat32Geometry, RESERVED_SECTORS};
+use teslausb_core::fs::exfat::geometry::ExfatGeometry;
+use teslausb_core::fs::exfat::upcase_table::UpcaseTable;
 use teslausb_core::fs::geometry::{Geometry, SECTOR_SIZE_BYTES};
 
 const VOLUME_SIZE_GB: u32 = 4;
 const VOLUME_BYTES: u64 = (VOLUME_SIZE_GB as u64) * 1024 * 1024 * 1024;
 const SECTOR: u64 = SECTOR_SIZE_BYTES as u64;
-const EOC: u32 = 0x0FFF_FFFF;
 
 fn sample_cfg(backing_root: PathBuf) -> Config {
     Config {
@@ -59,65 +65,82 @@ fn sample_cfg(backing_root: PathBuf) -> Config {
         volume_size_gb: VOLUME_SIZE_GB,
         volume_label: "PWRCUT".to_string(),
         cluster_size: None,
-        fs_type: FsType::Fat32,
+        fs_type: FsType::Exfat,
         retention: RetentionConfig::default(),
         spill_dir: None,
         reload_on_sighup: true,
     }
 }
 
-fn geometry() -> Fat32Geometry {
-    Fat32Geometry::for_volume_size(VOLUME_BYTES).expect("4 GiB volume")
+fn geometry() -> ExfatGeometry {
+    ExfatGeometry::for_volume_size(VOLUME_BYTES).expect("4 GiB is a valid exFAT volume")
 }
 
-fn fat1_volume_byte(cluster: u32) -> u64 {
-    u64::from(RESERVED_SECTORS) * SECTOR + u64::from(cluster) * 4
-}
-
-fn cluster_volume_byte(g: &Fat32Geometry, cluster: u32) -> u64 {
-    g.first_data_sector() * SECTOR
+fn cluster_volume_byte(g: &ExfatGeometry, cluster: u32) -> u64 {
+    u64::from(g.cluster_heap_offset_sectors()) * SECTOR
         + u64::from(cluster - FIRST_DATA_CLUSTER) * u64::from(g.bytes_per_cluster())
 }
 
-fn root_cluster_byte(g: &Fat32Geometry) -> u64 {
-    cluster_volume_byte(g, 2)
+fn root_cluster_byte(g: &ExfatGeometry) -> u64 {
+    cluster_volume_byte(g, g.first_root_directory_cluster())
 }
 
-fn build_file_entry(name: &str, first_cluster: u32, file_size: u32) -> Vec<u8> {
-    let short = ShortName::from_padded_str(&name.to_ascii_uppercase()).unwrap();
-    let lfn = synthesize_lfn_sequence(name, short.checksum()).unwrap();
-    let sfn = synthesize_sfn_entry(
-        &short,
-        FileAttributes::archive(),
-        first_cluster,
-        file_size,
-        &Timestamps::epoch(),
-    );
-    let mut bytes = Vec::new();
-    for slot in lfn {
-        bytes.extend_from_slice(&slot);
+fn timestamps() -> FileTimestamps {
+    FileTimestamps {
+        create_timestamp: 0x4A21_0000,
+        modify_timestamp: 0x4A21_0001,
+        access_timestamp: 0x4A21_0002,
+        create_10ms: 50,
+        modify_10ms: 25,
+        create_utc_offset: 0x80,
+        modify_utc_offset: 0x80,
+        access_utc_offset: 0x80,
     }
-    bytes.extend_from_slice(&sfn);
-    bytes
 }
 
-async fn write_fat_entry(backend: &SynthBackend, cluster: u32, value: u32) {
-    backend
-        .write(
-            fat1_volume_byte(cluster),
-            &value.to_le_bytes(),
-            WriteFlags::NONE,
-        )
-        .await
-        .expect("FAT entry write");
+/// Build a contiguous (`no_fat_chain`) exFAT File entry set —
+/// the byte sequence a kernel writes into a directory cluster to
+/// name a freshly created file.
+fn build_file_entry(name: &str, first_cluster: u32, data_length: u64) -> Vec<u8> {
+    let name_utf16: Vec<u16> = name.encode_utf16().collect();
+    let params = FileEntrySetParams {
+        name: &name_utf16,
+        attributes: FileAttributes::default(),
+        timestamps: timestamps(),
+        first_cluster,
+        valid_data_length: data_length,
+        data_length,
+        no_fat_chain: true,
+    };
+    let upcase = UpcaseTable::ascii_identity();
+    encode_file_entry_set(&params, &upcase).expect("encode file entry set")
 }
 
-async fn write_cluster_data(g: &Fat32Geometry, backend: &SynthBackend, cluster: u32, data: &[u8]) {
+async fn write_cluster_data(g: &ExfatGeometry, backend: &SynthBackend, cluster: u32, data: &[u8]) {
     let offset = cluster_volume_byte(g, cluster);
     backend
         .write(offset, data, WriteFlags::NONE)
         .await
         .expect("data cluster write");
+}
+
+/// Decode the File names visible in the root directory cluster of
+/// the synthesized exFAT view, as Tesla would read them.
+async fn root_file_names(backend: &SynthBackend, g: &ExfatGeometry) -> Vec<String> {
+    let mut buf = vec![0u8; g.bytes_per_cluster() as usize];
+    backend
+        .read(root_cluster_byte(g), &mut buf)
+        .await
+        .expect("read root cluster");
+    let decoded = decode_directory_cluster(&buf, None).expect("decode root cluster");
+    decoded
+        .entries
+        .iter()
+        .filter_map(|e| match e {
+            DecodedExfatEntry::File { name, .. } => name.clone(),
+            _ => None,
+        })
+        .collect()
 }
 
 /// List `.partial` files under `root` recursively (test-only
@@ -158,12 +181,11 @@ async fn power_cut_mid_write_without_flush_leaves_partial_then_recovery_discards
     let backend = SynthBackend::open(&cfg).expect("open");
     let g = geometry();
 
-    // Write a file: FAT entry + dir entry + data cluster, NO flush.
+    // Write a file: data cluster + dir entry, NO flush.
     let payload = b"unflushed bytes that simulate a power cut".repeat(4);
     let file_cluster = 7;
-    write_fat_entry(&backend, file_cluster, EOC).await;
     write_cluster_data(&g, &backend, file_cluster, &payload).await;
-    let entry = build_file_entry("kill.bin", file_cluster, payload.len() as u32);
+    let entry = build_file_entry("kill.bin", file_cluster, payload.len() as u64);
     backend
         .write(root_cluster_byte(&g), &entry, WriteFlags::NONE)
         .await
@@ -191,23 +213,7 @@ async fn power_cut_mid_write_without_flush_leaves_partial_then_recovery_discards
 
     // The "kill.bin" file must NOT appear in the synthesized
     // root cluster (Tesla must not see the partial bytes).
-    let mut buf = vec![0u8; g.bytes_per_cluster() as usize];
-    backend2
-        .read(root_cluster_byte(&g), &mut buf)
-        .await
-        .expect("read root");
-    let decoded = teslausb_core::fs::fat32::dir_decode::decode_directory_cluster(&buf, Vec::new())
-        .expect("decode");
-    let names: Vec<String> = decoded
-        .entries
-        .iter()
-        .filter_map(|e| match e {
-            teslausb_core::fs::fat32::dir_decode::DecodedDirEntry::File { long_name, .. } => {
-                long_name.clone()
-            }
-            _ => None,
-        })
-        .collect();
+    let names = root_file_names(&backend2, &g).await;
     assert!(
         !names.contains(&"kill.bin".to_string()),
         "kill.bin must not surface in synth view: {names:?}"
@@ -223,9 +229,8 @@ async fn power_cut_after_flush_preserves_finalized_file() {
 
     let payload = b"finalized bytes durable across crash".repeat(4);
     let file_cluster = 9;
-    write_fat_entry(&backend, file_cluster, EOC).await;
     write_cluster_data(&g, &backend, file_cluster, &payload).await;
-    let entry = build_file_entry("durable.bin", file_cluster, payload.len() as u32);
+    let entry = build_file_entry("durable.bin", file_cluster, payload.len() as u64);
     backend
         .write(root_cluster_byte(&g), &entry, WriteFlags::NONE)
         .await
@@ -261,9 +266,8 @@ async fn power_cut_with_fua_preserves_file() {
 
     let payload = b"FUA promise".repeat(8);
     let file_cluster = 11;
-    write_fat_entry(&backend, file_cluster, EOC).await;
     write_cluster_data(&g, &backend, file_cluster, &payload).await;
-    let entry = build_file_entry("fua.bin", file_cluster, payload.len() as u32);
+    let entry = build_file_entry("fua.bin", file_cluster, payload.len() as u64);
     // FUA on the dir-entry write triggers the immediate flush.
     backend
         .write(root_cluster_byte(&g), &entry, WriteFlags::FUA)
@@ -340,9 +344,8 @@ async fn restart_after_mixed_inflight_and_finalized_keeps_finalized_only() {
 
     // File 1: write + flush (finalized).
     let payload1 = b"keep me".repeat(8);
-    write_fat_entry(&backend, 5, EOC).await;
     write_cluster_data(&g, &backend, 5, &payload1).await;
-    let e1 = build_file_entry("keep.bin", 5, payload1.len() as u32);
+    let e1 = build_file_entry("keep.bin", 5, payload1.len() as u64);
     backend
         .write(root_cluster_byte(&g), &e1, WriteFlags::NONE)
         .await
@@ -353,9 +356,8 @@ async fn restart_after_mixed_inflight_and_finalized_keeps_finalized_only() {
     // Place its dir entry AFTER e1 so it doesn't overwrite the
     // first entry (which would delete keep.bin from Tesla's view).
     let payload2 = b"throw me".repeat(8);
-    write_fat_entry(&backend, 6, EOC).await;
     write_cluster_data(&g, &backend, 6, &payload2).await;
-    let e2 = build_file_entry("throw.bin", 6, payload2.len() as u32);
+    let e2 = build_file_entry("throw.bin", 6, payload2.len() as u64);
     backend
         .write(
             root_cluster_byte(&g) + e1.len() as u64,
@@ -381,23 +383,7 @@ async fn restart_after_mixed_inflight_and_finalized_keeps_finalized_only() {
     assert!(!dir.path().join("throw.bin.partial").exists());
 
     // Synthesized view shows keep.bin but not throw.bin.
-    let mut buf = vec![0u8; g.bytes_per_cluster() as usize];
-    backend2
-        .read(root_cluster_byte(&g), &mut buf)
-        .await
-        .expect("read root");
-    let decoded = teslausb_core::fs::fat32::dir_decode::decode_directory_cluster(&buf, Vec::new())
-        .expect("decode");
-    let names: Vec<String> = decoded
-        .entries
-        .iter()
-        .filter_map(|e| match e {
-            teslausb_core::fs::fat32::dir_decode::DecodedDirEntry::File { long_name, .. } => {
-                long_name.clone()
-            }
-            _ => None,
-        })
-        .collect();
+    let names = root_file_names(&backend2, &g).await;
     assert!(names.contains(&"keep.bin".to_string()), "saw {names:?}");
     assert!(!names.contains(&"throw.bin".to_string()), "saw {names:?}");
 }
@@ -423,23 +409,7 @@ async fn synthesized_view_never_includes_partial_suffix() {
     // never contained the .partial, regardless of recovery).
     let backend2 = SynthBackend::open(&cfg).expect("open 2");
     let g = geometry();
-    let mut buf = vec![0u8; g.bytes_per_cluster() as usize];
-    backend2
-        .read(root_cluster_byte(&g), &mut buf)
-        .await
-        .expect("read");
-    let decoded = teslausb_core::fs::fat32::dir_decode::decode_directory_cluster(&buf, Vec::new())
-        .expect("decode");
-    let names: Vec<String> = decoded
-        .entries
-        .iter()
-        .filter_map(|e| match e {
-            teslausb_core::fs::fat32::dir_decode::DecodedDirEntry::File { long_name, .. } => {
-                long_name.clone()
-            }
-            _ => None,
-        })
-        .collect();
+    let names = root_file_names(&backend2, &g).await;
     assert!(names.contains(&"regular.bin".to_string()));
     for name in &names {
         assert!(
@@ -454,10 +424,10 @@ async fn synthesized_view_never_includes_partial_suffix() {
 }
 
 /// Randomised power-cut stress: 100 iterations, each one creates
-/// a fresh backing tree, writes N files where every file's write
-/// sequence is interrupted at a random byte offset chosen between
-/// 0 and "all writes done but no flush", drops the backend, then
-/// reopens and asserts:
+/// a fresh backing tree, writes a file whose write sequence is
+/// interrupted at a random stage (after data, after the dir
+/// entry, or after flush), drops the backend, then reopens and
+/// asserts:
 ///
 /// * Zero `.partial` files survive.
 /// * Every finalized file (flushed before the kill) is intact.
@@ -484,42 +454,36 @@ async fn randomised_kill_stress_100_iterations_all_consistent() {
         let backend = SynthBackend::open(&cfg).expect("open");
         let g = geometry();
 
-        // Pick the kill point: one of {after_fat, after_data,
-        // after_dir_entry, after_flush}. The last branch
-        // exercises the "no .partial to clean up" recovery
-        // path.
-        let kill_point = (next_u64(&mut rng_state) % 4) as u8;
-        let file_cluster = 3 + (next_u64(&mut rng_state) % 100) as u32;
+        // Pick the kill point: one of {after_data, after_dir_entry,
+        // after_flush}. The last branch exercises the "no .partial
+        // to clean up" recovery path.
+        let kill_point = (next_u64(&mut rng_state) % 3) as u8;
+        // Keep file clusters above the reserved low region
+        // (root/bitmap/upcase) to avoid colliding with metadata.
+        let file_cluster = 5 + (next_u64(&mut rng_state) % 100) as u32;
         let payload_len = 16 + (next_u64(&mut rng_state) % 200) as usize;
         let payload: Vec<u8> = (0..payload_len).map(|i| ((i + iter) % 251) as u8).collect();
         let file_name = format!("iter{iter:03}.bin");
 
-        // Stage 1: FAT
-        write_fat_entry(&backend, file_cluster, EOC).await;
+        // Stage 1: data
+        write_cluster_data(&g, &backend, file_cluster, &payload).await;
         if kill_point == 0 {
             drop(backend);
             assert_consistency(dir.path(), &file_name, &payload, false);
             continue;
         }
-        // Stage 2: data
-        write_cluster_data(&g, &backend, file_cluster, &payload).await;
+        // Stage 2: dir entry
+        let entry = build_file_entry(&file_name, file_cluster, payload.len() as u64);
+        backend
+            .write(root_cluster_byte(&g), &entry, WriteFlags::NONE)
+            .await
+            .expect("dir entry");
         if kill_point == 1 {
             drop(backend);
             assert_consistency(dir.path(), &file_name, &payload, false);
             continue;
         }
-        // Stage 3: dir entry
-        let entry = build_file_entry(&file_name, file_cluster, payload.len() as u32);
-        backend
-            .write(root_cluster_byte(&g), &entry, WriteFlags::NONE)
-            .await
-            .expect("dir entry");
-        if kill_point == 2 {
-            drop(backend);
-            assert_consistency(dir.path(), &file_name, &payload, false);
-            continue;
-        }
-        // Stage 4: flush, then kill.
+        // Stage 3: flush, then kill.
         backend.flush().await.expect("flush");
         drop(backend);
         assert_consistency(dir.path(), &file_name, &payload, true);
@@ -556,89 +520,4 @@ fn assert_consistency(
             "in-flight file {file_name} must NOT be finalized after kill"
         );
     }
-}
-
-// =====================================================================
-// Phase 3.5e — cross-cutting exFAT smoke (single power-cut scenario)
-// =====================================================================
-
-#[tokio::test]
-async fn exfat_power_cut_mid_write_recovery_discards_partial() {
-    use teslausb_core::fs::exfat::directory::{
-        FileAttributes as ExfatAttrs, FileEntrySetParams, FileTimestamps, encode_file_entry_set,
-    };
-    use teslausb_core::fs::exfat::geometry::ExfatGeometry;
-    use teslausb_core::fs::exfat::upcase_table::UpcaseTable;
-
-    let dir = TempDir::new().expect("tempdir");
-    let cfg = Config {
-        backing_root: dir.path().to_path_buf(),
-        volume_size_gb: 4,
-        volume_label: "PWCEXFAT".to_string(),
-        cluster_size: None,
-        fs_type: FsType::Exfat,
-        retention: RetentionConfig::default(),
-        spill_dir: None,
-        reload_on_sighup: true,
-    };
-    let backend = SynthBackend::open(&cfg).expect("open exfat");
-    let g = ExfatGeometry::for_volume_size(VOLUME_BYTES).expect("geo");
-
-    let payload = b"unflushed exfat power-cut payload".repeat(4);
-    let file_cluster = 9;
-    let cluster_offset = u64::from(g.cluster_heap_offset_sectors()) * SECTOR
-        + u64::from(file_cluster - FIRST_DATA_CLUSTER) * u64::from(g.bytes_per_cluster());
-    backend
-        .write(cluster_offset, &payload, WriteFlags::NONE)
-        .await
-        .expect("data");
-
-    let name_utf16: Vec<u16> = "killed.bin".encode_utf16().collect();
-    let upcase = UpcaseTable::ascii_identity();
-    let params = FileEntrySetParams {
-        name: &name_utf16,
-        attributes: ExfatAttrs::default(),
-        timestamps: FileTimestamps {
-            create_timestamp: 0x4A21_0000,
-            modify_timestamp: 0x4A21_0001,
-            access_timestamp: 0x4A21_0002,
-            create_10ms: 50,
-            modify_10ms: 25,
-            create_utc_offset: 0x80,
-            modify_utc_offset: 0x80,
-            access_utc_offset: 0x80,
-        },
-        first_cluster: file_cluster,
-        valid_data_length: payload.len() as u64,
-        data_length: payload.len() as u64,
-        no_fat_chain: true,
-    };
-    let entry = encode_file_entry_set(&params, &upcase).expect("encode");
-    let root_byte = u64::from(g.cluster_heap_offset_sectors()) * SECTOR
-        + u64::from(g.first_root_directory_cluster() - FIRST_DATA_CLUSTER)
-            * u64::from(g.bytes_per_cluster());
-    backend
-        .write(root_byte, &entry, WriteFlags::NONE)
-        .await
-        .expect("dir entry");
-
-    // ".partial" should exist before kill.
-    let partials = list_partials_on_disk(dir.path());
-    assert_eq!(
-        partials.len(),
-        1,
-        "exfat .partial should exist: {partials:?}"
-    );
-
-    // Kill: drop without flush.
-    drop(backend);
-
-    // Restart: recovery must discard the .partial.
-    let _backend2 = SynthBackend::open(&cfg).expect("restart");
-    let partials_after = list_partials_on_disk(dir.path());
-    assert!(
-        partials_after.is_empty(),
-        "exfat .partial must be discarded on recovery: {partials_after:?}"
-    );
-    assert!(!dir.path().join("killed.bin").exists());
 }

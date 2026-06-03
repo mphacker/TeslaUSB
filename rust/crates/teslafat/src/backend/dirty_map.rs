@@ -5,10 +5,9 @@
 //! ## Why
 //!
 //! `SynthBackend` serves reads from an immutable layout computed
-//! at daemon startup. The write state machines
-//! ([`super::exfat_write::ExfatWriteState`],
-//! [`super::fat32_write::Fat32WriteState`]) accumulate kernel
-//! writes to the FAT region and to directory clusters in their
+//! at daemon startup. The write state machine
+//! ([`super::exfat_write::ExfatWriteState`]) accumulates kernel
+//! writes to the FAT region and to directory clusters in its
 //! own in-memory buffers, but those buffers start out zero — the
 //! synth's pre-existing FAT entries and pre-existing directory
 //! entries are not copied into them.

@@ -7,8 +7,7 @@
 //! 1. The NBD transmission loop calls
 //!    [`BlockBackend::write`](teslausb_core::backend::BlockBackend::write)
 //!    with `(offset, &[u8])`.
-//! 2. [`teslausb_core::fs::fat32::parse::decode_write`] or
-//!    [`teslausb_core::fs::exfat::parse::decode_write`] classifies
+//! 2. [`teslausb_core::fs::exfat::parse::decode_write`] classifies
 //!    each byte into a typed per-region chunk
 //!    (`MainBootRegion`, `FatTable`, `DataCluster`, …).
 //! 3. The `cluster_map` (Phase 3.4) translates a `DataCluster`

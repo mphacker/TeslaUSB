@@ -1,17 +1,14 @@
-//! exFAT write-side **decoder** (Phase 3.2).
+//! exFAT write-side **decoder**.
 //!
 //! The inverse of [`crate::fs::exfat::synth::ExfatSynth::read`]:
 //! given an arbitrary `(offset, &[u8])` write that the kernel
 //! issued against the synthesized volume, classify every byte
 //! into the exFAT region it lands in and return a sequence of
-//! typed per-region chunks the consumer (Phase 3.3
-//! `backend::dir_tree` POSIX adapter) can route.
+//! typed per-region chunks the consumer (`backend::dir_tree`
+//! POSIX adapter) can route.
 //!
-//! Parallels [`crate::fs::fat32::parse`] (Phase 3.1); see that
-//! module for the design rationale shared by both filesystems.
-//! The differences here mirror the structural differences
-//! between FAT32 and exFAT spelled out in the read-side
-//! [`crate::fs::exfat::synth`] dispatcher:
+//! Salient structural points of the exFAT layout, mirrored on the
+//! read-side [`crate::fs::exfat::synth`] dispatcher:
 //!
 //! 1. **Boot regions are 12 contiguous sectors each.** The
 //!    [`crate::fs::geometry::RegionKind::ExfatMainBootRegion`]
@@ -19,18 +16,17 @@
 //!    boot sectors + OEM parameters + reserved + checksum,
 //!    Microsoft exFAT spec v1.00 §3.1) and
 //!    [`crate::fs::geometry::RegionKind::ExfatBackupBootRegion`]
-//!    mirrors that at sectors 12..24 (§3.2). FAT32's per-sector
-//!    boot / fsinfo / backup-boot variants do not appear.
-//! 2. **There is no `FsInfo`.** exFAT has no equivalent free-
-//!    cluster summary sector — free-cluster bookkeeping lives
-//!    in the [`AllocationBitmap`](crate::fs::exfat::allocation_bitmap),
+//!    mirrors that at sectors 12..24 (§3.2).
+//! 2. **There is no `FsInfo`.** exFAT has no free-cluster summary
+//!    sector — free-cluster bookkeeping lives in the
+//!    [`AllocationBitmap`](crate::fs::exfat::allocation_bitmap),
 //!    itself stored as clusters in the data region.
 //! 3. **`NumberOfFats = 1`** (pinned by
 //!    [`crate::fs::exfat::geometry::NUMBER_OF_FATS`]). The
 //!    [`RegionKind::FatTable`] variant therefore always carries
 //!    `index = 0`; the `mirror_index` field on
-//!    [`DecodedWrite::FatTable`] is included for shape-parity
-//!    with the FAT32 decoder so consumers can stay regular.
+//!    [`DecodedWrite::FatTable`] is retained so consumers can stay
+//!    regular.
 //! 4. **No reserved gap between boot region and FAT.** The
 //!    backup boot region ends at sector 24 and the FAT starts at
 //!    sector 24 with no padding. Reserved space only appears as
@@ -92,9 +88,7 @@ use crate::fs::geometry::{Geometry, Region, RegionKind};
 /// route it through a write-back pipeline without allocation.
 ///
 /// Variants intentionally mirror the [`RegionKind`] variants that
-/// an exFAT geometry's region map can produce. The FAT32-only
-/// `RegionKind` variants are unreachable here and rejected by
-/// [`decode_write`] with [`DecodeWriteError::UnsupportedRegion`].
+/// an exFAT geometry's region map can produce.
 #[derive(Debug, PartialEq, Eq)]
 pub enum DecodedWrite<'a> {
     /// Write into the 12-sector main boot region (sectors 0..12
@@ -169,13 +163,7 @@ pub enum DecodedWrite<'a> {
 /// Errors returned by [`decode_write`].
 ///
 /// The bounds-check variants mirror
-/// [`crate::fs::exfat::synth::ExfatSynthError`] and
-/// [`crate::fs::fat32::parse::DecodeWriteError`] for cross-
-/// filesystem symmetry. The `UnsupportedRegion` variant is
-/// defense-in-depth: a well-formed [`ExfatGeometry`] never
-/// produces a FAT32-only [`RegionKind`], but the type system
-/// can't prove that, so we reject explicitly instead of
-/// silently dropping the write.
+/// [`crate::fs::exfat::synth::ExfatSynthError`].
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum DecodeWriteError {
     /// `offset` is at or beyond the geometry's volume size.
@@ -199,13 +187,6 @@ pub enum DecodeWriteError {
         /// The geometry's volume size.
         volume_size: u64,
     },
-    /// The geometry returned a [`RegionKind`] this decoder does
-    /// not recognise — currently the FAT32-only variants.
-    #[error("exFAT decode_write received an unsupported region kind: {kind}")]
-    UnsupportedRegion {
-        /// The offending region kind.
-        kind: RegionKind,
-    },
 }
 
 /// Decode a single kernel-issued write against an exFAT volume
@@ -225,10 +206,6 @@ pub enum DecodeWriteError {
 ///   or beyond `geometry.volume_size_bytes()`.
 /// * [`DecodeWriteError::LengthExceedsVolume`] if
 ///   `offset + bytes.len()` exceeds the volume size.
-/// * [`DecodeWriteError::UnsupportedRegion`] if the geometry's
-///   region map contains a FAT32 (or other non-exFAT) variant —
-///   defense-in-depth; a well-formed [`ExfatGeometry`] never
-///   produces one.
 pub fn decode_write<'a>(
     geometry: &ExfatGeometry,
     offset: u64,
@@ -275,7 +252,7 @@ pub fn decode_write<'a>(
         let region_remaining = usize::try_from(region_remaining_u64).unwrap_or(usize::MAX);
         let take = region_remaining.min(remaining.len());
         let (chunk, rest) = remaining.split_at(take);
-        emit_region_chunks(geometry, region, cursor, chunk, &mut out)?;
+        emit_region_chunks(geometry, region, cursor, chunk, &mut out);
         cursor = cursor.saturating_add(take as u64);
         remaining = rest;
     }
@@ -293,7 +270,7 @@ fn emit_region_chunks<'a>(
     cursor: u64,
     chunk: &'a [u8],
     out: &mut Vec<DecodedWrite<'a>>,
-) -> Result<(), DecodeWriteError> {
+) {
     let byte_in_region_u64 = cursor.saturating_sub(region.start);
     let byte_in_region = usize::try_from(byte_in_region_u64).unwrap_or(usize::MAX);
     match region.kind {
@@ -315,13 +292,7 @@ fn emit_region_chunks<'a>(
             absolute_offset: cursor,
             bytes: chunk,
         }),
-        RegionKind::Fat32BootSector
-        | RegionKind::Fat32BackupBootSector
-        | RegionKind::Fat32FsInfo => {
-            return Err(DecodeWriteError::UnsupportedRegion { kind: region.kind });
-        }
     }
-    Ok(())
 }
 
 /// Sub-divide a data-region chunk into one

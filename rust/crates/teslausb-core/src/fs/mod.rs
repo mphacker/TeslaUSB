@@ -1,51 +1,42 @@
-//! Filesystem synthesis primitives shared by FAT32 and `exFAT`.
+//! Filesystem synthesis primitives for the synthesized `exFAT`
+//! volume.
 //!
 //! Phase 2 of the B-1 rewrite turns the [`crate::backend::BlockBackend`]
-//! surface into something the kernel actually recognises as a FAT32
-//! or `exFAT` volume. The on-disk layout is computed lazily by the
-//! `synth` modules under each FS family; the *region map* — i.e.
-//! "what kind of bytes live at offset `o`" — is computed eagerly
-//! from the volume size by the [`geometry::Geometry`] trait that
-//! the read-dispatcher (Phase 2.6) will consult on every read.
+//! surface into something the kernel actually recognises as an
+//! `exFAT` volume. The on-disk layout is computed lazily by the
+//! `exfat::synth` module; the *region map* — i.e. "what kind of
+//! bytes live at offset `o`" — is computed eagerly from the volume
+//! size by the [`geometry::Geometry`] trait that the read-dispatcher
+//! consults on every read.
 //!
 //! ## Current contents
 //!
 //! * [`geometry`] — `Geometry` trait, `Region`, `RegionKind`,
 //!   `GeometryError`. Pure data; no I/O.
-//! * [`fat32`] — Microsoft FAT32 implementation. Ships
-//!   `fat32::geometry::Fat32Geometry` (Phase 2.1),
-//!   `fat32::boot_sector::synthesize` (Phase 2.2),
-//!   `fat32::fsinfo::synthesize` (Phase 2.3),
-//!   `fat32::fat_table::FatTable` (Phase 2.4),
-//!   `fat32::directory` (Phase 2.5), and
-//!   `fat32::synth::Fat32Synth` — the byte-offset read dispatcher
-//!   that wires all the above together (Phase 2.6). Phase 2.7
-//!   added the public-API-only external integration test under
-//!   `tests/fs_fat32_integration.rs`.
 //! * [`exfat`] — Microsoft `exFAT` implementation. Ships
-//!   `exfat::geometry::ExfatGeometry` and
-//!   `exfat::boot_sector::synthesize` (Phase 2.8); subsequent
-//!   `exfat::*` submodules land in Phases 2.9 – 2.12.
+//!   `exfat::geometry::ExfatGeometry`, `exfat::boot_sector`, the
+//!   allocation bitmap / up-case table, the directory-entry
+//!   synthesizer, and `exfat::synth::ExfatSynth` — the byte-offset
+//!   read dispatcher that wires it all together.
 //!
 //! * [`backing_tree`] — In-memory representation of a real Linux
 //!   directory tree plus the shared name-validation rule
 //!   (`validate_name`). Filesystem-agnostic; consumed by the
-//!   cluster-layout planner (Phase 2.16) and the per-FS
-//!   dir-entry synthesizers (Phases 2.17 / 2.18). The walker
-//!   that fills a `BackingTree` from `std::fs` lives in
-//!   `teslafat::backing_walker` (Phase 2.15 second deliverable).
-//! * [`cluster_layout`] — Phase 2.16 — `ClusterAllocator` that
-//!   hands out contiguous cluster ranges, `Allocation`
-//!   value-type, and `AllocatedChains` which implements
-//!   `DirTreeBackend` so the layout drops straight into
-//!   `FatTable::build`. FS-agnostic; the per-FS code drives the
-//!   allocator with FS-specific dir-entry sizing.
+//!   cluster-layout planner and the exFAT dir-entry synthesizer.
+//!   The walker that fills a `BackingTree` from `std::fs` lives in
+//!   `teslafat::backing_walker`.
+//! * [`cluster_layout`] — `ClusterAllocator` that hands out
+//!   contiguous cluster ranges plus the `Allocation` value-type.
+//!   FS-agnostic; the exFAT layout drives the allocator with
+//!   exFAT-specific dir-entry sizing.
+//! * `civil_date` — UTC calendar decomposition shared by the
+//!   exFAT directory-entry timestamp encoder.
 
 pub mod backing_tree;
+pub(crate) mod civil_date;
 pub mod cluster_layout;
 pub mod cluster_map;
 pub mod data_cluster_source;
 pub mod exfat;
-pub mod fat32;
 pub mod geometry;
 pub mod mbr;

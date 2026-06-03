@@ -58,9 +58,11 @@
 //! directory.
 
 use core::fmt;
+use std::time::SystemTime;
 
 use super::geometry::ExfatGeometry;
 use super::upcase_table::UpcaseTable;
+use crate::fs::civil_date::CivilDateTime;
 use crate::fs::geometry::Geometry;
 
 /// Size of a single `exFAT` directory entry in bytes
@@ -183,6 +185,82 @@ pub struct FileTimestamps {
     pub modify_utc_offset: u8,
     /// Signed UTC offset for the access timestamp (raw byte).
     pub access_utc_offset: u8,
+}
+
+/// exFAT packed timestamp for 1980-01-01T00:00:00 (the DOS epoch).
+///
+/// Used as the fallback when a backing mtime falls outside the
+/// representable 1980-2107 range. The high 16 bits hold the packed
+/// date `(month=1, day=1, year=1980)`; the low 16 (time) are zero.
+/// A synthesized directory entry must always be emittable, so we
+/// stamp this sentinel rather than fail.
+const DOS_EPOCH_TIMESTAMP: u32 = 0x0021_0000;
+
+/// `UtcOffset` byte meaning "valid offset, +00:00" (exFAT spec
+/// §7.4.26): bit 7 (`OffsetValid`) set, offset bits zero. The
+/// synthesizer treats all backing mtimes as UTC.
+const UTC_OFFSET_UTC: u8 = 0x80;
+
+/// Lowest year the DOS-derived packed date can represent.
+const MIN_DOS_YEAR: i64 = 1980;
+/// Highest year the DOS-derived packed date can represent
+/// (`year - 1980` must fit the 7-bit field, so `1980..=2107`).
+const MAX_DOS_YEAR: i64 = 2107;
+
+impl FileTimestamps {
+    /// Build create/modify/access timestamps from a single backing
+    /// `mtime` (interpreted as UTC).
+    ///
+    /// All three timestamps are stamped with the same instant — the
+    /// synthesizer only knows one mtime per backing object — so
+    /// Tesla's UI shows a meaningful "last modified" date. Instants
+    /// outside the representable 1980-2107 range (including pre-epoch
+    /// times) fall back to `DOS_EPOCH_TIMESTAMP` so an entry is
+    /// always emittable.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    pub fn from_system_time(mtime: SystemTime) -> Self {
+        let Some(c) = CivilDateTime::from_system_time(mtime) else {
+            return Self::dos_epoch();
+        };
+        if !(MIN_DOS_YEAR..=MAX_DOS_YEAR).contains(&c.year) {
+            return Self::dos_epoch();
+        }
+        // year is bounded to 1980..=2107, so (year - 1980) is 0..=127
+        // and fits the 7-bit field; all other fields are sub-range.
+        let date =
+            (((c.year - MIN_DOS_YEAR) as u32) << 9) | (u32::from(c.month) << 5) | u32::from(c.day);
+        let time =
+            (u32::from(c.hour) << 11) | (u32::from(c.minute) << 5) | (u32::from(c.second) / 2);
+        let packed = (date << 16) | time;
+        // 10 ms field carries the odd-second remainder (0 or 100) plus
+        // the sub-second nanos rounded down to 10 ms units (0..=99).
+        let tenms = (u16::from(c.second % 2) * 100 + (c.subsec_nanos / 10_000_000) as u16) as u8;
+        Self {
+            create_timestamp: packed,
+            modify_timestamp: packed,
+            access_timestamp: packed,
+            create_10ms: tenms,
+            modify_10ms: tenms,
+            create_utc_offset: UTC_OFFSET_UTC,
+            modify_utc_offset: UTC_OFFSET_UTC,
+            access_utc_offset: UTC_OFFSET_UTC,
+        }
+    }
+
+    /// All-fields-at-the-DOS-epoch fallback timestamp set.
+    const fn dos_epoch() -> Self {
+        Self {
+            create_timestamp: DOS_EPOCH_TIMESTAMP,
+            modify_timestamp: DOS_EPOCH_TIMESTAMP,
+            access_timestamp: DOS_EPOCH_TIMESTAMP,
+            create_10ms: 0,
+            modify_10ms: 0,
+            create_utc_offset: UTC_OFFSET_UTC,
+            modify_utc_offset: UTC_OFFSET_UTC,
+            access_utc_offset: UTC_OFFSET_UTC,
+        }
+    }
 }
 
 /// Error returned by the directory builders when caller input
@@ -970,6 +1048,68 @@ mod tests {
         assert_eq!(entry[0x16], ts.create_utc_offset);
         assert_eq!(entry[0x17], ts.modify_utc_offset);
         assert_eq!(entry[0x18], ts.access_utc_offset);
+    }
+
+    // ---------- FileTimestamps::from_system_time (MINOR 8) ----------
+
+    #[test]
+    fn from_system_time_packs_a_modern_utc_instant() {
+        use std::time::Duration;
+        // 2021-08-15T13:10:20Z + 250 ms.
+        let t = SystemTime::UNIX_EPOCH + Duration::new(1_629_033_020, 250_000_000);
+        let ts = FileTimestamps::from_system_time(t);
+        // date = ((2021-1980)<<9)|(8<<5)|15 = (41<<9)|0x10F = 0x530F
+        // time = (13<<11)|(10<<5)|(20/2) = 0x6800|0x140|0xA = 0x694A
+        let expected = (0x530F_u32 << 16) | 0x694A;
+        assert_eq!(ts.modify_timestamp, expected);
+        assert_eq!(ts.create_timestamp, expected);
+        assert_eq!(ts.access_timestamp, expected);
+        // second 20 is even, so 10ms is just the sub-second part:
+        // 250 ms / 10 ms = 25.
+        assert_eq!(ts.modify_10ms, 25);
+        assert_eq!(ts.modify_utc_offset, UTC_OFFSET_UTC);
+        assert_eq!(ts.access_utc_offset, UTC_OFFSET_UTC);
+    }
+
+    #[test]
+    fn from_system_time_carries_odd_second_into_10ms_field() {
+        use std::time::Duration;
+        // 2021-08-15T13:10:21Z (odd second), no sub-second part.
+        let t = SystemTime::UNIX_EPOCH + Duration::from_secs(1_629_033_021);
+        let ts = FileTimestamps::from_system_time(t);
+        // Odd second loses its low bit in the 2-second-granular packed
+        // field, so it is recovered via the +100 in the 10 ms field.
+        assert_eq!(ts.modify_10ms, 100);
+    }
+
+    #[test]
+    fn from_system_time_falls_back_to_dos_epoch_before_1980() {
+        use std::time::Duration;
+        // 1970-01-01 (Unix epoch) is before the DOS 1980 floor.
+        let ts = FileTimestamps::from_system_time(SystemTime::UNIX_EPOCH);
+        assert_eq!(ts.modify_timestamp, DOS_EPOCH_TIMESTAMP);
+        assert_eq!(ts.create_timestamp, DOS_EPOCH_TIMESTAMP);
+        assert_eq!(ts.access_timestamp, DOS_EPOCH_TIMESTAMP);
+        assert_eq!(ts.modify_10ms, 0);
+        assert_eq!(ts.modify_utc_offset, UTC_OFFSET_UTC);
+        // A few seconds before the epoch must also be representable
+        // (CivilDateTime returns None → same sentinel), never a panic.
+        let pre = SystemTime::UNIX_EPOCH - Duration::from_secs(5);
+        assert_eq!(
+            FileTimestamps::from_system_time(pre).modify_timestamp,
+            DOS_EPOCH_TIMESTAMP
+        );
+    }
+
+    #[test]
+    fn from_system_time_falls_back_to_dos_epoch_past_2107() {
+        use std::time::Duration;
+        // 2108-01-01T00:00:00Z is past the DOS 2107 ceiling.
+        // (2108-1970) years; use a comfortably-past-2107 instant.
+        let secs_2108 = 4_355_596_800_u64; // 2108-01-01T00:00:00Z
+        let t = SystemTime::UNIX_EPOCH + Duration::from_secs(secs_2108);
+        let ts = FileTimestamps::from_system_time(t);
+        assert_eq!(ts.modify_timestamp, DOS_EPOCH_TIMESTAMP);
     }
 
     // ---------- Stream Extension (0xC0) ----------

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import stat
 import struct
 import zlib
 from io import BytesIO
@@ -194,6 +196,21 @@ def test_upload_files_saves_single_wrap(service: WrapService, wraps_folder: Path
     assert result.success is True
     assert result.file_count == 1
     assert (wraps_folder / "solid.png").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes are not enforced on Windows")
+def test_upload_files_publishes_gadget_readable_wrap(
+    service: WrapService, wraps_folder: Path
+) -> None:
+    # Regression: published wraps must be readable by the teslafat gadget user
+    # (a different user than this web process). tempfile.mkstemp() defaults to
+    # 0600, which previously made the MEDIA partition unreadable and caused a
+    # deterministic NBD I/O error when the car read the wrap.
+    service.upload_files([_upload("solid.png", _png_bytes(512, 512))])
+
+    mode = stat.S_IMODE((wraps_folder / "solid.png").stat().st_mode)
+    assert mode & stat.S_IROTH, f"published wrap mode {mode:#o} is not other-readable"
+    assert mode & stat.S_IRGRP, f"published wrap mode {mode:#o} is not group-readable"
 
 
 def test_upload_files_saves_multiple_wraps(service: WrapService, wraps_folder: Path) -> None:

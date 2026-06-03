@@ -7,7 +7,7 @@
 #
 # ─── SCOPE: cloud / PC-runnable checks only ──────────────────────────
 # Static analysis + unit tests. Anything that touches real hardware —
-# USB gadget binding, NBD against a Pi loopback, FAT32 / exFAT against
+# USB gadget binding, NBD against a Pi loopback, exFAT against
 # real block devices, the hardware watchdog, SDIO bus contention, Pi
 # Zero 2 W performance, or a vehicle in Sentry mode — is NOT testable
 # here. Those run on the Pi via the H-phases (H0, H1, …) under the

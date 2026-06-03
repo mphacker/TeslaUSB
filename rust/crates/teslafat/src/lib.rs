@@ -1,4 +1,4 @@
-//! `teslafat` library — domain code for the FAT/`exFAT` synthesizer
+//! `teslafat` library — domain code for the `exFAT` synthesizer
 //! and NBD server.
 //!
 //! Split out from the binary so:
@@ -23,8 +23,8 @@
 //!   `backend::zero::ZeroBackend` (Phase 1.6) is the
 //!   zero-allocation placeholder retained for smoke tests.
 //!   `backend::synth::SynthBackend` (Phase 2.19) is the
-//!   production backend: walks `backing_root`, plans a FAT32
-//!   or `exFAT` layout, and serves byte-level reads from the
+//!   production backend: walks `backing_root`, plans an `exFAT`
+//!   layout, and serves byte-level reads from the
 //!   metadata synthesizer + on-demand backing-file overlay.
 //! * [`server`] — accept loop that wraps [`nbd::handshake::run`]
 //!   in a configurable timeout and hands the established

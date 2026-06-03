@@ -1,7 +1,6 @@
-//! Phase 2.18 — exFAT directory + file layout planner.
+//! exFAT directory + file layout planner.
 //!
-//! Parallel to [`crate::fs::fat32::layout`] (Phase 2.17) but
-//! for exFAT: walks a [`BackingTree`] (Phase 2.15), allocates
+//! Walks a [`BackingTree`], allocates
 //! cluster extents via [`ClusterAllocator`] (Phase 2.16), and
 //! produces:
 //!
@@ -20,29 +19,32 @@
 //!    [`crate::fs::exfat::synth::ExfatSynth::with_layout`] can
 //!    mark them in the allocation bitmap.
 //!
-//! ## `NoFatChain` everywhere
+//! ## `NoFatChain` for subdirectories and files
 //!
-//! Every allocation the planner makes is contiguous (it uses
-//! [`ClusterAllocator`] which only hands out contiguous
-//! extents), so every directory + file is laid out with the
-//! exFAT `NoFatChain` flag set in its stream extension entry.
-//! Per exFAT spec §6.3.4.2 the FAT entries for `NoFatChain`
-//! extents may stay free (zero), which is exactly what the
-//! synth's existing FAT region produces for unmarked clusters
-//! — no FAT updates are needed for layout extents.
+//! Every subdirectory and file allocation the planner makes is
+//! contiguous (it uses [`ClusterAllocator`] which only hands out
+//! contiguous extents), so each is laid out with the exFAT
+//! `NoFatChain` flag set in its stream extension entry. Per exFAT
+//! spec §6.3.4.2 the FAT entries for `NoFatChain` extents may stay
+//! free (zero), which is exactly what the synth's existing FAT
+//! region produces for unmarked clusters — no FAT updates are needed
+//! for those extents. The root directory is the exception (see
+//! below).
 //!
-//! ## Single-cluster root
+//! ## Multi-cluster root via a FAT chain
 //!
-//! The planner currently restricts the root directory to a
-//! single cluster. The three mandatory entries take 96 bytes,
-//! leaving `(bytes_per_cluster - 96)` bytes for the top-level
-//! children. A 4 KiB cluster fits ~7 file entry sets which is
-//! adequate for the `TeslaUSB` use case (~5 top-level children:
-//! `RecentClips`, `SavedClips`, `SentryClips`, `ArchivedClips`,
-//! plus
-//! the occasional config file). Multi-cluster root chains
-//! require populating the FAT for the root chain and are
-//! left for a later phase.
+//! The root directory begins at the fixed first root cluster
+//! ([`ExfatGeometry::first_root_directory_cluster`]) and, when the
+//! three mandatory entries plus the top-level children's entry sets
+//! exceed one cluster, grows by FAT-chaining additional contiguous
+//! overflow clusters. The root cannot use `NoFatChain`: the boot
+//! sector only carries `FirstClusterOfRootDirectory`, so a
+//! multi-cluster root must be expressed in the FAT. The resident root
+//! buffer is bounded by `MAX_ROOT_DIRECTORY_BYTES` so a pathological
+//! tree fails cleanly rather than exhausting device memory. The common
+//! `TeslaUSB` layout (~5 top-level children: `RecentClips`,
+//! `SavedClips`, `SentryClips`, `ArchivedClips`, plus the occasional
+//! config file) still fits in a single cluster and chains nothing.
 //!
 //! ## What this module does NOT do
 //!
@@ -51,12 +53,15 @@
 //!   bytes only; file clusters return zeros. Phase 2.19's
 //!   `teslafat::DirTreeMaterializer` wraps the layout and
 //!   opens the backing files on demand.
-//! * **No FAT chain construction.** The planner picks
-//!   `NoFatChain` for every extent so no FAT updates are
-//!   required.
+//! * **No FAT chain construction for subdirectories or files.**
+//!   The planner picks `NoFatChain` for every subdirectory and
+//!   file extent so no FAT updates are required for them. The
+//!   read synth synthesizes the root directory's FAT chain from
+//!   [`ExfatLayout::root_cluster_chain`].
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use crate::fs::backing_tree::{BackingDir, BackingFile, BackingTree};
 use crate::fs::cluster_layout::{AllocError, Allocation, ClusterAllocator};
@@ -71,6 +76,17 @@ use crate::fs::exfat::directory::{
 use crate::fs::exfat::geometry::{ExfatGeometry, FIRST_CLUSTER_NUMBER};
 use crate::fs::exfat::upcase_table::UpcaseTable;
 use crate::fs::geometry::{Geometry, SECTOR_SIZE_BYTES};
+
+/// Upper bound on the in-memory root-directory buffer the planner
+/// will build. The root is FAT-chained and may span multiple
+/// clusters (see [`ExfatLayout::root_cluster_chain`]), but the
+/// buffer is held resident in both the read synth and the write
+/// resolver, so an unbounded root (e.g. a pathological backing tree
+/// with millions of top-level entries) could exhaust the Pi's
+/// memory. 16 MiB is ~175k 96-byte entry sets — far beyond any real
+/// `TeslaCam` / MEDIA layout, where files live in subfolders — and
+/// keeps the resident cost safe on a 464 MB device.
+const MAX_ROOT_DIRECTORY_BYTES: u64 = 16 * 1024 * 1024;
 
 /// All metadata the planner needs to lay out the root cluster
 /// and to know where the free cluster heap begins.
@@ -145,14 +161,16 @@ pub enum LayoutError {
     /// (empty name, name too long, label too long, …).
     Directory(DirectoryError),
     /// The root directory's mandatory three entries plus the
-    /// top-level children's entry sets don't fit in a single
-    /// cluster. Multi-cluster root chains are not yet
-    /// supported.
-    RootOverflow {
+    /// top-level children's entry sets would need more than
+    /// `MAX_ROOT_DIRECTORY_BYTES` of resident buffer. The root
+    /// can span multiple FAT-chained clusters, but it is bounded
+    /// to protect the device's memory; this is the clean-failure
+    /// ceiling rather than an unbounded allocation.
+    RootTooLarge {
         /// Bytes the root entries would consume.
         needed_bytes: u64,
-        /// Bytes available in a single cluster.
-        cluster_bytes: u64,
+        /// The planner's resident-buffer ceiling.
+        max_bytes: u64,
     },
     /// A backing file is larger than `u32::MAX * bytes_per_cluster`
     /// or otherwise exceeds the planner's per-file cluster cap
@@ -179,13 +197,13 @@ impl core::fmt::Display for LayoutError {
         match self {
             Self::Alloc(err) => write!(f, "exFAT cluster allocator failed during planning: {err}"),
             Self::Directory(err) => write!(f, "exFAT directory entry construction failed: {err}"),
-            Self::RootOverflow {
+            Self::RootTooLarge {
                 needed_bytes,
-                cluster_bytes,
+                max_bytes,
             } => write!(
                 f,
-                "exFAT root directory needs {needed_bytes} bytes but a single cluster only \
-                 holds {cluster_bytes}; multi-cluster root chains are not yet supported",
+                "exFAT root directory needs {needed_bytes} bytes which exceeds the planner's \
+                 resident-buffer ceiling of {max_bytes}",
             ),
             Self::FileTooLarge { path, size_bytes } => write!(
                 f,
@@ -203,7 +221,7 @@ impl std::error::Error for LayoutError {
         match self {
             Self::Alloc(err) => Some(err),
             Self::Directory(err) => Some(err),
-            Self::RootOverflow { .. } | Self::FileTooLarge { .. } | Self::BadMetadata { .. } => {
+            Self::RootTooLarge { .. } | Self::FileTooLarge { .. } | Self::BadMetadata { .. } => {
                 None
             }
         }
@@ -218,6 +236,11 @@ pub struct ExfatLayout {
     cluster_heap_byte_offset: u64,
     root_directory_cluster: u32,
     root_directory_bytes: Vec<u8>,
+    /// Contiguous overflow extent for a multi-cluster root, or
+    /// `None` when the root fits in its single fixed cluster.
+    /// The full root chain is `[root_directory_cluster]` followed
+    /// by this extent's clusters (see [`Self::root_cluster_chain`]).
+    root_overflow: Option<Allocation>,
     subdir_clusters: BTreeMap<u32, Vec<u8>>,
     file_placements: Vec<FilePlacement>,
     dir_placements: Vec<DirPlacement>,
@@ -234,9 +257,10 @@ impl ExfatLayout {
     ///   hold the tree.
     /// * [`LayoutError::Directory`] if a name fails exFAT's
     ///   length / emptiness rules.
-    /// * [`LayoutError::RootOverflow`] if the top-level
-    ///   children don't fit alongside the three mandatory
-    ///   entries in one root cluster.
+    /// * [`LayoutError::RootTooLarge`] if the root directory's
+    ///   mandatory entries plus the top-level children would
+    ///   exceed the resident-buffer ceiling
+    ///   (`MAX_ROOT_DIRECTORY_BYTES`).
     /// * [`LayoutError::FileTooLarge`] if a backing file would
     ///   require more than `u32::MAX` clusters.
     /// * [`LayoutError::BadMetadata`] if `metadata` is
@@ -297,47 +321,23 @@ impl ExfatLayout {
 
         let mut sink = LayoutSink::default();
 
-        let mut top_level_children: Vec<ChildEntry> =
-            Vec::with_capacity(tree.root.subdirs.len() + tree.root.files.len());
+        let top_level_children = plan_top_level_children(
+            tree,
+            bytes_per_cluster,
+            metadata.upcase,
+            &mut allocator,
+            &mut sink,
+        )?;
 
-        for sub in &tree.root.subdirs {
-            let alloc = plan_dir(
-                sub,
-                &PathBuf::from(sub.name.as_str()),
-                &mut allocator,
-                &mut sink,
-                metadata.upcase,
-            )?;
-            top_level_children.push(ChildEntry {
-                name: sub.name.as_str(),
-                attrs: FileAttributes {
-                    directory: true,
-                    ..FileAttributes::default()
-                },
-                first_cluster: alloc.first_cluster,
-                data_length: u64::from(alloc.cluster_count)
-                    .saturating_mul(u64::from(bytes_per_cluster)),
-                no_fat_chain: !alloc.is_empty(),
-            });
+        let (root_directory_bytes, root_overflow) = render_root_directory(
+            metadata,
+            &top_level_children,
+            bytes_per_cluster,
+            &mut allocator,
+        )?;
+        if let Some(overflow) = root_overflow {
+            sink.allocated_extents.push(overflow);
         }
-
-        for f in &tree.root.files {
-            let placement = plan_file(f, &mut allocator, &mut sink.allocated_extents)?;
-            top_level_children.push(ChildEntry {
-                name: f.name.as_str(),
-                attrs: FileAttributes {
-                    archive: true,
-                    ..FileAttributes::default()
-                },
-                first_cluster: placement.allocation.first_cluster,
-                data_length: placement.size_bytes,
-                no_fat_chain: !placement.allocation.is_empty(),
-            });
-            sink.file_placements.push(placement);
-        }
-
-        let root_directory_bytes =
-            render_root_directory(geometry, metadata, &top_level_children, bytes_per_cluster)?;
 
         let LayoutSink {
             subdir_clusters,
@@ -351,6 +351,7 @@ impl ExfatLayout {
             cluster_heap_byte_offset,
             root_directory_cluster: geometry.first_root_directory_cluster(),
             root_directory_bytes,
+            root_overflow,
             subdir_clusters,
             file_placements,
             dir_placements,
@@ -371,12 +372,33 @@ impl ExfatLayout {
         self.cluster_heap_byte_offset
     }
 
-    /// Complete bytes of the root directory cluster — the three
-    /// mandatory entries plus the top-level children's entry
-    /// sets, zero-padded to one cluster.
+    /// Complete bytes of the root directory — the three mandatory
+    /// entries plus the top-level children's entry sets, zero-padded
+    /// to a whole number of clusters. Spans one cluster in the common
+    /// case; when the top-level entries overflow a single cluster the
+    /// buffer covers the full FAT-chained root (see
+    /// [`Self::root_cluster_chain`]) and its length is
+    /// `root_cluster_chain().len() * bytes_per_cluster`.
     #[must_use]
     pub fn root_directory_bytes(&self) -> &[u8] {
         &self.root_directory_bytes
+    }
+
+    /// The root directory's full cluster chain: the fixed first
+    /// cluster ([`ExfatGeometry::first_root_directory_cluster`])
+    /// followed by any contiguous overflow clusters. Always at least
+    /// one element. The read synth FAT-chains these clusters and the
+    /// write resolver seeds the chain from this list.
+    #[must_use]
+    pub fn root_cluster_chain(&self) -> Vec<u32> {
+        let mut chain = vec![self.root_directory_cluster];
+        if let Some(overflow) = self.root_overflow {
+            let end = overflow
+                .first_cluster
+                .saturating_add(overflow.cluster_count);
+            chain.extend(overflow.first_cluster..end);
+        }
+        chain
     }
 
     /// Materialized subdirectory cluster bytes keyed by cluster
@@ -413,17 +435,45 @@ impl ExfatLayout {
 
 impl DataClusterSource for ExfatLayout {
     fn read_cluster_bytes(&self, cluster: u32, byte_in_cluster: usize, out: &mut [u8]) {
-        // The root directory cluster is held separately from
-        // `subdir_clusters`; serve it here too so the write-side
-        // resolver can materialize the root buffer (and its
+        // The root directory is held separately from `subdir_clusters`
+        // and may span a FAT-chained multi-cluster run; serve each
+        // root chain cluster's slice of the root buffer here so the
+        // write-side resolver can materialize the full root (and its
         // pre-existing-child baseline) from this single source.
-        if cluster == self.root_directory_cluster {
-            copy_cluster_bytes(&self.root_directory_bytes, byte_in_cluster, out);
+        if let Some(chain_index) = self.root_chain_index(cluster) {
+            let cluster_bytes = self.bytes_per_cluster as usize;
+            let slice_start = chain_index.saturating_mul(cluster_bytes);
+            let slice_end = slice_start.saturating_add(cluster_bytes);
+            let slice = self
+                .root_directory_bytes
+                .get(slice_start..slice_end)
+                .unwrap_or(&[]);
+            copy_cluster_bytes(slice, byte_in_cluster, out);
         } else if let Some(bytes) = self.subdir_clusters.get(&cluster) {
             copy_cluster_bytes(bytes, byte_in_cluster, out);
         } else {
             out.fill(0);
         }
+    }
+}
+
+impl ExfatLayout {
+    /// Position of `cluster` within the root directory chain, or
+    /// `None` if it is not a root cluster. Index 0 is the fixed
+    /// first cluster; subsequent indices map into the contiguous
+    /// overflow extent. O(1).
+    fn root_chain_index(&self, cluster: u32) -> Option<usize> {
+        if cluster == self.root_directory_cluster {
+            return Some(0);
+        }
+        let overflow = self.root_overflow?;
+        let end = overflow
+            .first_cluster
+            .saturating_add(overflow.cluster_count);
+        if cluster >= overflow.first_cluster && cluster < end {
+            return Some(1 + (cluster - overflow.first_cluster) as usize);
+        }
+        None
     }
 }
 
@@ -467,6 +517,9 @@ struct ChildEntry<'a> {
     first_cluster: u32,
     data_length: u64,
     no_fat_chain: bool,
+    /// Backing object's mtime, stamped into the entry's timestamp
+    /// fields so Tesla's UI shows a meaningful "last modified" date.
+    mtime: SystemTime,
 }
 
 /// Mutable accumulators threaded through the recursive layout
@@ -537,6 +590,7 @@ fn plan_dir(
             data_length: u64::from(alloc.cluster_count)
                 .saturating_mul(u64::from(bytes_per_cluster)),
             no_fat_chain: !alloc.is_empty(),
+            mtime: sub.mtime,
         });
     }
     for (f, (alloc, size)) in dir.files.iter().zip(file_allocs.iter()) {
@@ -549,6 +603,7 @@ fn plan_dir(
             first_cluster: alloc.first_cluster,
             data_length: *size,
             no_fat_chain: !alloc.is_empty(),
+            mtime: f.mtime,
         });
     }
 
@@ -635,8 +690,8 @@ fn render_directory_entries(
     upcase: &UpcaseTable,
 ) -> Result<Vec<u8>, LayoutError> {
     let mut out: Vec<u8> = Vec::new();
-    let timestamps = FileTimestamps::default();
     for child in children {
+        let timestamps = FileTimestamps::from_system_time(child.mtime);
         let utf16: Vec<u16> = child.name.encode_utf16().collect();
         let params = FileEntrySetParams {
             name: &utf16,
@@ -653,12 +708,69 @@ fn render_directory_entries(
     Ok(out)
 }
 
+/// Plan every top-level child (subdirectories then files), pushing
+/// their allocations into `sink` and returning the `ChildEntry`
+/// records the root-directory renderer needs. Split out of
+/// [`ExfatLayout::plan`] to keep that orchestration function within
+/// the cognitive/length budget; children borrow their names from
+/// `tree`.
+fn plan_top_level_children<'a>(
+    tree: &'a BackingTree,
+    bytes_per_cluster: u32,
+    upcase: &UpcaseTable,
+    allocator: &mut ClusterAllocator,
+    sink: &mut LayoutSink,
+) -> Result<Vec<ChildEntry<'a>>, LayoutError> {
+    let mut top_level_children: Vec<ChildEntry<'a>> =
+        Vec::with_capacity(tree.root.subdirs.len() + tree.root.files.len());
+
+    for sub in &tree.root.subdirs {
+        let alloc = plan_dir(
+            sub,
+            &PathBuf::from(sub.name.as_str()),
+            allocator,
+            sink,
+            upcase,
+        )?;
+        top_level_children.push(ChildEntry {
+            name: sub.name.as_str(),
+            attrs: FileAttributes {
+                directory: true,
+                ..FileAttributes::default()
+            },
+            first_cluster: alloc.first_cluster,
+            data_length: u64::from(alloc.cluster_count)
+                .saturating_mul(u64::from(bytes_per_cluster)),
+            no_fat_chain: !alloc.is_empty(),
+            mtime: sub.mtime,
+        });
+    }
+
+    for f in &tree.root.files {
+        let placement = plan_file(f, allocator, &mut sink.allocated_extents)?;
+        top_level_children.push(ChildEntry {
+            name: f.name.as_str(),
+            attrs: FileAttributes {
+                archive: true,
+                ..FileAttributes::default()
+            },
+            first_cluster: placement.allocation.first_cluster,
+            data_length: placement.size_bytes,
+            no_fat_chain: !placement.allocation.is_empty(),
+            mtime: f.mtime,
+        });
+        sink.file_placements.push(placement);
+    }
+
+    Ok(top_level_children)
+}
+
 fn render_root_directory(
-    geometry: &ExfatGeometry,
     metadata: &LayoutMetadata<'_>,
     children: &[ChildEntry<'_>],
     bytes_per_cluster: u32,
-) -> Result<Vec<u8>, LayoutError> {
+    allocator: &mut ClusterAllocator,
+) -> Result<(Vec<u8>, Option<Allocation>), LayoutError> {
     let cluster_bytes = bytes_per_cluster as usize;
     let needed_bytes = 3 * DIRECTORY_ENTRY_SIZE_BYTES;
     if cluster_bytes < needed_bytes {
@@ -669,7 +781,6 @@ fn render_root_directory(
             },
         ));
     }
-    let _ = geometry;
 
     let bitmap =
         encode_allocation_bitmap_entry(metadata.bitmap_first_cluster, metadata.bitmap_size_bytes);
@@ -688,15 +799,45 @@ fn render_root_directory(
 
     let header_bytes = (3 * DIRECTORY_ENTRY_SIZE_BYTES) as u64;
     let total_root_bytes = header_bytes.saturating_add(child_bytes);
-    if total_root_bytes > cluster_bytes as u64 {
-        return Err(LayoutError::RootOverflow {
+
+    // The root starts at the fixed first root cluster and grows by
+    // FAT-chaining additional clusters (unlike subdirectories, the
+    // root cannot use NoFatChain — the boot sector only carries
+    // FirstClusterOfRootDirectory). Bound the resident buffer so a
+    // pathological tree can't OOM the device; this is a clean failure,
+    // never an unbounded allocation.
+    if total_root_bytes > MAX_ROOT_DIRECTORY_BYTES {
+        return Err(LayoutError::RootTooLarge {
             needed_bytes: total_root_bytes,
-            cluster_bytes: cluster_bytes as u64,
+            max_bytes: MAX_ROOT_DIRECTORY_BYTES,
         });
     }
+    let root_cluster_count = total_root_bytes
+        .div_ceil(u64::from(bytes_per_cluster))
+        .max(1);
+    // Safe: total_root_bytes <= MAX_ROOT_DIRECTORY_BYTES, so the
+    // cluster count and the byte product fit comfortably in usize on
+    // any supported target.
+    let buf_len = usize::try_from(root_cluster_count)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(cluster_bytes);
 
-    let mut buf = vec![0u8; cluster_bytes];
-    #[allow(clippy::indexing_slicing)] // bounds verified above
+    // Allocate the overflow clusters (everything past the fixed first
+    // cluster) as a single contiguous extent. They are allocated AFTER
+    // every child so child cluster numbers are undisturbed.
+    let overflow = if root_cluster_count > 1 {
+        let overflow_clusters = root_cluster_count - 1;
+        let overflow_bytes = overflow_clusters.saturating_mul(u64::from(bytes_per_cluster));
+        let alloc = allocator
+            .allocate(overflow_bytes)
+            .map_err(LayoutError::Alloc)?;
+        Some(alloc)
+    } else {
+        None
+    };
+
+    let mut buf = vec![0u8; buf_len];
+    #[allow(clippy::indexing_slicing)] // buf_len >= one cluster >= 0x60
     {
         buf[0x00..0x20].copy_from_slice(&bitmap);
         buf[0x20..0x40].copy_from_slice(&upcase_entry);
@@ -704,8 +845,8 @@ fn render_root_directory(
     }
 
     let mut cursor: usize = 3 * DIRECTORY_ENTRY_SIZE_BYTES;
-    let timestamps = FileTimestamps::default();
     for child in children {
+        let timestamps = FileTimestamps::from_system_time(child.mtime);
         let utf16: Vec<u16> = child.name.encode_utf16().collect();
         let params = FileEntrySetParams {
             name: &utf16,
@@ -719,10 +860,12 @@ fn render_root_directory(
         let bytes =
             encode_file_entry_set(&params, metadata.upcase).map_err(LayoutError::Directory)?;
         let end = cursor.saturating_add(bytes.len());
-        if end > cluster_bytes {
-            return Err(LayoutError::RootOverflow {
+        // Sizing above reserved enough clusters for every child, so
+        // this is a defensive guard, not an expected failure path.
+        if end > buf_len {
+            return Err(LayoutError::RootTooLarge {
                 needed_bytes: end as u64,
-                cluster_bytes: cluster_bytes as u64,
+                max_bytes: MAX_ROOT_DIRECTORY_BYTES,
             });
         }
         if let (Some(dst), Some(src)) = (buf.get_mut(cursor..end), bytes.get(..)) {
@@ -730,7 +873,7 @@ fn render_root_directory(
         }
         cursor = end;
     }
-    Ok(buf)
+    Ok((buf, overflow))
 }
 
 fn write_into_clusters(
@@ -758,6 +901,7 @@ fn write_into_clusters(
 
 #[cfg(test)]
 #[allow(
+    clippy::cast_possible_truncation,
     clippy::cognitive_complexity,
     clippy::expect_used,
     clippy::indexing_slicing,
@@ -908,17 +1052,78 @@ mod tests {
     }
 
     #[test]
-    fn plan_root_overflow_returns_error_when_too_many_children() {
+    fn plan_root_spanning_multiple_clusters_builds_fat_chain() {
+        let fx = Fixture::new();
+        let bytes_per_cluster = fx.geo.bytes_per_cluster();
+        let mut root = empty_dir("root");
+        // Each short-named file emits one ~96-byte entry set. Add
+        // enough to comfortably overflow a single root cluster so the
+        // planner must FAT-chain overflow clusters.
+        let files_to_overflow = (bytes_per_cluster / 96) * 2 + 8;
+        for i in 0..files_to_overflow {
+            root.files.push(file(&format!("f{i:04}.txt"), 0));
+        }
+        let tree = BackingTree { root };
+        let layout = ExfatLayout::plan(&fx.geo, &fx.metadata(), &tree).expect("plan ok");
+
+        // The root now spans more than one cluster.
+        let chain = layout.root_cluster_chain();
+        assert!(
+            chain.len() > 1,
+            "expected a multi-cluster root chain, got {chain:?}"
+        );
+        // Chain head is the fixed first root cluster; the overflow
+        // run (everything after the head) is contiguous, but the head
+        // itself jumps non-adjacently into the heap.
+        assert_eq!(chain[0], fx.geo.first_root_directory_cluster());
+        for w in chain[1..].windows(2) {
+            assert_eq!(w[1], w[0] + 1, "overflow run must be contiguous");
+        }
+        // Overflow is non-adjacent to cluster 2 (cluster 3+ hold the
+        // bitmap/upcase), so the chain head is NOT chain[1]-1 in
+        // cluster space.
+        assert!(chain[1] > fx.geo.first_root_directory_cluster() + 1);
+
+        // Root buffer covers the full chain.
+        assert_eq!(
+            layout.root_directory_bytes().len(),
+            chain.len() * bytes_per_cluster as usize
+        );
+        // The overflow extent is recorded so the synth marks it
+        // allocated in the bitmap.
+        let overflow_first = chain[1];
+        let overflow_count = (chain.len() - 1) as u32;
+        assert!(
+            layout.allocated_extents().iter().any(|e| {
+                e.first_cluster == overflow_first && e.cluster_count == overflow_count
+            }),
+            "root overflow extent must be in allocated_extents"
+        );
+        // The DataClusterSource serves each overflow cluster's slice.
+        let mut buf = vec![0u8; bytes_per_cluster as usize];
+        layout.read_cluster_bytes(overflow_first, 0, &mut buf);
+        let expected = &layout.root_directory_bytes()
+            [bytes_per_cluster as usize..2 * bytes_per_cluster as usize];
+        assert_eq!(buf, expected);
+    }
+
+    #[test]
+    fn plan_rejects_root_exceeding_resident_buffer_ceiling() {
         let fx = Fixture::new();
         let mut root = empty_dir("root");
-        // 100 short-named files each emit ~96 bytes; way past
-        // a 4 KiB cluster's capacity.
-        for i in 0..100 {
-            root.files.push(file(&format!("f{i:02}.txt"), 1));
+        // Push past MAX_ROOT_DIRECTORY_BYTES (16 MiB / ~96 bytes ≈
+        // 175k entries). Use a count guaranteed to exceed it without
+        // building real files on disk; sizing is computed from names.
+        let count = (MAX_ROOT_DIRECTORY_BYTES / 96) + 10_000;
+        for i in 0..count {
+            root.files.push(file(&format!("f{i:08}.txt"), 0));
         }
         let tree = BackingTree { root };
         let err = ExfatLayout::plan(&fx.geo, &fx.metadata(), &tree).unwrap_err();
-        assert!(matches!(err, LayoutError::RootOverflow { .. }));
+        assert!(
+            matches!(err, LayoutError::RootTooLarge { .. }),
+            "expected RootTooLarge, got {err:?}"
+        );
     }
 
     #[test]

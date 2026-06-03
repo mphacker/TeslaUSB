@@ -85,7 +85,7 @@ fn load_and_announce(args: &Args) -> Result<DiskConfig> {
             backing_root = %part.backing_root.display(),
             volume_size_gb = part.volume_size_gb,
             volume_label = %part.volume_label,
-            fs_type = if matches!(part.fs_type, teslafat::config::FsType::Fat32) { "fat32" } else { "exfat" },
+            fs_type = "exfat",
             retention_hide_after_s = part.retention.recentclips_hide_after_seconds,
             "partition configured"
         );
@@ -136,28 +136,16 @@ mod unix_serve {
     use tracing::{info, warn};
 
     use teslafat::backend::{PartitionedDiskBackend, ReloadableBackend, SynthBackend};
-    use teslafat::config::{DiskConfig, FsType};
+    use teslafat::config::DiskConfig;
     use teslafat::server;
     use teslausb_core::backend::BlockBackend;
     use teslausb_core::fs::mbr::{
-        DEFAULT_ALIGNMENT_SECTORS, DiskLayout, PARTITION_TYPE_EXFAT, PARTITION_TYPE_FAT32_LBA,
-        PartitionRequest,
+        DEFAULT_ALIGNMENT_SECTORS, DiskLayout, PARTITION_TYPE_EXFAT, PartitionRequest,
     };
 
     /// Logical sector size used to convert a backend's byte size into
     /// the MBR partition's sector count.
     const SECTOR_SIZE_BYTES: u64 = 512;
-
-    /// Map a partition's filesystem flavour to its MBR partition-type
-    /// byte. Both volumes are exFAT under ADR-0023, but the FAT32 byte
-    /// is kept so a partition left on FAT32 during migration still
-    /// gets a correct type field.
-    const fn partition_type_for(fs: FsType) -> u8 {
-        match fs {
-            FsType::Exfat => PARTITION_TYPE_EXFAT,
-            FsType::Fat32 => PARTITION_TYPE_FAT32_LBA,
-        }
-    }
 
     /// Convert a child backend's byte size into a u32 sector count for
     /// the MBR partition table.
@@ -210,7 +198,7 @@ mod unix_serve {
                 let view = child.current();
                 info!(
                     partition = index,
-                    fs_type = if view.is_fat32() { "fat32" } else { "exfat" },
+                    fs_type = "exfat",
                     size_bytes = view.volume_size(),
                     file_count = view.file_count(),
                     backing_root = %part.backing_root.display(),
@@ -223,7 +211,7 @@ mod unix_serve {
                     .with_context(|| format!("partition[{index}] geometry"))?;
                 requests.push(PartitionRequest {
                     sector_count,
-                    partition_type: partition_type_for(part.fs_type),
+                    partition_type: PARTITION_TYPE_EXFAT,
                 });
                 children.push(child);
             }
@@ -348,13 +336,13 @@ mod unix_serve {
 
     /// Regions of the synthesised volume that a host SCSI/USB
     /// initiator always touches first during enumeration. The
-    /// values are chosen to cover both FAT32 and exFAT layouts:
-    /// boot sector at offset 0, reserved/FSInfo around 512 B, the
-    /// FAT region (which the synth backend lazily builds in 64 KiB
-    /// windows), and the root directory cluster (~1 MiB in for our
-    /// typical volume geometry). Reading them up front populates
-    /// the synth backend's internal caches before we tell systemd
-    /// the daemon is ready.
+    /// values cover the `exFAT` layout: boot sector at offset 0,
+    /// reserved area around 512 B, the FAT region (which the synth
+    /// backend lazily builds in 64 KiB windows), and the root
+    /// directory cluster (~1 MiB in for our typical volume
+    /// geometry). Reading them up front populates the synth
+    /// backend's internal caches before we tell systemd the daemon
+    /// is ready.
     const WARMUP_REGIONS: &[(u64, usize)] = &[
         (0, 4096),
         (0x1_0000, 65_536),

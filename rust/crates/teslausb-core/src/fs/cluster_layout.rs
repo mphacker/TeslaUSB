@@ -1,8 +1,7 @@
-//! Filesystem-agnostic cluster allocator + chain layout
-//! (Phase 2.16).
+//! Filesystem-agnostic cluster allocator + chain layout.
 //!
-//! Both FAT32 and exFAT lay out user data as a sequence of
-//! **clusters**, each `bytes_per_cluster` bytes wide, numbered
+//! exFAT lays out user data as a sequence of **clusters**, each
+//! `bytes_per_cluster` bytes wide, numbered
 //! `2..=(2 + cluster_count - 1)`. A *chain* is the ordered list
 //! of clusters that belong to one entity (file or directory).
 //! This module provides the shared pieces:
@@ -12,17 +11,13 @@
 //! * [`Allocation`] — what the allocator returns: a starting
 //!   cluster number plus how many contiguous clusters belong to
 //!   the entity.
-//! * [`AllocatedChains`] — a collection of [`Allocation`]s that
-//!   implements [`super::fat32::fat_table::DirTreeBackend`] so
-//!   it can be passed straight into
-//!   [`crate::fs::fat32::fat_table::FatTable::build`].
 //!
-//! Per-FS code (Phases 2.17 / 2.18) is responsible for:
+//! The exFAT layout code (`fs::exfat::layout`) is responsible for:
 //!
-//! * Pre-reserving any FS-specific clusters (exFAT bitmap +
-//!   upcase table) before allocating user data.
+//! * Pre-reserving the exFAT-specific clusters (allocation bitmap
+//!   + up-case table) before allocating user data.
 //! * Computing per-directory entry-array byte sizes using the
-//!   FS-specific entry format.
+//!   exFAT entry format.
 //! * Walking the [`crate::fs::backing_tree::BackingTree`] in the
 //!   correct order (post-order so children are allocated before
 //!   their parent's dir-entry array, which references child
@@ -30,36 +25,29 @@
 //!
 //! ## Why contiguous allocation
 //!
-//! The B-1 daemon serves a synthesized view; no on-disk FAT
+//! The B-1 daemon serves a synthesized view; no on-disk
 //! fragmentation exists. The allocator therefore hands out
 //! contiguous ranges, which:
 //!
-//! * Makes FAT-entry synthesis a single `next = N+1` formula
-//!   in [`crate::fs::fat32::fat_table::FatTable`] (already the
-//!   existing implementation's assumption — exercised by the
-//!   Phase 2.4 tests).
 //! * Lets a file-content read at byte offset `O` of file `F`
 //!   compute `(cluster, offset_in_cluster)` in `O(1)` from
 //!   `F.first_cluster + O / bytes_per_cluster`, without walking
 //!   the FAT.
-//! * Simplifies cluster-number → entity lookup in [`AllocatedChains`]
-//!   to a sorted-range search.
+//! * Keeps cluster-number → entity lookup a sorted-range search.
 //!
-//! Phase 3.4's `cluster_map` will lift this restriction for
+//! The write-side `cluster_map` lifts this restriction for
 //! write-side allocation; the read-side path stays contiguous.
 //!
 //! ## Empty-entity convention
 //!
 //! Calling [`ClusterAllocator::allocate`] with `size_bytes = 0`
 //! returns an [`Allocation`] with `first_cluster = 0` and
-//! `cluster_count = 0`. FAT32 and exFAT both encode "no chain"
-//! as `FstClus = 0` in the directory entry, so the special
+//! `cluster_count = 0`. exFAT encodes "no chain" as
+//! `FirstCluster = 0` in the directory entry, so the special
 //! sentinel is the standard one. The allocator does NOT advance
 //! its cursor for a zero-sized entity.
 
 use std::ops::Range;
-
-use crate::fs::fat32::fat_table::DirTreeBackend;
 
 /// First valid data-cluster number in both FAT32 and exFAT.
 ///
@@ -306,82 +294,6 @@ impl ClusterAllocator {
     }
 }
 
-/// A collection of [`Allocation`]s that satisfies the
-/// [`DirTreeBackend`] contract.
-///
-/// Built by the per-FS layout code (Phases 2.17 / 2.18) by
-/// repeatedly calling [`ClusterAllocator::allocate`] and pushing
-/// each returned [`Allocation`] here. The collection then
-/// hands the resulting chain layout to
-/// [`crate::fs::fat32::fat_table::FatTable::build`] via the
-/// [`DirTreeBackend`] interface.
-///
-/// Empty allocations ([`Allocation::EMPTY`]) are silently
-/// dropped — the FAT table has nothing to mark for them
-/// (`FstClus` = 0 ⇒ no chain).
-#[derive(Debug, Clone, Default)]
-pub struct AllocatedChains {
-    allocations: Vec<Allocation>,
-}
-
-impl AllocatedChains {
-    /// Construct an empty collection.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            allocations: Vec::new(),
-        }
-    }
-
-    /// Append `allocation`. Empty allocations are dropped so the
-    /// underlying `DirTreeBackend` visitor never receives an
-    /// empty chain (which `FatTable::build` would reject).
-    pub fn push(&mut self, allocation: Allocation) {
-        if !allocation.is_empty() {
-            self.allocations.push(allocation);
-        }
-    }
-
-    /// Number of non-empty allocations recorded.
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.allocations.len()
-    }
-
-    /// Returns `true` if no non-empty allocation has been
-    /// recorded.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.allocations.is_empty()
-    }
-
-    /// All allocations, in insertion order.
-    #[must_use]
-    pub fn as_slice(&self) -> &[Allocation] {
-        &self.allocations
-    }
-}
-
-impl DirTreeBackend for AllocatedChains {
-    fn for_each_chain(&self, visitor: &mut dyn FnMut(&[u32])) {
-        for alloc in &self.allocations {
-            // Materialize each contiguous range as a Vec<u32>
-            // because the DirTreeBackend trait passes chains by
-            // `&[u32]`. The vector is short-lived (dropped at
-            // the end of each visit) and the total bytes across
-            // all chains equals 4 * total_clusters — for a
-            // 64 GiB volume at 32 KiB clusters that's ~8 MiB,
-            // which fits comfortably in even the Pi Zero 2 W's
-            // budget. Phase 3 may swap to an iterator if profiling
-            // shows this matters, but the read-side allocator's
-            // synth path only walks chains once at FAT-build time.
-            let chain: Vec<u32> =
-                (alloc.first_cluster..alloc.first_cluster + alloc.cluster_count).collect();
-            visitor(&chain);
-        }
-    }
-}
-
 #[cfg(test)]
 #[allow(
     clippy::cognitive_complexity,
@@ -618,138 +530,6 @@ mod tests {
             }
             other => panic!("expected OutOfClusters, got {other:?}"),
         }
-    }
-
-    // ---- AllocatedChains -------------------------------------
-
-    #[test]
-    fn allocated_chains_starts_empty() {
-        let c = AllocatedChains::new();
-        assert!(c.is_empty());
-        assert_eq!(c.len(), 0);
-        assert!(c.as_slice().is_empty());
-    }
-
-    #[test]
-    fn allocated_chains_drops_empty_allocations_silently() {
-        let mut c = AllocatedChains::new();
-        c.push(Allocation::EMPTY);
-        c.push(Allocation::EMPTY);
-        assert!(c.is_empty());
-        assert_eq!(c.len(), 0);
-    }
-
-    #[test]
-    fn allocated_chains_preserves_insertion_order() {
-        let mut c = AllocatedChains::new();
-        let a1 = Allocation {
-            first_cluster: 2,
-            cluster_count: 1,
-        };
-        let a2 = Allocation {
-            first_cluster: 3,
-            cluster_count: 4,
-        };
-        let a3 = Allocation {
-            first_cluster: 7,
-            cluster_count: 2,
-        };
-        c.push(a1);
-        c.push(a2);
-        c.push(a3);
-        assert_eq!(c.as_slice(), &[a1, a2, a3]);
-    }
-
-    #[test]
-    fn dir_tree_backend_visits_each_chain_with_expanded_clusters() {
-        let mut c = AllocatedChains::new();
-        c.push(Allocation {
-            first_cluster: 2,
-            cluster_count: 1,
-        });
-        c.push(Allocation {
-            first_cluster: 3,
-            cluster_count: 4,
-        });
-        let mut visited: Vec<Vec<u32>> = Vec::new();
-        c.for_each_chain(&mut |chain| {
-            visited.push(chain.to_vec());
-        });
-        assert_eq!(visited, vec![vec![2], vec![3, 4, 5, 6]]);
-    }
-
-    #[test]
-    fn dir_tree_backend_skips_empty_allocations_internally() {
-        // Push doesn't add empty allocations, so the visitor
-        // should never see an empty chain. This pins the
-        // FatTable::build precondition (empty chains are
-        // rejected by FatTable validation).
-        let mut c = AllocatedChains::new();
-        c.push(Allocation {
-            first_cluster: 2,
-            cluster_count: 1,
-        });
-        c.push(Allocation::EMPTY);
-        c.push(Allocation {
-            first_cluster: 3,
-            cluster_count: 2,
-        });
-        let mut visited: Vec<Vec<u32>> = Vec::new();
-        c.for_each_chain(&mut |chain| {
-            assert!(!chain.is_empty(), "empty chain leaked to visitor");
-            visited.push(chain.to_vec());
-        });
-        assert_eq!(visited.len(), 2);
-    }
-
-    #[test]
-    fn dir_tree_backend_integrates_with_fat_table_build() {
-        // End-to-end check: a chain layout produced via
-        // ClusterAllocator + AllocatedChains feeds straight into
-        // FatTable::build without any glue code. Catches any
-        // future drift between the planner's chain shape and
-        // FatTable's expectations.
-        use crate::fs::fat32::fat_table::{FREE_CLUSTER, FatTable};
-        use crate::fs::fat32::geometry::Fat32Geometry;
-        use crate::fs::geometry::Geometry;
-
-        let geometry = Fat32Geometry::for_volume_size(34 * 1024 * 1024).expect("34 MiB geometry");
-        let max_cluster_exclusive =
-            FIRST_DATA_CLUSTER.saturating_add(geometry.data_cluster_count());
-        let mut allocator = ClusterAllocator::new(
-            geometry.bytes_per_cluster(),
-            FIRST_DATA_CLUSTER,
-            max_cluster_exclusive,
-        )
-        .unwrap();
-
-        let mut chains = AllocatedChains::new();
-        let bytes_per_cluster = u64::from(geometry.bytes_per_cluster());
-        let root = allocator.allocate(bytes_per_cluster).unwrap(); // 1 cluster
-        let file_a = allocator.allocate(bytes_per_cluster * 2).unwrap(); // 2 clusters
-        let file_b = allocator.allocate(bytes_per_cluster * 4).unwrap(); // 4 clusters
-        let total_clusters_allocated =
-            root.cluster_count + file_a.cluster_count + file_b.cluster_count;
-        chains.push(root);
-        chains.push(file_a);
-        chains.push(file_b);
-
-        let table = FatTable::build(&geometry, &chains).expect("fat table builds");
-        let entries = table.entries();
-        // FAT entries 0 and 1 are reserved (media descriptor and
-        // dirty/IO-error flags); they are never FREE_CLUSTER. The
-        // remaining non-free entries should match the cluster
-        // count we allocated.
-        let allocated_data_entries = entries
-            .iter()
-            .skip(2)
-            .filter(|&&e| e != FREE_CLUSTER)
-            .count();
-        assert_eq!(
-            u32::try_from(allocated_data_entries).unwrap(),
-            total_clusters_allocated,
-            "FAT table should mark exactly the clusters from AllocatedChains as non-free",
-        );
     }
 
     // ---- Display / Error -------------------------------------

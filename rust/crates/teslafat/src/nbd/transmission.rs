@@ -185,7 +185,14 @@ where
         }
         Err(e) => {
             let code = map_backend_err(&e);
-            debug!(handle = req.handle, code, ?e, "read failed");
+            warn!(
+                handle = req.handle,
+                offset = req.offset,
+                length = req.length,
+                code,
+                ?e,
+                "read failed — returning NBD error to host"
+            );
             write_error_reply(stream, code, req.handle).await?;
         }
     }
@@ -220,7 +227,14 @@ where
         }
         Err(e) => {
             let code = map_backend_err(&e);
-            debug!(handle = req.handle, code, ?e, "write failed");
+            warn!(
+                handle = req.handle,
+                offset = req.offset,
+                length = req.length,
+                code,
+                ?e,
+                "write failed — returning NBD error to host"
+            );
             write_error_reply(stream, code, req.handle).await?;
         }
     }
@@ -246,7 +260,12 @@ where
         Ok(()) => write_ok_reply(stream, req.handle).await?,
         Err(e) => {
             let code = map_backend_err(&e);
-            debug!(handle = req.handle, code, ?e, "flush failed");
+            warn!(
+                handle = req.handle,
+                code,
+                ?e,
+                "flush failed — returning NBD error to host"
+            );
             write_error_reply(stream, code, req.handle).await?;
         }
     }

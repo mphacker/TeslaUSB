@@ -50,6 +50,7 @@
 //!   slots are zero-filled, matching the 2.11 contract.
 
 #![allow(
+    clippy::cast_possible_truncation,
     clippy::cognitive_complexity,
     clippy::expect_used,
     clippy::indexing_slicing,
@@ -824,5 +825,77 @@ mod phase_2_18 {
             teslausb_core::fs::exfat::synth::ExfatSynthError::LayoutMismatch { .. } => {}
             other => panic!("expected LayoutMismatch, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn root_spanning_multiple_clusters_chains_fat_and_serves_all_entries() {
+        // A root directory whose entry sets exceed one cluster must
+        // be served as a FAT chain (cluster 2 -> overflow -> EOC),
+        // with directory bytes spilling into the overflow clusters.
+        // This exercises both the read-side FAT chain logic and the
+        // multi-cluster data reads end to end.
+        let mut root = empty_dir("root");
+        let file_count = 200u32;
+        for i in 0..file_count {
+            // 8-char names fold to a single 96-byte entry set.
+            root.files.push(file(&format!("f{i:03}.dat"), 0));
+        }
+        let tree = BackingTree { root };
+        let synth = build_synth_with_tree(&tree);
+        let geo = synth.geometry().clone();
+        let bytes_per_cluster = u64::from(geo.bytes_per_cluster());
+        let root_cluster = geo.first_root_directory_cluster();
+
+        // Walk the root FAT chain.
+        let mut chain = Vec::new();
+        let mut cluster = root_cluster;
+        let mut budget = 256;
+        loop {
+            chain.push(cluster);
+            let next = super::parse_fat_entry(&synth, cluster);
+            if next == super::FAT_END_OF_CHAIN {
+                break;
+            }
+            cluster = next;
+            budget -= 1;
+            assert!(budget > 0, "root chain did not terminate");
+        }
+        assert!(
+            chain.len() >= 2,
+            "200 files must overflow the root into >= 2 clusters, got {}",
+            chain.len()
+        );
+        assert_eq!(
+            chain[0], root_cluster,
+            "chain head is the fixed root cluster"
+        );
+        assert_ne!(
+            chain[1],
+            root_cluster + 1,
+            "overflow cannot be adjacent (root+1 is the bitmap)"
+        );
+        for w in chain[1..].windows(2) {
+            assert_eq!(w[1], w[0] + 1, "overflow run must be contiguous");
+        }
+
+        // Read every chain cluster and count File primary entries
+        // (0x85). All `file_count` entry sets must be present across
+        // the multi-cluster root, proving data reads serve the
+        // spilled directory bytes (not zero-fill).
+        let mut file_primaries = 0u32;
+        for &c in &chain {
+            let off = cluster_offset_bytes(&geo, c);
+            let mut buf = vec![0u8; bytes_per_cluster as usize];
+            synth.read(off, &mut buf).expect("cluster read ok");
+            for slot in buf.chunks_exact(32) {
+                if slot[0] == ENTRY_TYPE_FILE {
+                    file_primaries += 1;
+                }
+            }
+        }
+        assert_eq!(
+            file_primaries, file_count,
+            "all file entry sets must be served across the root chain"
+        );
     }
 }

@@ -26,6 +26,14 @@ logger = logging.getLogger(__name__)
 _JSON_ENCODING: Final[str] = "utf-8"
 _JSON_INDENT: Final[int] = 2
 _COPY_CHUNK_BYTES: Final[int] = 65_536
+# Files published into the MEDIA backing tree are read by teslafat (the USB
+# gadget) running as the `teslausb` service user, while this web process runs as
+# a different user. tempfile.mkstemp() creates 0600 temp files, so without this
+# explicit mode the published file is unreadable by teslafat — which manifests
+# as a deterministic NBD I/O error (or, with the tolerant overlay, silent zeros)
+# when the car tries to read it. 0644 matches the gadget-visible convention used
+# for chimes and Samba-published media.
+_PUBLISHED_FILE_MODE: Final[int] = 0o644
 _LIGHTSHOW_ROOT_DIRNAME: Final[str] = "lightshow"
 _PATH_TRAVERSAL_FORBIDDEN: Final[frozenset[str]] = frozenset({"/", "\\", "..", "\x00"})
 _ACTIVE_SHOW_FILENAME_KEY: Final[str] = "filename"
@@ -479,6 +487,7 @@ def _write_stream_atomically(*, source: IO[bytes], destination: Path, max_size: 
             size_bytes = _copy_stream_with_limit(source, file_handle, max_size=max_size)
             file_handle.flush()
             os.fsync(file_handle.fileno())
+        os.chmod(temp_path, _PUBLISHED_FILE_MODE)  # noqa: PTH101 - readable by teslafat gadget user
         os.replace(temp_path, destination)  # noqa: PTH105 - atomic publish contract
     except _SizeLimitExceeded:
         _safe_unlink(temp_path)

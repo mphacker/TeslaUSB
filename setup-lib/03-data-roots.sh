@@ -57,7 +57,7 @@ B1_STATE_DIR="/var/lib/teslausb"
 B1_STATE_DIR_MODE="0770"
 
 # Tesla-canonical subdirectories created inside each LUN backing root so
-# the FAT32 volume teslafat synthesizes for the car already has the
+# the exFAT volume teslafat synthesizes for the car already has the
 # directory structure Tesla expects. Tesla creates these on first write
 # anyway, but pre-creating means:
 #   * the web app shows correct empty states from day one;

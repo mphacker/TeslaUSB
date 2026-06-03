@@ -5,7 +5,7 @@
 //! ## Why this exists
 //!
 //! [`SynthBackend::open`] walks `backing_root` exactly once and then
-//! serves an immutable FAT32/`exFAT` layout (directory entries, FAT /
+//! serves an immutable `exFAT` layout (directory entries, FAT /
 //! allocation bitmap, cluster extents). A backing file that is
 //! *added*, *removed*, or *resized* after open is invisible to the
 //! synthesised view until the daemon re-walks. Before this wrapper the
@@ -216,7 +216,7 @@ mod tests {
     async fn size_is_constant_across_reload() {
         let dir = tempfile::tempdir().unwrap();
         write_file(&dir.path().join("alpha.bin"), &[0x11; 4096]);
-        let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Fat32);
+        let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Exfat);
         let backend = ReloadableBackend::open(&cfg).unwrap();
         let before = backend.size();
 
@@ -234,7 +234,7 @@ mod tests {
     async fn reload_makes_a_newly_added_file_visible() {
         let dir = tempfile::tempdir().unwrap();
         write_file(&dir.path().join("first.bin"), &[0x33; 4096]);
-        let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Fat32);
+        let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Exfat);
         let backend = ReloadableBackend::open(&cfg).unwrap();
         let count_before = backend.current().file_count();
 
@@ -264,7 +264,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let old_payload: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
         write_file(&dir.path().join("chime.wav"), &old_payload);
-        let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Fat32);
+        let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Exfat);
         let backend = ReloadableBackend::open(&cfg).unwrap();
 
         let first_byte = backend
@@ -291,7 +291,7 @@ mod tests {
     async fn failed_build_leaves_live_view_intact() {
         let dir = tempfile::tempdir().unwrap();
         write_file(&dir.path().join("keep.bin"), &[0x55; 4096]);
-        let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Fat32);
+        let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Exfat);
         let backend = ReloadableBackend::open(&cfg).unwrap();
         let count_before = backend.current().file_count();
 
@@ -299,7 +299,7 @@ mod tests {
         // build_fresh to fail, proving the error path is a clean
         // Err (the caller's "swap only on Ok" contract then trivially
         // preserves the live view).
-        let bad_cfg = sample_cfg(dir.path().join("does-not-exist"), FsType::Fat32);
+        let bad_cfg = sample_cfg(dir.path().join("does-not-exist"), FsType::Exfat);
         let bad = ReloadableBackend::open(&bad_cfg);
         // open() over a missing root surfaces an error rather than a
         // silent empty view.
@@ -316,7 +316,7 @@ mod tests {
     async fn try_go_live_swaps_when_quiescent() {
         let dir = tempfile::tempdir().unwrap();
         write_file(&dir.path().join("first.bin"), &[0x33; 4096]);
-        let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Fat32);
+        let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Exfat);
         let backend = ReloadableBackend::open(&cfg).unwrap();
         let count_before = backend.current().file_count();
 
@@ -341,7 +341,7 @@ mod tests {
     async fn try_go_live_refuses_when_busy() {
         let dir = tempfile::tempdir().unwrap();
         write_file(&dir.path().join("first.bin"), &[0x33; 4096]);
-        let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Fat32);
+        let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Exfat);
         let backend = ReloadableBackend::open(&cfg).unwrap();
         let count_before = backend.current().file_count();
 
@@ -359,8 +359,8 @@ mod tests {
         );
     }
 
-    /// The gate is filesystem-agnostic: an exFAT media LUN reloads
-    /// through the exact same quiescence-gated path as FAT32.
+    /// The gate is filesystem-agnostic: the exFAT media LUN reloads
+    /// through the same quiescence-gated path regardless of layout.
     #[tokio::test]
     async fn try_go_live_swaps_when_quiescent_exfat() {
         let dir = tempfile::tempdir().unwrap();

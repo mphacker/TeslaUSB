@@ -25,6 +25,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _COPY_CHUNK_BYTES: Final[int] = 65_536
+# Published wrap files are read by teslafat (USB gadget) as the `teslausb`
+# service user; tempfile.mkstemp() creates 0600 temp files, so restore a
+# gadget-readable mode before publishing or the car cannot read the wrap.
+_PUBLISHED_FILE_MODE: Final[int] = 0o644
 _BYTES_PER_MIB: Final[int] = 1_048_576
 _LIGHTSHOW_ROOT_DIRNAME: Final[str] = "lightshow"
 _PATH_TRAVERSAL_FORBIDDEN: Final[frozenset[str]] = frozenset({"/", "\\", "..", "\x00"})
@@ -327,6 +331,7 @@ class WrapService:
             validation = self.validate_png(temp_path)
             if not validation.success:
                 raise WrapError(f"{destination.name}: {validation.message}")
+            os.chmod(temp_path, _PUBLISHED_FILE_MODE)  # noqa: PTH101 - readable by teslafat gadget user
             os.replace(temp_path, destination)  # noqa: PTH105 - atomic publish contract
         except _SizeLimitExceeded:
             _safe_unlink(temp_path)

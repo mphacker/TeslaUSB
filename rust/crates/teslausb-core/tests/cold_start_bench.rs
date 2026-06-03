@@ -10,22 +10,20 @@
 //!
 //! ## What this file gates
 //!
-//! Three measurements that compose the cold-start path:
+//! Measurements that compose the cold-start path:
 //!
-//! 1. **Fat32 synthesis with 10 000 file chains.** The synthesizer
-//!    walks the in-memory dir tree, builds the FAT table,
-//!    composes boot/`FsInfo`, and returns a ready-to-serve
-//!    `Fat32Synth`. Budget: 1 s. This is the closest current
-//!    proxy for the row-2.14 deliverable since Phase 3 hasn't
-//!    yet added user-file entries to the exFAT side.
-//! 2. **exFAT synthesis on a 64 GiB volume.** Worst-case
+//! 1. **exFAT synthesis on a 64 GiB volume.** Worst-case
 //!    metadata size (largest cluster heap + bitmap +
 //!    backup-boot). Budget: 1 s.
-//! 3. **Lazy cluster materialization of 10 000 distinct
+//! 2. **Lazy cluster materialization of 10 000 distinct
 //!    clusters** through a no-op materializer. Validates that
 //!    the cache's lock + `BTreeMap` path doesn't itself blow
 //!    the budget under realistic working-set sizes.
 //!    Budget: 1 s.
+//!
+//! The 10 000-file synthesis budget (the row-2.14 deliverable) is
+//! gated against the real `SynthBackend::open` cold-start path in
+//! `teslafat/tests/exfat_cold_start_bench.rs`.
 //!
 //! On a modern dev box every measurement here completes in
 //! single-digit-to-tens-of-milliseconds; the 1 s ceilings are
@@ -61,15 +59,10 @@ use teslausb_core::fs::exfat::lazy_load::{
     ClusterMaterializer, LazyClusterCache, MaterializeError,
 };
 use teslausb_core::fs::exfat::synth::ExfatSynth;
-use teslausb_core::fs::fat32::boot_sector::ROOT_DIRECTORY_CLUSTER;
-use teslausb_core::fs::fat32::fat_table::InMemoryDirTree;
-use teslausb_core::fs::fat32::geometry::Fat32Geometry;
-use teslausb_core::fs::fat32::synth::Fat32Synth;
 use teslausb_core::fs::geometry::Geometry;
 
 const COLD_START_BUDGET: Duration = Duration::from_secs(1);
 const TEN_THOUSAND: u32 = 10_000;
-const TESTVOL_FAT_LABEL: &[u8; 11] = b"TESTVOL    ";
 const TESTVOL_EXFAT_UTF16: &[u16] = &[
     b'T' as u16,
     b'E' as u16,
@@ -80,7 +73,6 @@ const TESTVOL_EXFAT_UTF16: &[u16] = &[
     b'L' as u16,
 ];
 const SERIAL: u32 = 0xDEAD_BEEF;
-const FAT32_VOLUME_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const EXFAT_VOLUME_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const CLUSTER_SIZE_BYTES: usize = 32 * 1024;
 
@@ -102,78 +94,9 @@ impl ClusterMaterializer for NoOpMaterializer {
     }
 }
 
-fn build_ten_thousand_chain_tree() -> InMemoryDirTree {
-    // First chain is the root directory at cluster 2. Each of
-    // the remaining 10 000 chains is a single-cluster file at
-    // clusters 3..10_003 — a realistic small-file workload
-    // (~4 KiB Tesla event.json files, GPS NMEA logs, etc.).
-    let mut chains = Vec::with_capacity(TEN_THOUSAND as usize + 1);
-    chains.push(vec![ROOT_DIRECTORY_CLUSTER]);
-    for cluster in (ROOT_DIRECTORY_CLUSTER + 1)..=(ROOT_DIRECTORY_CLUSTER + TEN_THOUSAND) {
-        chains.push(vec![cluster]);
-    }
-    InMemoryDirTree::from_chains(chains)
-}
-
 fn report(label: &str, elapsed: Duration) {
     let micros = elapsed.as_micros();
     eprintln!("[2.14 cold-start bench] {label}: {micros} µs (budget 1 000 000 µs)");
-}
-
-// ── Fat32 cold-start ─────────────────────────────────────────────────
-
-#[test]
-fn fat32_synth_cold_start_with_10k_file_tree_within_budget() {
-    let tree = build_ten_thousand_chain_tree();
-    let geo = Fat32Geometry::for_volume_size(FAT32_VOLUME_BYTES).expect("valid geometry");
-
-    let start = Instant::now();
-    let synth = Fat32Synth::new(geo, TESTVOL_FAT_LABEL, SERIAL, None, None, &tree)
-        .expect("synth must build");
-    let elapsed = start.elapsed();
-
-    report("Fat32Synth::new on 10k-file tree", elapsed);
-    // Reach through the API to defeat any compiler optimization
-    // that would constant-fold the synth construction away if
-    // the value were never read.
-    let _ = synth.geometry().volume_size_bytes();
-
-    assert!(
-        elapsed < COLD_START_BUDGET,
-        "Fat32 cold-start with 10k file chains took {elapsed:?}; budget is {COLD_START_BUDGET:?}",
-    );
-}
-
-#[test]
-fn fat32_synth_cold_start_reads_full_fat1_region_within_budget() {
-    // Tesla's first SCSI read against a newly-mounted FAT32 LUN
-    // is typically the entire reserved + first-FAT region.
-    // Measure that read path end-to-end.
-    let tree = build_ten_thousand_chain_tree();
-    let geo = Fat32Geometry::for_volume_size(FAT32_VOLUME_BYTES).expect("valid geometry");
-    let synth = Fat32Synth::new(geo, TESTVOL_FAT_LABEL, SERIAL, None, None, &tree)
-        .expect("synth must build");
-
-    // Read the first 16 MiB — covers boot, FsInfo, both FATs at
-    // 4 GiB scale.
-    let mut buf = vec![0_u8; 16 * 1024 * 1024];
-    let start = Instant::now();
-    synth.read(0, &mut buf).expect("read must succeed");
-    let elapsed = start.elapsed();
-
-    report("Fat32 first-16-MiB sweep read", elapsed);
-    assert!(
-        elapsed < COLD_START_BUDGET,
-        "first 16 MiB sweep took {elapsed:?}; budget is {COLD_START_BUDGET:?}",
-    );
-
-    // Sanity: the first 11 bytes are the BPB jump + OEM name
-    // (`MSWIN4.1` etc.) — at minimum non-zero, proving the read
-    // path actually wrote bytes.
-    assert!(
-        buf[..11].iter().any(|&b| b != 0),
-        "first 11 bytes of boot sector must contain JumpBoot + OEM name",
-    );
 }
 
 // ── exFAT cold-start ─────────────────────────────────────────────────

@@ -128,6 +128,26 @@ def test_teslafat_ipc_block_absent_when_flag_disabled(client: FlaskClient) -> No
     assert "teslafat_ipc" not in body
 
 
+def test_partition_block_defaults_absent_fs_type_to_exfat(tmp_path: Path) -> None:
+    # The project is exFAT-only; a deployed teslafat-0.toml may omit the
+    # ``fs_type`` key entirely. An absent value must surface as exFAT,
+    # never the historical "?" placeholder or a FAT32 label.
+    from teslausb_web.blueprints import system_health as sh
+
+    (tmp_path / "teslafat-0.toml").write_text(
+        '[[partition]]\nvolume_label = "TESLACAM"\n',
+        encoding="utf-8",
+    )
+    with (
+        patch.object(sh, "_TESLAFAT_CONFIG_DIR", tmp_path),
+        patch.object(sh, "_systemctl_is_active", return_value="active"),
+    ):
+        block = sh._teslafat_partition_block(0)
+    assert block["fs_type"] == "exfat"
+    assert "exFAT" in block["message"]
+    assert "FAT32" not in block["message"]
+
+
 @pytest.mark.skipif(
     not hasattr(socket, "AF_UNIX"),
     reason="AF_UNIX required for live socket round-trip; Linux-only.",

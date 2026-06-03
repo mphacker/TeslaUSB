@@ -8,13 +8,10 @@
 //! [`crate::fs::geometry::Geometry::region_at`] method to route an
 //! incoming byte-offset to the correct synthesizer module.
 //!
-//! Phase 2.8 ships [`geometry`] and [`boot_sector`]. Phase 2.9
-//! adds [`allocation_bitmap`] and [`upcase_table`]. Phase 2.10
-//! adds [`directory`]. Phase 2.11 adds the [`synth`] read
-//! dispatcher. Subsequent increments add:
-//!
-//! * Phase 2.12 — external integration test parallel to the FAT32
-//!   `fs_fat32_integration.rs` harness.
+//! This module ships [`geometry`], [`boot_sector`],
+//! [`allocation_bitmap`], [`upcase_table`], [`directory`], and the
+//! [`synth`] read dispatcher, exercised by the external
+//! `fs_exfat_integration.rs` harness.
 //!
 //! ## Spec reference
 //!

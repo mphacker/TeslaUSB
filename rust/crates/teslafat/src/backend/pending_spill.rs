@@ -3,10 +3,9 @@
 //!
 //! ## Why this exists
 //!
-//! Both the FAT32 and exFAT write-state machines (see
-//! [`super::fat32_write`] and [`super::exfat_write`]) face the same
-//! out-of-order problem: the Linux block layer can issue a write to
-//! a data cluster *before* it issues the FAT update or directory
+//! The exFAT write-state machine (see [`super::exfat_write`]) faces
+//! an out-of-order problem: the Linux block layer can issue a write
+//! to a data cluster *before* it issues the FAT update or directory
 //! entry that tells us which file owns that cluster. We stash those
 //! bytes in a per-cluster spill map and replay them once the
 //! ownership reveals itself.

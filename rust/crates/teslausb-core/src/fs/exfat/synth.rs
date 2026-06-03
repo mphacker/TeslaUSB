@@ -1,7 +1,6 @@
-//! `exFAT` read dispatcher (Phase 2.11).
+//! `exFAT` read dispatcher.
 //!
-//! [`ExfatSynth`] is the `exFAT` parallel of
-//! [`crate::fs::fat32::synth::Fat32Synth`]. Given a byte offset
+//! [`ExfatSynth`] is the read-side synthesizer. Given a byte offset
 //! and a caller-supplied `&mut [u8]` to fill,
 //! [`ExfatSynth::read`] dispatches each contiguous chunk of the
 //! request to the appropriate region synthesizer:
@@ -77,6 +76,11 @@ pub struct ExfatSynth {
     bitmap: AllocationBitmap,
     upcase: UpcaseTable,
     root_directory: Vec<u8>,
+    /// Contiguous overflow extent `(first_cluster, cluster_count)`
+    /// for a multi-cluster FAT-chained root, or `None` when the root
+    /// occupies only its single fixed cluster. The full root chain is
+    /// `[first_root_directory_cluster]` followed by this extent.
+    root_overflow: Option<(u32, u32)>,
     /// First cluster of the allocation bitmap stream.
     bitmap_first_cluster: u32,
     /// Number of clusters occupied by the bitmap stream.
@@ -131,15 +135,6 @@ pub enum ExfatSynthError {
         /// The geometry's volume size.
         volume_size: u64,
     },
-    /// The geometry returned a [`RegionKind`] that is not part of
-    /// the `exFAT` on-disk layout (for example, a FAT32 boot
-    /// sector). A correctly-constructed [`ExfatGeometry`] never
-    /// produces such regions; this variant exists as
-    /// defense-in-depth.
-    UnsupportedRegion {
-        /// The offending region kind.
-        kind: RegionKind,
-    },
     /// [`ExfatSynth::with_layout`] received a layout planned
     /// against a different `bytes_per_cluster` than this synth's
     /// geometry. The layout and synth must come from the same
@@ -181,9 +176,6 @@ impl fmt::Display for ExfatSynthError {
                 f,
                 "read of {length} bytes at offset {offset} extends past the volume size {volume_size}",
             ),
-            Self::UnsupportedRegion { kind } => {
-                write!(f, "exFAT synth received an unsupported region kind: {kind}")
-            }
             Self::LayoutMismatch {
                 synth_bytes_per_cluster,
                 layout_bytes_per_cluster,
@@ -205,7 +197,6 @@ impl core::error::Error for ExfatSynthError {
             Self::ClusterHeapTooSmall { .. }
             | Self::OffsetBeyondVolume { .. }
             | Self::LengthExceedsVolume { .. }
-            | Self::UnsupportedRegion { .. }
             | Self::LayoutMismatch { .. } => None,
         }
     }
@@ -314,6 +305,7 @@ impl ExfatSynth {
             bitmap,
             upcase,
             root_directory,
+            root_overflow: None,
             bitmap_first_cluster,
             bitmap_cluster_count,
             upcase_first_cluster,
@@ -353,7 +345,11 @@ impl ExfatSynth {
                 layout_bytes_per_cluster: layout.bytes_per_cluster(),
             });
         }
-        let expected_root_len = expected_bytes_per_cluster as usize;
+        // The root may FAT-chain across multiple clusters; its rendered
+        // buffer must be exactly `chain_len * bytes_per_cluster`.
+        let root_chain = layout.root_cluster_chain();
+        let expected_root_len =
+            (expected_bytes_per_cluster as usize).saturating_mul(root_chain.len());
         if layout.root_directory_bytes().len() != expected_root_len {
             return Err(ExfatSynthError::LayoutMismatch {
                 synth_bytes_per_cluster: expected_bytes_per_cluster,
@@ -368,6 +364,16 @@ impl ExfatSynth {
                 .mark_range_allocated(extent.first_cluster, extent.cluster_count)
                 .map_err(ExfatSynthError::Bitmap)?;
         }
+        // Record the overflow extent (chain past the fixed first
+        // cluster) so the FAT and data-read paths synthesize the root
+        // chain. `chain[0]` is always the fixed first root cluster.
+        self.root_overflow = match root_chain.split_first() {
+            Some((_, rest)) => rest.first().map(|&first| {
+                let count = u32::try_from(rest.len()).unwrap_or(u32::MAX);
+                (first, count)
+            }),
+            None => None,
+        };
         self.root_directory = layout.root_directory_bytes().to_vec();
         self.data_source = Some(Arc::new(layout));
         Ok(self)
@@ -406,6 +412,17 @@ impl ExfatSynth {
         self.bitmap_cluster_count
     }
 
+    /// Spec-minimal `DataLength` of the allocation bitmap stream:
+    /// `ceil(ClusterCount / 8)` bytes (exFAT spec §7.1.4). This is
+    /// the value the bitmap directory entry must advertise — what a
+    /// real `mkfs.exfat` writes — even though the stream's storage
+    /// footprint is rounded up to [`Self::bitmap_cluster_count`]
+    /// whole clusters. Reads past `DataLength` zero-fill (= free).
+    #[must_use]
+    pub fn bitmap_data_length_bytes(&self) -> u64 {
+        self.bitmap.size_bytes()
+    }
+
     /// First cluster of the upcase table stream.
     #[must_use]
     pub fn upcase_first_cluster(&self) -> u32 {
@@ -433,10 +450,6 @@ impl ExfatSynth {
     ///   at or beyond the volume size.
     /// * [`ExfatSynthError::LengthExceedsVolume`] if
     ///   `offset + out.len()` exceeds the volume size.
-    /// * [`ExfatSynthError::UnsupportedRegion`] if the geometry
-    ///   yields a region kind the dispatcher doesn't recognise
-    ///   (defense-in-depth — never happens with the shipped
-    ///   `ExfatGeometry`).
     pub fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), ExfatSynthError> {
         if out.is_empty() {
             return Ok(());
@@ -480,19 +493,14 @@ impl ExfatSynth {
                 usize::try_from(region_remaining_u64).unwrap_or(usize::MAX);
             let take = region_remaining_usize.min(remaining.len());
             let (chunk, rest) = remaining.split_at_mut(take);
-            self.read_region(region, cursor, chunk)?;
+            self.read_region(region, cursor, chunk);
             cursor = cursor.saturating_add(u64::try_from(take).unwrap_or(u64::MAX));
             remaining = rest;
         }
         Ok(())
     }
 
-    fn read_region(
-        &self,
-        region: Region,
-        offset: u64,
-        out: &mut [u8],
-    ) -> Result<(), ExfatSynthError> {
+    fn read_region(&self, region: Region, offset: u64, out: &mut [u8]) {
         let byte_in_region = offset.saturating_sub(region.start);
         match region.kind {
             RegionKind::ExfatMainBootRegion | RegionKind::ExfatBackupBootRegion => {
@@ -507,22 +515,17 @@ impl ExfatSynth {
             RegionKind::Reserved => {
                 out.fill(0);
             }
-            RegionKind::Fat32BootSector
-            | RegionKind::Fat32BackupBootSector
-            | RegionKind::Fat32FsInfo => {
-                return Err(ExfatSynthError::UnsupportedRegion { kind: region.kind });
-            }
         }
-        Ok(())
     }
 
     fn read_boot_region(&self, byte_in_region: u64, out: &mut [u8]) {
-        // Caller has clamped to region bytes, so byte_in_region
-        // + out.len() <= BOOT_REGION_SIZE_BYTES.
-        let start = usize::try_from(byte_in_region).unwrap_or(BOOT_REGION_SIZE_BYTES);
-        let end = start.saturating_add(out.len()).min(BOOT_REGION_SIZE_BYTES);
-        #[allow(clippy::indexing_slicing)] // bounds clamped above
-        out.copy_from_slice(&self.boot_region[start..end]);
+        // The caller clamps to region bytes, but make this
+        // structurally panic-proof regardless: a panic in the NBD
+        // read path drops the gadget and stops recording. Copy only
+        // the bytes that actually exist in `boot_region` and zero-fill
+        // any remainder (mirrors `copy_from_stream`), so a length
+        // mismatch can never reach `copy_from_slice`'s panic.
+        copy_from_stream(&self.boot_region, byte_in_region, out);
     }
 
     fn read_fat_region(&self, byte_in_region: u64, out: &mut [u8]) {
@@ -552,9 +555,31 @@ impl ExfatSynth {
         if cluster == 1 {
             return END_OF_CHAIN;
         }
-        if cluster == root_cluster {
-            // Root directory occupies exactly one cluster.
-            return END_OF_CHAIN;
+        // Root directory chain. Single-cluster root → lone EOC.
+        // Multi-cluster root → cluster 2 points at the first overflow
+        // cluster, the contiguous overflow run links each cluster to
+        // the next, and the last overflow cluster terminates the chain.
+        match self.root_overflow {
+            None => {
+                if cluster == root_cluster {
+                    return END_OF_CHAIN;
+                }
+            }
+            Some((overflow_first, overflow_count)) => {
+                let overflow_last = overflow_first
+                    .saturating_add(overflow_count)
+                    .saturating_sub(1);
+                if cluster == root_cluster {
+                    return overflow_first;
+                }
+                if cluster >= overflow_first && cluster <= overflow_last {
+                    return if cluster == overflow_last {
+                        END_OF_CHAIN
+                    } else {
+                        cluster.saturating_add(1)
+                    };
+                }
+            }
         }
         if let Some(next) = chain_next(
             cluster,
@@ -593,10 +618,29 @@ impl ExfatSynth {
         }
     }
 
+    /// Position of `cluster` within the root directory chain, or
+    /// `None` if it is not a root cluster. Index 0 is the fixed first
+    /// root cluster; subsequent indices map into the contiguous
+    /// overflow extent. O(1).
+    fn root_chain_index(&self, cluster: u32) -> Option<u64> {
+        if cluster == self.geometry.first_root_directory_cluster() {
+            return Some(0);
+        }
+        let (overflow_first, overflow_count) = self.root_overflow?;
+        let overflow_end = overflow_first.saturating_add(overflow_count);
+        if cluster >= overflow_first && cluster < overflow_end {
+            return Some(u64::from(1 + (cluster - overflow_first)));
+        }
+        None
+    }
+
     fn read_data_cluster_chunk(&self, cluster: u32, byte_in_cluster: u64, out: &mut [u8]) {
-        let root_cluster = self.geometry.first_root_directory_cluster();
-        if cluster == root_cluster {
-            copy_from_stream(&self.root_directory, byte_in_cluster, out);
+        if let Some(chain_index) = self.root_chain_index(cluster) {
+            let bytes_per_cluster = u64::from(self.geometry.bytes_per_cluster());
+            let offset = chain_index
+                .saturating_mul(bytes_per_cluster)
+                .saturating_add(byte_in_cluster);
+            copy_from_stream(&self.root_directory, offset, out);
             return;
         }
         if let Some(local_offset) = stream_offset(
@@ -728,6 +772,29 @@ mod tests {
     }
 
     // ---------- Construction ----------
+
+    /// MAJOR 6: `read_boot_region` must be structurally panic-proof.
+    /// Pre-fix it used `out.copy_from_slice(&boot_region[start..end])`,
+    /// which panics if `end - start != out.len()` — e.g. when the
+    /// requested range starts inside the boot region but `out` extends
+    /// past `BOOT_REGION_SIZE_BYTES`. A panic in the NBD read path
+    /// drops the gadget and stops recording. It must instead copy what
+    /// exists and zero-fill the rest.
+    #[test]
+    fn read_boot_region_zero_fills_past_end_without_panicking() {
+        let s = synth_64mib();
+        // Start a few bytes before the end of the boot region with an
+        // `out` buffer that runs well past it.
+        let start = (BOOT_REGION_SIZE_BYTES - 4) as u64;
+        let mut out = [0xAAu8; 32];
+        s.read_boot_region(start, &mut out);
+        // The first 4 bytes come from the region; the remainder is
+        // zero-filled, and crucially the call did not panic.
+        assert!(
+            out[4..].iter().all(|&b| b == 0),
+            "bytes past the boot region must be zero-filled"
+        );
+    }
 
     #[test]
     fn construction_returns_geometry() {

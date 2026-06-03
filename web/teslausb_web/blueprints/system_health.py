@@ -169,8 +169,10 @@ def _teslafat_partition_block(partition_index: int) -> dict[str, object]:
     reflects that unit's state plus the partition's label/filesystem."""
     cfg_data = _read_teslafat_partition_config(partition_index)
     label = cfg_data.get("volume_label", f"Partition {partition_index}")
-    fs_type = cfg_data.get("fs_type", "?")
-    fs_display = {"exfat": "exFAT", "fat32": "FAT32"}.get(fs_type.lower(), fs_type)
+    # The project is exFAT-only; the ``fs_type`` key is optional in the
+    # deployed config and absent means exFAT.
+    fs_type = cfg_data.get("fs_type", "exfat")
+    fs_display = {"exfat": "exFAT"}.get(fs_type.lower(), fs_type)
     unit = _TESLAFAT_DISK_UNIT
     state = _systemctl_is_active(unit)
     if state is None:

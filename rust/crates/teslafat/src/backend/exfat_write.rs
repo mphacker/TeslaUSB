@@ -6,11 +6,9 @@
 //! (which materializes file content onto the POSIX backing tree
 //! via `.partial`-suffix atomicity).
 //!
-//! Parallel to [`super::fat32_write`] (Phase 3.5c); see that
-//! module for the shared rationale (per-region-chunk routing,
-//! pending stash for out-of-order arrivals, crash safety via
-//! `.partial` rename). The differences here mirror the structural
-//! differences between FAT32 and `exFAT`:
+//! The write path routes per-region chunks, stashes out-of-order
+//! arrivals in a pending spill buffer, and achieves crash safety
+//! via `.partial` rename. Structural points specific to `exFAT`:
 //!
 //! 1. **Single FAT**, not two mirrors — there is no per-mirror
 //!    array; the one FAT is the source of truth for chained files.
@@ -64,7 +62,7 @@ const EXFAT_END_OF_CHAIN: u32 = 0xFFFF_FFFF;
 /// Bad-cluster marker (spec §4.1).
 const EXFAT_BAD_CLUSTER: u32 = 0xFFFF_FFF7;
 /// Maximum chain length the walker will follow before declaring
-/// the chain corrupt. Same cap as the FAT32 walker (Phase 3.5b).
+/// the chain corrupt.
 const MAX_CHAIN_LENGTH: usize = 1_048_576;
 
 /// Errors returned by [`ExfatWriteState::apply_write`] and
@@ -104,8 +102,8 @@ impl From<ExfatWriteError> for BackendError {
 
 /// Per-directory accumulated state. One per dir-first-cluster.
 ///
-/// Mirror of FAT32's `DirectoryState`; differs in the dir-entry
-/// decoder carry type (`PartialEntrySet` instead of `Vec<LfnEntry>`).
+/// Carries `PartialEntrySet` across dir-cluster boundaries so a
+/// multi-cluster entry set can be reassembled before decoding.
 #[derive(Debug)]
 struct DirectoryState {
     /// Cluster chain in FAT order. Initially `[first_cluster]`
@@ -307,10 +305,6 @@ impl BitmapTracker {
 
 /// Describes a pre-existing file extent the [`ExfatWriteState`]
 /// should seed into its cluster map at construction time.
-///
-/// Same role as [`super::fat32_write::PreExistingExtent`]; kept
-/// as a distinct type so the two state machines stay
-/// independently evolvable.
 #[derive(Debug, Clone)]
 pub struct PreExistingExfatExtent {
     /// First cluster of the extent.
@@ -429,7 +423,7 @@ impl ExfatWriteState {
 
     /// Seed every planned subdirectory's contiguous cluster chain
     /// into the resolver, with `source` retained for lazy buffer
-    /// materialization (see [`Self::dir_byte_source`]).
+    /// materialization (see `Self::dir_byte_source`).
     ///
     /// Without this, [`Self::new`] knows only the root directory.
     /// Every `TeslaCam` clip lives inside a subdirectory
@@ -443,19 +437,52 @@ impl ExfatWriteState {
     ///
     /// Subdirectory `buffer`s are left empty and materialized
     /// lazily on first write to bound memory; the root buffer is
-    /// materialized eagerly (a single cluster) so a partial root
-    /// rewrite still re-decodes the complete child set.
+    /// materialized eagerly (its full cluster chain) so a partial
+    /// root rewrite still re-decodes the complete child set.
+    ///
+    /// `root_chain` is the root directory's full cluster chain from
+    /// the layout planner (`ExfatLayout::root_cluster_chain`): the
+    /// fixed first root cluster followed by any FAT-chained overflow
+    /// clusters when the root's entry sets exceed one cluster. The
+    /// base FAT mirror is seeded for this chain (without marking it
+    /// dirty) so that `try_walk_chain(root)` stays consistent and a
+    /// host write that extends the root resolves correctly.
     #[must_use]
     pub fn with_directory_seed(
         mut self,
         source: Arc<dyn DataClusterSource + Send + Sync>,
+        root_chain: &[u32],
         dirs: &[DirPlacement],
     ) -> Self {
         let bytes_per_cluster_usize = self.bytes_per_cluster as usize;
         let root_cluster = self.geometry.first_root_directory_cluster();
+        // Seed the base FAT mirror for the root chain so the resolver
+        // can walk it (cluster N -> N+1 ... -> EOC). Not marked dirty:
+        // reads of the FAT region are served by the synth, and these
+        // base entries must not surface as host-written overlay bytes.
+        if root_chain.len() > 1 {
+            for window in root_chain.windows(2) {
+                if let [from, to] = window {
+                    self.set_fat_base(*from, *to);
+                }
+            }
+            if let Some(&last) = root_chain.last() {
+                self.set_fat_base(last, EXFAT_END_OF_CHAIN);
+            }
+        }
         if let Some(root_state) = self.directories.get_mut(&root_cluster) {
-            let mut buf = vec![0u8; bytes_per_cluster_usize];
-            source.read_cluster_bytes(root_cluster, 0, &mut buf);
+            let chain: Vec<u32> = if root_chain.is_empty() {
+                vec![root_cluster]
+            } else {
+                root_chain.to_vec()
+            };
+            let mut buf = vec![0u8; chain.len().saturating_mul(bytes_per_cluster_usize)];
+            for (i, &cluster) in chain.iter().enumerate() {
+                let off = i.saturating_mul(bytes_per_cluster_usize);
+                if let Some(slot) = buf.get_mut(off..off + bytes_per_cluster_usize) {
+                    source.read_cluster_bytes(cluster, 0, slot);
+                }
+            }
             // Establish the pre-existing child baseline so the first
             // post-open redecode of a partial root rewrite diffs
             // against the real prior set (catching deletions), not an
@@ -463,6 +490,14 @@ impl ExfatWriteState {
             let parent_path = root_state.parent_path.clone();
             root_state.registered_children = Self::decode_registered_children(&buf, &parent_path);
             root_state.buffer = buf;
+            // Every root cluster (head + overflow) routes directory
+            // writes back to the root directory state.
+            for &cluster in &chain {
+                self.cluster_to_directory.insert(cluster, root_cluster);
+            }
+            if let Some(root_state) = self.directories.get_mut(&root_cluster) {
+                root_state.chain = chain;
+            }
         }
         for dir in dirs {
             if dir.cluster_count == 0 {
@@ -871,6 +906,38 @@ impl ExfatWriteState {
         self.deleted.forget(relative_path);
 
         let cluster_count = self.clusters_for_data_length(data_length);
+        // Reject malformed entries whose cluster geometry escapes the
+        // data heap BEFORE they can drive an unbounded allocation.
+        // A garbage/torn `DataLength` yields `cluster_count` up to
+        // `u32::MAX`; the downstream `NoFatChain` resolve path would
+        // then `collect()` that many cluster ids and allocate a
+        // matching directory buffer, demanding tens of GiB and
+        // aborting the process — which drops the gadget and stops
+        // TeslaCam recording. See `contiguous_run_in_heap`.
+        let geometry_ok = if cluster_count == 0 && !is_directory {
+            // Empty file: no cluster run to materialize.
+            true
+        } else if no_fat_chain {
+            self.contiguous_run_in_heap(first_cluster, cluster_count.max(1))
+        } else {
+            // FAT-chained: the chain is walked under `MAX_CHAIN_LENGTH`,
+            // so only the starting cluster needs to be in-heap here.
+            first_cluster >= FIRST_DATA_CLUSTER && first_cluster < self.heap_end_cluster_exclusive()
+        };
+        if !geometry_ok {
+            tracing::warn!(
+                first_cluster,
+                cluster_count,
+                data_length,
+                no_fat_chain,
+                is_directory,
+                heap_end_cluster = self.heap_end_cluster_exclusive(),
+                ?relative_path,
+                "rejecting malformed directory entry whose cluster run escapes the data \
+                 heap; honoring it would force an out-of-heap / multi-GiB allocation"
+            );
+            return Ok(());
+        }
         let pending = self
             .pending_files
             .entry(first_cluster)
@@ -914,9 +981,7 @@ impl ExfatWriteState {
             return;
         }
         // Phase 4.2: record in retention `DeletedSet` and KEEP
-        // the committed backing file. See the matching block in
-        // `fat32_write::Fat32WriteState::handle_child_deleted`
-        // for the design rationale (Tesla's blind round-robin
+        // the committed backing file (Tesla's blind round-robin
         // reuse must not destroy GPS/SEI-tagged clips).
         self.pending_files.remove(&first_cluster);
         let removed = self.cluster_map.remove_at(first_cluster);
@@ -1173,6 +1238,25 @@ impl ExfatWriteState {
         walk_chain(&self.fat, first_cluster)
     }
 
+    /// Write a FAT entry into the base mirror without marking it
+    /// dirty. Used to seed pre-existing chains (e.g. the root
+    /// directory) the synth already reflects on the read path, so
+    /// the resolver can walk them while the overlay continues to
+    /// surface only genuinely host-written FAT bytes. Out-of-range
+    /// clusters are silently ignored (the chain seed is best-effort
+    /// and bounded by the FAT size computed in [`Self::new`]).
+    fn set_fat_base(&mut self, cluster: u32, value: u32) {
+        let Some(byte_offset) = (cluster as usize).checked_mul(FAT_ENTRY_SIZE_BYTES) else {
+            return;
+        };
+        if let Some(slot) = self
+            .fat
+            .get_mut(byte_offset..byte_offset + FAT_ENTRY_SIZE_BYTES)
+        {
+            slot.copy_from_slice(&value.to_le_bytes());
+        }
+    }
+
     fn replay_pending_data_for_cluster(
         &mut self,
         cluster_number: u32,
@@ -1257,9 +1341,24 @@ impl ExfatWriteState {
     /// See [`ExfatWriteError`].
     pub fn flush(&mut self) -> Result<(), ExfatWriteError> {
         let paths: Vec<PathBuf> = self.in_flight_files.drain().collect();
+        // Best-effort, state-preserving finalize: a failure on one
+        // path (e.g. backing ENOSPC) must NOT silently drop the other
+        // in-flight files. Re-queue any path that fails to finalize so
+        // the next flush retries it, attempt every path, and surface
+        // the first error to the caller (the NBD boundary swallows it
+        // so an in-bounds write never becomes a recording-stopping EIO
+        // — see `SynthBackend::flush`).
+        let mut first_err: Option<ExfatWriteError> = None;
         for path in paths {
             let truncate_size = self.find_recorded_size(&path);
-            self.dir_tree.finalize_with_replace(&path)?;
+            if let Err(err) = self.dir_tree.finalize_with_replace(&path) {
+                tracing::warn!(?path, %err, "finalize failed; re-queuing for retry");
+                self.in_flight_files.insert(path);
+                if first_err.is_none() {
+                    first_err = Some(ExfatWriteError::from(err));
+                }
+                continue;
+            }
             if let Some(size) = truncate_size {
                 let absolute = self.dir_tree.backing_root().join(&path);
                 if let Err(err) = std::fs::OpenOptions::new()
@@ -1290,7 +1389,10 @@ impl ExfatWriteState {
                 "exfat pending-data spill state at flush",
             );
         }
-        Ok(())
+        match first_err {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 
     fn find_recorded_size(&self, relative_path: &Path) -> Option<u64> {
@@ -1312,6 +1414,37 @@ impl ExfatWriteState {
         let bpc = u64::from(self.bytes_per_cluster);
         let total = data_length.div_ceil(bpc);
         u32::try_from(total).unwrap_or(u32::MAX)
+    }
+
+    /// First cluster index *past* the data heap. Valid clusters are
+    /// numbered `FIRST_DATA_CLUSTER..heap_end_cluster_exclusive()`
+    /// (exFAT spec §3.1.6: `ClusterCount` clusters starting at 2).
+    fn heap_end_cluster_exclusive(&self) -> u32 {
+        FIRST_DATA_CLUSTER.saturating_add(self.geometry.cluster_count())
+    }
+
+    /// Whether a contiguous (`NoFatChain`) run `[first, first+count)`
+    /// lies entirely inside the data heap.
+    ///
+    /// A directory entry whose `FirstCluster`/`DataLength` imply a run
+    /// that escapes the heap is malformed (garbage, a torn write, or a
+    /// hostile image). Honoring it is catastrophic on this device: the
+    /// `NoFatChain` resolve path materializes the run with
+    /// `(first..first+count).collect::<Vec<u32>>()` and then a
+    /// `vec![0u8; count * bytes_per_cluster]` directory buffer. With a
+    /// garbage `DataLength`, `count` reaches `u32::MAX`, so those
+    /// allocations demand tens of GiB and abort the process — which
+    /// drops the gadget and stops `TeslaCam` recording. Rejecting the
+    /// entry instead keeps the backend alive; the kernel re-emits a
+    /// corrected entry on the next directory write.
+    fn contiguous_run_in_heap(&self, first: u32, count: u32) -> bool {
+        if count == 0 {
+            return first >= FIRST_DATA_CLUSTER && first < self.heap_end_cluster_exclusive();
+        }
+        let Some(end_excl) = first.checked_add(count) else {
+            return false;
+        };
+        first >= FIRST_DATA_CLUSTER && end_excl <= self.heap_end_cluster_exclusive()
     }
 
     // === Test / diagnostic introspection ===
@@ -1492,7 +1625,7 @@ fn overlay_region_with_base(
 /// continue to return zeros for that region.
 ///
 /// `data_region_start_bytes` is the volume-byte offset where
-/// the cluster heap (or data region for FAT32) begins.
+/// the cluster heap begins.
 /// `bytes_per_cluster` must match what the `cluster_map` was
 /// populated with.
 #[allow(clippy::cast_possible_truncation)]
@@ -1552,8 +1685,8 @@ pub(super) fn overlay_data_clusters_from_cluster_map(
 /// Walk a chain in an `exFAT` FAT buffer starting from
 /// `first_cluster`. Returns `Some(chain)` on success, `None`
 /// for any walk error (empty / out-of-range FAT, cycle, free
-/// pointer, bad cluster) — same lenient behavior as the FAT32
-/// walker.
+/// pointer, bad cluster) — lenient: a malformed chain yields
+/// `None` rather than an error.
 fn walk_chain(fat: &[u8], first_cluster: u32) -> Option<Vec<u32>> {
     if first_cluster < FIRST_DATA_CLUSTER {
         return None;
@@ -1592,7 +1725,7 @@ fn read_fat_entry(fat: &[u8], byte_offset: usize) -> Option<u32> {
 }
 
 /// Collapse a flat list of cluster numbers into one or more
-/// `FileExtent` runs. Mirrors `fat32::chain::chain_to_extents`.
+/// `FileExtent` runs, coalescing contiguous clusters.
 fn chain_to_extents(chain: &[u32], file_path: PathBuf, bytes_per_cluster: u32) -> Vec<FileExtent> {
     let mut out = Vec::new();
     let mut byte_offset: u64 = 0;
@@ -1664,6 +1797,61 @@ mod tests {
 
     fn writer(tmp: &TempDir) -> DirTreeWriter {
         DirTreeWriter::new(tmp.path().to_path_buf()).expect("writer construction")
+    }
+
+    /// A directory entry whose `DataLength` implies a contiguous
+    /// cluster run far past the end of the data heap must be rejected,
+    /// not honored. Pre-fix, the `NoFatChain` resolve path would
+    /// `(first..first+u32::MAX).collect::<Vec<u32>>()` and allocate a
+    /// multi-GiB directory buffer, aborting the process and dropping
+    /// the USB gadget (`TeslaCam` stops recording). The guard must skip
+    /// the entry and leave nothing behind.
+    #[test]
+    fn out_of_heap_data_length_is_rejected_without_unbounded_allocation() {
+        let tmp = TempDir::new().expect("tempdir");
+        let mut s = state(&tmp);
+        let heap_end = s.heap_end_cluster_exclusive();
+        let base_extents = s.extent_count();
+        let base_dirs = s.directory_count();
+
+        // File entry: valid start cluster, garbage DataLength -> the
+        // implied run runs off the end of the heap (cluster_count near
+        // u32::MAX).
+        s.handle_child_seen(
+            FIRST_DATA_CLUSTER,
+            FIRST_DATA_CLUSTER,
+            std::path::Path::new("garbage.bin"),
+            u64::MAX,
+            false,
+            true,
+        )
+        .expect("malformed file entry must be skipped, not error");
+
+        // Directory entry: start cluster past the heap entirely.
+        s.handle_child_seen(
+            FIRST_DATA_CLUSTER,
+            heap_end.saturating_add(5),
+            std::path::Path::new("GarbageDir"),
+            u64::from(s.bytes_per_cluster),
+            true,
+            true,
+        )
+        .expect("malformed dir entry must be skipped, not error");
+
+        assert_eq!(
+            s.extent_count(),
+            base_extents,
+            "no file extent may be registered for an out-of-heap entry"
+        );
+        assert_eq!(
+            s.directory_count(),
+            base_dirs,
+            "no directory may be registered past the heap end"
+        );
+        assert!(
+            s.pending_files.is_empty(),
+            "malformed entries must not be retained as pending files"
+        );
     }
 
     fn state(tmp: &TempDir) -> ExfatWriteState {
@@ -1786,7 +1974,11 @@ mod tests {
         let source = Arc::new(FakeDirSource {
             clusters: source_clusters,
         });
-        ExfatWriteState::new(geo(), writer(tmp), &[]).with_directory_seed(source, dirs)
+        ExfatWriteState::new(geo(), writer(tmp), &[]).with_directory_seed(
+            source,
+            &[geo().first_root_directory_cluster()],
+            dirs,
+        )
     }
 
     /// Regression test for the 2026-06-01 recording outage
@@ -1870,6 +2062,59 @@ mod tests {
         assert_eq!(on_disk, payload);
     }
 
+    /// Regression test for MAJOR 4 — a root directory whose entry
+    /// sets exceed one cluster is FAT-chained from the fixed root
+    /// cluster to a non-adjacent overflow cluster. A top-level clip
+    /// dir-entry that Tesla writes into a root OVERFLOW cluster must
+    /// route back to the root directory and resolve. Before the
+    /// multi-cluster-root seed, only the single fixed root cluster
+    /// was registered, so a write into an overflow cluster hit
+    /// neither `cluster_to_directory` nor `cluster_map`, spilled to
+    /// `pending_data`, and the clip was silently dropped.
+    #[test]
+    fn seeded_multicluster_root_resolves_clip_in_overflow_cluster() {
+        let tmp = TempDir::new().unwrap();
+        let g = geo();
+        let bpc = g.bytes_per_cluster() as usize;
+        let root_cluster = g.first_root_directory_cluster();
+        let overflow_cluster = 20u32;
+
+        // The fixed root cluster is packed with in-use entries and no
+        // 0x00 end-of-directory marker, so a decode of the root flows
+        // past it into the overflow cluster — exactly how a full root
+        // rolls over into a FAT-chained second cluster.
+        let mut source = HashMap::new();
+        source.insert(root_cluster, vec![0xA1u8; bpc]);
+        let src = Arc::new(FakeDirSource { clusters: source });
+        let mut s = ExfatWriteState::new(geo(), writer(&tmp), &[]).with_directory_seed(
+            src,
+            &[root_cluster, overflow_cluster],
+            &[],
+        );
+
+        // The base FAT mirror must be seeded so the root chain is
+        // walkable (fixed root cluster -> overflow -> EOC).
+        assert_eq!(
+            s.try_walk_chain(root_cluster),
+            Some(vec![root_cluster, overflow_cluster]),
+            "root chain must be walkable from the seeded base FAT"
+        );
+
+        // A top-level clip whose dir-entry Tesla writes into the root
+        // OVERFLOW cluster, then the clip data.
+        let payload = b"root overflow clip".repeat(4);
+        let clip_cluster = 30u32;
+        let entry = build_file_entry("rootclip.mp4", clip_cluster, payload.len() as u64, true);
+        s.apply_write(cluster_to_volume_byte(&g, overflow_cluster), &entry)
+            .expect("clip dir entry into root overflow cluster");
+        write_cluster_data(&mut s, clip_cluster, &payload);
+        s.flush().expect("flush");
+
+        let on_disk = fs::read(tmp.path().join("rootclip.mp4"))
+            .expect("top-level clip written into a root overflow cluster must materialize");
+        assert_eq!(on_disk, payload);
+    }
+
     /// Regression test for the GPT-5.5-reviewed blocker: a clip
     /// Tesla DELETES on its very first write to a seeded
     /// subdirectory must be detected. Before the baseline fix, the
@@ -1911,8 +2156,11 @@ mod tests {
             cluster_count: 1,
         }];
         let src = Arc::new(FakeDirSource { clusters: source });
-        let mut s =
-            ExfatWriteState::new(geo(), writer(&tmp), &[pre]).with_directory_seed(src, &dirs);
+        let mut s = ExfatWriteState::new(geo(), writer(&tmp), &[pre]).with_directory_seed(
+            src,
+            &[geo().first_root_directory_cluster()],
+            &dirs,
+        );
         assert_eq!(
             s.extent_count(),
             1,
@@ -1969,7 +2217,11 @@ mod tests {
         source.insert(root_cluster, root_bytes);
 
         let src = Arc::new(FakeDirSource { clusters: source });
-        let mut s = ExfatWriteState::new(geo(), writer(&tmp), &[pre]).with_directory_seed(src, &[]);
+        let mut s = ExfatWriteState::new(geo(), writer(&tmp), &[pre]).with_directory_seed(
+            src,
+            &[root_cluster],
+            &[],
+        );
         assert_eq!(
             s.extent_count(),
             1,
@@ -2233,6 +2485,35 @@ mod tests {
         s.flush().expect("flush");
         assert!(!tmp.path().join("final.bin.partial").exists());
         assert!(tmp.path().join("final.bin").exists());
+    }
+
+    /// MAJOR 3: a finalize failure during `flush()` must NOT silently
+    /// drop the in-flight path. Pre-fix, `flush()` drained
+    /// `in_flight_files` up front and `?`-returned on the first
+    /// finalize error, so every still-pending path (and the failing
+    /// one) was lost and never retried. The path must be re-queued.
+    #[test]
+    fn flush_requeues_in_flight_path_when_finalize_fails() {
+        let tmp = TempDir::new().unwrap();
+        let mut s = state(&tmp);
+        let payload = b"keep me".to_vec();
+        write_cluster_data(&mut s, 5, &payload);
+        let entry = build_file_entry("clip.bin", 5, payload.len() as u64, true);
+        s.apply_write(root_cluster_byte(), &entry).expect("dir");
+        assert_eq!(s.in_flight_file_count(), 1);
+
+        // Sabotage finalize: delete the `.partial` so the rename fails.
+        fs::remove_file(tmp.path().join("clip.bin.partial")).expect("remove partial");
+
+        assert!(
+            s.flush().is_err(),
+            "finalize failure must be surfaced to the caller"
+        );
+        assert_eq!(
+            s.in_flight_file_count(),
+            1,
+            "a path that failed to finalize must be re-queued, not dropped"
+        );
     }
 
     #[test]

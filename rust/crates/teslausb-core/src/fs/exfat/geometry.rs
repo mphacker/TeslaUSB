@@ -476,8 +476,7 @@ fn build_region_map(
 /// freshly-constructed map.
 ///
 /// This indicates a bug in the constructor — every user-supplied
-/// bad input is filtered earlier with [`GeometryError`]. See the
-/// twin function in `fs::fat32::geometry` for the same pattern.
+/// bad input is filtered earlier with [`GeometryError`].
 #[allow(clippy::panic)]
 fn panic_invalid_region_map(volume_size_bytes: u64, err: &RegionMapError) -> GeometryError {
     panic!(

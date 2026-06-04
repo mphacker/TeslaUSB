@@ -1,0 +1,285 @@
+<!DOCTYPE html><html><head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    
+    <title>Tesla USB Gadget Control</title>
+    <script>
+        // Apply theme immediately before page renders to prevent flash
+        (function() {
+            const savedTheme = localStorage.getItem('theme');
+            const systemPrefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+            const theme = savedTheme || (systemPrefersDark ? 'dark' : 'light');
+            if (theme === 'dark') {
+                document.documentElement.setAttribute('data-theme', 'dark');
+            }
+        })();
+    </script>
+    <link rel="stylesheet" href="/static/css/bootstrap-icons-subset.css">
+    <link rel="stylesheet" href="/static/css/style.css">
+    
+
+<link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
+<link rel="stylesheet" href="/static/vendor/leaflet/MarkerCluster.css">
+<link rel="stylesheet" href="/static/vendor/leaflet/MarkerCluster.Default.css">
+<link rel="stylesheet" href="/static/css/mapping.css">
+
+</head>
+<body>
+    
+    
+
+    <!-- Top Bar -->
+    <header class="top-bar">
+        <div class="top-bar-left">
+            <a href="/" class="top-bar-brand">
+                <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-hard-drive"></use></svg>
+                <span class="top-bar-title">TeslaUSB</span>
+            </a>
+        </div>
+        <div class="top-bar-right">
+            
+            <a href="/settings/#system-health-card" class="health-dot-link" id="health-dot-link" title="teslafat_0: inactive — Partition 0 (exFAT)" aria-label="teslafat_0: inactive — Partition 0 (exFAT)">
+                <span class="status-dot health-dot health-dot-error" id="health-dot" data-status-dot="health"></span>
+            </a>
+            
+            
+            <button class="theme-toggle-btn" onclick="toggleTheme()" aria-label="Toggle dark mode">
+                <svg class="nav-icon" id="theme-icon-svg" aria-hidden="true">
+                    <use href="/static/icons/lucide-sprite.svg#icon-moon"></use>
+                </svg>
+            </button>
+        </div>
+    </header>
+
+    <!-- Desktop Sidebar Rail -->
+    <nav class="sidebar-rail" id="sidebarRail" aria-label="Main navigation">
+        
+        <a href="/" class="nav-item active" title="Map">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-map-pin"></use></svg>
+            <span class="nav-label">Map</span>
+        </a>
+        
+        
+        <a href="/analytics/" class="nav-item" title="Analytics">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-bar-chart-2"></use></svg>
+            <span class="nav-label">Analytics</span>
+        </a>
+        
+        
+        <a href="/media/" class="nav-item" title="Media">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-music"></use></svg>
+            <span class="nav-label">Media</span>
+        </a>
+        
+        
+        <a href="/cloud/" class="nav-item" title="Cloud">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-cloud"></use></svg>
+            <span class="nav-label">Cloud</span>
+        </a>
+        
+        <a href="/settings/" class="nav-item" title="Settings">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-settings"></use></svg>
+            <span class="nav-label">Settings</span>
+        </a>
+    </nav>
+
+    <!-- Mobile Bottom Tab Bar -->
+    <nav class="bottom-tabs" aria-label="Main navigation">
+        
+        <a href="/" class="tab-item active">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-map-pin"></use></svg>
+            <span class="tab-label">Map</span>
+        </a>
+        
+        
+        <a href="/analytics/" class="tab-item">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-bar-chart-2"></use></svg>
+            <span class="tab-label">Analytics</span>
+        </a>
+        
+        
+        <a href="/media/" class="tab-item">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-music"></use></svg>
+            <span class="tab-label">Media</span>
+        </a>
+        
+        
+        <a href="/cloud/" class="tab-item">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-cloud"></use></svg>
+            <span class="tab-label">Cloud</span>
+        </a>
+        
+        <a href="/settings/" class="tab-item">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-settings"></use></svg>
+            <span class="tab-label">Settings</span>
+        </a>
+    </nav>
+
+    <main class="main-content expandable" role="main">
+        
+
+        
+            
+            <script>
+                document.addEventListener('DOMContentLoaded', function() {
+                    
+                    showToast('Required Wi-Fi binary &#39;iwconfig&#39; was not found in PATH; configure [wifi.binary_paths].iwconfig', 'error');
+                    
+                });
+            </script>
+            
+        
+
+        
+<div class="map-container">
+    <!-- Map -->
+    <div id="map" class="leaflet-container leaflet-touch leaflet-retina leaflet-fade-anim leaflet-grab leaflet-touch-drag leaflet-touch-zoom" tabindex="0" style="position: relative;"><div class="leaflet-pane leaflet-map-pane" style="transform: translate3d(0px, 0px, 0px);"><div class="leaflet-pane leaflet-tile-pane"><div class="leaflet-layer " style="z-index: 1; opacity: 1;"><div class="leaflet-tile-container leaflet-zoom-animated" style="z-index: 19; transform: translate3d(0px, 0px, 0px) scale(1);"><img alt="" src="https://tile.openstreetmap.org/15/5272/12708.png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(392px, 176px, 0px); opacity: 1;"><img alt="" src="https://tile.openstreetmap.org/15/5273/12708.png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(648px, 176px, 0px); opacity: 1;"><img alt="" src="https://tile.openstreetmap.org/15/5272/12709.png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(392px, 432px, 0px); opacity: 1;"><img alt="" src="https://tile.openstreetmap.org/15/5273/12709.png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(648px, 432px, 0px); opacity: 1;"><img alt="" src="https://tile.openstreetmap.org/15/5272/12707.png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(392px, -80px, 0px); opacity: 1;"><img alt="" src="https://tile.openstreetmap.org/15/5273/12707.png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(648px, -80px, 0px); opacity: 1;"><img alt="" src="https://tile.openstreetmap.org/15/5271/12708.png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(136px, 176px, 0px); opacity: 1;"><img alt="" src="https://tile.openstreetmap.org/15/5274/12708.png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(904px, 176px, 0px); opacity: 1;"><img alt="" src="https://tile.openstreetmap.org/15/5271/12709.png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(136px, 432px, 0px); opacity: 1;"><img alt="" src="https://tile.openstreetmap.org/15/5274/12709.png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(904px, 432px, 0px); opacity: 1;"><img alt="" src="https://tile.openstreetmap.org/15/5272/12710.png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(392px, 688px, 0px); opacity: 1;"><img alt="" src="https://tile.openstreetmap.org/15/5273/12710.png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(648px, 688px, 0px); opacity: 1;"><img alt="" src="https://tile.openstreetmap.org/15/5271/12707.png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(136px, -80px, 0px); opacity: 1;"><img alt="" src="https://tile.openstreetmap.org/15/5274/12707.png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(904px, -80px, 0px); opacity: 1;"><img alt="" src="https://tile.openstreetmap.org/15/5271/12710.png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(136px, 688px, 0px); opacity: 1;"><img alt="" src="https://tile.openstreetmap.org/15/5274/12710.png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(904px, 688px, 0px); opacity: 1;"><img alt="" src="https://tile.openstreetmap.org/15/5270/12708.png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(-120px, 176px, 0px); opacity: 1;"><img alt="" src="https://tile.openstreetmap.org/15/5275/12708.png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(1160px, 176px, 0px); opacity: 1;"><img alt="" src="https://tile.openstreetmap.org/15/5270/12709.png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(-120px, 432px, 0px); opacity: 1;"><img alt="" src="https://tile.openstreetmap.org/15/5275/12709.png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(1160px, 432px, 0px); opacity: 1;"><img alt="" src="https://tile.openstreetmap.org/15/5270/12707.png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(-120px, -80px, 0px); opacity: 1;"><img alt="" src="https://tile.openstreetmap.org/15/5275/12707.png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(1160px, -80px, 0px); opacity: 1;"><img alt="" src="https://tile.openstreetmap.org/15/5270/12710.png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(-120px, 688px, 0px); opacity: 1;"><img alt="" src="https://tile.openstreetmap.org/15/5275/12710.png" class="leaflet-tile leaflet-tile-loaded" style="width: 256px; height: 256px; transform: translate3d(1160px, 688px, 0px); opacity: 1;"></div></div></div><div class="leaflet-pane leaflet-overlay-pane"><canvas class="leaflet-zoom-animated" width="3898" height="2386" style="transform: translate3d(-278.823px, -170.389px, 0px) scale(1); width: 1949px; height: 1193px;"></canvas><svg pointer-events="none" class="leaflet-zoom-animated" width="1670" height="1022" viewBox="-139 -85 1670 1022" style="transform: translate3d(-139.623px, -85.1892px, 0px) scale(1);"><g><path class="leaflet-interactive" stroke="#fff" stroke-opacity="1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="#28a745" fill-opacity="0.9" fill-rule="evenodd" d="M317,633a7,7 0 1,0 14,0 a7,7 0 1,0 -14,0 "></path><path class="leaflet-interactive" stroke="#fff" stroke-opacity="1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="#dc3545" fill-opacity="0.9" fill-rule="evenodd" d="M319,633a7,7 0 1,0 14,0 a7,7 0 1,0 -14,0 "></path><path class="leaflet-interactive" stroke="#fff" stroke-opacity="1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="#28a745" fill-opacity="0.9" fill-rule="evenodd" d="M1058,219a7,7 0 1,0 14,0 a7,7 0 1,0 -14,0 "></path><path class="leaflet-interactive" stroke="#fff" stroke-opacity="1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="#dc3545" fill-opacity="0.9" fill-rule="evenodd" d="M1060,219a7,7 0 1,0 14,0 a7,7 0 1,0 -14,0 "></path><path class="leaflet-interactive" stroke="#fff" stroke-opacity="1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="#28a745" fill-opacity="0.9" fill-rule="evenodd" d="M418,502a7,7 0 1,0 14,0 a7,7 0 1,0 -14,0 "></path><path class="leaflet-interactive" stroke="#fff" stroke-opacity="1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="#dc3545" fill-opacity="0.9" fill-rule="evenodd" d="M675,225a7,7 0 1,0 14,0 a7,7 0 1,0 -14,0 "></path></g></svg></div><div class="leaflet-pane leaflet-shadow-pane"></div><div class="leaflet-pane leaflet-marker-pane"><div class="leaflet-marker-icon event-svg-icon leaflet-zoom-animated leaflet-interactive" tabindex="0" role="button" style="margin-left: -17px; margin-top: -43px; width: 34px; height: 44px; transform: translate3d(1065px, 219px, 0px); z-index: 219; opacity: 1;"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 42" width="34" height="44"><defs><filter id="ds_saved"><feDropShadow dx="0" dy="1.5" stdDeviation="1.5" flood-opacity=".3"></feDropShadow></filter></defs><g filter="url(#ds_saved)"><circle cx="16" cy="14.5" r="13.5" fill="#007bff" stroke="#fff" stroke-width="2"></circle><polygon points="11,26 16,37 21,26" fill="#007bff" stroke="#fff" stroke-width="2" stroke-linejoin="round"></polygon></g><path d="M10,6 L22,6 L22,21 L16,17.5 L10,21 Z" fill="none" stroke="#fff" stroke-width="2.5" stroke-linejoin="round"></path></svg></div><div class="leaflet-marker-icon event-svg-icon leaflet-zoom-animated leaflet-interactive" tabindex="0" role="button" style="margin-left: -17px; margin-top: -43px; width: 34px; height: 44px; transform: translate3d(487px, 457px, 0px); z-index: 457; opacity: 1;"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 42" width="34" height="44"><defs><filter id="ds_harsh_braking"><feDropShadow dx="0" dy="1.5" stdDeviation="1.5" flood-opacity=".3"></feDropShadow></filter></defs><g filter="url(#ds_harsh_braking)"><circle cx="16" cy="14.5" r="13.5" fill="#dc3545" stroke="#fff" stroke-width="2"></circle><polygon points="11,26 16,37 21,26" fill="#dc3545" stroke="#fff" stroke-width="2" stroke-linejoin="round"></polygon></g><rect x="11" y="6" width="10" height="5" rx="1.5" fill="#fff"></rect><rect x="14" y="11" width="4" height="7" rx="1" fill="#fff"></rect><line x1="12" y1="20" x2="20" y2="20" stroke="#fff" stroke-width="2" stroke-linecap="round"></line></svg></div><div class="leaflet-marker-icon event-svg-icon leaflet-zoom-animated leaflet-interactive" tabindex="0" role="button" style="margin-left: -17px; margin-top: -43px; width: 34px; height: 44px; transform: translate3d(324px, 633px, 0px); z-index: 633; opacity: 1;"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 42" width="34" height="44"><defs><filter id="ds_sentry"><feDropShadow dx="0" dy="1.5" stdDeviation="1.5" flood-opacity=".3"></feDropShadow></filter></defs><g filter="url(#ds_sentry)"><circle cx="16" cy="14.5" r="13.5" fill="#8b5cf6" stroke="#fff" stroke-width="2"></circle><polygon points="11,26 16,37 21,26" fill="#8b5cf6" stroke="#fff" stroke-width="2" stroke-linejoin="round"></polygon></g><path d="M7,13 Q16,4 25,13 Q16,22 7,13 Z" fill="none" stroke="#fff" stroke-width="2.2"></path><circle cx="16" cy="13" r="3.5" fill="#fff"></circle><circle cx="16" cy="13" r="1.8" fill="#8b5cf6"></circle></svg></div></div><div class="leaflet-pane leaflet-tooltip-pane"></div><div class="leaflet-pane leaflet-popup-pane"></div><div class="leaflet-proxy leaflet-zoom-animated" style="transform: translate3d(1.34994e+06px, 3.2535e+06px, 0px) scale(16384);"></div></div><div class="leaflet-control-container"><div class="leaflet-top leaflet-left"><div class="leaflet-control-zoom leaflet-bar leaflet-control"><a class="leaflet-control-zoom-in" href="#" title="Zoom in" role="button" aria-label="Zoom in" aria-disabled="false"><span aria-hidden="true">+</span></a><a class="leaflet-control-zoom-out" href="#" title="Zoom out" role="button" aria-label="Zoom out" aria-disabled="false"><span aria-hidden="true">−</span></a></div></div><div class="leaflet-top leaflet-right"></div><div class="leaflet-bottom leaflet-left"></div><div class="leaflet-bottom leaflet-right"><div class="leaflet-control-attribution leaflet-control"><a href="https://leafletjs.com" title="A JavaScript library for interactive maps"><svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" width="12" height="8" viewBox="0 0 12 8" class="leaflet-attribution-flag"><path fill="#4C7BE1" d="M0 0h12v4H0z"></path><path fill="#FFD500" d="M0 4h12v3H0z"></path><path fill="#E0BC00" d="M0 7h12v1H0z"></path></svg> Leaflet</a> <span aria-hidden="true">|</span> © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a></div></div></div></div>
+
+    <!-- Day-load progress bar (hidden until .map-container.is-loading) -->
+    <div class="map-loading-bar" id="mapLoadingBar" role="progressbar" aria-label="Loading map data" aria-busy="false" aria-hidden="true">
+        <div class="map-loading-bar-fill"></div>
+    </div>
+
+    <!-- Event-Type Filter Pills (top-center, populated dynamically per day) -->
+    <div class="event-filter-pills" id="eventFilterPills" role="toolbar" aria-label="Filter event markers"><button type="button" class="event-filter-pill active master" style="background-color: var(--accent-primary, #3B82F6);"><span>All</span><span class="pill-count">3</span></button><button type="button" class="event-filter-pill active" style="background-color: rgb(220, 53, 69);"><span>harsh braking</span><span class="pill-count">1</span></button><button type="button" class="event-filter-pill active" style="background-color: rgb(0, 123, 255);"><span>saved</span><span class="pill-count">1</span></button><button type="button" class="event-filter-pill active" style="background-color: rgb(139, 92, 246);"><span>sentry</span><span class="pill-count">1</span></button></div>
+
+    <!-- Day Card (bottom-left floating) -->
+    <div class="trip-card" id="tripCard">
+        <div class="trip-card-nav">
+            <button class="trip-nav-btn" id="dayPrev" onclick="cycleDay(-1)" aria-label="Older day" disabled="">
+                <svg class="nav-icon"><use href="/static/icons/lucide-sprite.svg#icon-chevron-left"></use></svg>
+            </button>
+            <div class="trip-card-info">
+                <div class="trip-card-date" id="dayCardDate">Sat, Jun 1, 2024</div>
+                <div class="trip-card-stats" id="dayCardStats">3 trips · 1.0 mi · 6 videos · 3 events</div>
+            </div>
+            <button class="trip-nav-btn" id="dayNext" onclick="cycleDay(1)" aria-label="Newer day" disabled="">
+                <svg class="nav-icon"><use href="/static/icons/lucide-sprite.svg#icon-chevron-right"></use></svg>
+            </button>
+        </div>
+        <div class="trip-card-indexed" id="tripCardIndexed">
+            <span id="tripIndexedCount">6</span> videos mapped
+        </div>
+    </div>
+
+    <!-- Speed Color Legend (toggleable, hidden by default) -->
+    <div class="speed-legend" id="speedLegend" aria-hidden="true">
+        <div class="speed-legend-title">Speed (mph)</div>
+        <div class="speed-legend-row"><span class="speed-legend-swatch speed-legend-swatch-0"></span><span>0–15</span></div>
+        <div class="speed-legend-row"><span class="speed-legend-swatch speed-legend-swatch-1"></span><span>15–30</span></div>
+        <div class="speed-legend-row"><span class="speed-legend-swatch speed-legend-swatch-2"></span><span>30–45</span></div>
+        <div class="speed-legend-row"><span class="speed-legend-swatch speed-legend-swatch-3"></span><span>45–60</span></div>
+        <div class="speed-legend-row"><span class="speed-legend-swatch speed-legend-swatch-4"></span><span>60–75</span></div>
+        <div class="speed-legend-row"><span class="speed-legend-swatch speed-legend-swatch-5"></span><span>75+</span></div>
+    </div>
+
+    <!-- FAB Group (right-side floating) -->
+    <div class="map-fab-group" id="mapFabs">
+        <button class="map-fab" id="btnVideos" onclick="toggleVideoPanel()" aria-label="Video browser" title="Videos" aria-controls="videoPanel" aria-expanded="false">
+            <svg class="nav-icon"><use href="/static/icons/lucide-sprite.svg#icon-video"></use></svg>
+        </button>
+        <button class="map-fab" id="btnSpeedLegend" onclick="toggleSpeedLegend()" aria-label="Speed color legend" title="Speed Legend">
+            <svg class="nav-icon"><use href="/static/icons/lucide-sprite.svg#icon-zap"></use></svg>
+        </button>
+    </div>
+
+    <!-- Video Browser Slide-out Panel -->
+    <div class="video-panel" id="videoPanel" role="dialog" aria-modal="false" aria-hidden="true">
+        <div class="video-panel-header">
+            <div class="vp-tabs">
+                <button class="vp-tab active" id="vpTabSentry" onclick="vpShowSentry()">Events</button>
+                <button class="vp-tab" id="vpTabTrips" onclick="vpShowTrips()">Trips</button>
+                <button class="vp-tab" id="vpTabClips" onclick="vpShowClips()">All Clips</button>
+            </div>
+            <button class="close-btn" onclick="toggleVideoPanel()" aria-label="Close video panel"><svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-x"></use></svg></button>
+        </div>
+        <div class="vp-folder-row" id="vpFolderRow" style="display: none;">
+            <select id="vpFolder" onchange="vpChangeFolder()">
+                <option value="RecentClips">Recent Clips</option>
+                <option value="SavedClips">Saved Clips</option>
+                <option value="SentryClips">Sentry Clips</option>
+            </select>
+        </div>
+        <div class="video-panel-list" id="vpList">
+            <div class="vp-empty">Loading events…</div>
+        </div>
+    </div>
+</div>
+
+    </main>
+
+    <!-- Toast notification container -->
+    <div class="toast-container" id="toast-container" aria-live="polite"></div>
+
+    <script src="/static/js/main.js"></script>
+    
+
+    
+    <script>
+        (function() {
+            const POLL_MS = 30000;
+            const link = document.getElementById('health-dot-link');
+            const dot = document.getElementById('health-dot');
+            if (!link || !dot) return;
+
+            // Map subsystem severity to the CSS class + tooltip prefix.
+            // B-1: uses the design-system accent tokens for ok/warn/
+            // error so dark/light mode work automatically. (v1's mode
+            // status-dot vocabulary that this comment used to reference
+            // was removed when legacy mode switching went away.)
+            const SEV_TO_CLASS = {
+                ok:      'health-dot-ok',
+                warn:    'health-dot-warn',
+                error:   'health-dot-error',
+                unknown: 'health-dot-unknown',
+            };
+
+            function applyHealth(payload) {
+                const overall = (payload && payload.overall) || {};
+                const sev = overall.severity || 'unknown';
+                const msg = overall.message || 'System status';
+                // Reset any prior class then apply the new one.
+                dot.className = 'status-dot health-dot ' +
+                    (SEV_TO_CLASS[sev] || SEV_TO_CLASS.unknown);
+                link.title = msg;
+                link.setAttribute('aria-label', msg);
+                link.hidden = false;
+            }
+
+            async function poll() {
+                try {
+                    const r = await fetch('/api/system/health', {
+                        credentials: 'same-origin',
+                    });
+                    if (!r.ok) return;
+                    const data = await r.json();
+                    applyHealth(data);
+                } catch (e) { /* network blip — keep last known colour */ }
+            }
+
+            poll();
+            setInterval(poll, POLL_MS);
+        })();
+    </script>
+    
+
+<script src="/static/vendor/leaflet/leaflet.js"></script>
+<script src="/static/vendor/leaflet/leaflet.markercluster.js"></script>
+<script>
+const BOOTSTRAP = {"api": {"day_payload_template": "/api/day/__DATE__/payload", "day_routes_template": "/api/day/__DATE__/routes", "days": "/api/days", "driving_stats": "/api/driving-stats", "event_charts": "/api/event-charts", "event_clips_template": "/api/event-clips/__FOLDER__/__EVENT__", "event_details_template": "/api/event-details/__FOLDER__/__EVENT__", "events": "/api/events", "playable_trips": "/api/trips/playable", "sentry_events": "/api/sentry-events", "stats": "/api/stats", "trip_route_template": "/api/trip/__TRIP_ID__/route", "trip_telemetry_template": "/api/trip/__TRIP_ID__/telemetry", "trips": "/api/trips", "waypoints_for_clip": "/api/waypoints-for-clip"}, "assets": {"leaflet_icon_path": "/static/vendor/leaflet/images/", "sprite": "/static/icons/lucide-sprite.svg", "tile_cache_sw": "/tile-cache-sw.js"}, "features": {"cloud_archive_enabled": true}, "view": {"date": "", "display_timezone": "", "latest_date": "", "speed_units": "mph", "video_stream_template": "/videos/stream/__PATH__"}};
+</script>
+
+<script src="/static/js/mapping/bootstrap.js"></script>
+<script src="/static/js/mapping/speed_units.js"></script>
+<script src="/static/js/mapping/route_disambiguation.js"></script>
+<script src="/static/js/mapping/day_navigation.js"></script>
+<script src="/static/js/mapping/day_rendering.js"></script>
+<script src="/static/js/mapping/video_overlay_core.js"></script>
+<script src="/static/js/mapping/video_overlay_controls.js"></script>
+<script src="/static/js/mapping/video_overlay_actions.js"></script>
+<script src="/static/js/mapping/video_panel_timelines.js"></script>
+<script src="/static/js/mapping/video_panel_clips.js"></script>
+<script src="/static/js/mapping/init.js"></script>
+
+
+</body></html>

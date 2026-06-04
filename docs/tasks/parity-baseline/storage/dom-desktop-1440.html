@@ -1,0 +1,477 @@
+<!DOCTYPE html><html><head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    
+    <title>Storage — Tesla USB Gadget Control</title>
+    <script>
+        // Apply theme immediately before page renders to prevent flash
+        (function() {
+            const savedTheme = localStorage.getItem('theme');
+            const systemPrefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+            const theme = savedTheme || (systemPrefersDark ? 'dark' : 'light');
+            if (theme === 'dark') {
+                document.documentElement.setAttribute('data-theme', 'dark');
+            }
+        })();
+    </script>
+    <link rel="stylesheet" href="/static/css/bootstrap-icons-subset.css">
+    <link rel="stylesheet" href="/static/css/style.css">
+    
+<style>
+.storage-page { display: grid; gap: var(--space-6); }
+.storage-header,
+.storage-card {
+    padding: var(--space-6);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-lg);
+    display: grid;
+    gap: var(--space-4);
+}
+.storage-title { margin: 0; color: var(--text-primary); font-size: var(--text-3xl); }
+.storage-card-title { margin: 0; color: var(--text-primary); font-size: var(--text-xl); }
+.storage-copy, .storage-help {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: var(--text-sm);
+}
+.storage-pill-row {
+    display: flex; gap: var(--space-3); flex-wrap: wrap;
+}
+.storage-pill {
+    display: inline-flex; align-items: center; gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--form-input-bg);
+    border: 1px solid var(--border-input);
+    border-radius: var(--radius-md);
+    color: var(--text-primary);
+    font-size: var(--text-sm);
+}
+.storage-form { display: grid; gap: var(--space-4); }
+.storage-fields { display: grid; gap: var(--space-4); grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+.storage-field { display: grid; gap: var(--space-2); }
+.storage-field label { color: var(--text-primary); font-weight: 600; }
+.storage-field-copy { color: var(--text-secondary); font-size: var(--text-sm); font-weight: 400; }
+.storage-field input[type="number"] {
+    padding: var(--space-3);
+    background: var(--form-input-bg);
+    border: 1px solid var(--border-input);
+    border-radius: var(--radius-md);
+    color: var(--text-primary);
+    font-size: var(--text-base);
+    min-height: 44px;
+}
+.storage-toggle-row {
+    display: flex; justify-content: space-between; align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-3);
+    background: var(--form-input-bg);
+    border: 1px solid var(--border-input);
+    border-radius: var(--radius-md);
+}
+.storage-actions { display: flex; gap: var(--space-3); flex-wrap: wrap; }
+.storage-btn {
+    display: inline-flex; align-items: center; gap: var(--space-2);
+    padding: var(--space-3) var(--space-4);
+    border: 1px solid var(--border-input);
+    border-radius: var(--radius-md);
+    background: var(--btn-primary-bg);
+    color: var(--btn-primary-text);
+    font-size: var(--text-base);
+    font-weight: 600;
+    cursor: pointer;
+    min-height: 44px;
+}
+.storage-lun-row {
+    display: grid; gap: var(--space-2);
+    grid-template-columns: 1fr 1fr 1fr;
+}
+.storage-lun-row .storage-pill { justify-content: center; }
+.storage-warn {
+    padding: var(--space-3);
+    background: var(--warning-bg, #3a2f10);
+    border: 1px solid var(--warning-border, #b58900);
+    border-radius: var(--radius-md);
+    color: var(--text-primary);
+    font-size: var(--text-sm);
+}
+/* Single-disk capacity bar (TeslaCam | Media | OS+reserve | free). */
+.cap-bar {
+    display: flex;
+    width: 100%;
+    height: 28px;
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    border: 1px solid var(--border-input);
+    background: var(--form-input-bg);
+}
+.cap-seg { height: 100%; min-width: 2px; }
+.cap-seg-teslacam { background: #2f81f7; }
+.cap-seg-media    { background: #3fb950; }
+.cap-seg-reserve  { background: #6e7681; }
+.cap-seg-free     { background: var(--form-input-bg); }
+.cap-legend {
+    display: flex; gap: var(--space-4); flex-wrap: wrap;
+    font-size: var(--text-sm); color: var(--text-secondary);
+}
+.cap-legend span { display: inline-flex; align-items: center; gap: var(--space-2); }
+.cap-swatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+.storage-field-max { color: var(--text-secondary); font-size: var(--text-sm); font-weight: 400; }
+@media (max-width: 48rem) {
+    .storage-header, .storage-card { padding: var(--space-4); }
+    .storage-lun-row { grid-template-columns: 1fr; }
+}
+</style>
+
+</head>
+<body>
+    
+    
+
+    <!-- Top Bar -->
+    <header class="top-bar">
+        <div class="top-bar-left">
+            <a href="/" class="top-bar-brand">
+                <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-hard-drive"></use></svg>
+                <span class="top-bar-title">TeslaUSB</span>
+            </a>
+        </div>
+        <div class="top-bar-right">
+            
+            <a href="/settings/#system-health-card" class="health-dot-link" id="health-dot-link" title="teslafat_0: inactive — Partition 0 (exFAT)" aria-label="teslafat_0: inactive — Partition 0 (exFAT)">
+                <span class="status-dot health-dot health-dot-error" id="health-dot" data-status-dot="health"></span>
+            </a>
+            
+            
+            <button class="theme-toggle-btn" onclick="toggleTheme()" aria-label="Toggle dark mode">
+                <svg class="nav-icon" id="theme-icon-svg" aria-hidden="true">
+                    <use href="/static/icons/lucide-sprite.svg#icon-moon"></use>
+                </svg>
+            </button>
+        </div>
+    </header>
+
+    <!-- Desktop Sidebar Rail -->
+    <nav class="sidebar-rail" id="sidebarRail" aria-label="Main navigation">
+        
+        <a href="/" class="nav-item" title="Map">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-map-pin"></use></svg>
+            <span class="nav-label">Map</span>
+        </a>
+        
+        
+        <a href="/analytics/" class="nav-item" title="Analytics">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-bar-chart-2"></use></svg>
+            <span class="nav-label">Analytics</span>
+        </a>
+        
+        
+        <a href="/media/" class="nav-item" title="Media">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-music"></use></svg>
+            <span class="nav-label">Media</span>
+        </a>
+        
+        
+        <a href="/cloud/" class="nav-item" title="Cloud">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-cloud"></use></svg>
+            <span class="nav-label">Cloud</span>
+        </a>
+        
+        <a href="/settings/" class="nav-item" title="Settings">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-settings"></use></svg>
+            <span class="nav-label">Settings</span>
+        </a>
+    </nav>
+
+    <!-- Mobile Bottom Tab Bar -->
+    <nav class="bottom-tabs" aria-label="Main navigation">
+        
+        <a href="/" class="tab-item">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-map-pin"></use></svg>
+            <span class="tab-label">Map</span>
+        </a>
+        
+        
+        <a href="/analytics/" class="tab-item">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-bar-chart-2"></use></svg>
+            <span class="tab-label">Analytics</span>
+        </a>
+        
+        
+        <a href="/media/" class="tab-item">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-music"></use></svg>
+            <span class="tab-label">Media</span>
+        </a>
+        
+        
+        <a href="/cloud/" class="tab-item">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-cloud"></use></svg>
+            <span class="tab-label">Cloud</span>
+        </a>
+        
+        <a href="/settings/" class="tab-item">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-settings"></use></svg>
+            <span class="tab-label">Settings</span>
+        </a>
+    </nav>
+
+    <main class="main-content" role="main">
+        
+
+        
+            
+        
+
+        
+<section class="storage-page">
+    <header class="storage-header">
+        <h1 class="storage-title">Storage</h1>
+        <p class="storage-copy">
+            Allocate how much of the SD card each partition presents to
+            Tesla, and tune the auto-cleanup that keeps the TeslaCam
+            partition from filling up. The gadget exposes a single USB
+            drive with two exFAT partitions (TeslaCam and Media). You can
+            grow a partition into the card's free space — the maximum is
+            capped so the SD can never physically overfill and crash the
+            device. Changing a partition's size briefly disconnects the USB
+            gadget (~30–60&nbsp;s) while Tesla re-enumerates.
+        </p>
+        <div class="storage-pill-row">
+            <span class="storage-pill">SD total: 1006 GB</span>
+            <span class="storage-pill">SD free: 951 GB</span>
+            <span class="storage-pill">Allocated: 96 GB</span>
+            <span class="storage-pill">OS + reserve: 76 GB</span>
+            <span class="storage-pill">Unallocated: 834 GB</span>
+        </div>
+        
+        <div class="cap-bar" role="img" aria-label="SD card: TeslaCam 64 GB, Media 32 GB, OS plus reserve 76 GB, unallocated 834 GB of 1006 GB total">
+            <div class="cap-seg cap-seg-teslacam" style="width: 6.36%"></div>
+            <div class="cap-seg cap-seg-media" style="width: 3.18%"></div>
+            <div class="cap-seg cap-seg-reserve" style="width: 7.55%"></div>
+            <div class="cap-seg cap-seg-free" style="width: 82.9%"></div>
+        </div>
+        <div class="cap-legend">
+            <span><i class="cap-swatch cap-seg-teslacam"></i>TeslaCam 64 GB</span>
+            <span><i class="cap-swatch cap-seg-media"></i>Media 32 GB</span>
+            <span><i class="cap-swatch cap-seg-reserve"></i>OS + reserve 76 GB</span>
+            <span><i class="cap-swatch cap-seg-free" style="border:1px solid var(--border-input)"></i>Unallocated 834 GB</span>
+        </div>
+    </header>
+
+    <form method="post" action="/storage" class="storage-form">
+        <section class="storage-card">
+            <h2 class="storage-card-title">Partition sizes</h2>
+            <p class="storage-help">
+                Each partition can grow into the card's free space. The
+                maximum below is computed live as
+                <em>SD total − measured OS usage − the other partition − safety
+                buffer</em>, so the two partitions plus the OS can never
+                physically overfill the card. You can't shrink a partition
+                below the data it currently stores.
+            </p>
+
+            <div class="storage-fields">
+                
+                
+                
+                
+                
+                <div class="storage-field">
+                    <label for="teslacam_gb">
+                        <span>TeslaCam (exFAT) — GB</span>
+                        <span class="storage-field-copy">Used: 0 GB / 64 GB advertised</span>
+                    </label>
+                    <input id="teslacam_gb" name="teslacam_gb" type="number" min="4" max="898" data-used-gb="0" data-min-gb="4" value="64" required="" style="">
+                    <span class="storage-field-max" data-max-for="teslacam_gb">Max you can set: 898 GB</span>
+                </div>
+                <div class="storage-field">
+                    <label for="media_gb">
+                        <span>Media (exFAT) — GB</span>
+                        <span class="storage-field-copy">Used: 0 GB / 32 GB advertised</span>
+                    </label>
+                    <input id="media_gb" name="media_gb" type="number" min="4" max="866" data-used-gb="0" data-min-gb="4" value="32" required="" style="">
+                    <span class="storage-field-max" data-max-for="media_gb">Max you can set: 866 GB</span>
+                </div>
+                <div class="storage-field">
+                    <label for="safety_buffer_gb">
+                        <span>Safety buffer — GB</span>
+                        <span class="storage-field-copy">Held back on top of the measured OS usage (56 GB). Minimum and default 5 GB.</span>
+                    </label>
+                    <input id="safety_buffer_gb" name="safety_buffer_gb" type="number" min="5" value="20" required="" style="">
+                </div>
+            </div>
+
+            <p class="storage-warn">
+                Shrinking a partition below its current usage is refused.
+                Size changes regenerate the synthesized exFAT geometry
+                over the same Linux directory tree — your files are not
+                touched, and Tesla will see the new size on the next
+                reconnect without any reformat.
+            </p>
+        </section>
+
+        <section class="storage-card">
+            <h2 class="storage-card-title">Auto-cleanup (TeslaCam)</h2>
+            <p class="storage-help">
+                The worker continuously sweeps the TeslaCam partition when
+                free space dips below the target. Deletion priority:
+                <strong>Tier&nbsp;A</strong> — RecentClips with no GPS
+                or SEI data, then <strong>Tier&nbsp;B</strong> —
+                RecentClips with GPS/SEI, then <strong>Tier&nbsp;C</strong>
+                — SavedClips and SentryClips. SentryClips are only
+                touched when an age threshold is set.
+            </p>
+
+            <div class="storage-fields">
+                <div class="storage-field">
+                    <label for="target_free_pct">
+                        <span>Target free space — %</span>
+                        <span class="storage-field-copy">0 = auto-tune from recent clip size.</span>
+                    </label>
+                    <input id="target_free_pct" name="target_free_pct" type="number" min="0" max="95" value="0" required="" style="">
+                </div>
+                <div class="storage-field">
+                    <label for="sentry_max_age_days">
+                        <span>Sentry max age — days</span>
+                        <span class="storage-field-copy">0 = never auto-delete Sentry clips.</span>
+                    </label>
+                    <input id="sentry_max_age_days" name="sentry_max_age_days" type="number" min="0" value="0" required="" style="">
+                </div>
+            </div>
+
+            <div class="storage-toggle-row">
+                <div>
+                    <p class="storage-card-title" style="font-size: var(--text-base);">Preserve clips with GPS/SEI</p>
+                    <p class="storage-help">When on, GPS/SEI clips move to Tier&nbsp;B and are deleted only after plain Tier&nbsp;A clips are exhausted.</p>
+                </div>
+                <label>
+                    <input type="hidden" name="_preserve_with_gps_present" value="1" style="">
+                    <input type="checkbox" name="preserve_with_gps" value="on" checked="" style="">
+                </label>
+            </div>
+        </section>
+
+        <div class="storage-actions">
+            <button type="submit" class="storage-btn">
+                <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-save"></use></svg>
+                Save storage settings
+            </button>
+        </div>
+    </form>
+</section>
+
+    </main>
+
+    <!-- Toast notification container -->
+    <div class="toast-container" id="toast-container" aria-live="polite"></div>
+
+    <script src="/static/js/main.js"></script>
+    
+
+    
+    <script>
+        (function() {
+            const POLL_MS = 30000;
+            const link = document.getElementById('health-dot-link');
+            const dot = document.getElementById('health-dot');
+            if (!link || !dot) return;
+
+            // Map subsystem severity to the CSS class + tooltip prefix.
+            // B-1: uses the design-system accent tokens for ok/warn/
+            // error so dark/light mode work automatically. (v1's mode
+            // status-dot vocabulary that this comment used to reference
+            // was removed when legacy mode switching went away.)
+            const SEV_TO_CLASS = {
+                ok:      'health-dot-ok',
+                warn:    'health-dot-warn',
+                error:   'health-dot-error',
+                unknown: 'health-dot-unknown',
+            };
+
+            function applyHealth(payload) {
+                const overall = (payload && payload.overall) || {};
+                const sev = overall.severity || 'unknown';
+                const msg = overall.message || 'System status';
+                // Reset any prior class then apply the new one.
+                dot.className = 'status-dot health-dot ' +
+                    (SEV_TO_CLASS[sev] || SEV_TO_CLASS.unknown);
+                link.title = msg;
+                link.setAttribute('aria-label', msg);
+                link.hidden = false;
+            }
+
+            async function poll() {
+                try {
+                    const r = await fetch('/api/system/health', {
+                        credentials: 'same-origin',
+                    });
+                    if (!r.ok) return;
+                    const data = await r.json();
+                    applyHealth(data);
+                } catch (e) { /* network blip — keep last known colour */ }
+            }
+
+            poll();
+            setInterval(poll, POLL_MS);
+        })();
+    </script>
+    
+<script>
+(function () {
+    "use strict";
+    var sdTotal = 1006;
+    var osUsage = 56;
+    var tc = document.getElementById("teslacam_gb");
+    var md = document.getElementById("media_gb");
+    var buf = document.getElementById("safety_buffer_gb");
+    if (!tc || !md || !buf) { return; }
+
+    function intVal(el, fallback) {
+        var v = parseInt(el.value, 10);
+        return isNaN(v) ? fallback : v;
+    }
+
+    function maxFor(otherAdvertised, buffer) {
+        // Mirror the server: floor(sd_total - other - os_usage - buffer).
+        return Math.max(0, sdTotal - otherAdvertised - osUsage - buffer);
+    }
+
+    function refresh() {
+        var buffer = Math.max(5, intVal(buf, 5));
+
+        var tcMax = maxFor(intVal(md, 0), buffer);
+        var mdMax = maxFor(intVal(tc, 0), buffer);
+
+        tc.max = tcMax;
+        md.max = mdMax;
+
+        updateHint("teslacam_gb", tcMax);
+        updateHint("media_gb", mdMax);
+        flagOver(tc, tcMax);
+        flagOver(md, mdMax);
+    }
+
+    function updateHint(name, maxGb) {
+        var hint = document.querySelector('[data-max-for="' + name + '"]');
+        if (hint) { hint.textContent = "Max you can set: " + maxGb + " GB"; }
+    }
+
+    function flagOver(el, maxGb) {
+        var minGb = parseInt(el.getAttribute("data-min-gb"), 10) || 1;
+        var v = intVal(el, 0);
+        var bad = v > maxGb || v < minGb;
+        el.setCustomValidity(bad
+            ? "Enter a size between " + minGb + " and " + maxGb + " GB."
+            : "");
+    }
+
+    [tc, md, buf].forEach(function (el) {
+        el.addEventListener("input", refresh);
+    });
+    refresh();
+})();
+</script>
+
+
+</body></html>

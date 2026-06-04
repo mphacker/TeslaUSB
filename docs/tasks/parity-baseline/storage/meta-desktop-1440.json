@@ -1,0 +1,121 @@
+{
+  "screen": "storage",
+  "spa_screens": [
+    "storage settings",
+    "storage health"
+  ],
+  "url": "/storage/",
+  "viewport": {
+    "width": 1440,
+    "height": 900,
+    "tag": "desktop-1440"
+  },
+  "http_status": 200,
+  "wall_ms": 2378,
+  "dom_bytes": 19780,
+  "perf": {
+    "ttfb_ms": 2,
+    "dom_content_loaded_ms": 352,
+    "load_event_ms": 595,
+    "transfer_bytes": 20224,
+    "paints": {
+      "first-paint": 356,
+      "first-contentful-paint": 356
+    },
+    "slowest_resources": [
+      {
+        "name": "http://localhost:8080/api/system/health",
+        "dur": 342,
+        "size": 1589,
+        "type": "fetch"
+      },
+      {
+        "name": "http://localhost:8080/static/js/main.js",
+        "dur": 314,
+        "size": 300,
+        "type": "script"
+      },
+      {
+        "name": "http://localhost:8080/static/css/style.css",
+        "dur": 313,
+        "size": 300,
+        "type": "link"
+      },
+      {
+        "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+        "dur": 313,
+        "size": 300,
+        "type": "other"
+      },
+      {
+        "name": "http://localhost:8080/static/css/bootstrap-icons-subset.css",
+        "dur": 312,
+        "size": 300,
+        "type": "link"
+      },
+      {
+        "name": "http://localhost:8080/static/fonts/inter-variable.woff2",
+        "dur": 259,
+        "size": 300,
+        "type": "css"
+      }
+    ],
+    "resource_count": 6
+  },
+  "console": [],
+  "network": {
+    "total_requests": 7,
+    "failed": [],
+    "slowest": [
+      {
+        "url": "/api/system/health",
+        "method": "GET",
+        "status": 200,
+        "type": "fetch",
+        "ms": 342
+      },
+      {
+        "url": "/static/js/main.js",
+        "method": "GET",
+        "status": 200,
+        "type": "script",
+        "ms": 314
+      },
+      {
+        "url": "/static/css/style.css",
+        "method": "GET",
+        "status": 200,
+        "type": "stylesheet",
+        "ms": 313
+      },
+      {
+        "url": "/static/icons/lucide-sprite.svg",
+        "method": "GET",
+        "status": 200,
+        "type": "other",
+        "ms": 313
+      },
+      {
+        "url": "/static/css/bootstrap-icons-subset.css",
+        "method": "GET",
+        "status": 200,
+        "type": "stylesheet",
+        "ms": 311
+      },
+      {
+        "url": "/static/fonts/inter-variable.woff2",
+        "method": "GET",
+        "status": 200,
+        "type": "font",
+        "ms": 259
+      },
+      {
+        "url": "/storage/",
+        "method": "GET",
+        "status": 200,
+        "type": "document",
+        "ms": 2
+      }
+    ]
+  }
+}

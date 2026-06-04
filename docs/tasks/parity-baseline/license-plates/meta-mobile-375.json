@@ -1,0 +1,133 @@
+{
+  "screen": "license-plates",
+  "spa_screens": [
+    "license plates"
+  ],
+  "url": "/license_plates/",
+  "viewport": {
+    "width": 375,
+    "height": 812,
+    "tag": "mobile-375"
+  },
+  "http_status": 200,
+  "wall_ms": 1162,
+  "dom_bytes": 56186,
+  "perf": {
+    "ttfb_ms": 76,
+    "dom_content_loaded_ms": 422,
+    "load_event_ms": 661,
+    "transfer_bytes": 56867,
+    "paints": {
+      "first-paint": 424,
+      "first-contentful-paint": 424
+    },
+    "slowest_resources": [
+      {
+        "name": "http://localhost:8080/api/system/health",
+        "dur": 341,
+        "size": 1589,
+        "type": "fetch"
+      },
+      {
+        "name": "http://localhost:8080/license_plates/download/LightShow/TESLA.png",
+        "dur": 310,
+        "size": 2626,
+        "type": "img"
+      },
+      {
+        "name": "http://localhost:8080/static/css/style.css",
+        "dur": 307,
+        "size": 300,
+        "type": "link"
+      },
+      {
+        "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+        "dur": 307,
+        "size": 300,
+        "type": "other"
+      },
+      {
+        "name": "http://localhost:8080/static/js/main.js",
+        "dur": 306,
+        "size": 300,
+        "type": "script"
+      },
+      {
+        "name": "http://localhost:8080/static/css/bootstrap-icons-subset.css",
+        "dur": 305,
+        "size": 300,
+        "type": "link"
+      },
+      {
+        "name": "http://localhost:8080/static/fonts/inter-variable.woff2",
+        "dur": 261,
+        "size": 300,
+        "type": "css"
+      }
+    ],
+    "resource_count": 7
+  },
+  "console": [],
+  "network": {
+    "total_requests": 8,
+    "failed": [],
+    "slowest": [
+      {
+        "url": "/api/system/health",
+        "method": "GET",
+        "status": 200,
+        "type": "fetch",
+        "ms": 341
+      },
+      {
+        "url": "/license_plates/download/LightShow/TESLA.png",
+        "method": "GET",
+        "status": 200,
+        "type": "image",
+        "ms": 310
+      },
+      {
+        "url": "/static/css/style.css",
+        "method": "GET",
+        "status": 200,
+        "type": "stylesheet",
+        "ms": 307
+      },
+      {
+        "url": "/static/icons/lucide-sprite.svg",
+        "method": "GET",
+        "status": 200,
+        "type": "other",
+        "ms": 307
+      },
+      {
+        "url": "/static/js/main.js",
+        "method": "GET",
+        "status": 200,
+        "type": "script",
+        "ms": 306
+      },
+      {
+        "url": "/static/css/bootstrap-icons-subset.css",
+        "method": "GET",
+        "status": 200,
+        "type": "stylesheet",
+        "ms": 305
+      },
+      {
+        "url": "/static/fonts/inter-variable.woff2",
+        "method": "GET",
+        "status": 200,
+        "type": "font",
+        "ms": 261
+      },
+      {
+        "url": "/license_plates/",
+        "method": "GET",
+        "status": 200,
+        "type": "document",
+        "ms": 77
+      }
+    ]
+  }
+}

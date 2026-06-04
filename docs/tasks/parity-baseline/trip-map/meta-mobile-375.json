@@ -1,0 +1,205 @@
+{
+  "screen": "trip-map",
+  "spa_screens": [
+    "trip map"
+  ],
+  "url": "/",
+  "viewport": {
+    "width": 375,
+    "height": 812,
+    "tag": "mobile-375"
+  },
+  "http_status": 200,
+  "wall_ms": 8107,
+  "dom_bytes": 23446,
+  "perf": {
+    "ttfb_ms": 170,
+    "dom_content_loaded_ms": 1423,
+    "load_event_ms": 3796,
+    "transfer_bytes": 14112,
+    "paints": {
+      "first-paint": 808,
+      "first-contentful-paint": 808
+    },
+    "slowest_resources": [
+      {
+        "name": "https://tile.openstreetmap.org/13/1317/3177.png",
+        "dur": 1784,
+        "size": 0,
+        "type": "img"
+      },
+      {
+        "name": "https://tile.openstreetmap.org/13/1317/3176.png",
+        "dur": 1783,
+        "size": 0,
+        "type": "img"
+      },
+      {
+        "name": "https://tile.openstreetmap.org/13/1318/3177.png",
+        "dur": 1782,
+        "size": 0,
+        "type": "img"
+      },
+      {
+        "name": "https://tile.openstreetmap.org/13/1318/3176.png",
+        "dur": 1780,
+        "size": 0,
+        "type": "img"
+      },
+      {
+        "name": "https://tile.openstreetmap.org/13/1317/3175.png",
+        "dur": 1776,
+        "size": 0,
+        "type": "img"
+      },
+      {
+        "name": "https://tile.openstreetmap.org/13/1318/3175.png",
+        "dur": 1773,
+        "size": 0,
+        "type": "img"
+      },
+      {
+        "name": "https://tile.openstreetmap.org/13/1317/3178.png",
+        "dur": 1771,
+        "size": 0,
+        "type": "img"
+      },
+      {
+        "name": "https://tile.openstreetmap.org/13/1318/3178.png",
+        "dur": 1768,
+        "size": 0,
+        "type": "img"
+      },
+      {
+        "name": "https://tile.openstreetmap.org/13/1319/3178.png",
+        "dur": 1761,
+        "size": 0,
+        "type": "img"
+      },
+      {
+        "name": "https://tile.openstreetmap.org/13/1319/3175.png",
+        "dur": 1757,
+        "size": 0,
+        "type": "img"
+      }
+    ],
+    "resource_count": 50
+  },
+  "console": [
+    {
+      "type": "log",
+      "text": "Tile cache SW registered"
+    }
+  ],
+  "network": {
+    "total_requests": 51,
+    "failed": [
+      {
+        "url": "https://tile.openstreetmap.org/10/163/395.png",
+        "method": "GET",
+        "status": "FAILED",
+        "failure": "net::ERR_ABORTED"
+      },
+      {
+        "url": "https://tile.openstreetmap.org/10/164/395.png",
+        "method": "GET",
+        "status": "FAILED",
+        "failure": "net::ERR_ABORTED"
+      },
+      {
+        "url": "https://tile.openstreetmap.org/10/163/396.png",
+        "method": "GET",
+        "status": "FAILED",
+        "failure": "net::ERR_ABORTED"
+      },
+      {
+        "url": "https://tile.openstreetmap.org/10/163/394.png",
+        "method": "GET",
+        "status": "FAILED",
+        "failure": "net::ERR_ABORTED"
+      },
+      {
+        "url": "https://tile.openstreetmap.org/10/164/394.png",
+        "method": "GET",
+        "status": "FAILED",
+        "failure": "net::ERR_ABORTED"
+      },
+      {
+        "url": "https://tile.openstreetmap.org/10/163/397.png",
+        "method": "GET",
+        "status": "FAILED",
+        "failure": "net::ERR_ABORTED"
+      },
+      {
+        "url": "https://tile.openstreetmap.org/10/164/396.png",
+        "method": "GET",
+        "status": "FAILED",
+        "failure": "net::ERR_ABORTED"
+      },
+      {
+        "url": "https://tile.openstreetmap.org/10/164/397.png",
+        "method": "GET",
+        "status": "FAILED",
+        "failure": "net::ERR_ABORTED"
+      }
+    ],
+    "slowest": [
+      {
+        "url": "https://tile.openstreetmap.org/13/1317/3177.png",
+        "method": "GET",
+        "status": 200,
+        "type": "image",
+        "ms": 1784
+      },
+      {
+        "url": "https://tile.openstreetmap.org/13/1317/3176.png",
+        "method": "GET",
+        "status": 200,
+        "type": "image",
+        "ms": 1783
+      },
+      {
+        "url": "https://tile.openstreetmap.org/13/1318/3177.png",
+        "method": "GET",
+        "status": 200,
+        "type": "image",
+        "ms": 1782
+      },
+      {
+        "url": "https://tile.openstreetmap.org/13/1318/3176.png",
+        "method": "GET",
+        "status": 200,
+        "type": "image",
+        "ms": 1780
+      },
+      {
+        "url": "https://tile.openstreetmap.org/13/1317/3175.png",
+        "method": "GET",
+        "status": 200,
+        "type": "image",
+        "ms": 1776
+      },
+      {
+        "url": "https://tile.openstreetmap.org/13/1318/3175.png",
+        "method": "GET",
+        "status": 200,
+        "type": "image",
+        "ms": 1773
+      },
+      {
+        "url": "https://tile.openstreetmap.org/13/1317/3178.png",
+        "method": "GET",
+        "status": 200,
+        "type": "image",
+        "ms": 1771
+      },
+      {
+        "url": "https://tile.openstreetmap.org/13/1318/3178.png",
+        "method": "GET",
+        "status": 200,
+        "type": "image",
+        "ms": 1768
+      }
+    ]
+  }
+}

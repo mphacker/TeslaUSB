@@ -1,0 +1,151 @@
+{
+  "screen": "lock-chimes",
+  "spa_screens": [
+    "lock chimes"
+  ],
+  "url": "/lock_chimes/",
+  "viewport": {
+    "width": 1440,
+    "height": 900,
+    "tag": "desktop-1440"
+  },
+  "http_status": 200,
+  "wall_ms": 1569,
+  "dom_bytes": 134358,
+  "perf": {
+    "ttfb_ms": 310,
+    "dom_content_loaded_ms": 680,
+    "load_event_ms": 995,
+    "transfer_bytes": 134775,
+    "paints": {
+      "first-paint": 680,
+      "first-contentful-paint": 680
+    },
+    "slowest_resources": [
+      {
+        "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+        "dur": 365,
+        "size": 300,
+        "type": "other"
+      },
+      {
+        "name": "http://localhost:8080/api/system/health",
+        "dur": 339,
+        "size": 1589,
+        "type": "fetch"
+      },
+      {
+        "name": "http://localhost:8080/api/chime_filenames",
+        "dur": 314,
+        "size": 363,
+        "type": "fetch"
+      },
+      {
+        "name": "http://localhost:8080/static/vendor/lamejs/lame.min.js",
+        "dur": 312,
+        "size": 156487,
+        "type": "script"
+      },
+      {
+        "name": "http://localhost:8080/static/js/audio_trimmer.js",
+        "dur": 311,
+        "size": 40054,
+        "type": "script"
+      },
+      {
+        "name": "http://localhost:8080/static/js/main.js",
+        "dur": 311,
+        "size": 300,
+        "type": "script"
+      },
+      {
+        "name": "http://localhost:8080/static/css/audio_trimmer.css",
+        "dur": 308,
+        "size": 10651,
+        "type": "link"
+      },
+      {
+        "name": "http://localhost:8080/static/css/style.css",
+        "dur": 307,
+        "size": 300,
+        "type": "link"
+      },
+      {
+        "name": "http://localhost:8080/static/fonts/inter-variable.woff2",
+        "dur": 306,
+        "size": 300,
+        "type": "css"
+      },
+      {
+        "name": "http://localhost:8080/static/css/bootstrap-icons-subset.css",
+        "dur": 258,
+        "size": 300,
+        "type": "link"
+      }
+    ],
+    "resource_count": 10
+  },
+  "console": [],
+  "network": {
+    "total_requests": 11,
+    "failed": [],
+    "slowest": [
+      {
+        "url": "/static/icons/lucide-sprite.svg",
+        "method": "GET",
+        "status": 200,
+        "type": "other",
+        "ms": 365
+      },
+      {
+        "url": "/api/system/health",
+        "method": "GET",
+        "status": 200,
+        "type": "fetch",
+        "ms": 339
+      },
+      {
+        "url": "/api/chime_filenames",
+        "method": "GET",
+        "status": 200,
+        "type": "fetch",
+        "ms": 314
+      },
+      {
+        "url": "/static/vendor/lamejs/lame.min.js",
+        "method": "GET",
+        "status": 200,
+        "type": "script",
+        "ms": 312
+      },
+      {
+        "url": "/static/js/audio_trimmer.js",
+        "method": "GET",
+        "status": 200,
+        "type": "script",
+        "ms": 311
+      },
+      {
+        "url": "/static/js/main.js",
+        "method": "GET",
+        "status": 200,
+        "type": "script",
+        "ms": 311
+      },
+      {
+        "url": "/lock_chimes/",
+        "method": "GET",
+        "status": 200,
+        "type": "document",
+        "ms": 310
+      },
+      {
+        "url": "/static/css/audio_trimmer.css",
+        "method": "GET",
+        "status": 200,
+        "type": "stylesheet",
+        "ms": 308
+      }
+    ]
+  }
+}

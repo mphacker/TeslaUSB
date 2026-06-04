@@ -1,0 +1,145 @@
+{
+  "screen": "analytics",
+  "spa_screens": [
+    "analytics"
+  ],
+  "url": "/analytics/",
+  "viewport": {
+    "width": 1440,
+    "height": 900,
+    "tag": "desktop-1440"
+  },
+  "http_status": 200,
+  "wall_ms": 3097,
+  "dom_bytes": 24525,
+  "perf": {
+    "ttfb_ms": 3,
+    "dom_content_loaded_ms": 345,
+    "load_event_ms": 643,
+    "transfer_bytes": 24570,
+    "paints": {
+      "first-paint": 336,
+      "first-contentful-paint": 336
+    },
+    "slowest_resources": [
+      {
+        "name": "http://localhost:8080/api/system/health",
+        "dur": 377,
+        "size": 1589,
+        "type": "fetch"
+      },
+      {
+        "name": "http://localhost:8080/static/js/analytics.js",
+        "dur": 320,
+        "size": 5260,
+        "type": "script"
+      },
+      {
+        "name": "http://localhost:8080/static/css/analytics.css",
+        "dur": 319,
+        "size": 21242,
+        "type": "link"
+      },
+      {
+        "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+        "dur": 319,
+        "size": 300,
+        "type": "other"
+      },
+      {
+        "name": "http://localhost:8080/api/driving-stats",
+        "dur": 317,
+        "size": 529,
+        "type": "fetch"
+      },
+      {
+        "name": "http://localhost:8080/static/css/style.css",
+        "dur": 316,
+        "size": 300,
+        "type": "link"
+      },
+      {
+        "name": "http://localhost:8080/static/js/main.js",
+        "dur": 316,
+        "size": 300,
+        "type": "script"
+      },
+      {
+        "name": "http://localhost:8080/static/css/bootstrap-icons-subset.css",
+        "dur": 315,
+        "size": 300,
+        "type": "link"
+      },
+      {
+        "name": "http://localhost:8080/static/fonts/inter-variable.woff2",
+        "dur": 306,
+        "size": 300,
+        "type": "css"
+      }
+    ],
+    "resource_count": 9
+  },
+  "console": [],
+  "network": {
+    "total_requests": 10,
+    "failed": [],
+    "slowest": [
+      {
+        "url": "/api/system/health",
+        "method": "GET",
+        "status": 200,
+        "type": "fetch",
+        "ms": 377
+      },
+      {
+        "url": "/static/js/analytics.js",
+        "method": "GET",
+        "status": 200,
+        "type": "script",
+        "ms": 320
+      },
+      {
+        "url": "/static/css/analytics.css",
+        "method": "GET",
+        "status": 200,
+        "type": "stylesheet",
+        "ms": 319
+      },
+      {
+        "url": "/static/icons/lucide-sprite.svg",
+        "method": "GET",
+        "status": 200,
+        "type": "other",
+        "ms": 319
+      },
+      {
+        "url": "/api/driving-stats",
+        "method": "GET",
+        "status": 200,
+        "type": "fetch",
+        "ms": 317
+      },
+      {
+        "url": "/static/css/style.css",
+        "method": "GET",
+        "status": 200,
+        "type": "stylesheet",
+        "ms": 316
+      },
+      {
+        "url": "/static/js/main.js",
+        "method": "GET",
+        "status": 200,
+        "type": "script",
+        "ms": 316
+      },
+      {
+        "url": "/static/css/bootstrap-icons-subset.css",
+        "method": "GET",
+        "status": 200,
+        "type": "stylesheet",
+        "ms": 315
+      }
+    ]
+  }
+}

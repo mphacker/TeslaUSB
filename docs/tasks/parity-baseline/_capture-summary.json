@@ -1,0 +1,4497 @@
+[
+  {
+    "screen": "media-hub",
+    "spa_screens": [
+      "media hub"
+    ],
+    "url": "/settings/",
+    "viewport": {
+      "width": 375,
+      "height": 812,
+      "tag": "mobile-375"
+    },
+    "http_status": 200,
+    "wall_ms": 1434,
+    "dom_bytes": 132997,
+    "perf": {
+      "ttfb_ms": 534,
+      "dom_content_loaded_ms": 897,
+      "load_event_ms": 910,
+      "transfer_bytes": 134724,
+      "paints": {
+        "first-paint": 904,
+        "first-contentful-paint": 904
+      },
+      "slowest_resources": [
+        {
+          "name": "http://localhost:8080/api/system/metrics",
+          "dur": 321,
+          "size": 3269,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/static/css/style.css",
+          "dur": 318,
+          "size": 66823,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/js/main.js",
+          "dur": 318,
+          "size": 21402,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+          "dur": 317,
+          "size": 20376,
+          "type": "other"
+        },
+        {
+          "name": "http://localhost:8080/static/css/bootstrap-icons-subset.css",
+          "dur": 40,
+          "size": 24373,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/fonts/inter-variable.woff2",
+          "dur": 35,
+          "size": 352540,
+          "type": "css"
+        }
+      ],
+      "resource_count": 6
+    },
+    "console": [],
+    "network": {
+      "total_requests": 8,
+      "failed": [],
+      "slowest": [
+        {
+          "url": "/settings/",
+          "method": "GET",
+          "status": 200,
+          "type": "document",
+          "ms": 535
+        },
+        {
+          "url": "/api/wifi/saved",
+          "method": "GET",
+          "status": 302,
+          "type": "fetch",
+          "ms": 424
+        },
+        {
+          "url": "/api/system/metrics",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 321
+        },
+        {
+          "url": "/static/css/style.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 318
+        },
+        {
+          "url": "/static/js/main.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 318
+        },
+        {
+          "url": "/static/icons/lucide-sprite.svg",
+          "method": "GET",
+          "status": 200,
+          "type": "other",
+          "ms": 317
+        },
+        {
+          "url": "/static/css/bootstrap-icons-subset.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 40
+        },
+        {
+          "url": "/static/fonts/inter-variable.woff2",
+          "method": "GET",
+          "status": 200,
+          "type": "font",
+          "ms": 35
+        }
+      ]
+    }
+  },
+  {
+    "screen": "trip-map",
+    "spa_screens": [
+      "trip map"
+    ],
+    "url": "/",
+    "viewport": {
+      "width": 375,
+      "height": 812,
+      "tag": "mobile-375"
+    },
+    "http_status": 200,
+    "wall_ms": 8107,
+    "dom_bytes": 23446,
+    "perf": {
+      "ttfb_ms": 170,
+      "dom_content_loaded_ms": 1423,
+      "load_event_ms": 3796,
+      "transfer_bytes": 14112,
+      "paints": {
+        "first-paint": 808,
+        "first-contentful-paint": 808
+      },
+      "slowest_resources": [
+        {
+          "name": "https://tile.openstreetmap.org/13/1317/3177.png",
+          "dur": 1784,
+          "size": 0,
+          "type": "img"
+        },
+        {
+          "name": "https://tile.openstreetmap.org/13/1317/3176.png",
+          "dur": 1783,
+          "size": 0,
+          "type": "img"
+        },
+        {
+          "name": "https://tile.openstreetmap.org/13/1318/3177.png",
+          "dur": 1782,
+          "size": 0,
+          "type": "img"
+        },
+        {
+          "name": "https://tile.openstreetmap.org/13/1318/3176.png",
+          "dur": 1780,
+          "size": 0,
+          "type": "img"
+        },
+        {
+          "name": "https://tile.openstreetmap.org/13/1317/3175.png",
+          "dur": 1776,
+          "size": 0,
+          "type": "img"
+        },
+        {
+          "name": "https://tile.openstreetmap.org/13/1318/3175.png",
+          "dur": 1773,
+          "size": 0,
+          "type": "img"
+        },
+        {
+          "name": "https://tile.openstreetmap.org/13/1317/3178.png",
+          "dur": 1771,
+          "size": 0,
+          "type": "img"
+        },
+        {
+          "name": "https://tile.openstreetmap.org/13/1318/3178.png",
+          "dur": 1768,
+          "size": 0,
+          "type": "img"
+        },
+        {
+          "name": "https://tile.openstreetmap.org/13/1319/3178.png",
+          "dur": 1761,
+          "size": 0,
+          "type": "img"
+        },
+        {
+          "name": "https://tile.openstreetmap.org/13/1319/3175.png",
+          "dur": 1757,
+          "size": 0,
+          "type": "img"
+        }
+      ],
+      "resource_count": 50
+    },
+    "console": [
+      {
+        "type": "log",
+        "text": "Tile cache SW registered"
+      }
+    ],
+    "network": {
+      "total_requests": 51,
+      "failed": [
+        {
+          "url": "https://tile.openstreetmap.org/10/163/395.png",
+          "method": "GET",
+          "status": "FAILED",
+          "failure": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://tile.openstreetmap.org/10/164/395.png",
+          "method": "GET",
+          "status": "FAILED",
+          "failure": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://tile.openstreetmap.org/10/163/396.png",
+          "method": "GET",
+          "status": "FAILED",
+          "failure": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://tile.openstreetmap.org/10/163/394.png",
+          "method": "GET",
+          "status": "FAILED",
+          "failure": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://tile.openstreetmap.org/10/164/394.png",
+          "method": "GET",
+          "status": "FAILED",
+          "failure": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://tile.openstreetmap.org/10/163/397.png",
+          "method": "GET",
+          "status": "FAILED",
+          "failure": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://tile.openstreetmap.org/10/164/396.png",
+          "method": "GET",
+          "status": "FAILED",
+          "failure": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://tile.openstreetmap.org/10/164/397.png",
+          "method": "GET",
+          "status": "FAILED",
+          "failure": "net::ERR_ABORTED"
+        }
+      ],
+      "slowest": [
+        {
+          "url": "https://tile.openstreetmap.org/13/1317/3177.png",
+          "method": "GET",
+          "status": 200,
+          "type": "image",
+          "ms": 1784
+        },
+        {
+          "url": "https://tile.openstreetmap.org/13/1317/3176.png",
+          "method": "GET",
+          "status": 200,
+          "type": "image",
+          "ms": 1783
+        },
+        {
+          "url": "https://tile.openstreetmap.org/13/1318/3177.png",
+          "method": "GET",
+          "status": 200,
+          "type": "image",
+          "ms": 1782
+        },
+        {
+          "url": "https://tile.openstreetmap.org/13/1318/3176.png",
+          "method": "GET",
+          "status": 200,
+          "type": "image",
+          "ms": 1780
+        },
+        {
+          "url": "https://tile.openstreetmap.org/13/1317/3175.png",
+          "method": "GET",
+          "status": 200,
+          "type": "image",
+          "ms": 1776
+        },
+        {
+          "url": "https://tile.openstreetmap.org/13/1318/3175.png",
+          "method": "GET",
+          "status": 200,
+          "type": "image",
+          "ms": 1773
+        },
+        {
+          "url": "https://tile.openstreetmap.org/13/1317/3178.png",
+          "method": "GET",
+          "status": 200,
+          "type": "image",
+          "ms": 1771
+        },
+        {
+          "url": "https://tile.openstreetmap.org/13/1318/3178.png",
+          "method": "GET",
+          "status": 200,
+          "type": "image",
+          "ms": 1768
+        }
+      ]
+    }
+  },
+  {
+    "screen": "trip-map-events-panel",
+    "spa_screens": [
+      "trip map (event browser panel)"
+    ],
+    "url": "/",
+    "viewport": {
+      "width": 375,
+      "height": 812,
+      "tag": "mobile-375"
+    },
+    "http_status": 200,
+    "wall_ms": 7638,
+    "dom_bytes": 26899,
+    "perf": {
+      "ttfb_ms": 307,
+      "dom_content_loaded_ms": 1563,
+      "load_event_ms": 1874,
+      "transfer_bytes": 13773,
+      "paints": {
+        "first-paint": 952,
+        "first-contentful-paint": 952
+      },
+      "slowest_resources": [
+        {
+          "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+          "dur": 1559,
+          "size": 300,
+          "type": "other"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/init.js",
+          "dur": 1252,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/video_panel_clips.js",
+          "dur": 1251,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/video_panel_timelines.js",
+          "dur": 1250,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/video_overlay_actions.js",
+          "dur": 1249,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/video_overlay_controls.js",
+          "dur": 1248,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/video_overlay_core.js",
+          "dur": 1201,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/api/system/health",
+          "dur": 946,
+          "size": 1589,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/day_rendering.js",
+          "dur": 939,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/route_disambiguation.js",
+          "dur": 938,
+          "size": 300,
+          "type": "script"
+        }
+      ],
+      "resource_count": 55
+    },
+    "console": [
+      {
+        "type": "log",
+        "text": "Tile cache SW registered"
+      }
+    ],
+    "network": {
+      "total_requests": 56,
+      "failed": [],
+      "slowest": [
+        {
+          "url": "/static/icons/lucide-sprite.svg",
+          "method": "GET",
+          "status": 200,
+          "type": "other",
+          "ms": 1559
+        },
+        {
+          "url": "/static/js/mapping/init.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 1252
+        },
+        {
+          "url": "/static/js/mapping/video_panel_clips.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 1251
+        },
+        {
+          "url": "/static/js/mapping/video_panel_timelines.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 1250
+        },
+        {
+          "url": "/static/js/mapping/video_overlay_actions.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 1249
+        },
+        {
+          "url": "/static/js/mapping/video_overlay_controls.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 1248
+        },
+        {
+          "url": "/static/js/mapping/video_overlay_core.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 1201
+        },
+        {
+          "url": "/api/system/health",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 946
+        }
+      ]
+    }
+  },
+  {
+    "screen": "event-player",
+    "spa_screens": [
+      "event player"
+    ],
+    "url": "/videos/event/SavedClips/2024-06-01_18-30-00",
+    "viewport": {
+      "width": 375,
+      "height": 812,
+      "tag": "mobile-375"
+    },
+    "http_status": 200,
+    "wall_ms": 2417,
+    "dom_bytes": 70971,
+    "perf": {
+      "ttfb_ms": 28,
+      "dom_content_loaded_ms": 389,
+      "load_event_ms": 704,
+      "transfer_bytes": 70914,
+      "paints": {
+        "first-paint": 388,
+        "first-contentful-paint": 388
+      },
+      "slowest_resources": [
+        {
+          "name": "http://localhost:8080/api/system/health",
+          "dur": 389,
+          "size": 1589,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/static/vendor/dashcam-mp4/dashcam-mp4.js",
+          "dur": 325,
+          "size": 13374,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/vendor/protobuf/protobuf.min.js",
+          "dur": 324,
+          "size": 74593,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/main.js",
+          "dur": 323,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+          "dur": 322,
+          "size": 300,
+          "type": "other"
+        },
+        {
+          "name": "http://localhost:8080/static/css/bootstrap-icons-subset.css",
+          "dur": 320,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/css/style.css",
+          "dur": 320,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/fonts/inter-variable.woff2",
+          "dur": 318,
+          "size": 300,
+          "type": "css"
+        },
+        {
+          "name": "http://localhost:8080/static/vendor/dashcam-mp4/dashcam.proto",
+          "dur": 306,
+          "size": 1152,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/videos/stream/SavedClips/2024-06-01_18-30-00/2024-06-01_18-30-00-front.mp4",
+          "dur": 306,
+          "size": 11808,
+          "type": "video"
+        }
+      ],
+      "resource_count": 10
+    },
+    "console": [
+      {
+        "type": "log",
+        "text": "SEI system initialized"
+      }
+    ],
+    "network": {
+      "total_requests": 11,
+      "failed": [],
+      "slowest": [
+        {
+          "url": "/api/system/health",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 389
+        },
+        {
+          "url": "/static/vendor/dashcam-mp4/dashcam-mp4.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 325
+        },
+        {
+          "url": "/static/vendor/protobuf/protobuf.min.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 324
+        },
+        {
+          "url": "/static/js/main.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 323
+        },
+        {
+          "url": "/static/icons/lucide-sprite.svg",
+          "method": "GET",
+          "status": 200,
+          "type": "other",
+          "ms": 322
+        },
+        {
+          "url": "/static/css/bootstrap-icons-subset.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 320
+        },
+        {
+          "url": "/static/css/style.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 320
+        },
+        {
+          "url": "/static/fonts/inter-variable.woff2",
+          "method": "GET",
+          "status": 200,
+          "type": "font",
+          "ms": 318
+        }
+      ]
+    }
+  },
+  {
+    "screen": "video-overlay-hud",
+    "spa_screens": [
+      "video overlay HUD"
+    ],
+    "url": "/",
+    "viewport": {
+      "width": 375,
+      "height": 812,
+      "tag": "mobile-375"
+    },
+    "http_status": 200,
+    "wall_ms": 8186,
+    "dom_bytes": 28570,
+    "perf": {
+      "ttfb_ms": 310,
+      "dom_content_loaded_ms": 1564,
+      "load_event_ms": 1876,
+      "transfer_bytes": 13773,
+      "paints": {
+        "first-paint": 956,
+        "first-contentful-paint": 956
+      },
+      "slowest_resources": [
+        {
+          "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+          "dur": 1558,
+          "size": 300,
+          "type": "other"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/init.js",
+          "dur": 1250,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/video_panel_clips.js",
+          "dur": 1249,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/video_overlay_actions.js",
+          "dur": 1248,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/video_panel_timelines.js",
+          "dur": 1248,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/video_overlay_controls.js",
+          "dur": 1247,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/video_overlay_core.js",
+          "dur": 1199,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/api/system/health",
+          "dur": 940,
+          "size": 1589,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/day_rendering.js",
+          "dur": 938,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/day_navigation.js",
+          "dur": 937,
+          "size": 300,
+          "type": "script"
+        }
+      ],
+      "resource_count": 54
+    },
+    "console": [
+      {
+        "type": "log",
+        "text": "Tile cache SW registered"
+      }
+    ],
+    "network": {
+      "total_requests": 55,
+      "failed": [],
+      "slowest": [
+        {
+          "url": "/static/icons/lucide-sprite.svg",
+          "method": "GET",
+          "status": 200,
+          "type": "other",
+          "ms": 1558
+        },
+        {
+          "url": "/static/js/mapping/init.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 1250
+        },
+        {
+          "url": "/static/js/mapping/video_panel_clips.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 1249
+        },
+        {
+          "url": "/static/js/mapping/video_overlay_actions.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 1248
+        },
+        {
+          "url": "/static/js/mapping/video_panel_timelines.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 1248
+        },
+        {
+          "url": "/static/js/mapping/video_overlay_controls.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 1247
+        },
+        {
+          "url": "/static/js/mapping/video_overlay_core.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 1199
+        },
+        {
+          "url": "/api/system/health",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 940
+        }
+      ]
+    }
+  },
+  {
+    "screen": "analytics",
+    "spa_screens": [
+      "analytics"
+    ],
+    "url": "/analytics/",
+    "viewport": {
+      "width": 375,
+      "height": 812,
+      "tag": "mobile-375"
+    },
+    "http_status": 200,
+    "wall_ms": 3012,
+    "dom_bytes": 24525,
+    "perf": {
+      "ttfb_ms": 19,
+      "dom_content_loaded_ms": 353,
+      "load_event_ms": 650,
+      "transfer_bytes": 24570,
+      "paints": {
+        "first-paint": 344,
+        "first-contentful-paint": 344
+      },
+      "slowest_resources": [
+        {
+          "name": "http://localhost:8080/api/system/health",
+          "dur": 379,
+          "size": 1589,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/api/driving-stats",
+          "dur": 315,
+          "size": 529,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/static/js/analytics.js",
+          "dur": 312,
+          "size": 5260,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/css/analytics.css",
+          "dur": 311,
+          "size": 21242,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/js/main.js",
+          "dur": 310,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/css/style.css",
+          "dur": 309,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+          "dur": 309,
+          "size": 300,
+          "type": "other"
+        },
+        {
+          "name": "http://localhost:8080/static/css/bootstrap-icons-subset.css",
+          "dur": 308,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/fonts/inter-variable.woff2",
+          "dur": 305,
+          "size": 300,
+          "type": "css"
+        }
+      ],
+      "resource_count": 9
+    },
+    "console": [],
+    "network": {
+      "total_requests": 10,
+      "failed": [],
+      "slowest": [
+        {
+          "url": "/api/system/health",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 379
+        },
+        {
+          "url": "/api/driving-stats",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 315
+        },
+        {
+          "url": "/static/js/analytics.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 312
+        },
+        {
+          "url": "/static/css/analytics.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 311
+        },
+        {
+          "url": "/static/js/main.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 310
+        },
+        {
+          "url": "/static/css/style.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 309
+        },
+        {
+          "url": "/static/icons/lucide-sprite.svg",
+          "method": "GET",
+          "status": 200,
+          "type": "other",
+          "ms": 309
+        },
+        {
+          "url": "/static/css/bootstrap-icons-subset.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 308
+        }
+      ]
+    }
+  },
+  {
+    "screen": "boombox",
+    "spa_screens": [
+      "boombox"
+    ],
+    "url": "/boombox/",
+    "viewport": {
+      "width": 375,
+      "height": 812,
+      "tag": "mobile-375"
+    },
+    "http_status": 200,
+    "wall_ms": 1128,
+    "dom_bytes": 25419,
+    "perf": {
+      "ttfb_ms": 291,
+      "dom_content_loaded_ms": 613,
+      "load_event_ms": 621,
+      "transfer_bytes": 26144,
+      "paints": {
+        "first-paint": 584,
+        "first-contentful-paint": 584
+      },
+      "slowest_resources": [
+        {
+          "name": "http://localhost:8080/api/system/health",
+          "dur": 323,
+          "size": 1589,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/static/js/main.js",
+          "dur": 315,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+          "dur": 314,
+          "size": 300,
+          "type": "other"
+        },
+        {
+          "name": "http://localhost:8080/static/css/style.css",
+          "dur": 249,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/fonts/inter-variable.woff2",
+          "dur": 60,
+          "size": 300,
+          "type": "css"
+        },
+        {
+          "name": "http://localhost:8080/static/css/bootstrap-icons-subset.css",
+          "dur": 17,
+          "size": 300,
+          "type": "link"
+        }
+      ],
+      "resource_count": 6
+    },
+    "console": [],
+    "network": {
+      "total_requests": 7,
+      "failed": [],
+      "slowest": [
+        {
+          "url": "/api/system/health",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 323
+        },
+        {
+          "url": "/static/js/main.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 315
+        },
+        {
+          "url": "/static/icons/lucide-sprite.svg",
+          "method": "GET",
+          "status": 200,
+          "type": "other",
+          "ms": 314
+        },
+        {
+          "url": "/boombox/",
+          "method": "GET",
+          "status": 200,
+          "type": "document",
+          "ms": 291
+        },
+        {
+          "url": "/static/css/style.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 249
+        },
+        {
+          "url": "/static/fonts/inter-variable.woff2",
+          "method": "GET",
+          "status": 200,
+          "type": "font",
+          "ms": 60
+        },
+        {
+          "url": "/static/css/bootstrap-icons-subset.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 17
+        }
+      ]
+    }
+  },
+  {
+    "screen": "music",
+    "spa_screens": [
+      "music"
+    ],
+    "url": "/music/",
+    "viewport": {
+      "width": 375,
+      "height": 812,
+      "tag": "mobile-375"
+    },
+    "http_status": 200,
+    "wall_ms": 1100,
+    "dom_bytes": 26277,
+    "perf": {
+      "ttfb_ms": 14,
+      "dom_content_loaded_ms": 395,
+      "load_event_ms": 597,
+      "transfer_bytes": 26435,
+      "paints": {
+        "first-paint": 400,
+        "first-contentful-paint": 400
+      },
+      "slowest_resources": [
+        {
+          "name": "http://localhost:8080/api/system/health",
+          "dur": 335,
+          "size": 1589,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/static/js/music.js",
+          "dur": 324,
+          "size": 31102,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/main.js",
+          "dur": 323,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+          "dur": 323,
+          "size": 300,
+          "type": "other"
+        },
+        {
+          "name": "http://localhost:8080/static/css/style.css",
+          "dur": 321,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/css/bootstrap-icons-subset.css",
+          "dur": 320,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/fonts/inter-variable.woff2",
+          "dur": 239,
+          "size": 300,
+          "type": "css"
+        }
+      ],
+      "resource_count": 7
+    },
+    "console": [],
+    "network": {
+      "total_requests": 8,
+      "failed": [],
+      "slowest": [
+        {
+          "url": "/api/system/health",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 335
+        },
+        {
+          "url": "/static/js/music.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 324
+        },
+        {
+          "url": "/static/js/main.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 323
+        },
+        {
+          "url": "/static/icons/lucide-sprite.svg",
+          "method": "GET",
+          "status": 200,
+          "type": "other",
+          "ms": 322
+        },
+        {
+          "url": "/static/css/style.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 321
+        },
+        {
+          "url": "/static/css/bootstrap-icons-subset.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 319
+        },
+        {
+          "url": "/static/fonts/inter-variable.woff2",
+          "method": "GET",
+          "status": 200,
+          "type": "font",
+          "ms": 239
+        },
+        {
+          "url": "/music/",
+          "method": "GET",
+          "status": 200,
+          "type": "document",
+          "ms": 15
+        }
+      ]
+    }
+  },
+  {
+    "screen": "light-shows",
+    "spa_screens": [
+      "light shows"
+    ],
+    "url": "/light_shows/",
+    "viewport": {
+      "width": 375,
+      "height": 812,
+      "tag": "mobile-375"
+    },
+    "http_status": 200,
+    "wall_ms": 1097,
+    "dom_bytes": 37256,
+    "perf": {
+      "ttfb_ms": 10,
+      "dom_content_loaded_ms": 364,
+      "load_event_ms": 607,
+      "transfer_bytes": 37990,
+      "paints": {
+        "first-paint": 364,
+        "first-contentful-paint": 364
+      },
+      "slowest_resources": [
+        {
+          "name": "http://localhost:8080/api/system/health",
+          "dur": 345,
+          "size": 1589,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/static/js/main.js",
+          "dur": 318,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+          "dur": 317,
+          "size": 300,
+          "type": "other"
+        },
+        {
+          "name": "http://localhost:8080/static/css/bootstrap-icons-subset.css",
+          "dur": 316,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/css/style.css",
+          "dur": 316,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/fonts/inter-variable.woff2",
+          "dur": 260,
+          "size": 300,
+          "type": "css"
+        }
+      ],
+      "resource_count": 6
+    },
+    "console": [],
+    "network": {
+      "total_requests": 7,
+      "failed": [],
+      "slowest": [
+        {
+          "url": "/api/system/health",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 345
+        },
+        {
+          "url": "/static/js/main.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 318
+        },
+        {
+          "url": "/static/icons/lucide-sprite.svg",
+          "method": "GET",
+          "status": 200,
+          "type": "other",
+          "ms": 317
+        },
+        {
+          "url": "/static/css/bootstrap-icons-subset.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 316
+        },
+        {
+          "url": "/static/css/style.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 316
+        },
+        {
+          "url": "/static/fonts/inter-variable.woff2",
+          "method": "GET",
+          "status": 200,
+          "type": "font",
+          "ms": 260
+        },
+        {
+          "url": "/light_shows/",
+          "method": "GET",
+          "status": 200,
+          "type": "document",
+          "ms": 11
+        }
+      ]
+    }
+  },
+  {
+    "screen": "lock-chimes",
+    "spa_screens": [
+      "lock chimes"
+    ],
+    "url": "/lock_chimes/",
+    "viewport": {
+      "width": 375,
+      "height": 812,
+      "tag": "mobile-375"
+    },
+    "http_status": 200,
+    "wall_ms": 1582,
+    "dom_bytes": 134358,
+    "perf": {
+      "ttfb_ms": 348,
+      "dom_content_loaded_ms": 745,
+      "load_event_ms": 1050,
+      "transfer_bytes": 134775,
+      "paints": {
+        "first-paint": 744,
+        "first-contentful-paint": 744
+      },
+      "slowest_resources": [
+        {
+          "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+          "dur": 381,
+          "size": 300,
+          "type": "other"
+        },
+        {
+          "name": "http://localhost:8080/api/system/health",
+          "dur": 342,
+          "size": 1589,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/api/chime_filenames",
+          "dur": 319,
+          "size": 363,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/static/js/main.js",
+          "dur": 313,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/audio_trimmer.js",
+          "dur": 313,
+          "size": 40054,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/vendor/lamejs/lame.min.js",
+          "dur": 313,
+          "size": 156487,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/css/audio_trimmer.css",
+          "dur": 311,
+          "size": 10651,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/css/style.css",
+          "dur": 309,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/fonts/inter-variable.woff2",
+          "dur": 265,
+          "size": 300,
+          "type": "css"
+        },
+        {
+          "name": "http://localhost:8080/static/css/bootstrap-icons-subset.css",
+          "dur": 231,
+          "size": 300,
+          "type": "link"
+        }
+      ],
+      "resource_count": 10
+    },
+    "console": [],
+    "network": {
+      "total_requests": 11,
+      "failed": [],
+      "slowest": [
+        {
+          "url": "/static/icons/lucide-sprite.svg",
+          "method": "GET",
+          "status": 200,
+          "type": "other",
+          "ms": 381
+        },
+        {
+          "url": "/lock_chimes/",
+          "method": "GET",
+          "status": 200,
+          "type": "document",
+          "ms": 348
+        },
+        {
+          "url": "/api/system/health",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 342
+        },
+        {
+          "url": "/api/chime_filenames",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 319
+        },
+        {
+          "url": "/static/js/main.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 313
+        },
+        {
+          "url": "/static/js/audio_trimmer.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 313
+        },
+        {
+          "url": "/static/vendor/lamejs/lame.min.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 313
+        },
+        {
+          "url": "/static/css/audio_trimmer.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 311
+        }
+      ]
+    }
+  },
+  {
+    "screen": "license-plates",
+    "spa_screens": [
+      "license plates"
+    ],
+    "url": "/license_plates/",
+    "viewport": {
+      "width": 375,
+      "height": 812,
+      "tag": "mobile-375"
+    },
+    "http_status": 200,
+    "wall_ms": 1162,
+    "dom_bytes": 56186,
+    "perf": {
+      "ttfb_ms": 76,
+      "dom_content_loaded_ms": 422,
+      "load_event_ms": 661,
+      "transfer_bytes": 56867,
+      "paints": {
+        "first-paint": 424,
+        "first-contentful-paint": 424
+      },
+      "slowest_resources": [
+        {
+          "name": "http://localhost:8080/api/system/health",
+          "dur": 341,
+          "size": 1589,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/license_plates/download/LightShow/TESLA.png",
+          "dur": 310,
+          "size": 2626,
+          "type": "img"
+        },
+        {
+          "name": "http://localhost:8080/static/css/style.css",
+          "dur": 307,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+          "dur": 307,
+          "size": 300,
+          "type": "other"
+        },
+        {
+          "name": "http://localhost:8080/static/js/main.js",
+          "dur": 306,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/css/bootstrap-icons-subset.css",
+          "dur": 305,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/fonts/inter-variable.woff2",
+          "dur": 261,
+          "size": 300,
+          "type": "css"
+        }
+      ],
+      "resource_count": 7
+    },
+    "console": [],
+    "network": {
+      "total_requests": 8,
+      "failed": [],
+      "slowest": [
+        {
+          "url": "/api/system/health",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 341
+        },
+        {
+          "url": "/license_plates/download/LightShow/TESLA.png",
+          "method": "GET",
+          "status": 200,
+          "type": "image",
+          "ms": 310
+        },
+        {
+          "url": "/static/css/style.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 307
+        },
+        {
+          "url": "/static/icons/lucide-sprite.svg",
+          "method": "GET",
+          "status": 200,
+          "type": "other",
+          "ms": 307
+        },
+        {
+          "url": "/static/js/main.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 306
+        },
+        {
+          "url": "/static/css/bootstrap-icons-subset.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 305
+        },
+        {
+          "url": "/static/fonts/inter-variable.woff2",
+          "method": "GET",
+          "status": 200,
+          "type": "font",
+          "ms": 261
+        },
+        {
+          "url": "/license_plates/",
+          "method": "GET",
+          "status": 200,
+          "type": "document",
+          "ms": 77
+        }
+      ]
+    }
+  },
+  {
+    "screen": "wraps",
+    "spa_screens": [
+      "wraps"
+    ],
+    "url": "/wraps/",
+    "viewport": {
+      "width": 375,
+      "height": 812,
+      "tag": "mobile-375"
+    },
+    "http_status": 200,
+    "wall_ms": 1189,
+    "dom_bytes": 40217,
+    "perf": {
+      "ttfb_ms": 322,
+      "dom_content_loaded_ms": 672,
+      "load_event_ms": 677,
+      "transfer_bytes": 41116,
+      "paints": {
+        "first-paint": 676,
+        "first-contentful-paint": 676
+      },
+      "slowest_resources": [
+        {
+          "name": "http://localhost:8080/api/system/health",
+          "dur": 374,
+          "size": 1589,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/static/js/main.js",
+          "dur": 315,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+          "dur": 315,
+          "size": 300,
+          "type": "other"
+        },
+        {
+          "name": "http://localhost:8080/wraps/download/library/matte_black.png",
+          "dur": 315,
+          "size": 2790,
+          "type": "img"
+        },
+        {
+          "name": "http://localhost:8080/wraps/download/library/racing_stripes.png",
+          "dur": 315,
+          "size": 2812,
+          "type": "img"
+        },
+        {
+          "name": "http://localhost:8080/static/css/style.css",
+          "dur": 314,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/css/bootstrap-icons-subset.css",
+          "dur": 253,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/fonts/inter-variable.woff2",
+          "dur": 1,
+          "size": 300,
+          "type": "css"
+        }
+      ],
+      "resource_count": 8
+    },
+    "console": [],
+    "network": {
+      "total_requests": 9,
+      "failed": [],
+      "slowest": [
+        {
+          "url": "/api/system/health",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 374
+        },
+        {
+          "url": "/wraps/",
+          "method": "GET",
+          "status": 200,
+          "type": "document",
+          "ms": 322
+        },
+        {
+          "url": "/static/icons/lucide-sprite.svg",
+          "method": "GET",
+          "status": 200,
+          "type": "other",
+          "ms": 315
+        },
+        {
+          "url": "/static/js/main.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 315
+        },
+        {
+          "url": "/wraps/download/library/matte_black.png",
+          "method": "GET",
+          "status": 200,
+          "type": "image",
+          "ms": 315
+        },
+        {
+          "url": "/wraps/download/library/racing_stripes.png",
+          "method": "GET",
+          "status": 200,
+          "type": "image",
+          "ms": 315
+        },
+        {
+          "url": "/static/css/style.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 314
+        },
+        {
+          "url": "/static/css/bootstrap-icons-subset.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 253
+        }
+      ]
+    }
+  },
+  {
+    "screen": "cloud-archive",
+    "spa_screens": [
+      "cloud archive"
+    ],
+    "url": "/cloud/",
+    "viewport": {
+      "width": 375,
+      "height": 812,
+      "tag": "mobile-375"
+    },
+    "http_status": 200,
+    "wall_ms": 2253,
+    "dom_bytes": 117722,
+    "perf": {
+      "ttfb_ms": 114,
+      "dom_content_loaded_ms": 479,
+      "load_event_ms": 483,
+      "transfer_bytes": 117934,
+      "paints": {
+        "first-paint": 480,
+        "first-contentful-paint": 480
+      },
+      "slowest_resources": [
+        {
+          "name": "http://localhost:8080/api/system/health",
+          "dur": 381,
+          "size": 1589,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/cloud/api/queue?limit=100",
+          "dur": 379,
+          "size": 697,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/static/js/main.js",
+          "dur": 316,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+          "dur": 315,
+          "size": 300,
+          "type": "other"
+        },
+        {
+          "name": "http://localhost:8080/static/css/style.css",
+          "dur": 314,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/cloud/api/storage_usage",
+          "dur": 312,
+          "size": 359,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/static/css/bootstrap-icons-subset.css",
+          "dur": 189,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/fonts/inter-variable.woff2",
+          "dur": 1,
+          "size": 300,
+          "type": "css"
+        }
+      ],
+      "resource_count": 8
+    },
+    "console": [],
+    "network": {
+      "total_requests": 9,
+      "failed": [],
+      "slowest": [
+        {
+          "url": "/api/system/health",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 381
+        },
+        {
+          "url": "/cloud/api/queue?limit=100",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 379
+        },
+        {
+          "url": "/static/icons/lucide-sprite.svg",
+          "method": "GET",
+          "status": 200,
+          "type": "other",
+          "ms": 315
+        },
+        {
+          "url": "/static/js/main.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 315
+        },
+        {
+          "url": "/static/css/style.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 314
+        },
+        {
+          "url": "/cloud/api/storage_usage",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 312
+        },
+        {
+          "url": "/static/css/bootstrap-icons-subset.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 189
+        },
+        {
+          "url": "/cloud/",
+          "method": "GET",
+          "status": 200,
+          "type": "document",
+          "ms": 114
+        }
+      ]
+    }
+  },
+  {
+    "screen": "storage",
+    "spa_screens": [
+      "storage settings",
+      "storage health"
+    ],
+    "url": "/storage/",
+    "viewport": {
+      "width": 375,
+      "height": 812,
+      "tag": "mobile-375"
+    },
+    "http_status": 200,
+    "wall_ms": 2339,
+    "dom_bytes": 19780,
+    "perf": {
+      "ttfb_ms": 10,
+      "dom_content_loaded_ms": 359,
+      "load_event_ms": 603,
+      "transfer_bytes": 20224,
+      "paints": {
+        "first-paint": 360,
+        "first-contentful-paint": 360
+      },
+      "slowest_resources": [
+        {
+          "name": "http://localhost:8080/api/system/health",
+          "dur": 343,
+          "size": 1589,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/static/js/main.js",
+          "dur": 314,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+          "dur": 313,
+          "size": 300,
+          "type": "other"
+        },
+        {
+          "name": "http://localhost:8080/static/css/style.css",
+          "dur": 312,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/css/bootstrap-icons-subset.css",
+          "dur": 311,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/fonts/inter-variable.woff2",
+          "dur": 260,
+          "size": 300,
+          "type": "css"
+        }
+      ],
+      "resource_count": 6
+    },
+    "console": [],
+    "network": {
+      "total_requests": 7,
+      "failed": [],
+      "slowest": [
+        {
+          "url": "/api/system/health",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 344
+        },
+        {
+          "url": "/static/js/main.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 314
+        },
+        {
+          "url": "/static/icons/lucide-sprite.svg",
+          "method": "GET",
+          "status": 200,
+          "type": "other",
+          "ms": 313
+        },
+        {
+          "url": "/static/css/style.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 312
+        },
+        {
+          "url": "/static/css/bootstrap-icons-subset.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 311
+        },
+        {
+          "url": "/static/fonts/inter-variable.woff2",
+          "method": "GET",
+          "status": 200,
+          "type": "font",
+          "ms": 260
+        },
+        {
+          "url": "/storage/",
+          "method": "GET",
+          "status": 200,
+          "type": "document",
+          "ms": 11
+        }
+      ]
+    }
+  },
+  {
+    "screen": "failed-jobs",
+    "spa_screens": [
+      "failed jobs"
+    ],
+    "url": "/jobs",
+    "viewport": {
+      "width": 375,
+      "height": 812,
+      "tag": "mobile-375"
+    },
+    "http_status": 200,
+    "wall_ms": 1827,
+    "dom_bytes": 39396,
+    "perf": {
+      "ttfb_ms": 95,
+      "dom_content_loaded_ms": 427,
+      "load_event_ms": 433,
+      "transfer_bytes": 35985,
+      "paints": {
+        "first-paint": 428,
+        "first-contentful-paint": 428
+      },
+      "slowest_resources": [
+        {
+          "name": "http://localhost:8080/api/system/health",
+          "dur": 385,
+          "size": 1589,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/api/jobs/counts",
+          "dur": 352,
+          "size": 339,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/static/js/main.js",
+          "dur": 306,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+          "dur": 306,
+          "size": 300,
+          "type": "other"
+        },
+        {
+          "name": "http://localhost:8080/static/css/style.css",
+          "dur": 305,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/api/jobs/failed?subsystem=all&limit=200",
+          "dur": 252,
+          "size": 1613,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/static/css/bootstrap-icons-subset.css",
+          "dur": 212,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-cloud-upload",
+          "dur": 56,
+          "size": 300,
+          "type": "other"
+        },
+        {
+          "name": "http://localhost:8080/static/fonts/inter-variable.woff2",
+          "dur": 1,
+          "size": 300,
+          "type": "css"
+        }
+      ],
+      "resource_count": 9
+    },
+    "console": [],
+    "network": {
+      "total_requests": 10,
+      "failed": [],
+      "slowest": [
+        {
+          "url": "/api/system/health",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 385
+        },
+        {
+          "url": "/api/jobs/counts",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 352
+        },
+        {
+          "url": "/static/icons/lucide-sprite.svg",
+          "method": "GET",
+          "status": 200,
+          "type": "other",
+          "ms": 306
+        },
+        {
+          "url": "/static/js/main.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 306
+        },
+        {
+          "url": "/static/css/style.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 305
+        },
+        {
+          "url": "/api/jobs/failed?subsystem=all&limit=200",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 252
+        },
+        {
+          "url": "/static/css/bootstrap-icons-subset.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 212
+        },
+        {
+          "url": "/jobs",
+          "method": "GET",
+          "status": 200,
+          "type": "document",
+          "ms": 95
+        }
+      ]
+    }
+  },
+  {
+    "screen": "captive-portal",
+    "spa_screens": [
+      "captive portal"
+    ],
+    "url": "/captive-portal",
+    "viewport": {
+      "width": 375,
+      "height": 812,
+      "tag": "mobile-375"
+    },
+    "http_status": 200,
+    "wall_ms": 1333,
+    "dom_bytes": 17421,
+    "perf": {
+      "ttfb_ms": 160,
+      "dom_content_loaded_ms": 506,
+      "load_event_ms": 801,
+      "transfer_bytes": 17740,
+      "paints": {
+        "first-paint": 508,
+        "first-contentful-paint": 508
+      },
+      "slowest_resources": [
+        {
+          "name": "http://localhost:8080/api/system/health",
+          "dur": 391,
+          "size": 1589,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/static/js/main.js",
+          "dur": 315,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+          "dur": 314,
+          "size": 300,
+          "type": "other"
+        },
+        {
+          "name": "http://localhost:8080/static/css/style.css",
+          "dur": 313,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/fonts/inter-variable.woff2",
+          "dur": 307,
+          "size": 300,
+          "type": "css"
+        },
+        {
+          "name": "http://localhost:8080/static/css/bootstrap-icons-subset.css",
+          "dur": 252,
+          "size": 300,
+          "type": "link"
+        }
+      ],
+      "resource_count": 6
+    },
+    "console": [],
+    "network": {
+      "total_requests": 7,
+      "failed": [],
+      "slowest": [
+        {
+          "url": "/api/system/health",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 391
+        },
+        {
+          "url": "/static/js/main.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 315
+        },
+        {
+          "url": "/static/icons/lucide-sprite.svg",
+          "method": "GET",
+          "status": 200,
+          "type": "other",
+          "ms": 314
+        },
+        {
+          "url": "/static/css/style.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 313
+        },
+        {
+          "url": "/static/fonts/inter-variable.woff2",
+          "method": "GET",
+          "status": 200,
+          "type": "font",
+          "ms": 307
+        },
+        {
+          "url": "/static/css/bootstrap-icons-subset.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 251
+        },
+        {
+          "url": "/captive-portal",
+          "method": "GET",
+          "status": 200,
+          "type": "document",
+          "ms": 161
+        }
+      ]
+    }
+  },
+  {
+    "screen": "media-hub",
+    "spa_screens": [
+      "media hub"
+    ],
+    "url": "/settings/",
+    "viewport": {
+      "width": 1440,
+      "height": 900,
+      "tag": "desktop-1440"
+    },
+    "http_status": 200,
+    "wall_ms": 1456,
+    "dom_bytes": 136561,
+    "perf": {
+      "ttfb_ms": 468,
+      "dom_content_loaded_ms": 827,
+      "load_event_ms": 847,
+      "transfer_bytes": 134724,
+      "paints": {
+        "first-paint": 836,
+        "first-contentful-paint": 836
+      },
+      "slowest_resources": [
+        {
+          "name": "http://localhost:8080/api/system/health",
+          "dur": 353,
+          "size": 1589,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/api/system/health",
+          "dur": 353,
+          "size": 1613,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/static/css/style.css",
+          "dur": 319,
+          "size": 66823,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/js/main.js",
+          "dur": 319,
+          "size": 21402,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+          "dur": 318,
+          "size": 20376,
+          "type": "other"
+        },
+        {
+          "name": "http://localhost:8080/api/system/metrics",
+          "dur": 310,
+          "size": 3226,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/static/css/bootstrap-icons-subset.css",
+          "dur": 100,
+          "size": 24373,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/fonts/inter-variable.woff2",
+          "dur": 40,
+          "size": 352540,
+          "type": "css"
+        }
+      ],
+      "resource_count": 8
+    },
+    "console": [],
+    "network": {
+      "total_requests": 10,
+      "failed": [],
+      "slowest": [
+        {
+          "url": "/settings/",
+          "method": "GET",
+          "status": 200,
+          "type": "document",
+          "ms": 469
+        },
+        {
+          "url": "/api/wifi/saved",
+          "method": "GET",
+          "status": 302,
+          "type": "fetch",
+          "ms": 409
+        },
+        {
+          "url": "/api/system/health",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 353
+        },
+        {
+          "url": "/api/system/health",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 353
+        },
+        {
+          "url": "/static/css/style.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 319
+        },
+        {
+          "url": "/static/js/main.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 319
+        },
+        {
+          "url": "/static/icons/lucide-sprite.svg",
+          "method": "GET",
+          "status": 200,
+          "type": "other",
+          "ms": 317
+        },
+        {
+          "url": "/api/system/metrics",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 310
+        }
+      ]
+    }
+  },
+  {
+    "screen": "trip-map",
+    "spa_screens": [
+      "trip map"
+    ],
+    "url": "/",
+    "viewport": {
+      "width": 1440,
+      "height": 900,
+      "tag": "desktop-1440"
+    },
+    "http_status": 200,
+    "wall_ms": 6733,
+    "dom_bytes": 25922,
+    "perf": {
+      "ttfb_ms": 60,
+      "dom_content_loaded_ms": 1317,
+      "load_event_ms": 1623,
+      "transfer_bytes": 14112,
+      "paints": {
+        "first-paint": 700,
+        "first-contentful-paint": 700
+      },
+      "slowest_resources": [
+        {
+          "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+          "dur": 1558,
+          "size": 300,
+          "type": "other"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/init.js",
+          "dur": 1252,
+          "size": 2962,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/video_panel_clips.js",
+          "dur": 1251,
+          "size": 16971,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/video_panel_timelines.js",
+          "dur": 1251,
+          "size": 20083,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/video_overlay_actions.js",
+          "dur": 1249,
+          "size": 6381,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/video_overlay_controls.js",
+          "dur": 1186,
+          "size": 20661,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/video_overlay_core.js",
+          "dur": 1041,
+          "size": 25517,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/route_disambiguation.js",
+          "dur": 941,
+          "size": 20212,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/day_navigation.js",
+          "dur": 941,
+          "size": 18717,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/day_rendering.js",
+          "dur": 940,
+          "size": 9558,
+          "type": "script"
+        }
+      ],
+      "resource_count": 78
+    },
+    "console": [
+      {
+        "type": "log",
+        "text": "Tile cache SW registered"
+      }
+    ],
+    "network": {
+      "total_requests": 79,
+      "failed": [],
+      "slowest": [
+        {
+          "url": "/static/icons/lucide-sprite.svg",
+          "method": "GET",
+          "status": 200,
+          "type": "other",
+          "ms": 1558
+        },
+        {
+          "url": "/static/js/mapping/init.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 1252
+        },
+        {
+          "url": "/static/js/mapping/video_panel_clips.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 1251
+        },
+        {
+          "url": "/static/js/mapping/video_panel_timelines.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 1251
+        },
+        {
+          "url": "/static/js/mapping/video_overlay_actions.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 1249
+        },
+        {
+          "url": "/static/js/mapping/video_overlay_controls.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 1186
+        },
+        {
+          "url": "/static/js/mapping/video_overlay_core.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 1041
+        },
+        {
+          "url": "/static/js/mapping/route_disambiguation.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 941
+        }
+      ]
+    }
+  },
+  {
+    "screen": "trip-map-events-panel",
+    "spa_screens": [
+      "trip map (event browser panel)"
+    ],
+    "url": "/",
+    "viewport": {
+      "width": 1440,
+      "height": 900,
+      "tag": "desktop-1440"
+    },
+    "http_status": 200,
+    "wall_ms": 8133,
+    "dom_bytes": 29203,
+    "perf": {
+      "ttfb_ms": 309,
+      "dom_content_loaded_ms": 1559,
+      "load_event_ms": 1868,
+      "transfer_bytes": 13773,
+      "paints": {
+        "first-paint": 956,
+        "first-contentful-paint": 956
+      },
+      "slowest_resources": [
+        {
+          "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+          "dur": 1553,
+          "size": 300,
+          "type": "other"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/init.js",
+          "dur": 1247,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/video_panel_clips.js",
+          "dur": 1246,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/video_panel_timelines.js",
+          "dur": 1245,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/video_overlay_actions.js",
+          "dur": 1244,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/video_overlay_controls.js",
+          "dur": 1242,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/video_overlay_core.js",
+          "dur": 1196,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/day_rendering.js",
+          "dur": 936,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/day_navigation.js",
+          "dur": 936,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/speed_units.js",
+          "dur": 934,
+          "size": 300,
+          "type": "script"
+        }
+      ],
+      "resource_count": 83
+    },
+    "console": [
+      {
+        "type": "log",
+        "text": "Tile cache SW registered"
+      }
+    ],
+    "network": {
+      "total_requests": 84,
+      "failed": [],
+      "slowest": [
+        {
+          "url": "/static/icons/lucide-sprite.svg",
+          "method": "GET",
+          "status": 200,
+          "type": "other",
+          "ms": 1553
+        },
+        {
+          "url": "/static/js/mapping/init.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 1247
+        },
+        {
+          "url": "/static/js/mapping/video_panel_clips.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 1246
+        },
+        {
+          "url": "/static/js/mapping/video_panel_timelines.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 1245
+        },
+        {
+          "url": "/static/js/mapping/video_overlay_actions.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 1243
+        },
+        {
+          "url": "/static/js/mapping/video_overlay_controls.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 1242
+        },
+        {
+          "url": "/static/js/mapping/video_overlay_core.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 1196
+        },
+        {
+          "url": "/static/js/mapping/day_rendering.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 936
+        }
+      ]
+    }
+  },
+  {
+    "screen": "event-player",
+    "spa_screens": [
+      "event player"
+    ],
+    "url": "/videos/event/SavedClips/2024-06-01_18-30-00",
+    "viewport": {
+      "width": 1440,
+      "height": 900,
+      "tag": "desktop-1440"
+    },
+    "http_status": 200,
+    "wall_ms": 2475,
+    "dom_bytes": 70971,
+    "perf": {
+      "ttfb_ms": 3,
+      "dom_content_loaded_ms": 365,
+      "load_event_ms": 691,
+      "transfer_bytes": 70914,
+      "paints": {
+        "first-paint": 368,
+        "first-contentful-paint": 368
+      },
+      "slowest_resources": [
+        {
+          "name": "http://localhost:8080/api/system/health",
+          "dur": 403,
+          "size": 1589,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/static/vendor/protobuf/protobuf.min.js",
+          "dur": 326,
+          "size": 74593,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+          "dur": 324,
+          "size": 300,
+          "type": "other"
+        },
+        {
+          "name": "http://localhost:8080/static/vendor/dashcam-mp4/dashcam.proto",
+          "dur": 324,
+          "size": 1152,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/videos/stream/SavedClips/2024-06-01_18-30-00/2024-06-01_18-30-00-front.mp4",
+          "dur": 324,
+          "size": 11808,
+          "type": "video"
+        },
+        {
+          "name": "http://localhost:8080/static/vendor/dashcam-mp4/dashcam-mp4.js",
+          "dur": 323,
+          "size": 13374,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/main.js",
+          "dur": 323,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/css/style.css",
+          "dur": 321,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/css/bootstrap-icons-subset.css",
+          "dur": 320,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/fonts/inter-variable.woff2",
+          "dur": 317,
+          "size": 300,
+          "type": "css"
+        }
+      ],
+      "resource_count": 10
+    },
+    "console": [
+      {
+        "type": "log",
+        "text": "SEI system initialized"
+      }
+    ],
+    "network": {
+      "total_requests": 11,
+      "failed": [],
+      "slowest": [
+        {
+          "url": "/api/system/health",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 403
+        },
+        {
+          "url": "/static/vendor/protobuf/protobuf.min.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 326
+        },
+        {
+          "url": "/static/icons/lucide-sprite.svg",
+          "method": "GET",
+          "status": 200,
+          "type": "other",
+          "ms": 324
+        },
+        {
+          "url": "/static/vendor/dashcam-mp4/dashcam.proto",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 324
+        },
+        {
+          "url": "/videos/stream/SavedClips/2024-06-01_18-30-00/2024-06-01_18-30-00-front.mp4",
+          "method": "GET",
+          "status": 206,
+          "type": "media",
+          "ms": 324
+        },
+        {
+          "url": "/static/vendor/dashcam-mp4/dashcam-mp4.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 323
+        },
+        {
+          "url": "/static/js/main.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 323
+        },
+        {
+          "url": "/static/css/style.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 321
+        }
+      ]
+    }
+  },
+  {
+    "screen": "video-overlay-hud",
+    "spa_screens": [
+      "video overlay HUD"
+    ],
+    "url": "/",
+    "viewport": {
+      "width": 1440,
+      "height": 900,
+      "tag": "desktop-1440"
+    },
+    "http_status": 200,
+    "wall_ms": 8616,
+    "dom_bytes": 30906,
+    "perf": {
+      "ttfb_ms": 319,
+      "dom_content_loaded_ms": 1575,
+      "load_event_ms": 1885,
+      "transfer_bytes": 13773,
+      "paints": {
+        "first-paint": 968,
+        "first-contentful-paint": 968
+      },
+      "slowest_resources": [
+        {
+          "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+          "dur": 1559,
+          "size": 300,
+          "type": "other"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/init.js",
+          "dur": 1252,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/video_panel_clips.js",
+          "dur": 1251,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/video_overlay_controls.js",
+          "dur": 1249,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/video_overlay_actions.js",
+          "dur": 1249,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/video_panel_timelines.js",
+          "dur": 1249,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/video_overlay_core.js",
+          "dur": 1186,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/day_navigation.js",
+          "dur": 939,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/speed_units.js",
+          "dur": 938,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/mapping/route_disambiguation.js",
+          "dur": 938,
+          "size": 300,
+          "type": "script"
+        }
+      ],
+      "resource_count": 82
+    },
+    "console": [
+      {
+        "type": "log",
+        "text": "Tile cache SW registered"
+      }
+    ],
+    "network": {
+      "total_requests": 83,
+      "failed": [],
+      "slowest": [
+        {
+          "url": "/static/icons/lucide-sprite.svg",
+          "method": "GET",
+          "status": 200,
+          "type": "other",
+          "ms": 1559
+        },
+        {
+          "url": "/static/js/mapping/init.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 1252
+        },
+        {
+          "url": "/static/js/mapping/video_panel_clips.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 1251
+        },
+        {
+          "url": "/static/js/mapping/video_overlay_controls.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 1249
+        },
+        {
+          "url": "/static/js/mapping/video_panel_timelines.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 1249
+        },
+        {
+          "url": "/static/js/mapping/video_overlay_actions.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 1248
+        },
+        {
+          "url": "/static/js/mapping/video_overlay_core.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 1186
+        },
+        {
+          "url": "/static/js/mapping/day_navigation.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 939
+        }
+      ]
+    }
+  },
+  {
+    "screen": "analytics",
+    "spa_screens": [
+      "analytics"
+    ],
+    "url": "/analytics/",
+    "viewport": {
+      "width": 1440,
+      "height": 900,
+      "tag": "desktop-1440"
+    },
+    "http_status": 200,
+    "wall_ms": 3097,
+    "dom_bytes": 24525,
+    "perf": {
+      "ttfb_ms": 3,
+      "dom_content_loaded_ms": 345,
+      "load_event_ms": 643,
+      "transfer_bytes": 24570,
+      "paints": {
+        "first-paint": 336,
+        "first-contentful-paint": 336
+      },
+      "slowest_resources": [
+        {
+          "name": "http://localhost:8080/api/system/health",
+          "dur": 377,
+          "size": 1589,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/static/js/analytics.js",
+          "dur": 320,
+          "size": 5260,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/css/analytics.css",
+          "dur": 319,
+          "size": 21242,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+          "dur": 319,
+          "size": 300,
+          "type": "other"
+        },
+        {
+          "name": "http://localhost:8080/api/driving-stats",
+          "dur": 317,
+          "size": 529,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/static/css/style.css",
+          "dur": 316,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/js/main.js",
+          "dur": 316,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/css/bootstrap-icons-subset.css",
+          "dur": 315,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/fonts/inter-variable.woff2",
+          "dur": 306,
+          "size": 300,
+          "type": "css"
+        }
+      ],
+      "resource_count": 9
+    },
+    "console": [],
+    "network": {
+      "total_requests": 10,
+      "failed": [],
+      "slowest": [
+        {
+          "url": "/api/system/health",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 377
+        },
+        {
+          "url": "/static/js/analytics.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 320
+        },
+        {
+          "url": "/static/css/analytics.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 319
+        },
+        {
+          "url": "/static/icons/lucide-sprite.svg",
+          "method": "GET",
+          "status": 200,
+          "type": "other",
+          "ms": 319
+        },
+        {
+          "url": "/api/driving-stats",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 317
+        },
+        {
+          "url": "/static/css/style.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 316
+        },
+        {
+          "url": "/static/js/main.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 316
+        },
+        {
+          "url": "/static/css/bootstrap-icons-subset.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 315
+        }
+      ]
+    }
+  },
+  {
+    "screen": "boombox",
+    "spa_screens": [
+      "boombox"
+    ],
+    "url": "/boombox/",
+    "viewport": {
+      "width": 1440,
+      "height": 900,
+      "tag": "desktop-1440"
+    },
+    "http_status": 200,
+    "wall_ms": 1162,
+    "dom_bytes": 25419,
+    "perf": {
+      "ttfb_ms": 281,
+      "dom_content_loaded_ms": 594,
+      "load_event_ms": 605,
+      "transfer_bytes": 26144,
+      "paints": {
+        "first-paint": 568,
+        "first-contentful-paint": 568
+      },
+      "slowest_resources": [
+        {
+          "name": "http://localhost:8080/api/system/health",
+          "dur": 322,
+          "size": 1589,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/static/js/main.js",
+          "dur": 309,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+          "dur": 309,
+          "size": 300,
+          "type": "other"
+        },
+        {
+          "name": "http://localhost:8080/static/css/style.css",
+          "dur": 245,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/fonts/inter-variable.woff2",
+          "dur": 58,
+          "size": 300,
+          "type": "css"
+        },
+        {
+          "name": "http://localhost:8080/static/css/bootstrap-icons-subset.css",
+          "dur": 28,
+          "size": 300,
+          "type": "link"
+        }
+      ],
+      "resource_count": 6
+    },
+    "console": [],
+    "network": {
+      "total_requests": 7,
+      "failed": [],
+      "slowest": [
+        {
+          "url": "/api/system/health",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 322
+        },
+        {
+          "url": "/static/js/main.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 309
+        },
+        {
+          "url": "/static/icons/lucide-sprite.svg",
+          "method": "GET",
+          "status": 200,
+          "type": "other",
+          "ms": 309
+        },
+        {
+          "url": "/boombox/",
+          "method": "GET",
+          "status": 200,
+          "type": "document",
+          "ms": 281
+        },
+        {
+          "url": "/static/css/style.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 245
+        },
+        {
+          "url": "/static/fonts/inter-variable.woff2",
+          "method": "GET",
+          "status": 200,
+          "type": "font",
+          "ms": 58
+        },
+        {
+          "url": "/static/css/bootstrap-icons-subset.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 28
+        }
+      ]
+    }
+  },
+  {
+    "screen": "music",
+    "spa_screens": [
+      "music"
+    ],
+    "url": "/music/",
+    "viewport": {
+      "width": 1440,
+      "height": 900,
+      "tag": "desktop-1440"
+    },
+    "http_status": 200,
+    "wall_ms": 1142,
+    "dom_bytes": 26277,
+    "perf": {
+      "ttfb_ms": 3,
+      "dom_content_loaded_ms": 368,
+      "load_event_ms": 591,
+      "transfer_bytes": 26435,
+      "paints": {
+        "first-paint": 372,
+        "first-contentful-paint": 372
+      },
+      "slowest_resources": [
+        {
+          "name": "http://localhost:8080/api/system/health",
+          "dur": 338,
+          "size": 1589,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/static/js/music.js",
+          "dur": 313,
+          "size": 31102,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/main.js",
+          "dur": 312,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+          "dur": 312,
+          "size": 300,
+          "type": "other"
+        },
+        {
+          "name": "http://localhost:8080/static/css/bootstrap-icons-subset.css",
+          "dur": 310,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/css/style.css",
+          "dur": 310,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/fonts/inter-variable.woff2",
+          "dur": 256,
+          "size": 300,
+          "type": "css"
+        }
+      ],
+      "resource_count": 7
+    },
+    "console": [],
+    "network": {
+      "total_requests": 8,
+      "failed": [],
+      "slowest": [
+        {
+          "url": "/api/system/health",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 338
+        },
+        {
+          "url": "/static/js/music.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 313
+        },
+        {
+          "url": "/static/icons/lucide-sprite.svg",
+          "method": "GET",
+          "status": 200,
+          "type": "other",
+          "ms": 312
+        },
+        {
+          "url": "/static/js/main.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 312
+        },
+        {
+          "url": "/static/css/bootstrap-icons-subset.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 310
+        },
+        {
+          "url": "/static/css/style.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 310
+        },
+        {
+          "url": "/static/fonts/inter-variable.woff2",
+          "method": "GET",
+          "status": 200,
+          "type": "font",
+          "ms": 256
+        },
+        {
+          "url": "/music/",
+          "method": "GET",
+          "status": 200,
+          "type": "document",
+          "ms": 3
+        }
+      ]
+    }
+  },
+  {
+    "screen": "light-shows",
+    "spa_screens": [
+      "light shows"
+    ],
+    "url": "/light_shows/",
+    "viewport": {
+      "width": 1440,
+      "height": 900,
+      "tag": "desktop-1440"
+    },
+    "http_status": 200,
+    "wall_ms": 1104,
+    "dom_bytes": 37256,
+    "perf": {
+      "ttfb_ms": 2,
+      "dom_content_loaded_ms": 360,
+      "load_event_ms": 586,
+      "transfer_bytes": 37990,
+      "paints": {
+        "first-paint": 360,
+        "first-contentful-paint": 360
+      },
+      "slowest_resources": [
+        {
+          "name": "http://localhost:8080/api/system/health",
+          "dur": 345,
+          "size": 1589,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/static/js/main.js",
+          "dur": 322,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/css/style.css",
+          "dur": 321,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+          "dur": 321,
+          "size": 300,
+          "type": "other"
+        },
+        {
+          "name": "http://localhost:8080/static/css/bootstrap-icons-subset.css",
+          "dur": 320,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/fonts/inter-variable.woff2",
+          "dur": 242,
+          "size": 300,
+          "type": "css"
+        }
+      ],
+      "resource_count": 6
+    },
+    "console": [],
+    "network": {
+      "total_requests": 7,
+      "failed": [],
+      "slowest": [
+        {
+          "url": "/api/system/health",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 345
+        },
+        {
+          "url": "/static/css/style.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 321
+        },
+        {
+          "url": "/static/icons/lucide-sprite.svg",
+          "method": "GET",
+          "status": 200,
+          "type": "other",
+          "ms": 321
+        },
+        {
+          "url": "/static/js/main.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 321
+        },
+        {
+          "url": "/static/css/bootstrap-icons-subset.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 320
+        },
+        {
+          "url": "/static/fonts/inter-variable.woff2",
+          "method": "GET",
+          "status": 200,
+          "type": "font",
+          "ms": 242
+        },
+        {
+          "url": "/light_shows/",
+          "method": "GET",
+          "status": 200,
+          "type": "document",
+          "ms": 3
+        }
+      ]
+    }
+  },
+  {
+    "screen": "lock-chimes",
+    "spa_screens": [
+      "lock chimes"
+    ],
+    "url": "/lock_chimes/",
+    "viewport": {
+      "width": 1440,
+      "height": 900,
+      "tag": "desktop-1440"
+    },
+    "http_status": 200,
+    "wall_ms": 1569,
+    "dom_bytes": 134358,
+    "perf": {
+      "ttfb_ms": 310,
+      "dom_content_loaded_ms": 680,
+      "load_event_ms": 995,
+      "transfer_bytes": 134775,
+      "paints": {
+        "first-paint": 680,
+        "first-contentful-paint": 680
+      },
+      "slowest_resources": [
+        {
+          "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+          "dur": 365,
+          "size": 300,
+          "type": "other"
+        },
+        {
+          "name": "http://localhost:8080/api/system/health",
+          "dur": 339,
+          "size": 1589,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/api/chime_filenames",
+          "dur": 314,
+          "size": 363,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/static/vendor/lamejs/lame.min.js",
+          "dur": 312,
+          "size": 156487,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/audio_trimmer.js",
+          "dur": 311,
+          "size": 40054,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/js/main.js",
+          "dur": 311,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/css/audio_trimmer.css",
+          "dur": 308,
+          "size": 10651,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/css/style.css",
+          "dur": 307,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/fonts/inter-variable.woff2",
+          "dur": 306,
+          "size": 300,
+          "type": "css"
+        },
+        {
+          "name": "http://localhost:8080/static/css/bootstrap-icons-subset.css",
+          "dur": 258,
+          "size": 300,
+          "type": "link"
+        }
+      ],
+      "resource_count": 10
+    },
+    "console": [],
+    "network": {
+      "total_requests": 11,
+      "failed": [],
+      "slowest": [
+        {
+          "url": "/static/icons/lucide-sprite.svg",
+          "method": "GET",
+          "status": 200,
+          "type": "other",
+          "ms": 365
+        },
+        {
+          "url": "/api/system/health",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 339
+        },
+        {
+          "url": "/api/chime_filenames",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 314
+        },
+        {
+          "url": "/static/vendor/lamejs/lame.min.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 312
+        },
+        {
+          "url": "/static/js/audio_trimmer.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 311
+        },
+        {
+          "url": "/static/js/main.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 311
+        },
+        {
+          "url": "/lock_chimes/",
+          "method": "GET",
+          "status": 200,
+          "type": "document",
+          "ms": 310
+        },
+        {
+          "url": "/static/css/audio_trimmer.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 308
+        }
+      ]
+    }
+  },
+  {
+    "screen": "license-plates",
+    "spa_screens": [
+      "license plates"
+    ],
+    "url": "/license_plates/",
+    "viewport": {
+      "width": 1440,
+      "height": 900,
+      "tag": "desktop-1440"
+    },
+    "http_status": 200,
+    "wall_ms": 1222,
+    "dom_bytes": 56186,
+    "perf": {
+      "ttfb_ms": 69,
+      "dom_content_loaded_ms": 428,
+      "load_event_ms": 663,
+      "transfer_bytes": 56867,
+      "paints": {
+        "first-paint": 432,
+        "first-contentful-paint": 432
+      },
+      "slowest_resources": [
+        {
+          "name": "http://localhost:8080/api/system/health",
+          "dur": 337,
+          "size": 1589,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/static/css/style.css",
+          "dur": 316,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/js/main.js",
+          "dur": 316,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+          "dur": 316,
+          "size": 300,
+          "type": "other"
+        },
+        {
+          "name": "http://localhost:8080/static/css/bootstrap-icons-subset.css",
+          "dur": 315,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/license_plates/download/LightShow/TESLA.png",
+          "dur": 307,
+          "size": 2626,
+          "type": "img"
+        },
+        {
+          "name": "http://localhost:8080/static/fonts/inter-variable.woff2",
+          "dur": 261,
+          "size": 300,
+          "type": "css"
+        }
+      ],
+      "resource_count": 7
+    },
+    "console": [],
+    "network": {
+      "total_requests": 8,
+      "failed": [],
+      "slowest": [
+        {
+          "url": "/api/system/health",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 337
+        },
+        {
+          "url": "/static/css/style.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 316
+        },
+        {
+          "url": "/static/js/main.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 316
+        },
+        {
+          "url": "/static/icons/lucide-sprite.svg",
+          "method": "GET",
+          "status": 200,
+          "type": "other",
+          "ms": 316
+        },
+        {
+          "url": "/static/css/bootstrap-icons-subset.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 315
+        },
+        {
+          "url": "/license_plates/download/LightShow/TESLA.png",
+          "method": "GET",
+          "status": 200,
+          "type": "image",
+          "ms": 307
+        },
+        {
+          "url": "/static/fonts/inter-variable.woff2",
+          "method": "GET",
+          "status": 200,
+          "type": "font",
+          "ms": 261
+        },
+        {
+          "url": "/license_plates/",
+          "method": "GET",
+          "status": 200,
+          "type": "document",
+          "ms": 69
+        }
+      ]
+    }
+  },
+  {
+    "screen": "wraps",
+    "spa_screens": [
+      "wraps"
+    ],
+    "url": "/wraps/",
+    "viewport": {
+      "width": 1440,
+      "height": 900,
+      "tag": "desktop-1440"
+    },
+    "http_status": 200,
+    "wall_ms": 1219,
+    "dom_bytes": 40217,
+    "perf": {
+      "ttfb_ms": 307,
+      "dom_content_loaded_ms": 655,
+      "load_event_ms": 661,
+      "transfer_bytes": 41116,
+      "paints": {
+        "first-paint": 660,
+        "first-contentful-paint": 660
+      },
+      "slowest_resources": [
+        {
+          "name": "http://localhost:8080/api/system/health",
+          "dur": 381,
+          "size": 1589,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/wraps/download/library/matte_black.png",
+          "dur": 318,
+          "size": 2790,
+          "type": "img"
+        },
+        {
+          "name": "http://localhost:8080/wraps/download/library/racing_stripes.png",
+          "dur": 318,
+          "size": 2812,
+          "type": "img"
+        },
+        {
+          "name": "http://localhost:8080/static/js/main.js",
+          "dur": 313,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/css/style.css",
+          "dur": 312,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+          "dur": 312,
+          "size": 300,
+          "type": "other"
+        },
+        {
+          "name": "http://localhost:8080/static/css/bootstrap-icons-subset.css",
+          "dur": 265,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/fonts/inter-variable.woff2",
+          "dur": 2,
+          "size": 300,
+          "type": "css"
+        }
+      ],
+      "resource_count": 8
+    },
+    "console": [],
+    "network": {
+      "total_requests": 9,
+      "failed": [],
+      "slowest": [
+        {
+          "url": "/api/system/health",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 381
+        },
+        {
+          "url": "/wraps/download/library/matte_black.png",
+          "method": "GET",
+          "status": 200,
+          "type": "image",
+          "ms": 318
+        },
+        {
+          "url": "/wraps/download/library/racing_stripes.png",
+          "method": "GET",
+          "status": 200,
+          "type": "image",
+          "ms": 318
+        },
+        {
+          "url": "/static/js/main.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 313
+        },
+        {
+          "url": "/static/css/style.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 312
+        },
+        {
+          "url": "/static/icons/lucide-sprite.svg",
+          "method": "GET",
+          "status": 200,
+          "type": "other",
+          "ms": 312
+        },
+        {
+          "url": "/wraps/",
+          "method": "GET",
+          "status": 200,
+          "type": "document",
+          "ms": 308
+        },
+        {
+          "url": "/static/css/bootstrap-icons-subset.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 265
+        }
+      ]
+    }
+  },
+  {
+    "screen": "cloud-archive",
+    "spa_screens": [
+      "cloud archive"
+    ],
+    "url": "/cloud/",
+    "viewport": {
+      "width": 1440,
+      "height": 900,
+      "tag": "desktop-1440"
+    },
+    "http_status": 200,
+    "wall_ms": 2298,
+    "dom_bytes": 117722,
+    "perf": {
+      "ttfb_ms": 90,
+      "dom_content_loaded_ms": 451,
+      "load_event_ms": 454,
+      "transfer_bytes": 117934,
+      "paints": {
+        "first-paint": 452,
+        "first-contentful-paint": 452
+      },
+      "slowest_resources": [
+        {
+          "name": "http://localhost:8080/api/system/health",
+          "dur": 380,
+          "size": 1589,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/cloud/api/queue?limit=100",
+          "dur": 373,
+          "size": 697,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/static/js/main.js",
+          "dur": 309,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/cloud/api/storage_usage",
+          "dur": 309,
+          "size": 359,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+          "dur": 308,
+          "size": 300,
+          "type": "other"
+        },
+        {
+          "name": "http://localhost:8080/static/css/style.css",
+          "dur": 307,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/css/bootstrap-icons-subset.css",
+          "dur": 215,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/fonts/inter-variable.woff2",
+          "dur": 1,
+          "size": 300,
+          "type": "css"
+        }
+      ],
+      "resource_count": 8
+    },
+    "console": [],
+    "network": {
+      "total_requests": 9,
+      "failed": [],
+      "slowest": [
+        {
+          "url": "/api/system/health",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 380
+        },
+        {
+          "url": "/cloud/api/queue?limit=100",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 373
+        },
+        {
+          "url": "/static/js/main.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 309
+        },
+        {
+          "url": "/cloud/api/storage_usage",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 309
+        },
+        {
+          "url": "/static/icons/lucide-sprite.svg",
+          "method": "GET",
+          "status": 200,
+          "type": "other",
+          "ms": 308
+        },
+        {
+          "url": "/static/css/style.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 307
+        },
+        {
+          "url": "/static/css/bootstrap-icons-subset.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 215
+        },
+        {
+          "url": "/cloud/",
+          "method": "GET",
+          "status": 200,
+          "type": "document",
+          "ms": 91
+        }
+      ]
+    }
+  },
+  {
+    "screen": "storage",
+    "spa_screens": [
+      "storage settings",
+      "storage health"
+    ],
+    "url": "/storage/",
+    "viewport": {
+      "width": 1440,
+      "height": 900,
+      "tag": "desktop-1440"
+    },
+    "http_status": 200,
+    "wall_ms": 2378,
+    "dom_bytes": 19780,
+    "perf": {
+      "ttfb_ms": 2,
+      "dom_content_loaded_ms": 352,
+      "load_event_ms": 595,
+      "transfer_bytes": 20224,
+      "paints": {
+        "first-paint": 356,
+        "first-contentful-paint": 356
+      },
+      "slowest_resources": [
+        {
+          "name": "http://localhost:8080/api/system/health",
+          "dur": 342,
+          "size": 1589,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/static/js/main.js",
+          "dur": 314,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/css/style.css",
+          "dur": 313,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+          "dur": 313,
+          "size": 300,
+          "type": "other"
+        },
+        {
+          "name": "http://localhost:8080/static/css/bootstrap-icons-subset.css",
+          "dur": 312,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/fonts/inter-variable.woff2",
+          "dur": 259,
+          "size": 300,
+          "type": "css"
+        }
+      ],
+      "resource_count": 6
+    },
+    "console": [],
+    "network": {
+      "total_requests": 7,
+      "failed": [],
+      "slowest": [
+        {
+          "url": "/api/system/health",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 342
+        },
+        {
+          "url": "/static/js/main.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 314
+        },
+        {
+          "url": "/static/css/style.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 313
+        },
+        {
+          "url": "/static/icons/lucide-sprite.svg",
+          "method": "GET",
+          "status": 200,
+          "type": "other",
+          "ms": 313
+        },
+        {
+          "url": "/static/css/bootstrap-icons-subset.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 311
+        },
+        {
+          "url": "/static/fonts/inter-variable.woff2",
+          "method": "GET",
+          "status": 200,
+          "type": "font",
+          "ms": 259
+        },
+        {
+          "url": "/storage/",
+          "method": "GET",
+          "status": 200,
+          "type": "document",
+          "ms": 2
+        }
+      ]
+    }
+  },
+  {
+    "screen": "failed-jobs",
+    "spa_screens": [
+      "failed jobs"
+    ],
+    "url": "/jobs",
+    "viewport": {
+      "width": 1440,
+      "height": 900,
+      "tag": "desktop-1440"
+    },
+    "http_status": 200,
+    "wall_ms": 1834,
+    "dom_bytes": 39396,
+    "perf": {
+      "ttfb_ms": 28,
+      "dom_content_loaded_ms": 367,
+      "load_event_ms": 372,
+      "transfer_bytes": 35985,
+      "paints": {
+        "first-paint": 372,
+        "first-contentful-paint": 372
+      },
+      "slowest_resources": [
+        {
+          "name": "http://localhost:8080/api/system/health",
+          "dur": 379,
+          "size": 1589,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/api/jobs/counts",
+          "dur": 354,
+          "size": 339,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/static/css/style.css",
+          "dur": 312,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/js/main.js",
+          "dur": 312,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+          "dur": 311,
+          "size": 300,
+          "type": "other"
+        },
+        {
+          "name": "http://localhost:8080/static/css/bootstrap-icons-subset.css",
+          "dur": 281,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/api/jobs/failed?subsystem=all&limit=200",
+          "dur": 249,
+          "size": 1613,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-cloud-upload",
+          "dur": 57,
+          "size": 300,
+          "type": "other"
+        },
+        {
+          "name": "http://localhost:8080/static/fonts/inter-variable.woff2",
+          "dur": 1,
+          "size": 300,
+          "type": "css"
+        }
+      ],
+      "resource_count": 9
+    },
+    "console": [],
+    "network": {
+      "total_requests": 10,
+      "failed": [],
+      "slowest": [
+        {
+          "url": "/api/system/health",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 379
+        },
+        {
+          "url": "/api/jobs/counts",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 354
+        },
+        {
+          "url": "/static/js/main.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 312
+        },
+        {
+          "url": "/static/css/style.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 311
+        },
+        {
+          "url": "/static/icons/lucide-sprite.svg",
+          "method": "GET",
+          "status": 200,
+          "type": "other",
+          "ms": 311
+        },
+        {
+          "url": "/static/css/bootstrap-icons-subset.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 281
+        },
+        {
+          "url": "/api/jobs/failed?subsystem=all&limit=200",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 249
+        },
+        {
+          "url": "/static/icons/lucide-sprite.svg",
+          "method": "GET",
+          "status": 200,
+          "type": "other",
+          "ms": 57
+        }
+      ]
+    }
+  },
+  {
+    "screen": "captive-portal",
+    "spa_screens": [
+      "captive portal"
+    ],
+    "url": "/captive-portal",
+    "viewport": {
+      "width": 1440,
+      "height": 900,
+      "tag": "desktop-1440"
+    },
+    "http_status": 200,
+    "wall_ms": 1387,
+    "dom_bytes": 17421,
+    "perf": {
+      "ttfb_ms": 171,
+      "dom_content_loaded_ms": 515,
+      "load_event_ms": 807,
+      "transfer_bytes": 17740,
+      "paints": {
+        "first-paint": 520,
+        "first-contentful-paint": 520
+      },
+      "slowest_resources": [
+        {
+          "name": "http://localhost:8080/api/system/health",
+          "dur": 389,
+          "size": 1589,
+          "type": "fetch"
+        },
+        {
+          "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+          "dur": 312,
+          "size": 300,
+          "type": "other"
+        },
+        {
+          "name": "http://localhost:8080/static/css/style.css",
+          "dur": 311,
+          "size": 300,
+          "type": "link"
+        },
+        {
+          "name": "http://localhost:8080/static/js/main.js",
+          "dur": 311,
+          "size": 300,
+          "type": "script"
+        },
+        {
+          "name": "http://localhost:8080/static/fonts/inter-variable.woff2",
+          "dur": 305,
+          "size": 300,
+          "type": "css"
+        },
+        {
+          "name": "http://localhost:8080/static/css/bootstrap-icons-subset.css",
+          "dur": 170,
+          "size": 300,
+          "type": "link"
+        }
+      ],
+      "resource_count": 6
+    },
+    "console": [],
+    "network": {
+      "total_requests": 7,
+      "failed": [],
+      "slowest": [
+        {
+          "url": "/api/system/health",
+          "method": "GET",
+          "status": 200,
+          "type": "fetch",
+          "ms": 389
+        },
+        {
+          "url": "/static/icons/lucide-sprite.svg",
+          "method": "GET",
+          "status": 200,
+          "type": "other",
+          "ms": 312
+        },
+        {
+          "url": "/static/css/style.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 311
+        },
+        {
+          "url": "/static/js/main.js",
+          "method": "GET",
+          "status": 200,
+          "type": "script",
+          "ms": 311
+        },
+        {
+          "url": "/static/fonts/inter-variable.woff2",
+          "method": "GET",
+          "status": 200,
+          "type": "font",
+          "ms": 305
+        },
+        {
+          "url": "/captive-portal",
+          "method": "GET",
+          "status": 200,
+          "type": "document",
+          "ms": 171
+        },
+        {
+          "url": "/static/css/bootstrap-icons-subset.css",
+          "method": "GET",
+          "status": 200,
+          "type": "stylesheet",
+          "ms": 170
+        }
+      ]
+    }
+  }
+]

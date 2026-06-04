@@ -1,0 +1,120 @@
+{
+  "screen": "captive-portal",
+  "spa_screens": [
+    "captive portal"
+  ],
+  "url": "/captive-portal",
+  "viewport": {
+    "width": 375,
+    "height": 812,
+    "tag": "mobile-375"
+  },
+  "http_status": 200,
+  "wall_ms": 1333,
+  "dom_bytes": 17421,
+  "perf": {
+    "ttfb_ms": 160,
+    "dom_content_loaded_ms": 506,
+    "load_event_ms": 801,
+    "transfer_bytes": 17740,
+    "paints": {
+      "first-paint": 508,
+      "first-contentful-paint": 508
+    },
+    "slowest_resources": [
+      {
+        "name": "http://localhost:8080/api/system/health",
+        "dur": 391,
+        "size": 1589,
+        "type": "fetch"
+      },
+      {
+        "name": "http://localhost:8080/static/js/main.js",
+        "dur": 315,
+        "size": 300,
+        "type": "script"
+      },
+      {
+        "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+        "dur": 314,
+        "size": 300,
+        "type": "other"
+      },
+      {
+        "name": "http://localhost:8080/static/css/style.css",
+        "dur": 313,
+        "size": 300,
+        "type": "link"
+      },
+      {
+        "name": "http://localhost:8080/static/fonts/inter-variable.woff2",
+        "dur": 307,
+        "size": 300,
+        "type": "css"
+      },
+      {
+        "name": "http://localhost:8080/static/css/bootstrap-icons-subset.css",
+        "dur": 252,
+        "size": 300,
+        "type": "link"
+      }
+    ],
+    "resource_count": 6
+  },
+  "console": [],
+  "network": {
+    "total_requests": 7,
+    "failed": [],
+    "slowest": [
+      {
+        "url": "/api/system/health",
+        "method": "GET",
+        "status": 200,
+        "type": "fetch",
+        "ms": 391
+      },
+      {
+        "url": "/static/js/main.js",
+        "method": "GET",
+        "status": 200,
+        "type": "script",
+        "ms": 315
+      },
+      {
+        "url": "/static/icons/lucide-sprite.svg",
+        "method": "GET",
+        "status": 200,
+        "type": "other",
+        "ms": 314
+      },
+      {
+        "url": "/static/css/style.css",
+        "method": "GET",
+        "status": 200,
+        "type": "stylesheet",
+        "ms": 313
+      },
+      {
+        "url": "/static/fonts/inter-variable.woff2",
+        "method": "GET",
+        "status": 200,
+        "type": "font",
+        "ms": 307
+      },
+      {
+        "url": "/static/css/bootstrap-icons-subset.css",
+        "method": "GET",
+        "status": 200,
+        "type": "stylesheet",
+        "ms": 251
+      },
+      {
+        "url": "/captive-portal",
+        "method": "GET",
+        "status": 200,
+        "type": "document",
+        "ms": 161
+      }
+    ]
+  }
+}

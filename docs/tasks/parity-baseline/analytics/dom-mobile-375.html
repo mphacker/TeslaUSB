@@ -1,0 +1,540 @@
+<!DOCTYPE html><html><head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    
+    <title>Storage Analytics — Tesla USB Gadget Control</title>
+    <script>
+        // Apply theme immediately before page renders to prevent flash
+        (function() {
+            const savedTheme = localStorage.getItem('theme');
+            const systemPrefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+            const theme = savedTheme || (systemPrefersDark ? 'dark' : 'light');
+            if (theme === 'dark') {
+                document.documentElement.setAttribute('data-theme', 'dark');
+            }
+        })();
+    </script>
+    <link rel="stylesheet" href="/static/css/bootstrap-icons-subset.css">
+    <link rel="stylesheet" href="/static/css/style.css">
+    
+</head>
+<body>
+    
+    
+
+    <!-- Top Bar -->
+    <header class="top-bar">
+        <div class="top-bar-left">
+            <a href="/" class="top-bar-brand">
+                <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-hard-drive"></use></svg>
+                <span class="top-bar-title">TeslaUSB</span>
+            </a>
+        </div>
+        <div class="top-bar-right">
+            
+            <a href="/settings/#system-health-card" class="health-dot-link" id="health-dot-link" title="teslafat_0: inactive — Partition 0 (exFAT)" aria-label="teslafat_0: inactive — Partition 0 (exFAT)">
+                <span class="status-dot health-dot health-dot-error" id="health-dot" data-status-dot="health"></span>
+            </a>
+            
+            
+            <button class="theme-toggle-btn" onclick="toggleTheme()" aria-label="Toggle dark mode">
+                <svg class="nav-icon" id="theme-icon-svg" aria-hidden="true">
+                    <use href="/static/icons/lucide-sprite.svg#icon-moon"></use>
+                </svg>
+            </button>
+        </div>
+    </header>
+
+    <!-- Desktop Sidebar Rail -->
+    <nav class="sidebar-rail" id="sidebarRail" aria-label="Main navigation">
+        
+        <a href="/" class="nav-item" title="Map">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-map-pin"></use></svg>
+            <span class="nav-label">Map</span>
+        </a>
+        
+        
+        <a href="/analytics/" class="nav-item active" title="Analytics">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-bar-chart-2"></use></svg>
+            <span class="nav-label">Analytics</span>
+        </a>
+        
+        
+        <a href="/media/" class="nav-item" title="Media">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-music"></use></svg>
+            <span class="nav-label">Media</span>
+        </a>
+        
+        
+        <a href="/cloud/" class="nav-item" title="Cloud">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-cloud"></use></svg>
+            <span class="nav-label">Cloud</span>
+        </a>
+        
+        <a href="/settings/" class="nav-item" title="Settings">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-settings"></use></svg>
+            <span class="nav-label">Settings</span>
+        </a>
+    </nav>
+
+    <!-- Mobile Bottom Tab Bar -->
+    <nav class="bottom-tabs" aria-label="Main navigation">
+        
+        <a href="/" class="tab-item">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-map-pin"></use></svg>
+            <span class="tab-label">Map</span>
+        </a>
+        
+        
+        <a href="/analytics/" class="tab-item active">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-bar-chart-2"></use></svg>
+            <span class="tab-label">Analytics</span>
+        </a>
+        
+        
+        <a href="/media/" class="tab-item">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-music"></use></svg>
+            <span class="tab-label">Media</span>
+        </a>
+        
+        
+        <a href="/cloud/" class="tab-item">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-cloud"></use></svg>
+            <span class="tab-label">Cloud</span>
+        </a>
+        
+        <a href="/settings/" class="tab-item">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-settings"></use></svg>
+            <span class="tab-label">Settings</span>
+        </a>
+    </nav>
+
+    <main class="main-content" role="main">
+        
+
+        
+            
+        
+
+        
+<link rel="stylesheet" href="/static/css/analytics.css">
+
+
+<div class="container" id="analyticsDashboard" data-page="analytics">
+    <h2>
+        <svg class="nav-icon" aria-hidden="true" focusable="false"><use href="/static/icons/lucide-sprite.svg#icon-bar-chart-2"></use></svg>
+        Storage Analytics Dashboard
+    </h2>
+
+    
+    
+
+    
+    
+        <div class="alert alert-success" role="status">
+            <strong>
+                <svg class="nav-icon" aria-hidden="true" focusable="false"><use href="/static/icons/lucide-sprite.svg#icon-check-circle"></use></svg>
+                Storage Healthy
+            </strong>
+        </div>
+    
+
+    
+    <div class="analytics-grid analytics-grid-scroll" id="partitionUsageGrid">
+        
+        
+        
+        <div class="analytics-card" data-partition-key="backing">
+        
+            <h3>
+                <svg class="nav-icon" aria-hidden="true" focusable="false"><use href="/static/icons/lucide-sprite.svg#icon-hard-drive"></use></svg>
+                TeslaCam Storage
+            </h3>
+
+            
+                <div class="usage-stats">
+                    <div class="stat-row">
+                        <span class="stat-label">Total Space:</span>
+                        <span class="stat-value">1006.85 GB</span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label">Used:</span>
+                        <span class="stat-value">4.22 GB</span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label">Free:</span>
+                        <span class="stat-value">951.42 GB</span>
+                    </div>
+                </div>
+
+                <div class="progress-container" role="progressbar" aria-valuenow="0.4" aria-valuemin="0" aria-valuemax="100" aria-label="TeslaCam Storage usage">
+                    <div class="progress-bar
+                        progress-normal" data-percent="0.4" style="width: 0.4%">
+                    </div>
+                </div>
+                <div class="progress-label">0.4% Used</div>
+
+                <div class="partition-path">/root/parity/data/srv/teslausb</div>
+                
+            
+        
+        </div>
+        
+        
+    </div>
+
+    
+    
+    
+    <div class="info-card" id="recordingEstimateCard">
+        <h3>
+            <svg class="nav-icon" aria-hidden="true" focusable="false"><use href="/static/icons/lucide-sprite.svg#icon-clock"></use></svg>
+            Estimated Recording Time Remaining
+        </h3>
+        <div class="estimate-value" id="estimateValue">
+            
+                61646.5 days
+            
+        </div>
+        <div class="estimate-method">based on 16 existing clips</div>
+        <div class="estimate-confidence">Confidence: medium</div>
+    </div>
+    
+
+    
+    <div class="analytics-section" id="videoStatsSection">
+        <h3>
+            <svg class="nav-icon" aria-hidden="true" focusable="false"><use href="/static/icons/lucide-sprite.svg#icon-video"></use></svg>
+            Video Statistics
+        </h3>
+
+        
+        <div class="totals-row">
+            <div class="total-stat">
+                <div class="total-number">16</div>
+                <div class="total-label">Total Files</div>
+            </div>
+            <div class="total-stat">
+                <div class="total-number">6</div>
+                <div class="total-label">Clips (1-6 angles)</div>
+            </div>
+            <div class="total-stat">
+                <div class="total-number">0.00 GB</div>
+                <div class="total-label">Total Size</div>
+            </div>
+        </div>
+        
+        <div class="totals-row" id="videoStatsRange">
+            <div class="total-stat">
+                <div class="total-number"><time class="js-local-time" datetime="2026-06-04T19:14:30+00:00" title="2026-06-04T19:14:30+00:00">6/4/2026, 3:14:30 PM</time></div>
+                <div class="total-label">Oldest Clip</div>
+            </div>
+            <div class="total-stat">
+                <div class="total-number"><time class="js-local-time" datetime="2026-06-04T19:14:30+00:00" title="2026-06-04T19:14:30+00:00">6/4/2026, 3:14:30 PM</time></div>
+                <div class="total-label">Newest Clip</div>
+            </div>
+        </div>
+        
+    </div>
+
+    
+    
+    <div class="analytics-section" id="folderBreakdownSection">
+        <h3>
+            <svg class="nav-icon" aria-hidden="true" focusable="false"><use href="/static/icons/lucide-sprite.svg#icon-folder"></use></svg>
+            Folder Breakdown
+        </h3>
+
+        <div class="folder-table-container">
+            <table class="analytics-table">
+                <thead>
+                    <tr>
+                        <th scope="col">Folder</th>
+                        <th scope="col">Videos</th>
+                        <th scope="col">Size</th>
+                        <th scope="col">% of Total</th>
+                        <th scope="col">Oldest</th>
+                        <th scope="col">Newest</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    
+                    
+                    <tr class="priority-low">
+                        <td>
+                            <span class="folder-icon" aria-hidden="true">
+                                <svg class="nav-icon" focusable="false"><use href="/static/icons/lucide-sprite.svg#icon-folder"></use></svg>
+                            </span>
+                            <strong>RecentClips</strong>
+                            <div class="folder-description">Recent driving footage</div>
+                        </td>
+                        <td class="number-cell">8</td>
+                        <td class="number-cell">0.00 GB</td>
+                        <td class="number-cell">
+                            <div class="mini-progress-container">
+                                <div class="mini-progress-bar" data-percent="50.0" style="width: 50.0%"></div>
+                            </div>
+                            50.0%
+                        </td>
+                        <td class="date-cell"><time class="js-local-time" datetime="2026-06-04T19:14:30+00:00" title="2026-06-04T19:14:30+00:00">6/4/2026, 3:14:30 PM</time></td>
+                        <td class="date-cell"><time class="js-local-time" datetime="2026-06-04T19:14:30+00:00" title="2026-06-04T19:14:30+00:00">6/4/2026, 3:14:30 PM</time></td>
+                    </tr>
+                    
+                    
+                    <tr class="priority-high">
+                        <td>
+                            <span class="folder-icon" aria-hidden="true">
+                                <svg class="nav-icon" focusable="false"><use href="/static/icons/lucide-sprite.svg#icon-folder"></use></svg>
+                            </span>
+                            <strong>SentryClips</strong>
+                            <div class="folder-description">Sentry mode recordings</div>
+                        </td>
+                        <td class="number-cell">4</td>
+                        <td class="number-cell">0.00 GB</td>
+                        <td class="number-cell">
+                            <div class="mini-progress-container">
+                                <div class="mini-progress-bar" data-percent="25.0" style="width: 25.0%"></div>
+                            </div>
+                            25.0%
+                        </td>
+                        <td class="date-cell"><time class="js-local-time" datetime="2026-06-04T19:14:30+00:00" title="2026-06-04T19:14:30+00:00">6/4/2026, 3:14:30 PM</time></td>
+                        <td class="date-cell"><time class="js-local-time" datetime="2026-06-04T19:14:30+00:00" title="2026-06-04T19:14:30+00:00">6/4/2026, 3:14:30 PM</time></td>
+                    </tr>
+                    
+                    
+                    <tr class="priority-high">
+                        <td>
+                            <span class="folder-icon" aria-hidden="true">
+                                <svg class="nav-icon" focusable="false"><use href="/static/icons/lucide-sprite.svg#icon-folder"></use></svg>
+                            </span>
+                            <strong>SavedClips</strong>
+                            <div class="folder-description">Manually saved clips</div>
+                        </td>
+                        <td class="number-cell">4</td>
+                        <td class="number-cell">0.00 GB</td>
+                        <td class="number-cell">
+                            <div class="mini-progress-container">
+                                <div class="mini-progress-bar" data-percent="25.0" style="width: 25.0%"></div>
+                            </div>
+                            25.0%
+                        </td>
+                        <td class="date-cell"><time class="js-local-time" datetime="2026-06-04T19:14:30+00:00" title="2026-06-04T19:14:30+00:00">6/4/2026, 3:14:30 PM</time></td>
+                        <td class="date-cell"><time class="js-local-time" datetime="2026-06-04T19:14:30+00:00" title="2026-06-04T19:14:30+00:00">6/4/2026, 3:14:30 PM</time></td>
+                    </tr>
+                    
+                </tbody>
+            </table>
+        </div>
+
+        <div class="folder-cards-mobile">
+            
+            
+            <div class="folder-card priority-low">
+                <div class="folder-card-header">
+                    <span class="folder-icon-large" aria-hidden="true">
+                        <svg class="nav-icon" focusable="false"><use href="/static/icons/lucide-sprite.svg#icon-folder"></use></svg>
+                    </span>
+                    <div>
+                        <strong>RecentClips</strong>
+                        <div class="folder-description">Recent driving footage</div>
+                    </div>
+                </div>
+                <div class="folder-card-stats">
+                    <div class="folder-stat">
+                        <span class="folder-stat-label">Videos:</span>
+                        <span class="folder-stat-value">8</span>
+                    </div>
+                    <div class="folder-stat">
+                        <span class="folder-stat-label">Size:</span>
+                        <span class="folder-stat-value">0.00 GB</span>
+                    </div>
+                    <div class="folder-stat">
+                        <span class="folder-stat-label">% of Total:</span>
+                        <span class="folder-stat-value">50.0%</span>
+                    </div>
+                </div>
+                <div class="mini-progress-container">
+                    <div class="mini-progress-bar" data-percent="50.0" style="width: 50.0%"></div>
+                </div>
+                <div class="folder-card-dates">
+                    <div><small>Oldest: <time class="js-local-time" datetime="2026-06-04T19:14:30+00:00" title="2026-06-04T19:14:30+00:00">6/4/2026, 3:14:30 PM</time></small></div>
+                    <div><small>Newest: <time class="js-local-time" datetime="2026-06-04T19:14:30+00:00" title="2026-06-04T19:14:30+00:00">6/4/2026, 3:14:30 PM</time></small></div>
+                </div>
+            </div>
+            
+            
+            <div class="folder-card priority-high">
+                <div class="folder-card-header">
+                    <span class="folder-icon-large" aria-hidden="true">
+                        <svg class="nav-icon" focusable="false"><use href="/static/icons/lucide-sprite.svg#icon-folder"></use></svg>
+                    </span>
+                    <div>
+                        <strong>SentryClips</strong>
+                        <div class="folder-description">Sentry mode recordings</div>
+                    </div>
+                </div>
+                <div class="folder-card-stats">
+                    <div class="folder-stat">
+                        <span class="folder-stat-label">Videos:</span>
+                        <span class="folder-stat-value">4</span>
+                    </div>
+                    <div class="folder-stat">
+                        <span class="folder-stat-label">Size:</span>
+                        <span class="folder-stat-value">0.00 GB</span>
+                    </div>
+                    <div class="folder-stat">
+                        <span class="folder-stat-label">% of Total:</span>
+                        <span class="folder-stat-value">25.0%</span>
+                    </div>
+                </div>
+                <div class="mini-progress-container">
+                    <div class="mini-progress-bar" data-percent="25.0" style="width: 25.0%"></div>
+                </div>
+                <div class="folder-card-dates">
+                    <div><small>Oldest: <time class="js-local-time" datetime="2026-06-04T19:14:30+00:00" title="2026-06-04T19:14:30+00:00">6/4/2026, 3:14:30 PM</time></small></div>
+                    <div><small>Newest: <time class="js-local-time" datetime="2026-06-04T19:14:30+00:00" title="2026-06-04T19:14:30+00:00">6/4/2026, 3:14:30 PM</time></small></div>
+                </div>
+            </div>
+            
+            
+            <div class="folder-card priority-high">
+                <div class="folder-card-header">
+                    <span class="folder-icon-large" aria-hidden="true">
+                        <svg class="nav-icon" focusable="false"><use href="/static/icons/lucide-sprite.svg#icon-folder"></use></svg>
+                    </span>
+                    <div>
+                        <strong>SavedClips</strong>
+                        <div class="folder-description">Manually saved clips</div>
+                    </div>
+                </div>
+                <div class="folder-card-stats">
+                    <div class="folder-stat">
+                        <span class="folder-stat-label">Videos:</span>
+                        <span class="folder-stat-value">4</span>
+                    </div>
+                    <div class="folder-stat">
+                        <span class="folder-stat-label">Size:</span>
+                        <span class="folder-stat-value">0.00 GB</span>
+                    </div>
+                    <div class="folder-stat">
+                        <span class="folder-stat-label">% of Total:</span>
+                        <span class="folder-stat-value">25.0%</span>
+                    </div>
+                </div>
+                <div class="mini-progress-container">
+                    <div class="mini-progress-bar" data-percent="25.0" style="width: 25.0%"></div>
+                </div>
+                <div class="folder-card-dates">
+                    <div><small>Oldest: <time class="js-local-time" datetime="2026-06-04T19:14:30+00:00" title="2026-06-04T19:14:30+00:00">6/4/2026, 3:14:30 PM</time></small></div>
+                    <div><small>Newest: <time class="js-local-time" datetime="2026-06-04T19:14:30+00:00" title="2026-06-04T19:14:30+00:00">6/4/2026, 3:14:30 PM</time></small></div>
+                </div>
+            </div>
+            
+        </div>
+    </div>
+    
+
+    
+    
+
+    
+    
+    <div class="analytics-section" id="drivingStatsSection">
+        <h3>
+            <svg class="nav-icon" aria-hidden="true" focusable="false"><use href="/static/icons/lucide-sprite.svg#icon-map-pin"></use></svg>
+            Driving Statistics
+        </h3>
+        <p class="section-description">
+            GPS and telemetry derived from indexed dashcam clips.
+            <a href="/">Open Map →</a>
+        </p>
+        <div id="drivingStatsContent">
+            <div class="analytics-grid" id="drivingStatsGrid">
+                <div class="analytics-card">
+                    <div class="stat-row"><span class="stat-label">Total Distance</span><span class="stat-value" id="dsTotalDist">1 mi</span></div>
+                    <div class="stat-row"><span class="stat-label">Total Drive Time</span><span class="stat-value" id="dsTotalTime">0.1 hrs</span></div>
+                    <div class="stat-row"><span class="stat-label">Total Trips</span><span class="stat-value" id="dsTripCount">3</span></div>
+                </div>
+                <div class="analytics-card">
+                    <div class="stat-row"><span class="stat-label">Avg Speed</span><span class="stat-value" id="dsAvgSpeed">35.8 mph</span></div>
+                    <div class="stat-row"><span class="stat-label">Max Speed</span><span class="stat-value" id="dsMaxSpeed">44.7 mph</span></div>
+                    <div class="stat-row"><span class="stat-label">FSD Usage</span><span class="stat-value" id="dsFsdPct">0%</span></div>
+                </div>
+                <div class="analytics-card">
+                    <div class="stat-row"><span class="stat-label">Total Events</span><span class="stat-value" id="dsEventCount">1</span></div>
+                    <div class="stat-row"><span class="stat-label">Warnings/Critical</span><span class="stat-value" id="dsWarnCount">0</span></div>
+                    <div class="stat-row"><span class="stat-label">Events per 100 mi</span><span class="stat-value" id="dsEvPer100">0</span></div>
+                </div>
+            </div>
+            <div id="drivingStatsEmpty" class="empty-stats" hidden="">
+                No driving data indexed yet.
+                <a href="/">Go to Map</a>
+                and index your videos to populate this dashboard.
+            </div>
+        </div>
+    </div>
+    
+
+    
+</div>
+
+<script src="/static/js/analytics.js" defer=""></script>
+
+    </main>
+
+    <!-- Toast notification container -->
+    <div class="toast-container" id="toast-container" aria-live="polite"></div>
+
+    <script src="/static/js/main.js"></script>
+    
+
+    
+    <script>
+        (function() {
+            const POLL_MS = 30000;
+            const link = document.getElementById('health-dot-link');
+            const dot = document.getElementById('health-dot');
+            if (!link || !dot) return;
+
+            // Map subsystem severity to the CSS class + tooltip prefix.
+            // B-1: uses the design-system accent tokens for ok/warn/
+            // error so dark/light mode work automatically. (v1's mode
+            // status-dot vocabulary that this comment used to reference
+            // was removed when legacy mode switching went away.)
+            const SEV_TO_CLASS = {
+                ok:      'health-dot-ok',
+                warn:    'health-dot-warn',
+                error:   'health-dot-error',
+                unknown: 'health-dot-unknown',
+            };
+
+            function applyHealth(payload) {
+                const overall = (payload && payload.overall) || {};
+                const sev = overall.severity || 'unknown';
+                const msg = overall.message || 'System status';
+                // Reset any prior class then apply the new one.
+                dot.className = 'status-dot health-dot ' +
+                    (SEV_TO_CLASS[sev] || SEV_TO_CLASS.unknown);
+                link.title = msg;
+                link.setAttribute('aria-label', msg);
+                link.hidden = false;
+            }
+
+            async function poll() {
+                try {
+                    const r = await fetch('/api/system/health', {
+                        credentials: 'same-origin',
+                    });
+                    if (!r.ok) return;
+                    const data = await r.json();
+                    applyHealth(data);
+                } catch (e) { /* network blip — keep last known colour */ }
+            }
+
+            poll();
+            setInterval(poll, POLL_MS);
+        })();
+    </script>
+    
+
+</body></html>

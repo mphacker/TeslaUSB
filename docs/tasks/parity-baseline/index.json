@@ -1,0 +1,722 @@
+{
+  "task": "0.4",
+  "lane": "T (tooling/baseline)",
+  "title": "Legacy Flask UI parity baseline",
+  "purpose": "Visual + structural reference of the OLD Flask web app before decommission. The static SPA tasks 5.2/5.3 use these screenshots/DOM dumps as the parity target.",
+  "source_branch": "b1-userspace-rust",
+  "spec_reference": "docs/specs/spa.md §3 (16 screens)",
+  "captured_with": "Playwright (Chromium) headless, real browser navigation + screenshots/DOM/perf/console.",
+  "server_profile": {
+    "note": "Legacy app served by Flask dev server in WSL Ubuntu (Python 3.13 venv), reachable from Windows at http://localhost:8080. This is a DEV-SERVER profile on a dev box, NOT a Pi — perf numbers are indicative only, not a pass/fail gate.",
+    "app": "teslausb_web (create_app + Flask dev server)",
+    "python": "3.13.13",
+    "flask": "3.1.3"
+  },
+  "viewports": [
+    {
+      "tag": "mobile-375",
+      "width": 375,
+      "height": 812
+    },
+    {
+      "tag": "desktop-1440",
+      "width": 1440,
+      "height": 900
+    }
+  ],
+  "per_screen_files": [
+    "<slug>/<viewport>.png",
+    "<slug>/dom-<viewport>.html",
+    "<slug>/meta-<viewport>.json"
+  ],
+  "dev_box_caveats": [
+    "storage-health: hardware probes (SMART/fsck/disk health) degrade to 'unknown' off-Pi; layout/look are still the parity target.",
+    "captive-portal: wifi scanning fails off-Pi (no nmcli/iwconfig); the splash layout is the parity target.",
+    "video-overlay-HUD / event-player: video clips are generated SMPTE test-pattern MP4s; telemetry HUD uses seeded values, not real SEI.",
+    "storage-settings and storage-health are the SAME page (/storage/) on the legacy app; both spa.md screens reference the one storage/ capture dir."
+  ],
+  "screen_count_spa": 16,
+  "capture_dir_count": 17,
+  "screens": [
+    {
+      "spa_screen": "media hub",
+      "slug": "media-hub",
+      "route": "/settings/",
+      "bonus": false,
+      "shares_page_with": null,
+      "note": "Settings/landing page (index.html) — the media hub entry point.",
+      "viewports": {
+        "mobile-375": {
+          "width": 375,
+          "height": 812,
+          "files": {
+            "screenshot": "media-hub/mobile-375.png",
+            "dom": "media-hub/dom-mobile-375.html",
+            "meta": "media-hub/meta-mobile-375.json"
+          },
+          "http_status": 200,
+          "console_errors": 0,
+          "ttfb_ms": 534,
+          "load_event_ms": 910,
+          "requests": 8,
+          "failed_requests": 0
+        },
+        "desktop-1440": {
+          "width": 1440,
+          "height": 900,
+          "files": {
+            "screenshot": "media-hub/desktop-1440.png",
+            "dom": "media-hub/dom-desktop-1440.html",
+            "meta": "media-hub/meta-desktop-1440.json"
+          },
+          "http_status": 200,
+          "console_errors": 0,
+          "ttfb_ms": 468,
+          "load_event_ms": 847,
+          "requests": 10,
+          "failed_requests": 0
+        }
+      }
+    },
+    {
+      "spa_screen": "trip map",
+      "slug": "trip-map",
+      "route": "/",
+      "bonus": false,
+      "shares_page_with": null,
+      "note": "Leaflet map (mapping.html) with seeded trips, route polylines and event markers. OSM tiles load from the public CDN.",
+      "viewports": {
+        "mobile-375": {
+          "width": 375,
+          "height": 812,
+          "files": {
+            "screenshot": "trip-map/mobile-375.png",
+            "dom": "trip-map/dom-mobile-375.html",
+            "meta": "trip-map/meta-mobile-375.json"
+          },
+          "http_status": 200,
+          "console_errors": 0,
+          "ttfb_ms": 170,
+          "load_event_ms": 3796,
+          "requests": 51,
+          "failed_requests": 8
+        },
+        "desktop-1440": {
+          "width": 1440,
+          "height": 900,
+          "files": {
+            "screenshot": "trip-map/desktop-1440.png",
+            "dom": "trip-map/dom-desktop-1440.html",
+            "meta": "trip-map/meta-desktop-1440.json"
+          },
+          "http_status": 200,
+          "console_errors": 0,
+          "ttfb_ms": 60,
+          "load_event_ms": 1623,
+          "requests": 79,
+          "failed_requests": 0
+        }
+      }
+    },
+    {
+      "spa_screen": "trip map — event browser panel",
+      "slug": "trip-map-events-panel",
+      "route": "/ + toggleVideoPanel()/vpShowSentry()",
+      "bonus": true,
+      "shares_page_with": null,
+      "note": "Bonus capture: the slide-out video/event browser panel of the trip map (Events tab). On mobile the panel is full-screen.",
+      "viewports": {
+        "mobile-375": {
+          "width": 375,
+          "height": 812,
+          "files": {
+            "screenshot": "trip-map-events-panel/mobile-375.png",
+            "dom": "trip-map-events-panel/dom-mobile-375.html",
+            "meta": "trip-map-events-panel/meta-mobile-375.json"
+          },
+          "http_status": 200,
+          "console_errors": 0,
+          "ttfb_ms": 307,
+          "load_event_ms": 1874,
+          "requests": 56,
+          "failed_requests": 0
+        },
+        "desktop-1440": {
+          "width": 1440,
+          "height": 900,
+          "files": {
+            "screenshot": "trip-map-events-panel/desktop-1440.png",
+            "dom": "trip-map-events-panel/dom-desktop-1440.html",
+            "meta": "trip-map-events-panel/meta-desktop-1440.json"
+          },
+          "http_status": 200,
+          "console_errors": 0,
+          "ttfb_ms": 309,
+          "load_event_ms": 1868,
+          "requests": 84,
+          "failed_requests": 0
+        }
+      }
+    },
+    {
+      "spa_screen": "event player",
+      "slug": "event-player",
+      "route": "/videos/event/SavedClips/2024-06-01_18-30-00",
+      "bonus": false,
+      "shares_page_with": null,
+      "note": "Full-screen multi-camera event player. Video is a generated SMPTE test-pattern MP4 (real H.264, ~2s).",
+      "viewports": {
+        "mobile-375": {
+          "width": 375,
+          "height": 812,
+          "files": {
+            "screenshot": "event-player/mobile-375.png",
+            "dom": "event-player/dom-mobile-375.html",
+            "meta": "event-player/meta-mobile-375.json"
+          },
+          "http_status": 200,
+          "console_errors": 0,
+          "ttfb_ms": 28,
+          "load_event_ms": 704,
+          "requests": 11,
+          "failed_requests": 0
+        },
+        "desktop-1440": {
+          "width": 1440,
+          "height": 900,
+          "files": {
+            "screenshot": "event-player/desktop-1440.png",
+            "dom": "event-player/dom-desktop-1440.html",
+            "meta": "event-player/meta-desktop-1440.json"
+          },
+          "http_status": 200,
+          "console_errors": 0,
+          "ttfb_ms": 3,
+          "load_event_ms": 691,
+          "requests": 11,
+          "failed_requests": 0
+        }
+      }
+    },
+    {
+      "spa_screen": "video overlay HUD",
+      "slug": "video-overlay-hud",
+      "route": "/ + openVideoOverlay(...)",
+      "bonus": false,
+      "shares_page_with": null,
+      "note": "Map video overlay with telemetry HUD, opened via the global openVideoOverlay() hook. HUD telemetry shows seeded values; on a real Pi it is driven by SEI/GPS data.",
+      "viewports": {
+        "mobile-375": {
+          "width": 375,
+          "height": 812,
+          "files": {
+            "screenshot": "video-overlay-hud/mobile-375.png",
+            "dom": "video-overlay-hud/dom-mobile-375.html",
+            "meta": "video-overlay-hud/meta-mobile-375.json"
+          },
+          "http_status": 200,
+          "console_errors": 0,
+          "ttfb_ms": 310,
+          "load_event_ms": 1876,
+          "requests": 55,
+          "failed_requests": 0
+        },
+        "desktop-1440": {
+          "width": 1440,
+          "height": 900,
+          "files": {
+            "screenshot": "video-overlay-hud/desktop-1440.png",
+            "dom": "video-overlay-hud/dom-desktop-1440.html",
+            "meta": "video-overlay-hud/meta-desktop-1440.json"
+          },
+          "http_status": 200,
+          "console_errors": 0,
+          "ttfb_ms": 319,
+          "load_event_ms": 1885,
+          "requests": 83,
+          "failed_requests": 0
+        }
+      }
+    },
+    {
+      "spa_screen": "analytics",
+      "slug": "analytics",
+      "route": "/analytics/",
+      "bonus": false,
+      "shares_page_with": null,
+      "note": "Storage Analytics Dashboard — disk usage, video statistics, folder breakdown, driving statistics (from seeded index.sqlite3).",
+      "viewports": {
+        "mobile-375": {
+          "width": 375,
+          "height": 812,
+          "files": {
+            "screenshot": "analytics/mobile-375.png",
+            "dom": "analytics/dom-mobile-375.html",
+            "meta": "analytics/meta-mobile-375.json"
+          },
+          "http_status": 200,
+          "console_errors": 0,
+          "ttfb_ms": 19,
+          "load_event_ms": 650,
+          "requests": 10,
+          "failed_requests": 0
+        },
+        "desktop-1440": {
+          "width": 1440,
+          "height": 900,
+          "files": {
+            "screenshot": "analytics/desktop-1440.png",
+            "dom": "analytics/dom-desktop-1440.html",
+            "meta": "analytics/meta-desktop-1440.json"
+          },
+          "http_status": 200,
+          "console_errors": 0,
+          "ttfb_ms": 3,
+          "load_event_ms": 643,
+          "requests": 10,
+          "failed_requests": 0
+        }
+      }
+    },
+    {
+      "spa_screen": "boombox",
+      "slug": "boombox",
+      "route": "/boombox/",
+      "bonus": false,
+      "shares_page_with": null,
+      "note": "Boombox track manager (media/Music/Boombox/*, max 5).",
+      "viewports": {
+        "mobile-375": {
+          "width": 375,
+          "height": 812,
+          "files": {
+            "screenshot": "boombox/mobile-375.png",
+            "dom": "boombox/dom-mobile-375.html",
+            "meta": "boombox/meta-mobile-375.json"
+          },
+          "http_status": 200,
+          "console_errors": 0,
+          "ttfb_ms": 291,
+          "load_event_ms": 621,
+          "requests": 7,
+          "failed_requests": 0
+        },
+        "desktop-1440": {
+          "width": 1440,
+          "height": 900,
+          "files": {
+            "screenshot": "boombox/desktop-1440.png",
+            "dom": "boombox/dom-desktop-1440.html",
+            "meta": "boombox/meta-desktop-1440.json"
+          },
+          "http_status": 200,
+          "console_errors": 0,
+          "ttfb_ms": 281,
+          "load_event_ms": 605,
+          "requests": 7,
+          "failed_requests": 0
+        }
+      }
+    },
+    {
+      "spa_screen": "music",
+      "slug": "music",
+      "route": "/music/",
+      "bonus": false,
+      "shares_page_with": null,
+      "note": "Music library browser (media/Music/ recursive).",
+      "viewports": {
+        "mobile-375": {
+          "width": 375,
+          "height": 812,
+          "files": {
+            "screenshot": "music/mobile-375.png",
+            "dom": "music/dom-mobile-375.html",
+            "meta": "music/meta-mobile-375.json"
+          },
+          "http_status": 200,
+          "console_errors": 0,
+          "ttfb_ms": 14,
+          "load_event_ms": 597,
+          "requests": 8,
+          "failed_requests": 0
+        },
+        "desktop-1440": {
+          "width": 1440,
+          "height": 900,
+          "files": {
+            "screenshot": "music/desktop-1440.png",
+            "dom": "music/dom-desktop-1440.html",
+            "meta": "music/meta-desktop-1440.json"
+          },
+          "http_status": 200,
+          "console_errors": 0,
+          "ttfb_ms": 3,
+          "load_event_ms": 591,
+          "requests": 8,
+          "failed_requests": 0
+        }
+      }
+    },
+    {
+      "spa_screen": "light shows",
+      "slug": "light-shows",
+      "route": "/light_shows/",
+      "bonus": false,
+      "shares_page_with": null,
+      "note": "Light show manager (media/LightShow/*.fseq + audio, lightshow_active.json).",
+      "viewports": {
+        "mobile-375": {
+          "width": 375,
+          "height": 812,
+          "files": {
+            "screenshot": "light-shows/mobile-375.png",
+            "dom": "light-shows/dom-mobile-375.html",
+            "meta": "light-shows/meta-mobile-375.json"
+          },
+          "http_status": 200,
+          "console_errors": 0,
+          "ttfb_ms": 10,
+          "load_event_ms": 607,
+          "requests": 7,
+          "failed_requests": 0
+        },
+        "desktop-1440": {
+          "width": 1440,
+          "height": 900,
+          "files": {
+            "screenshot": "light-shows/desktop-1440.png",
+            "dom": "light-shows/dom-desktop-1440.html",
+            "meta": "light-shows/meta-desktop-1440.json"
+          },
+          "http_status": 200,
+          "console_errors": 0,
+          "ttfb_ms": 2,
+          "load_event_ms": 586,
+          "requests": 7,
+          "failed_requests": 0
+        }
+      }
+    },
+    {
+      "spa_screen": "lock chimes",
+      "slug": "lock-chimes",
+      "route": "/lock_chimes/",
+      "bonus": false,
+      "shares_page_with": null,
+      "note": "Lock chime manager (media/LockChime.wav + media/Chimes/*.wav).",
+      "viewports": {
+        "mobile-375": {
+          "width": 375,
+          "height": 812,
+          "files": {
+            "screenshot": "lock-chimes/mobile-375.png",
+            "dom": "lock-chimes/dom-mobile-375.html",
+            "meta": "lock-chimes/meta-mobile-375.json"
+          },
+          "http_status": 200,
+          "console_errors": 0,
+          "ttfb_ms": 348,
+          "load_event_ms": 1050,
+          "requests": 11,
+          "failed_requests": 0
+        },
+        "desktop-1440": {
+          "width": 1440,
+          "height": 900,
+          "files": {
+            "screenshot": "lock-chimes/desktop-1440.png",
+            "dom": "lock-chimes/dom-desktop-1440.html",
+            "meta": "lock-chimes/meta-desktop-1440.json"
+          },
+          "http_status": 200,
+          "console_errors": 0,
+          "ttfb_ms": 310,
+          "load_event_ms": 995,
+          "requests": 11,
+          "failed_requests": 0
+        }
+      }
+    },
+    {
+      "spa_screen": "license plates",
+      "slug": "license-plates",
+      "route": "/license_plates/",
+      "bonus": false,
+      "shares_page_with": null,
+      "note": "License-plate redaction manager (license_plates.db rows + media/LicensePlate/*.png).",
+      "viewports": {
+        "mobile-375": {
+          "width": 375,
+          "height": 812,
+          "files": {
+            "screenshot": "license-plates/mobile-375.png",
+            "dom": "license-plates/dom-mobile-375.html",
+            "meta": "license-plates/meta-mobile-375.json"
+          },
+          "http_status": 200,
+          "console_errors": 0,
+          "ttfb_ms": 76,
+          "load_event_ms": 661,
+          "requests": 8,
+          "failed_requests": 0
+        },
+        "desktop-1440": {
+          "width": 1440,
+          "height": 900,
+          "files": {
+            "screenshot": "license-plates/desktop-1440.png",
+            "dom": "license-plates/dom-desktop-1440.html",
+            "meta": "license-plates/meta-desktop-1440.json"
+          },
+          "http_status": 200,
+          "console_errors": 0,
+          "ttfb_ms": 69,
+          "load_event_ms": 663,
+          "requests": 8,
+          "failed_requests": 0
+        }
+      }
+    },
+    {
+      "spa_screen": "wraps",
+      "slug": "wraps",
+      "route": "/wraps/",
+      "bonus": false,
+      "shares_page_with": null,
+      "note": "Vehicle wrap gallery (media/LightShow/wraps/*.png).",
+      "viewports": {
+        "mobile-375": {
+          "width": 375,
+          "height": 812,
+          "files": {
+            "screenshot": "wraps/mobile-375.png",
+            "dom": "wraps/dom-mobile-375.html",
+            "meta": "wraps/meta-mobile-375.json"
+          },
+          "http_status": 200,
+          "console_errors": 0,
+          "ttfb_ms": 322,
+          "load_event_ms": 677,
+          "requests": 9,
+          "failed_requests": 0
+        },
+        "desktop-1440": {
+          "width": 1440,
+          "height": 900,
+          "files": {
+            "screenshot": "wraps/desktop-1440.png",
+            "dom": "wraps/dom-desktop-1440.html",
+            "meta": "wraps/meta-desktop-1440.json"
+          },
+          "http_status": 200,
+          "console_errors": 0,
+          "ttfb_ms": 307,
+          "load_event_ms": 661,
+          "requests": 9,
+          "failed_requests": 0
+        }
+      }
+    },
+    {
+      "spa_screen": "cloud archive",
+      "slug": "cloud-archive",
+      "route": "/cloud/",
+      "bonus": false,
+      "shares_page_with": null,
+      "note": "Cloud sync dashboard — stats, provider config, sync settings, queue/history (seeded cloud_sync.db).",
+      "viewports": {
+        "mobile-375": {
+          "width": 375,
+          "height": 812,
+          "files": {
+            "screenshot": "cloud-archive/mobile-375.png",
+            "dom": "cloud-archive/dom-mobile-375.html",
+            "meta": "cloud-archive/meta-mobile-375.json"
+          },
+          "http_status": 200,
+          "console_errors": 0,
+          "ttfb_ms": 114,
+          "load_event_ms": 483,
+          "requests": 9,
+          "failed_requests": 0
+        },
+        "desktop-1440": {
+          "width": 1440,
+          "height": 900,
+          "files": {
+            "screenshot": "cloud-archive/desktop-1440.png",
+            "dom": "cloud-archive/dom-desktop-1440.html",
+            "meta": "cloud-archive/meta-desktop-1440.json"
+          },
+          "http_status": 200,
+          "console_errors": 0,
+          "ttfb_ms": 90,
+          "load_event_ms": 454,
+          "requests": 9,
+          "failed_requests": 0
+        }
+      }
+    },
+    {
+      "spa_screen": "storage settings",
+      "slug": "storage",
+      "route": "/storage/",
+      "bonus": false,
+      "shares_page_with": null,
+      "note": "Storage settings page. NOTE: storage-settings and storage-health are the same page on the legacy app (see storage-health).",
+      "viewports": {
+        "mobile-375": {
+          "width": 375,
+          "height": 812,
+          "files": {
+            "screenshot": "storage/mobile-375.png",
+            "dom": "storage/dom-mobile-375.html",
+            "meta": "storage/meta-mobile-375.json"
+          },
+          "http_status": 200,
+          "console_errors": 0,
+          "ttfb_ms": 10,
+          "load_event_ms": 603,
+          "requests": 7,
+          "failed_requests": 0
+        },
+        "desktop-1440": {
+          "width": 1440,
+          "height": 900,
+          "files": {
+            "screenshot": "storage/desktop-1440.png",
+            "dom": "storage/dom-desktop-1440.html",
+            "meta": "storage/meta-desktop-1440.json"
+          },
+          "http_status": 200,
+          "console_errors": 0,
+          "ttfb_ms": 2,
+          "load_event_ms": 595,
+          "requests": 7,
+          "failed_requests": 0
+        }
+      }
+    },
+    {
+      "spa_screen": "storage health",
+      "slug": "storage",
+      "route": "/storage/",
+      "bonus": false,
+      "shares_page_with": "storage",
+      "note": "Storage health is rendered within the same /storage/ page (and /api/storage/health). Captured in natural dev-box state — hardware probes (SMART, fsck) degrade to 'unknown' off-Pi.",
+      "viewports": {
+        "mobile-375": {
+          "width": 375,
+          "height": 812,
+          "files": {
+            "screenshot": "storage/mobile-375.png",
+            "dom": "storage/dom-mobile-375.html",
+            "meta": "storage/meta-mobile-375.json"
+          },
+          "http_status": 200,
+          "console_errors": 0,
+          "ttfb_ms": 10,
+          "load_event_ms": 603,
+          "requests": 7,
+          "failed_requests": 0
+        },
+        "desktop-1440": {
+          "width": 1440,
+          "height": 900,
+          "files": {
+            "screenshot": "storage/desktop-1440.png",
+            "dom": "storage/dom-desktop-1440.html",
+            "meta": "storage/meta-desktop-1440.json"
+          },
+          "http_status": 200,
+          "console_errors": 0,
+          "ttfb_ms": 2,
+          "load_event_ms": 595,
+          "requests": 7,
+          "failed_requests": 0
+        }
+      }
+    },
+    {
+      "spa_screen": "failed jobs",
+      "slug": "failed-jobs",
+      "route": "/jobs",
+      "bonus": false,
+      "shares_page_with": null,
+      "note": "Failed Jobs queue (seeded cloud_sync.db dead_letter rows: 2 cloud jobs with realistic rclone errors).",
+      "viewports": {
+        "mobile-375": {
+          "width": 375,
+          "height": 812,
+          "files": {
+            "screenshot": "failed-jobs/mobile-375.png",
+            "dom": "failed-jobs/dom-mobile-375.html",
+            "meta": "failed-jobs/meta-mobile-375.json"
+          },
+          "http_status": 200,
+          "console_errors": 0,
+          "ttfb_ms": 95,
+          "load_event_ms": 433,
+          "requests": 10,
+          "failed_requests": 0
+        },
+        "desktop-1440": {
+          "width": 1440,
+          "height": 900,
+          "files": {
+            "screenshot": "failed-jobs/desktop-1440.png",
+            "dom": "failed-jobs/dom-desktop-1440.html",
+            "meta": "failed-jobs/meta-desktop-1440.json"
+          },
+          "http_status": 200,
+          "console_errors": 0,
+          "ttfb_ms": 28,
+          "load_event_ms": 372,
+          "requests": 10,
+          "failed_requests": 0
+        }
+      }
+    },
+    {
+      "spa_screen": "captive portal",
+      "slug": "captive-portal",
+      "route": "/captive-portal",
+      "bonus": false,
+      "shares_page_with": null,
+      "note": "Captive-portal splash. Captured in natural dev-box state — wifi scan errors (no nmcli/iwconfig off-Pi) are expected and harmless.",
+      "viewports": {
+        "mobile-375": {
+          "width": 375,
+          "height": 812,
+          "files": {
+            "screenshot": "captive-portal/mobile-375.png",
+            "dom": "captive-portal/dom-mobile-375.html",
+            "meta": "captive-portal/meta-mobile-375.json"
+          },
+          "http_status": 200,
+          "console_errors": 0,
+          "ttfb_ms": 160,
+          "load_event_ms": 801,
+          "requests": 7,
+          "failed_requests": 0
+        },
+        "desktop-1440": {
+          "width": 1440,
+          "height": 900,
+          "files": {
+            "screenshot": "captive-portal/desktop-1440.png",
+            "dom": "captive-portal/dom-desktop-1440.html",
+            "meta": "captive-portal/meta-desktop-1440.json"
+          },
+          "http_status": 200,
+          "console_errors": 0,
+          "ttfb_ms": 171,
+          "load_event_ms": 807,
+          "requests": 7,
+          "failed_requests": 0
+        }
+      }
+    }
+  ]
+}

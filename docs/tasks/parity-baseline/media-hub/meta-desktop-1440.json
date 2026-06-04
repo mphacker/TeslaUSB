@@ -1,0 +1,139 @@
+{
+  "screen": "media-hub",
+  "spa_screens": [
+    "media hub"
+  ],
+  "url": "/settings/",
+  "viewport": {
+    "width": 1440,
+    "height": 900,
+    "tag": "desktop-1440"
+  },
+  "http_status": 200,
+  "wall_ms": 1456,
+  "dom_bytes": 136561,
+  "perf": {
+    "ttfb_ms": 468,
+    "dom_content_loaded_ms": 827,
+    "load_event_ms": 847,
+    "transfer_bytes": 134724,
+    "paints": {
+      "first-paint": 836,
+      "first-contentful-paint": 836
+    },
+    "slowest_resources": [
+      {
+        "name": "http://localhost:8080/api/system/health",
+        "dur": 353,
+        "size": 1589,
+        "type": "fetch"
+      },
+      {
+        "name": "http://localhost:8080/api/system/health",
+        "dur": 353,
+        "size": 1613,
+        "type": "fetch"
+      },
+      {
+        "name": "http://localhost:8080/static/css/style.css",
+        "dur": 319,
+        "size": 66823,
+        "type": "link"
+      },
+      {
+        "name": "http://localhost:8080/static/js/main.js",
+        "dur": 319,
+        "size": 21402,
+        "type": "script"
+      },
+      {
+        "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+        "dur": 318,
+        "size": 20376,
+        "type": "other"
+      },
+      {
+        "name": "http://localhost:8080/api/system/metrics",
+        "dur": 310,
+        "size": 3226,
+        "type": "fetch"
+      },
+      {
+        "name": "http://localhost:8080/static/css/bootstrap-icons-subset.css",
+        "dur": 100,
+        "size": 24373,
+        "type": "link"
+      },
+      {
+        "name": "http://localhost:8080/static/fonts/inter-variable.woff2",
+        "dur": 40,
+        "size": 352540,
+        "type": "css"
+      }
+    ],
+    "resource_count": 8
+  },
+  "console": [],
+  "network": {
+    "total_requests": 10,
+    "failed": [],
+    "slowest": [
+      {
+        "url": "/settings/",
+        "method": "GET",
+        "status": 200,
+        "type": "document",
+        "ms": 469
+      },
+      {
+        "url": "/api/wifi/saved",
+        "method": "GET",
+        "status": 302,
+        "type": "fetch",
+        "ms": 409
+      },
+      {
+        "url": "/api/system/health",
+        "method": "GET",
+        "status": 200,
+        "type": "fetch",
+        "ms": 353
+      },
+      {
+        "url": "/api/system/health",
+        "method": "GET",
+        "status": 200,
+        "type": "fetch",
+        "ms": 353
+      },
+      {
+        "url": "/static/css/style.css",
+        "method": "GET",
+        "status": 200,
+        "type": "stylesheet",
+        "ms": 319
+      },
+      {
+        "url": "/static/js/main.js",
+        "method": "GET",
+        "status": 200,
+        "type": "script",
+        "ms": 319
+      },
+      {
+        "url": "/static/icons/lucide-sprite.svg",
+        "method": "GET",
+        "status": 200,
+        "type": "other",
+        "ms": 317
+      },
+      {
+        "url": "/api/system/metrics",
+        "method": "GET",
+        "status": 200,
+        "type": "fetch",
+        "ms": 310
+      }
+    ]
+  }
+}

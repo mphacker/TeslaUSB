@@ -1,0 +1,156 @@
+{
+  "screen": "video-overlay-hud",
+  "spa_screens": [
+    "video overlay HUD"
+  ],
+  "url": "/",
+  "viewport": {
+    "width": 1440,
+    "height": 900,
+    "tag": "desktop-1440"
+  },
+  "http_status": 200,
+  "wall_ms": 8616,
+  "dom_bytes": 30906,
+  "perf": {
+    "ttfb_ms": 319,
+    "dom_content_loaded_ms": 1575,
+    "load_event_ms": 1885,
+    "transfer_bytes": 13773,
+    "paints": {
+      "first-paint": 968,
+      "first-contentful-paint": 968
+    },
+    "slowest_resources": [
+      {
+        "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+        "dur": 1559,
+        "size": 300,
+        "type": "other"
+      },
+      {
+        "name": "http://localhost:8080/static/js/mapping/init.js",
+        "dur": 1252,
+        "size": 300,
+        "type": "script"
+      },
+      {
+        "name": "http://localhost:8080/static/js/mapping/video_panel_clips.js",
+        "dur": 1251,
+        "size": 300,
+        "type": "script"
+      },
+      {
+        "name": "http://localhost:8080/static/js/mapping/video_overlay_controls.js",
+        "dur": 1249,
+        "size": 300,
+        "type": "script"
+      },
+      {
+        "name": "http://localhost:8080/static/js/mapping/video_overlay_actions.js",
+        "dur": 1249,
+        "size": 300,
+        "type": "script"
+      },
+      {
+        "name": "http://localhost:8080/static/js/mapping/video_panel_timelines.js",
+        "dur": 1249,
+        "size": 300,
+        "type": "script"
+      },
+      {
+        "name": "http://localhost:8080/static/js/mapping/video_overlay_core.js",
+        "dur": 1186,
+        "size": 300,
+        "type": "script"
+      },
+      {
+        "name": "http://localhost:8080/static/js/mapping/day_navigation.js",
+        "dur": 939,
+        "size": 300,
+        "type": "script"
+      },
+      {
+        "name": "http://localhost:8080/static/js/mapping/speed_units.js",
+        "dur": 938,
+        "size": 300,
+        "type": "script"
+      },
+      {
+        "name": "http://localhost:8080/static/js/mapping/route_disambiguation.js",
+        "dur": 938,
+        "size": 300,
+        "type": "script"
+      }
+    ],
+    "resource_count": 82
+  },
+  "console": [
+    {
+      "type": "log",
+      "text": "Tile cache SW registered"
+    }
+  ],
+  "network": {
+    "total_requests": 83,
+    "failed": [],
+    "slowest": [
+      {
+        "url": "/static/icons/lucide-sprite.svg",
+        "method": "GET",
+        "status": 200,
+        "type": "other",
+        "ms": 1559
+      },
+      {
+        "url": "/static/js/mapping/init.js",
+        "method": "GET",
+        "status": 200,
+        "type": "script",
+        "ms": 1252
+      },
+      {
+        "url": "/static/js/mapping/video_panel_clips.js",
+        "method": "GET",
+        "status": 200,
+        "type": "script",
+        "ms": 1251
+      },
+      {
+        "url": "/static/js/mapping/video_overlay_controls.js",
+        "method": "GET",
+        "status": 200,
+        "type": "script",
+        "ms": 1249
+      },
+      {
+        "url": "/static/js/mapping/video_panel_timelines.js",
+        "method": "GET",
+        "status": 200,
+        "type": "script",
+        "ms": 1249
+      },
+      {
+        "url": "/static/js/mapping/video_overlay_actions.js",
+        "method": "GET",
+        "status": 200,
+        "type": "script",
+        "ms": 1248
+      },
+      {
+        "url": "/static/js/mapping/video_overlay_core.js",
+        "method": "GET",
+        "status": 200,
+        "type": "script",
+        "ms": 1186
+      },
+      {
+        "url": "/static/js/mapping/day_navigation.js",
+        "method": "GET",
+        "status": 200,
+        "type": "script",
+        "ms": 939
+      }
+    ]
+  }
+}

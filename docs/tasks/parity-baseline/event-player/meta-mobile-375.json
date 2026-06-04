@@ -1,0 +1,156 @@
+{
+  "screen": "event-player",
+  "spa_screens": [
+    "event player"
+  ],
+  "url": "/videos/event/SavedClips/2024-06-01_18-30-00",
+  "viewport": {
+    "width": 375,
+    "height": 812,
+    "tag": "mobile-375"
+  },
+  "http_status": 200,
+  "wall_ms": 2417,
+  "dom_bytes": 70971,
+  "perf": {
+    "ttfb_ms": 28,
+    "dom_content_loaded_ms": 389,
+    "load_event_ms": 704,
+    "transfer_bytes": 70914,
+    "paints": {
+      "first-paint": 388,
+      "first-contentful-paint": 388
+    },
+    "slowest_resources": [
+      {
+        "name": "http://localhost:8080/api/system/health",
+        "dur": 389,
+        "size": 1589,
+        "type": "fetch"
+      },
+      {
+        "name": "http://localhost:8080/static/vendor/dashcam-mp4/dashcam-mp4.js",
+        "dur": 325,
+        "size": 13374,
+        "type": "script"
+      },
+      {
+        "name": "http://localhost:8080/static/vendor/protobuf/protobuf.min.js",
+        "dur": 324,
+        "size": 74593,
+        "type": "script"
+      },
+      {
+        "name": "http://localhost:8080/static/js/main.js",
+        "dur": 323,
+        "size": 300,
+        "type": "script"
+      },
+      {
+        "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+        "dur": 322,
+        "size": 300,
+        "type": "other"
+      },
+      {
+        "name": "http://localhost:8080/static/css/bootstrap-icons-subset.css",
+        "dur": 320,
+        "size": 300,
+        "type": "link"
+      },
+      {
+        "name": "http://localhost:8080/static/css/style.css",
+        "dur": 320,
+        "size": 300,
+        "type": "link"
+      },
+      {
+        "name": "http://localhost:8080/static/fonts/inter-variable.woff2",
+        "dur": 318,
+        "size": 300,
+        "type": "css"
+      },
+      {
+        "name": "http://localhost:8080/static/vendor/dashcam-mp4/dashcam.proto",
+        "dur": 306,
+        "size": 1152,
+        "type": "fetch"
+      },
+      {
+        "name": "http://localhost:8080/videos/stream/SavedClips/2024-06-01_18-30-00/2024-06-01_18-30-00-front.mp4",
+        "dur": 306,
+        "size": 11808,
+        "type": "video"
+      }
+    ],
+    "resource_count": 10
+  },
+  "console": [
+    {
+      "type": "log",
+      "text": "SEI system initialized"
+    }
+  ],
+  "network": {
+    "total_requests": 11,
+    "failed": [],
+    "slowest": [
+      {
+        "url": "/api/system/health",
+        "method": "GET",
+        "status": 200,
+        "type": "fetch",
+        "ms": 389
+      },
+      {
+        "url": "/static/vendor/dashcam-mp4/dashcam-mp4.js",
+        "method": "GET",
+        "status": 200,
+        "type": "script",
+        "ms": 325
+      },
+      {
+        "url": "/static/vendor/protobuf/protobuf.min.js",
+        "method": "GET",
+        "status": 200,
+        "type": "script",
+        "ms": 324
+      },
+      {
+        "url": "/static/js/main.js",
+        "method": "GET",
+        "status": 200,
+        "type": "script",
+        "ms": 323
+      },
+      {
+        "url": "/static/icons/lucide-sprite.svg",
+        "method": "GET",
+        "status": 200,
+        "type": "other",
+        "ms": 322
+      },
+      {
+        "url": "/static/css/bootstrap-icons-subset.css",
+        "method": "GET",
+        "status": 200,
+        "type": "stylesheet",
+        "ms": 320
+      },
+      {
+        "url": "/static/css/style.css",
+        "method": "GET",
+        "status": 200,
+        "type": "stylesheet",
+        "ms": 320
+      },
+      {
+        "url": "/static/fonts/inter-variable.woff2",
+        "method": "GET",
+        "status": 200,
+        "type": "font",
+        "ms": 318
+      }
+    ]
+  }
+}

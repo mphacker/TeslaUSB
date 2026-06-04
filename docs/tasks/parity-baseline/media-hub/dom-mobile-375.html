@@ -1,0 +1,2737 @@
+<!DOCTYPE html><html><head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    
+    <title>Tesla USB Gadget Control</title>
+    <script>
+        // Apply theme immediately before page renders to prevent flash
+        (function() {
+            const savedTheme = localStorage.getItem('theme');
+            const systemPrefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+            const theme = savedTheme || (systemPrefersDark ? 'dark' : 'light');
+            if (theme === 'dark') {
+                document.documentElement.setAttribute('data-theme', 'dark');
+            }
+        })();
+    </script>
+    <link rel="stylesheet" href="/static/css/bootstrap-icons-subset.css">
+    <link rel="stylesheet" href="/static/css/style.css">
+    
+</head>
+<body>
+    
+    
+
+    <!-- Top Bar -->
+    <header class="top-bar">
+        <div class="top-bar-left">
+            <a href="/" class="top-bar-brand">
+                <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-hard-drive"></use></svg>
+                <span class="top-bar-title">TeslaUSB</span>
+            </a>
+        </div>
+        <div class="top-bar-right">
+            
+            <a href="/settings/#system-health-card" class="health-dot-link" id="health-dot-link" title="System status" aria-label="System status" hidden="">
+                <span class="status-dot health-dot" id="health-dot" data-status-dot="health"></span>
+            </a>
+            
+            
+            <button class="theme-toggle-btn" onclick="toggleTheme()" aria-label="Toggle dark mode">
+                <svg class="nav-icon" id="theme-icon-svg" aria-hidden="true">
+                    <use href="/static/icons/lucide-sprite.svg#icon-moon"></use>
+                </svg>
+            </button>
+        </div>
+    </header>
+
+    <!-- Desktop Sidebar Rail -->
+    <nav class="sidebar-rail" id="sidebarRail" aria-label="Main navigation">
+        
+        <a href="/" class="nav-item" title="Map">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-map-pin"></use></svg>
+            <span class="nav-label">Map</span>
+        </a>
+        
+        
+        <a href="/analytics/" class="nav-item" title="Analytics">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-bar-chart-2"></use></svg>
+            <span class="nav-label">Analytics</span>
+        </a>
+        
+        
+        <a href="/media/" class="nav-item" title="Media">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-music"></use></svg>
+            <span class="nav-label">Media</span>
+        </a>
+        
+        
+        <a href="/cloud/" class="nav-item" title="Cloud">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-cloud"></use></svg>
+            <span class="nav-label">Cloud</span>
+        </a>
+        
+        <a href="/settings/" class="nav-item active" title="Settings">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-settings"></use></svg>
+            <span class="nav-label">Settings</span>
+        </a>
+    </nav>
+
+    <!-- Mobile Bottom Tab Bar -->
+    <nav class="bottom-tabs" aria-label="Main navigation">
+        
+        <a href="/" class="tab-item">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-map-pin"></use></svg>
+            <span class="tab-label">Map</span>
+        </a>
+        
+        
+        <a href="/analytics/" class="tab-item">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-bar-chart-2"></use></svg>
+            <span class="tab-label">Analytics</span>
+        </a>
+        
+        
+        <a href="/media/" class="tab-item">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-music"></use></svg>
+            <span class="tab-label">Media</span>
+        </a>
+        
+        
+        <a href="/cloud/" class="tab-item">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-cloud"></use></svg>
+            <span class="tab-label">Cloud</span>
+        </a>
+        
+        <a href="/settings/" class="tab-item active">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-settings"></use></svg>
+            <span class="tab-label">Settings</span>
+        </a>
+    </nav>
+
+    <main class="main-content" role="main">
+        
+
+        
+            
+        
+
+        
+<div class="container">
+    <div id="loadingOverlay" class="loading-overlay">
+        <div class="spinner"></div>
+        <div class="loading-text">Switching modes, please wait...</div>
+    </div>
+
+    <div id="apLoadingOverlay" class="loading-overlay">
+        <div class="spinner"></div>
+        <div class="loading-text">Updating AP settings, please wait...</div>
+    </div>
+
+    <!-- Device Status Card -->
+    
+    <div class="device-status-card device-status-unknown">
+        <div class="device-status-header">
+            <span class="status-dot status-unknown"></span>
+            <div class="device-status-info">
+                <strong>Status Unknown</strong>
+                <p>Unable to determine current device status.</p>
+            </div>
+        </div>
+    </div>
+    
+
+
+    <!-- System Health (Phase 4.2 — issue #101) -->
+    <details class="settings-section" id="system-health-section" open="">
+        <summary>System Health</summary>
+        <div class="section-content">
+            <div id="system-health-card" data-poll-url="/api/system/health" data-jobs-url="/jobs" style="display:flex; flex-direction:column; gap:6px;">
+                <p id="system-health-overall" style="margin:0 0 6px; padding:8px 12px;
+                          border-radius:8px; font-size:0.95rem;
+                          display:flex; align-items:center; gap:8px;
+                          background:var(--bg-secondary);
+                          border:1px solid var(--border-color);">
+                    <span class="health-dot health-dot-unknown" aria-hidden="true" style="width:10px; height:10px; border-radius:50%;
+                                 display:inline-block; flex-shrink:0;
+                                 background:var(--text-secondary);"></span>
+                    <span id="system-health-overall-text">
+                        Loading…
+                    </span>
+                </p>
+                <div id="system-health-rows" style="display:grid;
+                            grid-template-columns:auto auto 1fr;
+                            gap:6px 12px; align-items:center;
+                            font-size:0.9rem;">
+                    <!-- Rows rendered by JS from /api/system/health -->
+                </div>
+                <p id="system-health-error" hidden="" style="font-size:0.85rem; color:var(--msg-error-text);
+                          margin:6px 0 0;">
+                    System Health probe failed —
+                    <button type="button" class="btn btn-ghost" id="system-health-retry-btn" aria-label="Retry system health probe" style="min-height:44px; min-width:44px;
+                                   padding:0 14px; margin-left:6px;
+                                   font-size:0.9rem;">Retry</button>
+                </p>
+            </div>
+        </div>
+    </details>
+
+    <!-- Live Metrics (Issue #208) — near-realtime CPU / memory / I/O.
+         Auto-pauses when the tab is hidden so we never poll a backgrounded
+         page. /api/system/metrics is /proc-only (no subprocesses, no DB
+         writes), so a 5 s poll on the device itself is essentially free. -->
+    <details class="settings-section" id="live-metrics-section" open="">
+        <summary>Live Metrics</summary>
+        <div class="section-content">
+            <div id="live-metrics-card" data-poll-url="/api/system/metrics" style="display:flex; flex-direction:column; gap:8px;">
+                <div id="live-metrics-grid" style="display:grid;
+                            grid-template-columns:repeat(auto-fit,
+                                                  minmax(200px, 1fr));
+                            gap:10px;">
+                    <!-- Tiles rendered by JS from /api/system/metrics -->
+                    <div class="metric-tile" id="metric-load">
+                        <div class="metric-label">Load (1m / 5m / 15m)</div>
+                        <div class="metric-value" data-field="load">0.01  0.07  0.08</div>
+                        <div class="metric-detail" data-field="load-detail">0% of 16 cores</div>
+                    </div>
+                    <div class="metric-tile" id="metric-cpu">
+                        <div class="metric-label">CPU</div>
+                        <div class="metric-value" data-field="cpu">0.0%</div>
+                        <div class="metric-detail" data-field="cpu-detail">across 16 cores</div>
+                    </div>
+                    <div class="metric-tile" id="metric-mem">
+                        <div class="metric-label">Memory</div>
+                        <div class="metric-value" data-field="mem">3%</div>
+                        <div class="metric-detail" data-field="mem-detail">966 / 31671 MB used</div>
+                    </div>
+                    <div class="metric-tile" id="metric-swap">
+                        <div class="metric-label">Swap</div>
+                        <div class="metric-value" data-field="swap">0%</div>
+                        <div class="metric-detail" data-field="swap-detail">0 / 8192 MB used</div>
+                    </div>
+                    <div class="metric-tile" id="metric-sd">
+                        <div class="metric-label">SD Card I/O</div>
+                        <div class="metric-value" data-field="sd">0.0 KB/s</div>
+                        <div class="metric-detail" data-field="sd-detail">now r —  w —  · 60s avg</div>
+                    </div>
+                    <div class="metric-tile" id="metric-usb">
+                        <div class="metric-label">USB I/O (nbd0)</div>
+                        <div class="metric-value" data-field="usb">0.0 KB/s</div>
+                        <div class="metric-detail" data-field="usb-detail">now r 0.0 KB/s  w 0.0 KB/s  · 60s avg</div>
+                    </div>
+                </div>
+                <p id="live-metrics-foot" style="margin:0; font-size:0.78rem;
+                          color:var(--text-secondary);">
+                    Updated <span id="live-metrics-updated">3:27:45 PM</span>
+                    · <span id="live-metrics-uptime">uptime 4h 6m</span>
+                </p>
+            </div>
+        </div>
+    </details>
+    <style>
+        #live-metrics-card .metric-tile {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 10px 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            min-height: 72px;
+        }
+        #live-metrics-card .metric-label {
+            font-size: 0.78rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        #live-metrics-card .metric-value {
+            font-size: 1.15rem;
+            font-weight: 600;
+            color: var(--text-primary);
+            font-variant-numeric: tabular-nums;
+        }
+        #live-metrics-card .metric-detail {
+            font-size: 0.82rem;
+            color: var(--text-secondary);
+            font-variant-numeric: tabular-nums;
+        }
+        #live-metrics-card .metric-tile.warn {
+            border-color: var(--ds-accent-warning);
+        }
+        #live-metrics-card .metric-tile.error {
+            border-color: var(--ds-accent-danger);
+        }
+    </style>
+
+    <!-- WiFi Networks -->
+    <details class="settings-section">
+        <summary>WiFi Networks</summary>
+        <div class="section-content">
+            
+
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+                <p style="font-size:0.85em;color:var(--text-secondary);margin:0">Networks higher in the list are preferred when multiple are in range.</p>
+                <button class="edit-btn" onclick="scanAndRefreshNetworks()" id="btnWifiScan" style="padding:4px 10px;font-size:0.85em;white-space:nowrap" disabled="">Scanning...</button>
+            </div>
+            <div id="savedNetworksList">
+                <div style="text-align:center;padding:12px;color:var(--text-secondary)">Loading...</div>
+            </div>
+            <div style="margin-top:12px">
+                <button class="edit-btn" onclick="toggleAddNetwork()" id="btnAddNetwork" style="padding:4px 10px;font-size:0.85em">+ Add Network</button>
+            </div>
+            <div id="addNetworkPanel" style="display:none;margin-top:12px;padding:12px;background-color:var(--bg-info);border:1px solid var(--border-color);border-radius:var(--radius-md,8px)">
+                <div style="margin-bottom:8px">
+                    <label for="newWifiSSID" style="display:block;font-size:0.85em;font-weight:500;color:var(--text-primary);margin-bottom:4px">SSID</label>
+                    <input type="text" id="newWifiSSID" maxlength="32" placeholder="Network name" list="wifiScanResults" class="settings-form-input" style="max-width: 300px;">
+                    <datalist id="wifiScanResults"></datalist>
+                </div>
+                <div style="margin-bottom:8px">
+                    <label for="newWifiPassword" style="display:block;font-size:0.85em;font-weight:500;color:var(--text-primary);margin-bottom:4px">Password</label>
+                    <input type="password" id="newWifiPassword" minlength="8" maxlength="63" placeholder="Password (empty for open)" class="settings-form-input" style="max-width: 300px;">
+                </div>
+                <button class="edit-btn" onclick="addWifiNetwork()" id="addWifiBtn" style="padding:4px 10px;font-size:0.85em">Connect</button>
+            </div>
+
+            <div style="margin-top: 8px; font-size: 0.9em; color: var(--text-secondary);">
+                <strong>How it works:</strong> The Pi will attempt to connect to the new network. Thanks to concurrent AP mode, you can remain connected to the fallback AP during the transition. If the new WiFi network is unreachable or credentials are incorrect, you'll maintain access via the AP.
+            </div>
+        </div>
+    </details>
+
+    <!-- Access Point -->
+    <details class="settings-section">
+        <summary>Access Point</summary>
+        <div class="section-content">
+            
+                <div style="color: var(--error-text);">AP status unavailable (Required Wi-Fi binary 'iwconfig' was not found in PATH; configure [wifi.binary_paths].iwconfig)</div>
+            
+        </div>
+    </details>
+
+    <!-- Storage Maintenance -->
+    <details class="settings-section">
+        <summary>Storage &amp; Auto-Cleanup</summary>
+        <div class="section-content">
+            <a href="/storage/" class="action-card" style="display:flex; align-items:center; gap:12px; padding:14px; text-decoration:none; color:inherit; border:1px solid var(--border-color); border-radius:8px; min-height:44px;">
+                <svg class="inline-icon" width="24" height="24" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-hard-drive"></use></svg>
+                <div style="flex:1">
+                    <strong>Storage Settings</strong>
+                    <p style="margin:4px 0 0; font-size:0.85rem; color:var(--text-secondary)">Adjust USB drive sizes and tier-aware auto-cleanup for TeslaCam.</p>
+                </div>
+                <svg class="inline-icon" width="20" height="20" aria-hidden="true" style="color:var(--text-secondary)"><use href="/static/icons/lucide-sprite.svg#icon-chevron-right"></use></svg>
+            </a>
+        </div>
+    </details>
+
+    <!-- Mapping & Indexing Settings -->
+    <details class="settings-section">
+        <summary>Mapping &amp; Indexing</summary>
+        <div class="section-content">
+            <form method="post" action="/settings/save/mapping">
+                <p style="font-size:0.85rem; color:var(--text-secondary); margin:0 0 16px">
+                    Tesla embeds GPS coordinates and telemetry data (speed, braking, steering) inside each dashcam video.
+                    The indexer always extracts this data from videos that carry GPS or SEI telemetry and builds a
+                    database of trips, routes, and driving events. This powers the map view — showing where you drove,
+                    plotting routes, and detecting events like hard braking or sharp turns.
+                </p>
+                <div class="settings-form-grid">
+                    <div class="form-group">
+                        <label style="font-size:0.85rem"><strong>Trip gap (minutes)</strong></label>
+                        <input type="number" name="trip_gap_minutes" value="5" min="1" max="60" class="settings-form-input" style="">
+                        <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
+                            If there's a gap longer than this between GPS waypoints, a new trip is started.
+                            Lower values split stops (gas station, drive-through) into separate trips.
+                            Higher values keep them as one continuous trip.
+                        </p>
+                    </div>
+                    <div class="form-group">
+                        <label for="mapping-speed-limit" style="font-size:0.85rem"><strong>Speed alert (mph)</strong></label>
+                        <input id="mapping-speed-limit" type="number" name="speed_limit_mph" value="0" min="0" max="200" step="5" class="settings-form-input" style="">
+                        <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
+                            Marks a driving event on the map when your speed exceeds this threshold.
+                            Set to 0 to disable speed alerts entirely.
+                        </p>
+                    </div>
+                    <div class="form-group">
+                        <label for="mapping-speed-units" style="font-size:0.85rem"><strong>Map speed display units</strong></label>
+                        <select id="mapping-speed-units" name="speed_units" class="settings-form-input">
+                            <option value="mph" selected="">mph</option>
+                            <option value="kph">kph</option>
+                        </select>
+                        <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
+                            Controls speed labels and color buckets on the map only. Stored telemetry and speed alerts stay canonical.
+                        </p>
+                    </div>
+                    <div class="form-group">
+                        <label for="mapping-display-timezone" style="font-size:0.85rem"><strong>Map day timezone</strong></label>
+                        <select id="mapping-display-timezone" name="display_timezone" class="settings-form-input">
+                            <option value="" selected="">Auto (use this device's timezone)</option>
+                            
+                            <option value="Africa/Abidjan">Africa/Abidjan</option>
+                            
+                            <option value="Africa/Accra">Africa/Accra</option>
+                            
+                            <option value="Africa/Addis_Ababa">Africa/Addis_Ababa</option>
+                            
+                            <option value="Africa/Algiers">Africa/Algiers</option>
+                            
+                            <option value="Africa/Asmara">Africa/Asmara</option>
+                            
+                            <option value="Africa/Asmera">Africa/Asmera</option>
+                            
+                            <option value="Africa/Bamako">Africa/Bamako</option>
+                            
+                            <option value="Africa/Bangui">Africa/Bangui</option>
+                            
+                            <option value="Africa/Banjul">Africa/Banjul</option>
+                            
+                            <option value="Africa/Bissau">Africa/Bissau</option>
+                            
+                            <option value="Africa/Blantyre">Africa/Blantyre</option>
+                            
+                            <option value="Africa/Brazzaville">Africa/Brazzaville</option>
+                            
+                            <option value="Africa/Bujumbura">Africa/Bujumbura</option>
+                            
+                            <option value="Africa/Cairo">Africa/Cairo</option>
+                            
+                            <option value="Africa/Casablanca">Africa/Casablanca</option>
+                            
+                            <option value="Africa/Ceuta">Africa/Ceuta</option>
+                            
+                            <option value="Africa/Conakry">Africa/Conakry</option>
+                            
+                            <option value="Africa/Dakar">Africa/Dakar</option>
+                            
+                            <option value="Africa/Dar_es_Salaam">Africa/Dar_es_Salaam</option>
+                            
+                            <option value="Africa/Djibouti">Africa/Djibouti</option>
+                            
+                            <option value="Africa/Douala">Africa/Douala</option>
+                            
+                            <option value="Africa/El_Aaiun">Africa/El_Aaiun</option>
+                            
+                            <option value="Africa/Freetown">Africa/Freetown</option>
+                            
+                            <option value="Africa/Gaborone">Africa/Gaborone</option>
+                            
+                            <option value="Africa/Harare">Africa/Harare</option>
+                            
+                            <option value="Africa/Johannesburg">Africa/Johannesburg</option>
+                            
+                            <option value="Africa/Juba">Africa/Juba</option>
+                            
+                            <option value="Africa/Kampala">Africa/Kampala</option>
+                            
+                            <option value="Africa/Khartoum">Africa/Khartoum</option>
+                            
+                            <option value="Africa/Kigali">Africa/Kigali</option>
+                            
+                            <option value="Africa/Kinshasa">Africa/Kinshasa</option>
+                            
+                            <option value="Africa/Lagos">Africa/Lagos</option>
+                            
+                            <option value="Africa/Libreville">Africa/Libreville</option>
+                            
+                            <option value="Africa/Lome">Africa/Lome</option>
+                            
+                            <option value="Africa/Luanda">Africa/Luanda</option>
+                            
+                            <option value="Africa/Lubumbashi">Africa/Lubumbashi</option>
+                            
+                            <option value="Africa/Lusaka">Africa/Lusaka</option>
+                            
+                            <option value="Africa/Malabo">Africa/Malabo</option>
+                            
+                            <option value="Africa/Maputo">Africa/Maputo</option>
+                            
+                            <option value="Africa/Maseru">Africa/Maseru</option>
+                            
+                            <option value="Africa/Mbabane">Africa/Mbabane</option>
+                            
+                            <option value="Africa/Mogadishu">Africa/Mogadishu</option>
+                            
+                            <option value="Africa/Monrovia">Africa/Monrovia</option>
+                            
+                            <option value="Africa/Nairobi">Africa/Nairobi</option>
+                            
+                            <option value="Africa/Ndjamena">Africa/Ndjamena</option>
+                            
+                            <option value="Africa/Niamey">Africa/Niamey</option>
+                            
+                            <option value="Africa/Nouakchott">Africa/Nouakchott</option>
+                            
+                            <option value="Africa/Ouagadougou">Africa/Ouagadougou</option>
+                            
+                            <option value="Africa/Porto-Novo">Africa/Porto-Novo</option>
+                            
+                            <option value="Africa/Sao_Tome">Africa/Sao_Tome</option>
+                            
+                            <option value="Africa/Timbuktu">Africa/Timbuktu</option>
+                            
+                            <option value="Africa/Tripoli">Africa/Tripoli</option>
+                            
+                            <option value="Africa/Tunis">Africa/Tunis</option>
+                            
+                            <option value="Africa/Windhoek">Africa/Windhoek</option>
+                            
+                            <option value="America/Adak">America/Adak</option>
+                            
+                            <option value="America/Anchorage">America/Anchorage</option>
+                            
+                            <option value="America/Anguilla">America/Anguilla</option>
+                            
+                            <option value="America/Antigua">America/Antigua</option>
+                            
+                            <option value="America/Araguaina">America/Araguaina</option>
+                            
+                            <option value="America/Argentina/Buenos_Aires">America/Argentina/Buenos_Aires</option>
+                            
+                            <option value="America/Argentina/Catamarca">America/Argentina/Catamarca</option>
+                            
+                            <option value="America/Argentina/ComodRivadavia">America/Argentina/ComodRivadavia</option>
+                            
+                            <option value="America/Argentina/Cordoba">America/Argentina/Cordoba</option>
+                            
+                            <option value="America/Argentina/Jujuy">America/Argentina/Jujuy</option>
+                            
+                            <option value="America/Argentina/La_Rioja">America/Argentina/La_Rioja</option>
+                            
+                            <option value="America/Argentina/Mendoza">America/Argentina/Mendoza</option>
+                            
+                            <option value="America/Argentina/Rio_Gallegos">America/Argentina/Rio_Gallegos</option>
+                            
+                            <option value="America/Argentina/Salta">America/Argentina/Salta</option>
+                            
+                            <option value="America/Argentina/San_Juan">America/Argentina/San_Juan</option>
+                            
+                            <option value="America/Argentina/San_Luis">America/Argentina/San_Luis</option>
+                            
+                            <option value="America/Argentina/Tucuman">America/Argentina/Tucuman</option>
+                            
+                            <option value="America/Argentina/Ushuaia">America/Argentina/Ushuaia</option>
+                            
+                            <option value="America/Aruba">America/Aruba</option>
+                            
+                            <option value="America/Asuncion">America/Asuncion</option>
+                            
+                            <option value="America/Atikokan">America/Atikokan</option>
+                            
+                            <option value="America/Atka">America/Atka</option>
+                            
+                            <option value="America/Bahia">America/Bahia</option>
+                            
+                            <option value="America/Bahia_Banderas">America/Bahia_Banderas</option>
+                            
+                            <option value="America/Barbados">America/Barbados</option>
+                            
+                            <option value="America/Belem">America/Belem</option>
+                            
+                            <option value="America/Belize">America/Belize</option>
+                            
+                            <option value="America/Blanc-Sablon">America/Blanc-Sablon</option>
+                            
+                            <option value="America/Boa_Vista">America/Boa_Vista</option>
+                            
+                            <option value="America/Bogota">America/Bogota</option>
+                            
+                            <option value="America/Boise">America/Boise</option>
+                            
+                            <option value="America/Buenos_Aires">America/Buenos_Aires</option>
+                            
+                            <option value="America/Cambridge_Bay">America/Cambridge_Bay</option>
+                            
+                            <option value="America/Campo_Grande">America/Campo_Grande</option>
+                            
+                            <option value="America/Cancun">America/Cancun</option>
+                            
+                            <option value="America/Caracas">America/Caracas</option>
+                            
+                            <option value="America/Catamarca">America/Catamarca</option>
+                            
+                            <option value="America/Cayenne">America/Cayenne</option>
+                            
+                            <option value="America/Cayman">America/Cayman</option>
+                            
+                            <option value="America/Chicago">America/Chicago</option>
+                            
+                            <option value="America/Chihuahua">America/Chihuahua</option>
+                            
+                            <option value="America/Ciudad_Juarez">America/Ciudad_Juarez</option>
+                            
+                            <option value="America/Coral_Harbour">America/Coral_Harbour</option>
+                            
+                            <option value="America/Cordoba">America/Cordoba</option>
+                            
+                            <option value="America/Costa_Rica">America/Costa_Rica</option>
+                            
+                            <option value="America/Coyhaique">America/Coyhaique</option>
+                            
+                            <option value="America/Creston">America/Creston</option>
+                            
+                            <option value="America/Cuiaba">America/Cuiaba</option>
+                            
+                            <option value="America/Curacao">America/Curacao</option>
+                            
+                            <option value="America/Danmarkshavn">America/Danmarkshavn</option>
+                            
+                            <option value="America/Dawson">America/Dawson</option>
+                            
+                            <option value="America/Dawson_Creek">America/Dawson_Creek</option>
+                            
+                            <option value="America/Denver">America/Denver</option>
+                            
+                            <option value="America/Detroit">America/Detroit</option>
+                            
+                            <option value="America/Dominica">America/Dominica</option>
+                            
+                            <option value="America/Edmonton">America/Edmonton</option>
+                            
+                            <option value="America/Eirunepe">America/Eirunepe</option>
+                            
+                            <option value="America/El_Salvador">America/El_Salvador</option>
+                            
+                            <option value="America/Ensenada">America/Ensenada</option>
+                            
+                            <option value="America/Fort_Nelson">America/Fort_Nelson</option>
+                            
+                            <option value="America/Fort_Wayne">America/Fort_Wayne</option>
+                            
+                            <option value="America/Fortaleza">America/Fortaleza</option>
+                            
+                            <option value="America/Glace_Bay">America/Glace_Bay</option>
+                            
+                            <option value="America/Godthab">America/Godthab</option>
+                            
+                            <option value="America/Goose_Bay">America/Goose_Bay</option>
+                            
+                            <option value="America/Grand_Turk">America/Grand_Turk</option>
+                            
+                            <option value="America/Grenada">America/Grenada</option>
+                            
+                            <option value="America/Guadeloupe">America/Guadeloupe</option>
+                            
+                            <option value="America/Guatemala">America/Guatemala</option>
+                            
+                            <option value="America/Guayaquil">America/Guayaquil</option>
+                            
+                            <option value="America/Guyana">America/Guyana</option>
+                            
+                            <option value="America/Halifax">America/Halifax</option>
+                            
+                            <option value="America/Havana">America/Havana</option>
+                            
+                            <option value="America/Hermosillo">America/Hermosillo</option>
+                            
+                            <option value="America/Indiana/Indianapolis">America/Indiana/Indianapolis</option>
+                            
+                            <option value="America/Indiana/Knox">America/Indiana/Knox</option>
+                            
+                            <option value="America/Indiana/Marengo">America/Indiana/Marengo</option>
+                            
+                            <option value="America/Indiana/Petersburg">America/Indiana/Petersburg</option>
+                            
+                            <option value="America/Indiana/Tell_City">America/Indiana/Tell_City</option>
+                            
+                            <option value="America/Indiana/Vevay">America/Indiana/Vevay</option>
+                            
+                            <option value="America/Indiana/Vincennes">America/Indiana/Vincennes</option>
+                            
+                            <option value="America/Indiana/Winamac">America/Indiana/Winamac</option>
+                            
+                            <option value="America/Indianapolis">America/Indianapolis</option>
+                            
+                            <option value="America/Inuvik">America/Inuvik</option>
+                            
+                            <option value="America/Iqaluit">America/Iqaluit</option>
+                            
+                            <option value="America/Jamaica">America/Jamaica</option>
+                            
+                            <option value="America/Jujuy">America/Jujuy</option>
+                            
+                            <option value="America/Juneau">America/Juneau</option>
+                            
+                            <option value="America/Kentucky/Louisville">America/Kentucky/Louisville</option>
+                            
+                            <option value="America/Kentucky/Monticello">America/Kentucky/Monticello</option>
+                            
+                            <option value="America/Knox_IN">America/Knox_IN</option>
+                            
+                            <option value="America/Kralendijk">America/Kralendijk</option>
+                            
+                            <option value="America/La_Paz">America/La_Paz</option>
+                            
+                            <option value="America/Lima">America/Lima</option>
+                            
+                            <option value="America/Los_Angeles">America/Los_Angeles</option>
+                            
+                            <option value="America/Louisville">America/Louisville</option>
+                            
+                            <option value="America/Lower_Princes">America/Lower_Princes</option>
+                            
+                            <option value="America/Maceio">America/Maceio</option>
+                            
+                            <option value="America/Managua">America/Managua</option>
+                            
+                            <option value="America/Manaus">America/Manaus</option>
+                            
+                            <option value="America/Marigot">America/Marigot</option>
+                            
+                            <option value="America/Martinique">America/Martinique</option>
+                            
+                            <option value="America/Matamoros">America/Matamoros</option>
+                            
+                            <option value="America/Mazatlan">America/Mazatlan</option>
+                            
+                            <option value="America/Mendoza">America/Mendoza</option>
+                            
+                            <option value="America/Menominee">America/Menominee</option>
+                            
+                            <option value="America/Merida">America/Merida</option>
+                            
+                            <option value="America/Metlakatla">America/Metlakatla</option>
+                            
+                            <option value="America/Mexico_City">America/Mexico_City</option>
+                            
+                            <option value="America/Miquelon">America/Miquelon</option>
+                            
+                            <option value="America/Moncton">America/Moncton</option>
+                            
+                            <option value="America/Monterrey">America/Monterrey</option>
+                            
+                            <option value="America/Montevideo">America/Montevideo</option>
+                            
+                            <option value="America/Montreal">America/Montreal</option>
+                            
+                            <option value="America/Montserrat">America/Montserrat</option>
+                            
+                            <option value="America/Nassau">America/Nassau</option>
+                            
+                            <option value="America/New_York">America/New_York</option>
+                            
+                            <option value="America/Nipigon">America/Nipigon</option>
+                            
+                            <option value="America/Nome">America/Nome</option>
+                            
+                            <option value="America/Noronha">America/Noronha</option>
+                            
+                            <option value="America/North_Dakota/Beulah">America/North_Dakota/Beulah</option>
+                            
+                            <option value="America/North_Dakota/Center">America/North_Dakota/Center</option>
+                            
+                            <option value="America/North_Dakota/New_Salem">America/North_Dakota/New_Salem</option>
+                            
+                            <option value="America/Nuuk">America/Nuuk</option>
+                            
+                            <option value="America/Ojinaga">America/Ojinaga</option>
+                            
+                            <option value="America/Panama">America/Panama</option>
+                            
+                            <option value="America/Pangnirtung">America/Pangnirtung</option>
+                            
+                            <option value="America/Paramaribo">America/Paramaribo</option>
+                            
+                            <option value="America/Phoenix">America/Phoenix</option>
+                            
+                            <option value="America/Port-au-Prince">America/Port-au-Prince</option>
+                            
+                            <option value="America/Port_of_Spain">America/Port_of_Spain</option>
+                            
+                            <option value="America/Porto_Acre">America/Porto_Acre</option>
+                            
+                            <option value="America/Porto_Velho">America/Porto_Velho</option>
+                            
+                            <option value="America/Puerto_Rico">America/Puerto_Rico</option>
+                            
+                            <option value="America/Punta_Arenas">America/Punta_Arenas</option>
+                            
+                            <option value="America/Rainy_River">America/Rainy_River</option>
+                            
+                            <option value="America/Rankin_Inlet">America/Rankin_Inlet</option>
+                            
+                            <option value="America/Recife">America/Recife</option>
+                            
+                            <option value="America/Regina">America/Regina</option>
+                            
+                            <option value="America/Resolute">America/Resolute</option>
+                            
+                            <option value="America/Rio_Branco">America/Rio_Branco</option>
+                            
+                            <option value="America/Rosario">America/Rosario</option>
+                            
+                            <option value="America/Santa_Isabel">America/Santa_Isabel</option>
+                            
+                            <option value="America/Santarem">America/Santarem</option>
+                            
+                            <option value="America/Santiago">America/Santiago</option>
+                            
+                            <option value="America/Santo_Domingo">America/Santo_Domingo</option>
+                            
+                            <option value="America/Sao_Paulo">America/Sao_Paulo</option>
+                            
+                            <option value="America/Scoresbysund">America/Scoresbysund</option>
+                            
+                            <option value="America/Shiprock">America/Shiprock</option>
+                            
+                            <option value="America/Sitka">America/Sitka</option>
+                            
+                            <option value="America/St_Barthelemy">America/St_Barthelemy</option>
+                            
+                            <option value="America/St_Johns">America/St_Johns</option>
+                            
+                            <option value="America/St_Kitts">America/St_Kitts</option>
+                            
+                            <option value="America/St_Lucia">America/St_Lucia</option>
+                            
+                            <option value="America/St_Thomas">America/St_Thomas</option>
+                            
+                            <option value="America/St_Vincent">America/St_Vincent</option>
+                            
+                            <option value="America/Swift_Current">America/Swift_Current</option>
+                            
+                            <option value="America/Tegucigalpa">America/Tegucigalpa</option>
+                            
+                            <option value="America/Thule">America/Thule</option>
+                            
+                            <option value="America/Thunder_Bay">America/Thunder_Bay</option>
+                            
+                            <option value="America/Tijuana">America/Tijuana</option>
+                            
+                            <option value="America/Toronto">America/Toronto</option>
+                            
+                            <option value="America/Tortola">America/Tortola</option>
+                            
+                            <option value="America/Vancouver">America/Vancouver</option>
+                            
+                            <option value="America/Virgin">America/Virgin</option>
+                            
+                            <option value="America/Whitehorse">America/Whitehorse</option>
+                            
+                            <option value="America/Winnipeg">America/Winnipeg</option>
+                            
+                            <option value="America/Yakutat">America/Yakutat</option>
+                            
+                            <option value="America/Yellowknife">America/Yellowknife</option>
+                            
+                            <option value="Antarctica/Casey">Antarctica/Casey</option>
+                            
+                            <option value="Antarctica/Davis">Antarctica/Davis</option>
+                            
+                            <option value="Antarctica/DumontDUrville">Antarctica/DumontDUrville</option>
+                            
+                            <option value="Antarctica/Macquarie">Antarctica/Macquarie</option>
+                            
+                            <option value="Antarctica/Mawson">Antarctica/Mawson</option>
+                            
+                            <option value="Antarctica/McMurdo">Antarctica/McMurdo</option>
+                            
+                            <option value="Antarctica/Palmer">Antarctica/Palmer</option>
+                            
+                            <option value="Antarctica/Rothera">Antarctica/Rothera</option>
+                            
+                            <option value="Antarctica/South_Pole">Antarctica/South_Pole</option>
+                            
+                            <option value="Antarctica/Syowa">Antarctica/Syowa</option>
+                            
+                            <option value="Antarctica/Troll">Antarctica/Troll</option>
+                            
+                            <option value="Antarctica/Vostok">Antarctica/Vostok</option>
+                            
+                            <option value="Arctic/Longyearbyen">Arctic/Longyearbyen</option>
+                            
+                            <option value="Asia/Aden">Asia/Aden</option>
+                            
+                            <option value="Asia/Almaty">Asia/Almaty</option>
+                            
+                            <option value="Asia/Amman">Asia/Amman</option>
+                            
+                            <option value="Asia/Anadyr">Asia/Anadyr</option>
+                            
+                            <option value="Asia/Aqtau">Asia/Aqtau</option>
+                            
+                            <option value="Asia/Aqtobe">Asia/Aqtobe</option>
+                            
+                            <option value="Asia/Ashgabat">Asia/Ashgabat</option>
+                            
+                            <option value="Asia/Ashkhabad">Asia/Ashkhabad</option>
+                            
+                            <option value="Asia/Atyrau">Asia/Atyrau</option>
+                            
+                            <option value="Asia/Baghdad">Asia/Baghdad</option>
+                            
+                            <option value="Asia/Bahrain">Asia/Bahrain</option>
+                            
+                            <option value="Asia/Baku">Asia/Baku</option>
+                            
+                            <option value="Asia/Bangkok">Asia/Bangkok</option>
+                            
+                            <option value="Asia/Barnaul">Asia/Barnaul</option>
+                            
+                            <option value="Asia/Beirut">Asia/Beirut</option>
+                            
+                            <option value="Asia/Bishkek">Asia/Bishkek</option>
+                            
+                            <option value="Asia/Brunei">Asia/Brunei</option>
+                            
+                            <option value="Asia/Calcutta">Asia/Calcutta</option>
+                            
+                            <option value="Asia/Chita">Asia/Chita</option>
+                            
+                            <option value="Asia/Choibalsan">Asia/Choibalsan</option>
+                            
+                            <option value="Asia/Chongqing">Asia/Chongqing</option>
+                            
+                            <option value="Asia/Chungking">Asia/Chungking</option>
+                            
+                            <option value="Asia/Colombo">Asia/Colombo</option>
+                            
+                            <option value="Asia/Dacca">Asia/Dacca</option>
+                            
+                            <option value="Asia/Damascus">Asia/Damascus</option>
+                            
+                            <option value="Asia/Dhaka">Asia/Dhaka</option>
+                            
+                            <option value="Asia/Dili">Asia/Dili</option>
+                            
+                            <option value="Asia/Dubai">Asia/Dubai</option>
+                            
+                            <option value="Asia/Dushanbe">Asia/Dushanbe</option>
+                            
+                            <option value="Asia/Famagusta">Asia/Famagusta</option>
+                            
+                            <option value="Asia/Gaza">Asia/Gaza</option>
+                            
+                            <option value="Asia/Harbin">Asia/Harbin</option>
+                            
+                            <option value="Asia/Hebron">Asia/Hebron</option>
+                            
+                            <option value="Asia/Ho_Chi_Minh">Asia/Ho_Chi_Minh</option>
+                            
+                            <option value="Asia/Hong_Kong">Asia/Hong_Kong</option>
+                            
+                            <option value="Asia/Hovd">Asia/Hovd</option>
+                            
+                            <option value="Asia/Irkutsk">Asia/Irkutsk</option>
+                            
+                            <option value="Asia/Istanbul">Asia/Istanbul</option>
+                            
+                            <option value="Asia/Jakarta">Asia/Jakarta</option>
+                            
+                            <option value="Asia/Jayapura">Asia/Jayapura</option>
+                            
+                            <option value="Asia/Jerusalem">Asia/Jerusalem</option>
+                            
+                            <option value="Asia/Kabul">Asia/Kabul</option>
+                            
+                            <option value="Asia/Kamchatka">Asia/Kamchatka</option>
+                            
+                            <option value="Asia/Karachi">Asia/Karachi</option>
+                            
+                            <option value="Asia/Kashgar">Asia/Kashgar</option>
+                            
+                            <option value="Asia/Kathmandu">Asia/Kathmandu</option>
+                            
+                            <option value="Asia/Katmandu">Asia/Katmandu</option>
+                            
+                            <option value="Asia/Khandyga">Asia/Khandyga</option>
+                            
+                            <option value="Asia/Kolkata">Asia/Kolkata</option>
+                            
+                            <option value="Asia/Krasnoyarsk">Asia/Krasnoyarsk</option>
+                            
+                            <option value="Asia/Kuala_Lumpur">Asia/Kuala_Lumpur</option>
+                            
+                            <option value="Asia/Kuching">Asia/Kuching</option>
+                            
+                            <option value="Asia/Kuwait">Asia/Kuwait</option>
+                            
+                            <option value="Asia/Macao">Asia/Macao</option>
+                            
+                            <option value="Asia/Macau">Asia/Macau</option>
+                            
+                            <option value="Asia/Magadan">Asia/Magadan</option>
+                            
+                            <option value="Asia/Makassar">Asia/Makassar</option>
+                            
+                            <option value="Asia/Manila">Asia/Manila</option>
+                            
+                            <option value="Asia/Muscat">Asia/Muscat</option>
+                            
+                            <option value="Asia/Nicosia">Asia/Nicosia</option>
+                            
+                            <option value="Asia/Novokuznetsk">Asia/Novokuznetsk</option>
+                            
+                            <option value="Asia/Novosibirsk">Asia/Novosibirsk</option>
+                            
+                            <option value="Asia/Omsk">Asia/Omsk</option>
+                            
+                            <option value="Asia/Oral">Asia/Oral</option>
+                            
+                            <option value="Asia/Phnom_Penh">Asia/Phnom_Penh</option>
+                            
+                            <option value="Asia/Pontianak">Asia/Pontianak</option>
+                            
+                            <option value="Asia/Pyongyang">Asia/Pyongyang</option>
+                            
+                            <option value="Asia/Qatar">Asia/Qatar</option>
+                            
+                            <option value="Asia/Qostanay">Asia/Qostanay</option>
+                            
+                            <option value="Asia/Qyzylorda">Asia/Qyzylorda</option>
+                            
+                            <option value="Asia/Rangoon">Asia/Rangoon</option>
+                            
+                            <option value="Asia/Riyadh">Asia/Riyadh</option>
+                            
+                            <option value="Asia/Saigon">Asia/Saigon</option>
+                            
+                            <option value="Asia/Sakhalin">Asia/Sakhalin</option>
+                            
+                            <option value="Asia/Samarkand">Asia/Samarkand</option>
+                            
+                            <option value="Asia/Seoul">Asia/Seoul</option>
+                            
+                            <option value="Asia/Shanghai">Asia/Shanghai</option>
+                            
+                            <option value="Asia/Singapore">Asia/Singapore</option>
+                            
+                            <option value="Asia/Srednekolymsk">Asia/Srednekolymsk</option>
+                            
+                            <option value="Asia/Taipei">Asia/Taipei</option>
+                            
+                            <option value="Asia/Tashkent">Asia/Tashkent</option>
+                            
+                            <option value="Asia/Tbilisi">Asia/Tbilisi</option>
+                            
+                            <option value="Asia/Tehran">Asia/Tehran</option>
+                            
+                            <option value="Asia/Tel_Aviv">Asia/Tel_Aviv</option>
+                            
+                            <option value="Asia/Thimbu">Asia/Thimbu</option>
+                            
+                            <option value="Asia/Thimphu">Asia/Thimphu</option>
+                            
+                            <option value="Asia/Tokyo">Asia/Tokyo</option>
+                            
+                            <option value="Asia/Tomsk">Asia/Tomsk</option>
+                            
+                            <option value="Asia/Ujung_Pandang">Asia/Ujung_Pandang</option>
+                            
+                            <option value="Asia/Ulaanbaatar">Asia/Ulaanbaatar</option>
+                            
+                            <option value="Asia/Ulan_Bator">Asia/Ulan_Bator</option>
+                            
+                            <option value="Asia/Urumqi">Asia/Urumqi</option>
+                            
+                            <option value="Asia/Ust-Nera">Asia/Ust-Nera</option>
+                            
+                            <option value="Asia/Vientiane">Asia/Vientiane</option>
+                            
+                            <option value="Asia/Vladivostok">Asia/Vladivostok</option>
+                            
+                            <option value="Asia/Yakutsk">Asia/Yakutsk</option>
+                            
+                            <option value="Asia/Yangon">Asia/Yangon</option>
+                            
+                            <option value="Asia/Yekaterinburg">Asia/Yekaterinburg</option>
+                            
+                            <option value="Asia/Yerevan">Asia/Yerevan</option>
+                            
+                            <option value="Atlantic/Azores">Atlantic/Azores</option>
+                            
+                            <option value="Atlantic/Bermuda">Atlantic/Bermuda</option>
+                            
+                            <option value="Atlantic/Canary">Atlantic/Canary</option>
+                            
+                            <option value="Atlantic/Cape_Verde">Atlantic/Cape_Verde</option>
+                            
+                            <option value="Atlantic/Faeroe">Atlantic/Faeroe</option>
+                            
+                            <option value="Atlantic/Faroe">Atlantic/Faroe</option>
+                            
+                            <option value="Atlantic/Jan_Mayen">Atlantic/Jan_Mayen</option>
+                            
+                            <option value="Atlantic/Madeira">Atlantic/Madeira</option>
+                            
+                            <option value="Atlantic/Reykjavik">Atlantic/Reykjavik</option>
+                            
+                            <option value="Atlantic/South_Georgia">Atlantic/South_Georgia</option>
+                            
+                            <option value="Atlantic/St_Helena">Atlantic/St_Helena</option>
+                            
+                            <option value="Atlantic/Stanley">Atlantic/Stanley</option>
+                            
+                            <option value="Australia/ACT">Australia/ACT</option>
+                            
+                            <option value="Australia/Adelaide">Australia/Adelaide</option>
+                            
+                            <option value="Australia/Brisbane">Australia/Brisbane</option>
+                            
+                            <option value="Australia/Broken_Hill">Australia/Broken_Hill</option>
+                            
+                            <option value="Australia/Canberra">Australia/Canberra</option>
+                            
+                            <option value="Australia/Currie">Australia/Currie</option>
+                            
+                            <option value="Australia/Darwin">Australia/Darwin</option>
+                            
+                            <option value="Australia/Eucla">Australia/Eucla</option>
+                            
+                            <option value="Australia/Hobart">Australia/Hobart</option>
+                            
+                            <option value="Australia/LHI">Australia/LHI</option>
+                            
+                            <option value="Australia/Lindeman">Australia/Lindeman</option>
+                            
+                            <option value="Australia/Lord_Howe">Australia/Lord_Howe</option>
+                            
+                            <option value="Australia/Melbourne">Australia/Melbourne</option>
+                            
+                            <option value="Australia/NSW">Australia/NSW</option>
+                            
+                            <option value="Australia/North">Australia/North</option>
+                            
+                            <option value="Australia/Perth">Australia/Perth</option>
+                            
+                            <option value="Australia/Queensland">Australia/Queensland</option>
+                            
+                            <option value="Australia/South">Australia/South</option>
+                            
+                            <option value="Australia/Sydney">Australia/Sydney</option>
+                            
+                            <option value="Australia/Tasmania">Australia/Tasmania</option>
+                            
+                            <option value="Australia/Victoria">Australia/Victoria</option>
+                            
+                            <option value="Australia/West">Australia/West</option>
+                            
+                            <option value="Australia/Yancowinna">Australia/Yancowinna</option>
+                            
+                            <option value="Brazil/Acre">Brazil/Acre</option>
+                            
+                            <option value="Brazil/DeNoronha">Brazil/DeNoronha</option>
+                            
+                            <option value="Brazil/East">Brazil/East</option>
+                            
+                            <option value="Brazil/West">Brazil/West</option>
+                            
+                            <option value="CET">CET</option>
+                            
+                            <option value="CST6CDT">CST6CDT</option>
+                            
+                            <option value="Canada/Atlantic">Canada/Atlantic</option>
+                            
+                            <option value="Canada/Central">Canada/Central</option>
+                            
+                            <option value="Canada/Eastern">Canada/Eastern</option>
+                            
+                            <option value="Canada/Mountain">Canada/Mountain</option>
+                            
+                            <option value="Canada/Newfoundland">Canada/Newfoundland</option>
+                            
+                            <option value="Canada/Pacific">Canada/Pacific</option>
+                            
+                            <option value="Canada/Saskatchewan">Canada/Saskatchewan</option>
+                            
+                            <option value="Canada/Yukon">Canada/Yukon</option>
+                            
+                            <option value="Chile/Continental">Chile/Continental</option>
+                            
+                            <option value="Chile/EasterIsland">Chile/EasterIsland</option>
+                            
+                            <option value="Cuba">Cuba</option>
+                            
+                            <option value="EET">EET</option>
+                            
+                            <option value="EST">EST</option>
+                            
+                            <option value="EST5EDT">EST5EDT</option>
+                            
+                            <option value="Egypt">Egypt</option>
+                            
+                            <option value="Eire">Eire</option>
+                            
+                            <option value="Etc/GMT">Etc/GMT</option>
+                            
+                            <option value="Etc/GMT+0">Etc/GMT+0</option>
+                            
+                            <option value="Etc/GMT+1">Etc/GMT+1</option>
+                            
+                            <option value="Etc/GMT+10">Etc/GMT+10</option>
+                            
+                            <option value="Etc/GMT+11">Etc/GMT+11</option>
+                            
+                            <option value="Etc/GMT+12">Etc/GMT+12</option>
+                            
+                            <option value="Etc/GMT+2">Etc/GMT+2</option>
+                            
+                            <option value="Etc/GMT+3">Etc/GMT+3</option>
+                            
+                            <option value="Etc/GMT+4">Etc/GMT+4</option>
+                            
+                            <option value="Etc/GMT+5">Etc/GMT+5</option>
+                            
+                            <option value="Etc/GMT+6">Etc/GMT+6</option>
+                            
+                            <option value="Etc/GMT+7">Etc/GMT+7</option>
+                            
+                            <option value="Etc/GMT+8">Etc/GMT+8</option>
+                            
+                            <option value="Etc/GMT+9">Etc/GMT+9</option>
+                            
+                            <option value="Etc/GMT-0">Etc/GMT-0</option>
+                            
+                            <option value="Etc/GMT-1">Etc/GMT-1</option>
+                            
+                            <option value="Etc/GMT-10">Etc/GMT-10</option>
+                            
+                            <option value="Etc/GMT-11">Etc/GMT-11</option>
+                            
+                            <option value="Etc/GMT-12">Etc/GMT-12</option>
+                            
+                            <option value="Etc/GMT-13">Etc/GMT-13</option>
+                            
+                            <option value="Etc/GMT-14">Etc/GMT-14</option>
+                            
+                            <option value="Etc/GMT-2">Etc/GMT-2</option>
+                            
+                            <option value="Etc/GMT-3">Etc/GMT-3</option>
+                            
+                            <option value="Etc/GMT-4">Etc/GMT-4</option>
+                            
+                            <option value="Etc/GMT-5">Etc/GMT-5</option>
+                            
+                            <option value="Etc/GMT-6">Etc/GMT-6</option>
+                            
+                            <option value="Etc/GMT-7">Etc/GMT-7</option>
+                            
+                            <option value="Etc/GMT-8">Etc/GMT-8</option>
+                            
+                            <option value="Etc/GMT-9">Etc/GMT-9</option>
+                            
+                            <option value="Etc/GMT0">Etc/GMT0</option>
+                            
+                            <option value="Etc/Greenwich">Etc/Greenwich</option>
+                            
+                            <option value="Etc/UCT">Etc/UCT</option>
+                            
+                            <option value="Etc/UTC">Etc/UTC</option>
+                            
+                            <option value="Etc/Universal">Etc/Universal</option>
+                            
+                            <option value="Etc/Zulu">Etc/Zulu</option>
+                            
+                            <option value="Europe/Amsterdam">Europe/Amsterdam</option>
+                            
+                            <option value="Europe/Andorra">Europe/Andorra</option>
+                            
+                            <option value="Europe/Astrakhan">Europe/Astrakhan</option>
+                            
+                            <option value="Europe/Athens">Europe/Athens</option>
+                            
+                            <option value="Europe/Belfast">Europe/Belfast</option>
+                            
+                            <option value="Europe/Belgrade">Europe/Belgrade</option>
+                            
+                            <option value="Europe/Berlin">Europe/Berlin</option>
+                            
+                            <option value="Europe/Bratislava">Europe/Bratislava</option>
+                            
+                            <option value="Europe/Brussels">Europe/Brussels</option>
+                            
+                            <option value="Europe/Bucharest">Europe/Bucharest</option>
+                            
+                            <option value="Europe/Budapest">Europe/Budapest</option>
+                            
+                            <option value="Europe/Busingen">Europe/Busingen</option>
+                            
+                            <option value="Europe/Chisinau">Europe/Chisinau</option>
+                            
+                            <option value="Europe/Copenhagen">Europe/Copenhagen</option>
+                            
+                            <option value="Europe/Dublin">Europe/Dublin</option>
+                            
+                            <option value="Europe/Gibraltar">Europe/Gibraltar</option>
+                            
+                            <option value="Europe/Guernsey">Europe/Guernsey</option>
+                            
+                            <option value="Europe/Helsinki">Europe/Helsinki</option>
+                            
+                            <option value="Europe/Isle_of_Man">Europe/Isle_of_Man</option>
+                            
+                            <option value="Europe/Istanbul">Europe/Istanbul</option>
+                            
+                            <option value="Europe/Jersey">Europe/Jersey</option>
+                            
+                            <option value="Europe/Kaliningrad">Europe/Kaliningrad</option>
+                            
+                            <option value="Europe/Kiev">Europe/Kiev</option>
+                            
+                            <option value="Europe/Kirov">Europe/Kirov</option>
+                            
+                            <option value="Europe/Kyiv">Europe/Kyiv</option>
+                            
+                            <option value="Europe/Lisbon">Europe/Lisbon</option>
+                            
+                            <option value="Europe/Ljubljana">Europe/Ljubljana</option>
+                            
+                            <option value="Europe/London">Europe/London</option>
+                            
+                            <option value="Europe/Luxembourg">Europe/Luxembourg</option>
+                            
+                            <option value="Europe/Madrid">Europe/Madrid</option>
+                            
+                            <option value="Europe/Malta">Europe/Malta</option>
+                            
+                            <option value="Europe/Mariehamn">Europe/Mariehamn</option>
+                            
+                            <option value="Europe/Minsk">Europe/Minsk</option>
+                            
+                            <option value="Europe/Monaco">Europe/Monaco</option>
+                            
+                            <option value="Europe/Moscow">Europe/Moscow</option>
+                            
+                            <option value="Europe/Nicosia">Europe/Nicosia</option>
+                            
+                            <option value="Europe/Oslo">Europe/Oslo</option>
+                            
+                            <option value="Europe/Paris">Europe/Paris</option>
+                            
+                            <option value="Europe/Podgorica">Europe/Podgorica</option>
+                            
+                            <option value="Europe/Prague">Europe/Prague</option>
+                            
+                            <option value="Europe/Riga">Europe/Riga</option>
+                            
+                            <option value="Europe/Rome">Europe/Rome</option>
+                            
+                            <option value="Europe/Samara">Europe/Samara</option>
+                            
+                            <option value="Europe/San_Marino">Europe/San_Marino</option>
+                            
+                            <option value="Europe/Sarajevo">Europe/Sarajevo</option>
+                            
+                            <option value="Europe/Saratov">Europe/Saratov</option>
+                            
+                            <option value="Europe/Simferopol">Europe/Simferopol</option>
+                            
+                            <option value="Europe/Skopje">Europe/Skopje</option>
+                            
+                            <option value="Europe/Sofia">Europe/Sofia</option>
+                            
+                            <option value="Europe/Stockholm">Europe/Stockholm</option>
+                            
+                            <option value="Europe/Tallinn">Europe/Tallinn</option>
+                            
+                            <option value="Europe/Tirane">Europe/Tirane</option>
+                            
+                            <option value="Europe/Tiraspol">Europe/Tiraspol</option>
+                            
+                            <option value="Europe/Ulyanovsk">Europe/Ulyanovsk</option>
+                            
+                            <option value="Europe/Uzhgorod">Europe/Uzhgorod</option>
+                            
+                            <option value="Europe/Vaduz">Europe/Vaduz</option>
+                            
+                            <option value="Europe/Vatican">Europe/Vatican</option>
+                            
+                            <option value="Europe/Vienna">Europe/Vienna</option>
+                            
+                            <option value="Europe/Vilnius">Europe/Vilnius</option>
+                            
+                            <option value="Europe/Volgograd">Europe/Volgograd</option>
+                            
+                            <option value="Europe/Warsaw">Europe/Warsaw</option>
+                            
+                            <option value="Europe/Zagreb">Europe/Zagreb</option>
+                            
+                            <option value="Europe/Zaporozhye">Europe/Zaporozhye</option>
+                            
+                            <option value="Europe/Zurich">Europe/Zurich</option>
+                            
+                            <option value="Factory">Factory</option>
+                            
+                            <option value="GB">GB</option>
+                            
+                            <option value="GB-Eire">GB-Eire</option>
+                            
+                            <option value="GMT">GMT</option>
+                            
+                            <option value="GMT+0">GMT+0</option>
+                            
+                            <option value="GMT-0">GMT-0</option>
+                            
+                            <option value="GMT0">GMT0</option>
+                            
+                            <option value="Greenwich">Greenwich</option>
+                            
+                            <option value="HST">HST</option>
+                            
+                            <option value="Hongkong">Hongkong</option>
+                            
+                            <option value="Iceland">Iceland</option>
+                            
+                            <option value="Indian/Antananarivo">Indian/Antananarivo</option>
+                            
+                            <option value="Indian/Chagos">Indian/Chagos</option>
+                            
+                            <option value="Indian/Christmas">Indian/Christmas</option>
+                            
+                            <option value="Indian/Cocos">Indian/Cocos</option>
+                            
+                            <option value="Indian/Comoro">Indian/Comoro</option>
+                            
+                            <option value="Indian/Kerguelen">Indian/Kerguelen</option>
+                            
+                            <option value="Indian/Mahe">Indian/Mahe</option>
+                            
+                            <option value="Indian/Maldives">Indian/Maldives</option>
+                            
+                            <option value="Indian/Mauritius">Indian/Mauritius</option>
+                            
+                            <option value="Indian/Mayotte">Indian/Mayotte</option>
+                            
+                            <option value="Indian/Reunion">Indian/Reunion</option>
+                            
+                            <option value="Iran">Iran</option>
+                            
+                            <option value="Israel">Israel</option>
+                            
+                            <option value="Jamaica">Jamaica</option>
+                            
+                            <option value="Japan">Japan</option>
+                            
+                            <option value="Kwajalein">Kwajalein</option>
+                            
+                            <option value="Libya">Libya</option>
+                            
+                            <option value="MET">MET</option>
+                            
+                            <option value="MST">MST</option>
+                            
+                            <option value="MST7MDT">MST7MDT</option>
+                            
+                            <option value="Mexico/BajaNorte">Mexico/BajaNorte</option>
+                            
+                            <option value="Mexico/BajaSur">Mexico/BajaSur</option>
+                            
+                            <option value="Mexico/General">Mexico/General</option>
+                            
+                            <option value="NZ">NZ</option>
+                            
+                            <option value="NZ-CHAT">NZ-CHAT</option>
+                            
+                            <option value="Navajo">Navajo</option>
+                            
+                            <option value="PRC">PRC</option>
+                            
+                            <option value="PST8PDT">PST8PDT</option>
+                            
+                            <option value="Pacific/Apia">Pacific/Apia</option>
+                            
+                            <option value="Pacific/Auckland">Pacific/Auckland</option>
+                            
+                            <option value="Pacific/Bougainville">Pacific/Bougainville</option>
+                            
+                            <option value="Pacific/Chatham">Pacific/Chatham</option>
+                            
+                            <option value="Pacific/Chuuk">Pacific/Chuuk</option>
+                            
+                            <option value="Pacific/Easter">Pacific/Easter</option>
+                            
+                            <option value="Pacific/Efate">Pacific/Efate</option>
+                            
+                            <option value="Pacific/Enderbury">Pacific/Enderbury</option>
+                            
+                            <option value="Pacific/Fakaofo">Pacific/Fakaofo</option>
+                            
+                            <option value="Pacific/Fiji">Pacific/Fiji</option>
+                            
+                            <option value="Pacific/Funafuti">Pacific/Funafuti</option>
+                            
+                            <option value="Pacific/Galapagos">Pacific/Galapagos</option>
+                            
+                            <option value="Pacific/Gambier">Pacific/Gambier</option>
+                            
+                            <option value="Pacific/Guadalcanal">Pacific/Guadalcanal</option>
+                            
+                            <option value="Pacific/Guam">Pacific/Guam</option>
+                            
+                            <option value="Pacific/Honolulu">Pacific/Honolulu</option>
+                            
+                            <option value="Pacific/Johnston">Pacific/Johnston</option>
+                            
+                            <option value="Pacific/Kanton">Pacific/Kanton</option>
+                            
+                            <option value="Pacific/Kiritimati">Pacific/Kiritimati</option>
+                            
+                            <option value="Pacific/Kosrae">Pacific/Kosrae</option>
+                            
+                            <option value="Pacific/Kwajalein">Pacific/Kwajalein</option>
+                            
+                            <option value="Pacific/Majuro">Pacific/Majuro</option>
+                            
+                            <option value="Pacific/Marquesas">Pacific/Marquesas</option>
+                            
+                            <option value="Pacific/Midway">Pacific/Midway</option>
+                            
+                            <option value="Pacific/Nauru">Pacific/Nauru</option>
+                            
+                            <option value="Pacific/Niue">Pacific/Niue</option>
+                            
+                            <option value="Pacific/Norfolk">Pacific/Norfolk</option>
+                            
+                            <option value="Pacific/Noumea">Pacific/Noumea</option>
+                            
+                            <option value="Pacific/Pago_Pago">Pacific/Pago_Pago</option>
+                            
+                            <option value="Pacific/Palau">Pacific/Palau</option>
+                            
+                            <option value="Pacific/Pitcairn">Pacific/Pitcairn</option>
+                            
+                            <option value="Pacific/Pohnpei">Pacific/Pohnpei</option>
+                            
+                            <option value="Pacific/Ponape">Pacific/Ponape</option>
+                            
+                            <option value="Pacific/Port_Moresby">Pacific/Port_Moresby</option>
+                            
+                            <option value="Pacific/Rarotonga">Pacific/Rarotonga</option>
+                            
+                            <option value="Pacific/Saipan">Pacific/Saipan</option>
+                            
+                            <option value="Pacific/Samoa">Pacific/Samoa</option>
+                            
+                            <option value="Pacific/Tahiti">Pacific/Tahiti</option>
+                            
+                            <option value="Pacific/Tarawa">Pacific/Tarawa</option>
+                            
+                            <option value="Pacific/Tongatapu">Pacific/Tongatapu</option>
+                            
+                            <option value="Pacific/Truk">Pacific/Truk</option>
+                            
+                            <option value="Pacific/Wake">Pacific/Wake</option>
+                            
+                            <option value="Pacific/Wallis">Pacific/Wallis</option>
+                            
+                            <option value="Pacific/Yap">Pacific/Yap</option>
+                            
+                            <option value="Poland">Poland</option>
+                            
+                            <option value="Portugal">Portugal</option>
+                            
+                            <option value="ROC">ROC</option>
+                            
+                            <option value="ROK">ROK</option>
+                            
+                            <option value="Singapore">Singapore</option>
+                            
+                            <option value="Turkey">Turkey</option>
+                            
+                            <option value="UCT">UCT</option>
+                            
+                            <option value="US/Alaska">US/Alaska</option>
+                            
+                            <option value="US/Aleutian">US/Aleutian</option>
+                            
+                            <option value="US/Arizona">US/Arizona</option>
+                            
+                            <option value="US/Central">US/Central</option>
+                            
+                            <option value="US/East-Indiana">US/East-Indiana</option>
+                            
+                            <option value="US/Eastern">US/Eastern</option>
+                            
+                            <option value="US/Hawaii">US/Hawaii</option>
+                            
+                            <option value="US/Indiana-Starke">US/Indiana-Starke</option>
+                            
+                            <option value="US/Michigan">US/Michigan</option>
+                            
+                            <option value="US/Mountain">US/Mountain</option>
+                            
+                            <option value="US/Pacific">US/Pacific</option>
+                            
+                            <option value="US/Samoa">US/Samoa</option>
+                            
+                            <option value="UTC">UTC</option>
+                            
+                            <option value="Universal">Universal</option>
+                            
+                            <option value="W-SU">W-SU</option>
+                            
+                            <option value="WET">WET</option>
+                            
+                            <option value="Zulu">Zulu</option>
+                            
+                            <option value="localtime">localtime</option>
+                            
+                        </select>
+                        <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
+                            Groups trips and events into calendar days using this timezone. Leave on Auto to use the timezone of whatever device you view the map from.
+                        </p>
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-primary" style="width:100%">Save Mapping Settings</button>
+            </form>
+        </div>
+    </details>
+
+    <!-- Network Settings -->
+    <details class="settings-section" id="network-file-sharing">
+        <summary>Network File Sharing</summary>
+        <div class="section-content">
+            <form method="post" action="/settings/save/network">
+                <p style="font-size:0.85rem; color:var(--text-secondary); margin:0 0 12px">
+                    Enable Samba (SMB) network sharing so you can browse the
+                    TeslaCam and media partitions from your computer over WiFi.
+                </p>
+
+                <div class="form-group" style="margin-bottom:12px; padding:12px; background-color:var(--bg-info); border:1px solid var(--border-color); border-radius:var(--radius-md,8px)">
+                    <label style="display:flex; align-items:center; gap:12px; font-size:0.95rem; min-height:44px; cursor:pointer; margin:0">
+                        <input type="checkbox" name="samba_enabled" id="samba_enabled" value="on" style="width: 22px; height: 22px; flex: 0 0 22px;">
+                        <span><strong>Enable network file sharing (SMB)</strong></span>
+                    </label>
+                    <p style="font-size:0.8rem; color:var(--text-secondary); margin:8px 0 0 34px">
+                        When enabled, the following SMB shares are exposed on the local network:
+                    </p>
+                    <ul style="font-size:0.85rem; margin:6px 0 0 34px; padding:0; list-style:none">
+                        
+                            <li style="margin:2px 0"><code>\\DESKTOP-AQEMHBK\TeslaCam</code> — <span style="color:var(--text-secondary)">TeslaCam</span></li>
+                        
+                            <li style="margin:2px 0"><code>\\DESKTOP-AQEMHBK\Media</code> — <span style="color:var(--text-secondary)">Media</span></li>
+                        
+                    </ul>
+                </div>
+
+                <div class="form-group" style="margin-bottom:12px">
+                    <label style="font-size:0.85rem">Samba Password</label>
+                    <div style="display:flex; gap:8px">
+                        <input type="password" name="samba_password" id="samba_password" value="" placeholder="Set a password before clients can connect" class="settings-form-input" style="flex: 1 1 0%;" autocomplete="new-password">
+                        <button type="button" onclick="toggleSambaPassword(this)" class="btn btn-secondary" style="padding:10px 14px; font-size:0.85rem; min-height:44px">Show</button>
+                    </div>
+                    <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
+                        Username: <code>pi</code> · <span style="color:var(--warning-text,#b26a00)">no password set yet</span>
+                    </p>
+                </div>
+
+                <button type="submit" class="btn btn-primary" style="width:100%">Save Network Settings</button>
+            </form>
+        </div>
+    </details>
+
+    
+
+<details class="settings-section" id="storage-health-section">
+  <summary>Storage Health</summary>
+  <div class="section-content" id="storage-health-card" data-poll-url="/api/storage/health">
+    <div class="storage-health-header">
+      <span class="status-dot health-dot health-dot-unknown" id="storage-health-dot" aria-label="Storage health severity"></span>
+      <strong id="storage-health-summary">
+        
+          Checking…
+        
+      </strong>
+    </div>
+
+    <dl class="storage-health-grid" id="storage-health-grid">
+      <dt>Device</dt>
+      <dd id="sh-device">
+        —
+      </dd>
+
+      <dt>Filesystem</dt>
+      <dd id="sh-fs">
+        —
+      </dd>
+
+      <dt>Mount</dt>
+      <dd id="sh-mount">
+        —
+      </dd>
+
+      <dt>Filesystem errors</dt>
+      <dd id="sh-fserrors">
+        —
+      </dd>
+
+      <dt>I/O errors (24 h)</dt>
+      <dd id="sh-ioerrors">
+        —
+      </dd>
+
+      <dt>Last offline fsck (root, boot-time)</dt>
+      <dd id="sh-lastcheck">
+        —
+      </dd>
+
+      <dt>Online check (read-only, root)</dt>
+      <dd id="sh-onlinecheck">
+        —
+      </dd>
+
+      <dt>Online scrub (weekly)</dt>
+      <dd id="sh-scrub">
+        —
+      </dd>
+
+      <dt>TRIM</dt>
+      <dd id="sh-trim">
+        —
+      </dd>
+    </dl>
+
+    <div class="storage-health-actions" id="storage-health-actions" data-online-check-url="/api/storage/health/online-check">
+      <div class="storage-health-action-row">
+        <button type="button" class="btn btn-secondary" id="sh-online-check">
+          
+            Run read-only check now
+          
+        </button>
+        <span class="storage-health-action-status" id="sh-online-check-status" role="status" aria-live="polite"></span>
+      </div>
+      <p class="storage-health-action-help">
+        The read-only check runs <code>e2fsck&nbsp;-nf</code> against the
+        mounted root filesystem. It makes no changes and is safe to run
+        any time, but may report false positives because metadata is in
+        flux on a read-write mount. Typically takes 30–90&nbsp;s on a
+        healthy SD card. The check also runs automatically in the
+        background at most once every 7&nbsp;days.
+      </p>
+    </div>
+
+    <p class="storage-health-footer">
+      SD cards expose no wear telemetry (no SMART, no per-block checksums).
+      Plan to replace the card every 12 months and keep cloud archive enabled
+      so a card failure never costs you data.
+    </p>
+  </div>
+</details>
+
+<script>
+(function () {
+  var card = document.getElementById('storage-health-card');
+  if (!card) return;
+  var url = card.getAttribute('data-poll-url');
+  var actions = document.getElementById('storage-health-actions');
+  var onlineCheckUrl = actions ? actions.getAttribute('data-online-check-url') : null;
+  var POLL_MS = 60000;
+  var FAST_POLL_MS = 5000;
+  var fastPollHandle = null;
+  var dot = document.getElementById('storage-health-dot');
+  var summary = document.getElementById('storage-health-summary');
+  var onlineCheckBtn = document.getElementById('sh-online-check');
+  var onlineCheckStatus = document.getElementById('sh-online-check-status');
+
+  function setText(id, text) {
+    var el = document.getElementById(id);
+    if (el) el.textContent = text;
+  }
+
+  function fmt(v, fallback) {
+    return (v === null || v === undefined || v === '') ? (fallback || '—') : v;
+  }
+
+  // Format an ISO-8601 timestamp (with offset, e.g. 2025-09-30T20:14:54-04:00)
+  // as a short locale string in the user's browser timezone. Falls back to
+  // the raw value if Date parsing fails (avoids a blank cell on bad input).
+  function formatIsoLocal(iso) {
+    if (!iso) return '';
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return iso;
+    try {
+      return d.toLocaleString(undefined, {
+        year: 'numeric', month: 'short', day: '2-digit',
+        hour: '2-digit', minute: '2-digit'
+      });
+    } catch (_) {
+      return d.toLocaleString();
+    }
+  }
+
+  function applyLocalTimes(root) {
+    var nodes = (root || document).querySelectorAll('time[data-iso]');
+    nodes.forEach(function (n) {
+      var iso = n.getAttribute('data-iso');
+      var local = formatIsoLocal(iso);
+      if (local) {
+        n.textContent = local;
+        n.setAttribute('title', iso);
+      }
+    });
+  }
+
+  function setTimeCell(id, iso, prefix) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    if (!iso) { el.textContent = '—'; return; }
+    var local = formatIsoLocal(iso);
+    var text = (prefix ? prefix : '') + local;
+    el.innerHTML = '';
+    if (prefix) el.appendChild(document.createTextNode(prefix));
+    var t = document.createElement('time');
+    t.setAttribute('data-iso', iso);
+    t.setAttribute('title', iso);
+    t.textContent = local;
+    el.appendChild(t);
+  }
+
+  function render(data) {
+    if (!data) return;
+    if (dot) {
+      var sev = data.severity || 'unknown';
+      var cls = sev === 'critical' ? 'health-dot-error'
+              : sev === 'warn' ? 'health-dot-warn'
+              : sev === 'ok' ? 'health-dot-ok'
+              : 'health-dot-unknown';
+      dot.className = 'status-dot health-dot ' + cls;
+    }
+    if (summary && data.messages && data.messages.length) {
+      summary.textContent = data.messages[0];
+    }
+    var devName = data.sd_card_name
+      ? data.sd_card_name + (data.sd_card_manfid ? ' (manfid ' + data.sd_card_manfid + ')' : '')
+      : '—';
+    setText('sh-device', devName);
+    setText('sh-fs', fmt(data.fs_type) + ' on ' + fmt(data.device));
+    var mountEl = document.getElementById('sh-mount');
+    if (mountEl) {
+      if (data.mount_readonly === true) {
+        mountEl.innerHTML = '<span class="storage-health-bad">READ-ONLY — Tesla cannot record clips</span>';
+      } else if (data.mount_readonly === false) {
+        mountEl.textContent = 'read-write';
+      } else {
+        mountEl.textContent = '—';
+      }
+    }
+    var fserrEl = document.getElementById('sh-fserrors');
+    if (fserrEl) {
+      if (data.fs_errors === null || data.fs_errors === undefined) {
+        fserrEl.textContent = '—';
+      } else {
+        fserrEl.innerHTML = '';
+        fserrEl.appendChild(document.createTextNode(String(data.fs_errors)));
+        if (data.fs_errors > 0 && data.fs_last_error_iso) {
+          fserrEl.appendChild(document.createTextNode(' (last '));
+          var t = document.createElement('time');
+          t.setAttribute('data-iso', data.fs_last_error_iso);
+          t.setAttribute('title', data.fs_last_error_iso);
+          t.textContent = formatIsoLocal(data.fs_last_error_iso);
+          fserrEl.appendChild(t);
+          fserrEl.appendChild(document.createTextNode(')'));
+        }
+      }
+    }
+    setText('sh-ioerrors', fmt(data.io_errors_24h));
+    setTimeCell('sh-lastcheck', data.last_checked_iso, '');
+    setTimeCell('sh-scrub', data.e2scrub_last_run_iso, data.e2scrub_last_run_iso ? 'last ran ' : '');
+    setTimeCell('sh-trim', data.fstrim_last_run_iso, data.fstrim_last_run_iso ? 'last ran ' : '');
+
+    // Online check row + button state.
+    var onlineEl = document.getElementById('sh-onlinecheck');
+    if (onlineEl) {
+      if (data.online_check_iso) {
+        onlineEl.innerHTML = '';
+        var t = document.createElement('time');
+        t.setAttribute('data-iso', data.online_check_iso);
+        t.setAttribute('title', data.online_check_iso);
+        t.textContent = formatIsoLocal(data.online_check_iso);
+        onlineEl.appendChild(t);
+        if (data.online_check_status) {
+          onlineEl.appendChild(document.createTextNode(' — ' + data.online_check_status));
+        }
+        if (data.online_check_message) {
+          onlineEl.appendChild(document.createElement('br'));
+          var small = document.createElement('small');
+          small.textContent = data.online_check_message;
+          onlineEl.appendChild(small);
+        }
+      } else if (data.online_check_running) {
+        onlineEl.textContent = 'running…';
+      } else {
+        onlineEl.textContent = '—';
+      }
+    }
+    if (onlineCheckBtn) {
+      onlineCheckBtn.disabled = !!data.online_check_running;
+      onlineCheckBtn.textContent = data.online_check_running
+        ? 'Read-only check running…'
+        : 'Run read-only check now';
+    }
+    if (data.online_check_running) {
+      startFastPoll();
+    } else {
+      stopFastPoll();
+    }
+
+    var section = document.getElementById('storage-health-section');
+    if (section && data.severity && data.severity !== 'ok' && !section.open) {
+      section.open = true;
+    }
+  }
+
+  function poll() {
+    if (document.hidden) return;
+    fetch(url, { credentials: 'same-origin' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(render)
+      .catch(function () { /* swallow — page already shows last-known state */ });
+  }
+
+  if (onlineCheckBtn) onlineCheckBtn.addEventListener('click', function () {
+    if (!onlineCheckUrl) return;
+    onlineCheckBtn.disabled = true;
+    onlineCheckBtn.textContent = 'Starting…';
+    if (onlineCheckStatus) onlineCheckStatus.textContent = 'Starting read-only check…';
+    fetch(onlineCheckUrl, { method: 'POST', credentials: 'same-origin' })
+      .then(function (r) {
+        return r.json().then(function (body) { return { ok: r.ok || r.status === 202, body: body }; });
+      })
+      .then(function (result) {
+        if (result.ok) {
+          if (onlineCheckStatus) {
+            onlineCheckStatus.textContent = result.body && result.body.started
+              ? 'Running… this can take 30–90 s.'
+              : 'A check is already running.';
+          }
+          if (result.body && result.body.snapshot) render(result.body.snapshot);
+          startFastPoll();
+        } else {
+          if (onlineCheckStatus) {
+            onlineCheckStatus.textContent = (result.body && result.body.error)
+              ? ('Failed: ' + result.body.error)
+              : 'Failed.';
+          }
+          onlineCheckBtn.disabled = false;
+          onlineCheckBtn.textContent = 'Run read-only check now';
+        }
+      })
+      .catch(function () {
+        if (onlineCheckStatus) onlineCheckStatus.textContent = 'Network error.';
+        onlineCheckBtn.disabled = false;
+        onlineCheckBtn.textContent = 'Run read-only check now';
+      });
+  });
+
+  function startFastPoll() {
+    if (fastPollHandle !== null) return;
+    fastPollHandle = setInterval(poll, FAST_POLL_MS);
+  }
+  function stopFastPoll() {
+    if (fastPollHandle !== null) {
+      clearInterval(fastPollHandle);
+      fastPollHandle = null;
+    }
+    if (onlineCheckStatus && onlineCheckStatus.textContent.indexOf('Running') === 0) {
+      onlineCheckStatus.textContent = '';
+    }
+  }
+
+  // Initial pass: convert server-rendered ISO strings to local-time display.
+  applyLocalTimes(card);
+
+  // Kick off an immediate fetch so the "Checking…" placeholder is
+  // replaced as soon as the API responds (~tens of ms locally) rather
+  // than after the first POLL_MS tick. The server-rendered context
+  // intentionally ships storage_health=None to keep the index render
+  // path fast — this fetch is what actually hydrates the card.
+  poll();
+  setInterval(poll, POLL_MS);
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden) poll();
+  });
+})();
+</script>
+
+<style>
+.storage-health-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.storage-health-grid {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 16px;
+  margin: 0 0 12px 0;
+  font-size: 0.9rem;
+}
+.storage-health-grid dt {
+  color: var(--text-secondary);
+  font-weight: normal;
+}
+.storage-health-grid dd {
+  margin: 0;
+  color: var(--text-primary);
+  word-break: break-word;
+}
+.storage-health-bad {
+  color: var(--color-error, var(--text-primary));
+  font-weight: 600;
+}
+.storage-health-actions {
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid var(--border-subtle, var(--text-secondary));
+  border-radius: 6px;
+}
+.storage-health-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+.storage-health-action-status {
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+}
+.storage-health-action-help {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  margin: 8px 0 0 0;
+}
+.storage-health-footer {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  margin: 8px 0 0 0;
+}
+</style>
+
+    <!-- System -->
+    <details class="settings-section">
+        <summary>System</summary>
+        <div class="section-content">
+            
+            <div style="display:grid; grid-template-columns:auto 1fr; gap:6px 16px; font-size:0.9rem;">
+                <span style="color:var(--text-secondary)">Hostname</span>
+                <strong>DESKTOP-AQEMHBK</strong>
+
+                <span style="color:var(--text-secondary)">IP Address</span>
+                <span>N/A</span>
+
+                <span style="color:var(--text-secondary)">Uptime</span>
+                <span>4h 6m</span>
+
+                <span style="color:var(--text-secondary)">Platform</span>
+                <span>Linux-6.18.26.1-microsoft-standard-WSL2-x86_64-with-glibc2.39 · Python 3.13.13</span>
+
+                <span style="color:var(--text-secondary)">Memory</span>
+                <span>30707 MB free / 31671 MB total</span>
+
+                <span style="color:var(--text-secondary)">Version</span>
+                <code style="font-size:0.8rem">B-1</code>
+            </div>
+
+            
+            
+        </div>
+    </details>
+</div>
+
+<script>
+function togglePassword(btn) {
+    const passField = document.getElementById('ap_passphrase');
+    if (passField.type === 'password') {
+        passField.type = 'text';
+        btn.textContent = 'Hide';
+    } else {
+        passField.type = 'password';
+        btn.textContent = 'Show';
+    }
+}
+
+function toggleSambaPassword(btn) {
+    const passField = document.getElementById('samba_password');
+    if (passField.type === 'password') {
+        passField.type = 'text';
+        btn.textContent = 'Hide';
+    } else {
+        passField.type = 'password';
+        btn.textContent = 'Show';
+    }
+}
+
+function toggleWifiPassword(btn) {
+    const passField = document.getElementById('newWifiPassword');
+    if (passField.type === 'password') {
+        passField.type = 'text';
+        btn.textContent = 'Hide';
+    } else {
+        passField.type = 'password';
+        btn.textContent = 'Show';
+    }
+}
+
+// --- WiFi Network Management ---
+function loadSavedNetworks() {
+    fetch('/api/wifi/saved')
+    .then(r => r.json())
+    .then(networks => {
+        const el = document.getElementById('savedNetworksList');
+        if (!networks.length || networks.error) {
+            el.innerHTML = '<div style="text-align:center;padding:12px;color:var(--text-secondary)">No saved networks</div>';
+            return;
+        }
+        let html = '';
+        networks.forEach((net, idx) => {
+            const dot = net.active ? '<span style="color:var(--success-text, #22c55e);margin-right:6px">●</span>' : '<span style="margin-right:14px"></span>';
+            const signal = net.in_range ? '<span style="font-size:0.8em;color:var(--text-secondary)">' + getSignalIcon(net.signal) + ' ' + net.signal + '%</span>' : '<span style="font-size:0.8em;color:var(--text-secondary)">Not in range</span>';
+            const name = (net.ssid || net.name).replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            // Defence against XSS via SSID. The value is embedded inside
+            //   onclick="someFn('VALUE')"
+            // so we have to escape for two contexts in order:
+            //   1. JS string literal: backslash, then single quote (the JS
+            //      string delimiter).
+            //   2. HTML attribute value: ampersand first (must come before
+            //      other &-entities so we don't double-encode), then the
+            //      attribute delimiter (").
+            // Without the HTML attribute pass, an SSID containing `"` or
+            // `&quot;` could close the onclick attribute and inject
+            // arbitrary HTML. The order matters in BOTH passes.
+            const escapedName = net.name
+                .replace(/\\/g, '\\\\')   // JS: backslash
+                .replace(/'/g, "\\'")     // JS: single quote (string delimiter)
+                .replace(/&/g, '&amp;')   // HTML attr: ampersand (first!)
+                .replace(/"/g, '&quot;'); // HTML attr: double quote (delimiter)
+            html += '<div style="display:flex;align-items:center;padding:8px 4px;border-bottom:1px solid var(--border-color, var(--border));gap:6px">';
+            html += dot;
+            html += '<span style="flex:1;font-size:0.875rem;font-weight:' + (net.active ? '600' : '400') + '">' + name + '</span>';
+            html += signal;
+            // Connect button: only shown for non-active networks. Disabled if not in range.
+            if (!net.active) {
+                const cantConnect = !net.in_range;
+                html += '<button class="edit-btn wifi-connect-btn" onclick="connectToNetwork(\'' + escapedName + '\')" title="' + (cantConnect ? 'Network not in range' : 'Connect to this network now') + '" style="padding:2px 8px;font-size:0.8em;min-height:auto"' + (cantConnect ? ' disabled' : '') + '>Connect</button>';
+            }
+            html += '<button class="edit-btn" onclick="moveNetwork(\'' + escapedName + '\',-1)" title="Move up" style="padding:2px 6px;font-size:0.8em;min-height:auto"' + (idx === 0 ? ' disabled' : '') + '>▲</button>';
+            html += '<button class="edit-btn" onclick="moveNetwork(\'' + escapedName + '\',1)" title="Move down" style="padding:2px 6px;font-size:0.8em;min-height:auto"' + (idx === networks.length - 1 ? ' disabled' : '') + '>▼</button>';
+            html += '<button class="present-btn" onclick="forgetNetwork(\'' + escapedName + '\')" title="Forget" style="padding:2px 6px;font-size:0.8em;min-height:auto">✕</button>';
+            html += '</div>';
+        });
+        el.innerHTML = html;
+        el._networks = networks;
+    })
+    .catch(e => {
+        document.getElementById('savedNetworksList').innerHTML = '<div style="color:var(--error-text)">Failed to load networks</div>';
+    });
+}
+
+function moveNetwork(name, direction) {
+    const el = document.getElementById('savedNetworksList');
+    const nets = el._networks;
+    if (!nets) return;
+    const idx = nets.findIndex(n => n.name === name);
+    const newIdx = idx + direction;
+    if (newIdx < 0 || newIdx >= nets.length) return;
+    [nets[idx], nets[newIdx]] = [nets[newIdx], nets[idx]];
+    const ordered = nets.map(n => n.name);
+    fetch('/api/wifi/reorder', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({networks: ordered})
+    }).then(r => r.json()).then(data => {
+        if (data.success) loadSavedNetworks();
+        else alert(data.message || 'Reorder failed');
+    });
+}
+
+function forgetNetwork(name) {
+    if (!confirm('Forget network "' + name + '"?')) return;
+    fetch('/settings/wifi/forget', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: name})
+    }).then(r => r.json()).then(data => {
+        if (data.message) alert(data.message);
+        loadSavedNetworks();
+    });
+}
+
+function connectToNetwork(name) {
+    const msg = 'Connect to "' + name + '" now?\n\n'
+        + 'If the offline access point is currently active, it will drop for ~30-60 seconds '
+        + 'while we attempt the connection. After about 60-90 seconds:\n\n'
+        + '  - If WiFi reconnect succeeds, the AP stays off. Reach the Pi at '
+        + 'http://cybertruckusb.local on your home WiFi.\n'
+        + '  - If WiFi reconnect fails, the AP comes back automatically. '
+        + 'Reconnect to the TeslaUSB AP and try again.';
+    if (!confirm(msg)) return;
+
+    // Disable all Connect buttons so the user cannot double-fire.
+    document.querySelectorAll('.wifi-connect-btn').forEach(b => {
+        b.disabled = true;
+        if (b.getAttribute('onclick') && b.getAttribute('onclick').indexOf(name) !== -1) {
+            b.textContent = 'Connecting…';
+        }
+    });
+
+    fetch('/settings/wifi/connect', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: name})
+    }).then(r => r.json().then(data => ({status: r.status, data: data})))
+      .then(({status, data}) => {
+          if (status === 202 || (data && data.success)) {
+              alert((data && data.message) || 'Reconnect started.');
+          } else if (status === 409) {
+              alert('Another connect attempt is already in progress. Please wait.');
+              loadSavedNetworks();
+          } else {
+              alert((data && data.message) || ('Connect failed (HTTP ' + status + ')'));
+              loadSavedNetworks();
+          }
+      })
+      .catch(err => {
+          // Expected when the AP drops mid-fetch: the request is in flight, the
+          // server is doing its work, but the response could not be delivered.
+          alert('Reconnect attempt sent. The AP may have dropped. Wait ~60-90s, '
+              + 'then try http://cybertruckusb.local on your home WiFi, or '
+              + 'reconnect to the TeslaUSB AP if the attempt failed.');
+      });
+}
+
+function toggleAddNetwork() {
+    const panel = document.getElementById('addNetworkPanel');
+    panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+}
+
+function addWifiNetwork() {
+    const ssid = document.getElementById('newWifiSSID').value.trim();
+    const password = document.getElementById('newWifiPassword').value;
+    if (!ssid) { alert('Please enter an SSID'); return; }
+    const btn = document.getElementById('addWifiBtn');
+    btn.disabled = true; btn.textContent = 'Connecting...';
+
+    const formData = new FormData();
+    formData.append('wifi_ssid', ssid);
+    formData.append('wifi_password', password);
+
+    fetch('/captive-portal', {
+        method: 'POST',
+        body: formData
+    }).then(response => {
+        if (response.redirected) {
+            window.location.href = response.url;
+        } else {
+            btn.disabled = false; btn.textContent = 'Connect';
+            loadSavedNetworks();
+            document.getElementById('newWifiSSID').value = '';
+            document.getElementById('newWifiPassword').value = '';
+            document.getElementById('addNetworkPanel').style.display = 'none';
+        }
+    }).catch(() => {
+        btn.disabled = false; btn.textContent = 'Connect';
+        alert('Error connecting to network');
+    });
+}
+
+function scanAndRefreshNetworks() {
+    const btn = document.getElementById('btnWifiScan');
+    btn.disabled = true; btn.textContent = 'Scanning...';
+    fetch('/settings/wifi/networks')
+    .then(r => r.json())
+    .then(networks => {
+        btn.disabled = false; btn.textContent = 'Scan';
+        // Update datalist for add-network panel
+        const dl = document.getElementById('wifiScanResults');
+        if (dl && networks.length) {
+            dl.innerHTML = networks.map(n => '<option value="' + n.ssid.replace(/"/g, '&quot;') + '">' + n.signal + '% ' + (n.secured ? '🔒' : '') + '</option>').join('');
+        }
+        // Refresh the saved networks list (now with updated signal info)
+        loadSavedNetworks();
+    })
+    .catch(() => { btn.disabled = false; btn.textContent = 'Scan'; });
+}
+
+function confirmWifiUpdate() {
+    const connectedViaWifi = false;
+    const currentSSID = null;
+    const apActive = false;
+    const apIP = "10.0.0.1";
+
+    const accessingViaAP = apIP && (window.location.hostname === apIP || window.location.hostname === apIP.split('/')[0]);
+
+    let message = '';
+
+    if (connectedViaWifi && !accessingViaAP && currentSSID) {
+        message = '⚠️ WARNING: You are currently connected via WiFi (network: ' + currentSSID + ').\n\n';
+        message += 'If you change the WiFi credentials and they are incorrect, you will lose this connection.\n\n';
+        message += 'HOWEVER: The fallback AP is ' + (apActive ? 'already running' : 'available') + '.\n';
+        message += 'If the new WiFi fails, you can reconnect to the AP to fix it.\n\n';
+        message += 'Recommended: Connect to the AP first for safer credential updates.\n\n';
+        message += 'Continue anyway?';
+    } else if (accessingViaAP || apActive) {
+        message = '✓ You are connected via the fallback AP.\n\n';
+        message += 'The Pi will attempt to connect to the new WiFi network.\n';
+        message += 'Your AP connection will remain active during the process.\n\n';
+        message += 'Continue?';
+    } else {
+        message = 'The Pi will attempt to connect to the new WiFi network.\n';
+        message += 'The fallback AP will remain available if connection fails.\n\n';
+        message += 'Continue?';
+    }
+
+    return confirm(message);
+}
+
+// AP form elements
+const apConfigForm = document.getElementById('apConfigForm');
+const startApForm = document.getElementById('startApForm');
+const stopApForm = document.getElementById('stopApForm');
+const updateApBtn = document.getElementById('updateApBtn');
+const startApBtn = document.getElementById('startApBtn');
+const stopApBtn = document.getElementById('stopApBtn');
+const apLoadingOverlay = document.getElementById('apLoadingOverlay');
+
+function disableApButtons() {
+    if (updateApBtn) { updateApBtn.disabled = true; updateApBtn.style.opacity = '0.5'; updateApBtn.style.cursor = 'not-allowed'; }
+    if (startApBtn) { startApBtn.disabled = true; startApBtn.style.opacity = '0.5'; startApBtn.style.cursor = 'not-allowed'; }
+    if (stopApBtn) { stopApBtn.disabled = true; stopApBtn.style.opacity = '0.5'; stopApBtn.style.cursor = 'not-allowed'; }
+    if (apLoadingOverlay) apLoadingOverlay.style.display = 'flex';
+}
+
+if (apConfigForm) {
+    apConfigForm.addEventListener('submit', function(e) {
+        if (updateApBtn && updateApBtn.disabled) { e.preventDefault(); return false; }
+        disableApButtons();
+    });
+}
+
+if (startApForm) {
+    startApForm.addEventListener('submit', function(e) {
+        if (startApBtn && startApBtn.disabled) { e.preventDefault(); return false; }
+        disableApButtons();
+    });
+}
+
+if (stopApForm) {
+    stopApForm.addEventListener('submit', function(e) {
+        if (stopApBtn && stopApBtn.disabled) { e.preventDefault(); return false; }
+        disableApButtons();
+    });
+}
+
+// Load saved networks on page init
+loadSavedNetworks();
+// Auto-scan after short delay
+setTimeout(function() { scanAndRefreshNetworks(); }, 500);
+
+function getSignalIcon(signal) {
+    const signalNum = parseInt(signal) || 0;
+    if (signalNum >= 75) return '▂▄▆█';
+    if (signalNum >= 50) return '▂▄▆_';
+    if (signalNum >= 25) return '▂▄__';
+    return '▂___';
+}
+
+function dismissWifiStatus() {
+    const alert = document.getElementById('wifiStatusAlert');
+    if (alert) {
+        alert.style.display = 'none';
+    }
+    fetch('/settings/wifi/dismiss-status', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+    }).catch(error => {
+        console.error('Error dismissing WiFi status:', error);
+    });
+}
+
+// --- Storage Health card init lives in _storage_health_section.html ---
+
+
+// ---------------------------------------------------------------------------
+// System Health card (Phase 4.2 — issue #101)
+// ---------------------------------------------------------------------------
+(function() {
+    var card = document.getElementById('system-health-card');
+    if (!card) return;
+    var pollUrl = card.getAttribute('data-poll-url');
+    var jobsUrl = card.getAttribute('data-jobs-url');
+    var POLL_MS = 15000;  // 15 s — far below the cached probe TTL
+    var rowsBox = document.getElementById('system-health-rows');
+    var overallText = document.getElementById('system-health-overall-text');
+    var overallEl = document.getElementById('system-health-overall');
+    var errorEl = document.getElementById('system-health-error');
+    var retryBtn = document.getElementById('system-health-retry-btn');
+    var pollHandle = null;
+
+    var SUBSYSTEMS = [
+        { key: 'gadget',           label: 'USB Gadget' },
+        { key: 'teslafat_0',       label: 'TeslaCam (exFAT)' },
+        { key: 'teslafat_1',       label: 'Media (exFAT)' },
+        { key: 'worker',           label: 'Background Worker' },
+        { key: 'indexer',          label: 'Video Indexer' },
+        { key: 'disk',             label: 'SD Card' },
+        { key: 'storage_writable', label: 'Storage Roots' },
+        { key: 'network',          label: 'WiFi' },
+        { key: 'samba',            label: 'Network Share' },
+        { key: 'journal',          label: 'Recent Errors' },
+    ];
+
+    var SEV_COLORS = {
+        ok:      'var(--accent-success, #4caf50)',
+        warn:    'var(--accent-warning, #ff9800)',
+        error:   'var(--accent-error,   #f44336)',
+        unknown: 'var(--text-secondary, #888)',
+    };
+
+    function escapeText(s) {
+        if (s == null) return '';
+        return String(s)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+    }
+
+    function dotMarkup(severity) {
+        var color = SEV_COLORS[severity] || SEV_COLORS.unknown;
+        return '<span aria-label="' + escapeText(severity) + '" ' +
+               'style="width:10px; height:10px; border-radius:50%; ' +
+               'display:inline-block; flex-shrink:0; background:' + color +
+               ';"></span>';
+    }
+
+    function renderRows(payload) {
+        var html = '';
+        for (var i = 0; i < SUBSYSTEMS.length; i++) {
+            var sub = SUBSYSTEMS[i];
+            var block = payload[sub.key] || {};
+            var sev = block.severity || 'unknown';
+            var msg = escapeText(block.message || '\u2014');
+            html += '<div>' + dotMarkup(sev) + '</div>';
+            html += '<div style="color:var(--text-primary)">' +
+                    escapeText(sub.label) + '</div>';
+            html += '<div style="color:var(--text-secondary); ' +
+                    'overflow:hidden; text-overflow:ellipsis; ' +
+                    'white-space:nowrap;">' + msg + '</div>';
+        }
+        rowsBox.innerHTML = html;
+    }
+
+    function jumpToJobs() {
+        if (jobsUrl) window.location.href = jobsUrl;
+    }
+
+    function renderOverall(payload) {
+        var overall = payload.overall || { severity: 'unknown',
+                                            message: 'Unknown' };
+        var sev = overall.severity || 'unknown';
+        var color = SEV_COLORS[sev] || SEV_COLORS.unknown;
+        overallEl.querySelector('.health-dot').style.background = color;
+        overallText.textContent = overall.message || 'Unknown';
+        // Toggle the click affordance to track the current severity —
+        // a system that recovers to 'ok' must shed both the listener
+        // and the pointer cursor, otherwise it still looks clickable.
+        var shouldLink = sev !== 'ok' && !!jobsUrl;
+        var isLinked = overallEl.classList.contains('linked');
+        if (shouldLink && !isLinked) {
+            overallEl.style.cursor = 'pointer';
+            overallEl.classList.add('linked');
+            overallEl.addEventListener('click', jumpToJobs);
+        } else if (!shouldLink && isLinked) {
+            overallEl.style.cursor = '';
+            overallEl.classList.remove('linked');
+            overallEl.removeEventListener('click', jumpToJobs);
+        }
+    }
+
+    function loadHealth() {
+        fetch(pollUrl, { cache: 'no-store' })
+            .then(function(r) {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.json();
+            })
+            .then(function(payload) {
+                errorEl.hidden = true;
+                renderRows(payload);
+                renderOverall(payload);
+            })
+            .catch(function(e) {
+                console.warn('system_health load failed:', e);
+                errorEl.hidden = false;
+            });
+    }
+
+
+    function startPoll() {
+        if (pollHandle) return;
+        loadHealth();
+        pollHandle = setInterval(loadHealth, POLL_MS);
+    }
+
+    function stopPoll() {
+        if (pollHandle) clearInterval(pollHandle);
+        pollHandle = null;
+    }
+
+    if (retryBtn) retryBtn.addEventListener('click', loadHealth);
+
+    document.addEventListener('visibilitychange', function() {
+        if (document.hidden) stopPoll();
+        else startPoll();
+    });
+
+    if (!document.hidden) startPoll();
+})();
+
+// ---------------------------------------------------------------------------
+// Live Metrics card (Issue #208)
+// Polls /api/system/metrics every 5 s while the tab is visible. The endpoint
+// reads /proc files + in-memory counters only — no subprocesses, no DB
+// writes, no SEI parses — so this is essentially free even on a Pi Zero 2 W.
+// Stops polling on visibilitychange to avoid wasted cycles when the user has
+// the tab in the background.
+// ---------------------------------------------------------------------------
+(function() {
+    var card = document.getElementById('live-metrics-card');
+    if (!card) return;
+    var pollUrl = card.getAttribute('data-poll-url');
+    var POLL_MS = 5000;
+    var pollHandle = null;
+    var grid = document.getElementById('live-metrics-grid');
+    var updatedEl = document.getElementById('live-metrics-updated');
+    var uptimeEl = document.getElementById('live-metrics-uptime');
+
+    function fmtNum(n, digits) {
+        if (n == null || isNaN(n)) return '—';
+        if (digits == null) digits = 1;
+        return Number(n).toFixed(digits);
+    }
+
+    function fmtBytes(kbs) {
+        if (kbs == null || isNaN(kbs)) return '—';
+        if (kbs >= 1024) return fmtNum(kbs / 1024, 1) + ' MB/s';
+        return fmtNum(kbs, 1) + ' KB/s';
+    }
+
+    function fmtUptime(secs) {
+        if (secs == null || isNaN(secs)) return 'uptime —';
+        var d = Math.floor(secs / 86400);
+        var h = Math.floor((secs % 86400) / 3600);
+        var m = Math.floor((secs % 3600) / 60);
+        if (d > 0) return 'uptime ' + d + 'd ' + h + 'h';
+        if (h > 0) return 'uptime ' + h + 'h ' + m + 'm';
+        return 'uptime ' + m + 'm';
+    }
+
+    function setTile(tileId, value, detail, severity) {
+        var tile = document.getElementById(tileId);
+        if (!tile) return;
+        var v = tile.querySelector('[data-field]:not([data-field$=detail])');
+        var d = tile.querySelector('[data-field$=detail]');
+        if (v) v.textContent = value;
+        if (d) d.textContent = detail || '\u00a0';
+        tile.classList.remove('warn', 'error');
+        if (severity === 'warn') tile.classList.add('warn');
+        else if (severity === 'error') tile.classList.add('error');
+    }
+
+    function severityFromLoad(loadOne, cpuCount) {
+        if (loadOne == null || cpuCount == null) return 'ok';
+        var ratio = loadOne / cpuCount;
+        if (ratio > 1.5) return 'error';
+        if (ratio > 1.0) return 'warn';
+        return 'ok';
+    }
+
+    function severityFromPct(pct, warn, err) {
+        if (pct == null) return 'ok';
+        if (pct >= err) return 'error';
+        if (pct >= warn) return 'warn';
+        return 'ok';
+    }
+
+    function renderMetrics(p) {
+        var load = p.loadavg || {};
+        var cpuCount = p.cpu_count || 1;
+        var loadStr = fmtNum(load.one, 2) + '  ' +
+                      fmtNum(load.five, 2) + '  ' +
+                      fmtNum(load.fifteen, 2);
+        var loadDetail = cpuCount > 0 && load.one != null
+            ? fmtNum(load.one / cpuCount * 100, 0) + '% of ' +
+              cpuCount + ' cores'
+            : cpuCount + ' cores';
+        setTile('metric-load', loadStr, loadDetail,
+                severityFromLoad(load.one, cpuCount));
+
+        var cpuPct = p.cpu_pct;
+        setTile('metric-cpu',
+                cpuPct != null ? fmtNum(cpuPct, 1) + '%' : '—',
+                'across ' + cpuCount + ' cores',
+                severityFromPct(cpuPct, 70, 90));
+
+        var mem = p.memory || {};
+        setTile('metric-mem',
+                mem.mem_used_pct != null
+                    ? fmtNum(mem.mem_used_pct, 0) + '%'
+                    : '—',
+                mem.mem_total_mb != null
+                    ? (mem.mem_total_mb - (mem.mem_available_mb || 0)) +
+                      ' / ' + mem.mem_total_mb + ' MB used'
+                    : '—',
+                severityFromPct(mem.mem_used_pct, 80, 95));
+
+        setTile('metric-swap',
+                mem.swap_used_pct != null
+                    ? fmtNum(mem.swap_used_pct, 0) + '%'
+                    : '—',
+                mem.swap_total_mb != null
+                    ? (mem.swap_used_mb || 0) + ' / ' +
+                      mem.swap_total_mb + ' MB used'
+                    : '—',
+                severityFromPct(mem.swap_used_pct, 30, 60));
+
+        var io = p.io || {};
+        var sd = io.mmcblk0 || {};
+        // SD I/O is teslafat backing-file traffic plus everything
+        // else on mmcblk0. Show 60s avg as the headline (smooths
+        // over per-call bursts), instantaneous in the detail.
+        var sdAvgR = (sd.avg60_read_kbs != null) ? sd.avg60_read_kbs : sd.read_kbs;
+        var sdAvgW = (sd.avg60_write_kbs != null) ? sd.avg60_write_kbs : sd.write_kbs;
+        var sdAvgTotal = (sdAvgR || 0) + (sdAvgW || 0);
+        setTile('metric-sd',
+                fmtBytes(sdAvgTotal),
+                'now r ' + fmtBytes(sd.read_kbs) +
+                '  w ' + fmtBytes(sd.write_kbs) +
+                '  · 60s avg',
+                'ok');
+
+        // USB I/O = nbd0, the single block device the mass-storage
+        // gadget exposes to Tesla. It is one MBR-partitioned disk with
+        // two exFAT partitions (TeslaCam + Media), so a single nbd
+        // device carries all USB traffic. Older builds used loop0 for
+        // an image-backed block file; B-1 uses the teslafat daemon, so
+        // loop0 was always 0.
+        //
+        // Tesla writes are bursty (each ~1-min dashcam segment is
+        // flushed by the camera SoC in a short burst), so the
+        // instantaneous rate is 0 most of the time even when the
+        // system is healthy. Headline is the 60s rolling average
+        // for that reason; detail shows the live instantaneous rate.
+        var nbd0 = io.nbd0 || {};
+        var usbInstR = (nbd0.read_kbs || 0);
+        var usbInstW = (nbd0.write_kbs || 0);
+        var nbd0AvgR = (nbd0.avg60_read_kbs != null)
+            ? nbd0.avg60_read_kbs : nbd0.read_kbs;
+        var nbd0AvgW = (nbd0.avg60_write_kbs != null)
+            ? nbd0.avg60_write_kbs : nbd0.write_kbs;
+        var usbAvgR = (nbd0AvgR || 0);
+        var usbAvgW = (nbd0AvgW || 0);
+        var usbAvgTotal = usbAvgR + usbAvgW;
+        // Sustained USB throughput above ~6 MB/s averaged warrants
+        // a glance; above 12 MB/s is suspicious on a Pi Zero 2 W
+        // and likely indicates a runaway producer/consumer.
+        var usbSev = usbAvgTotal > 12288
+            ? 'error'
+            : (usbAvgTotal > 6144 ? 'warn' : 'ok');
+        setTile('metric-usb',
+                fmtBytes(usbAvgTotal),
+                'now r ' + fmtBytes(usbInstR) +
+                '  w ' + fmtBytes(usbInstW) +
+                '  · 60s avg',
+                usbSev);
+
+        var ts = p.generated_at
+            ? new Date(p.generated_at * 1000)
+            : new Date();
+        if (updatedEl) {
+            updatedEl.textContent = ts.toLocaleTimeString();
+        }
+        if (uptimeEl) {
+            uptimeEl.textContent = fmtUptime(p.uptime_seconds);
+        }
+    }
+
+    function loadMetrics() {
+        fetch(pollUrl, { cache: 'no-store' })
+            .then(function(r) {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.json();
+            })
+            .then(renderMetrics)
+            .catch(function(e) {
+                console.warn('live_metrics load failed:', e);
+            });
+    }
+
+    function startPoll() {
+        if (pollHandle) return;
+        loadMetrics();
+        pollHandle = setInterval(loadMetrics, POLL_MS);
+    }
+
+    function stopPoll() {
+        if (pollHandle) clearInterval(pollHandle);
+        pollHandle = null;
+    }
+
+    document.addEventListener('visibilitychange', function() {
+        if (document.hidden) stopPoll();
+        else startPoll();
+    });
+
+    if (!document.hidden) startPoll();
+})();
+</script>
+
+    </main>
+
+    <!-- Toast notification container -->
+    <div class="toast-container" id="toast-container" aria-live="polite"></div>
+
+    <script src="/static/js/main.js"></script>
+    
+
+    
+    <script>
+        (function() {
+            const POLL_MS = 30000;
+            const link = document.getElementById('health-dot-link');
+            const dot = document.getElementById('health-dot');
+            if (!link || !dot) return;
+
+            // Map subsystem severity to the CSS class + tooltip prefix.
+            // B-1: uses the design-system accent tokens for ok/warn/
+            // error so dark/light mode work automatically. (v1's mode
+            // status-dot vocabulary that this comment used to reference
+            // was removed when legacy mode switching went away.)
+            const SEV_TO_CLASS = {
+                ok:      'health-dot-ok',
+                warn:    'health-dot-warn',
+                error:   'health-dot-error',
+                unknown: 'health-dot-unknown',
+            };
+
+            function applyHealth(payload) {
+                const overall = (payload && payload.overall) || {};
+                const sev = overall.severity || 'unknown';
+                const msg = overall.message || 'System status';
+                // Reset any prior class then apply the new one.
+                dot.className = 'status-dot health-dot ' +
+                    (SEV_TO_CLASS[sev] || SEV_TO_CLASS.unknown);
+                link.title = msg;
+                link.setAttribute('aria-label', msg);
+                link.hidden = false;
+            }
+
+            async function poll() {
+                try {
+                    const r = await fetch('/api/system/health', {
+                        credentials: 'same-origin',
+                    });
+                    if (!r.ok) return;
+                    const data = await r.json();
+                    applyHealth(data);
+                } catch (e) { /* network blip — keep last known colour */ }
+            }
+
+            poll();
+            setInterval(poll, POLL_MS);
+        })();
+    </script>
+    
+
+</body></html>

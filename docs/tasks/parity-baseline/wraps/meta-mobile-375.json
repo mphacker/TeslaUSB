@@ -1,0 +1,139 @@
+{
+  "screen": "wraps",
+  "spa_screens": [
+    "wraps"
+  ],
+  "url": "/wraps/",
+  "viewport": {
+    "width": 375,
+    "height": 812,
+    "tag": "mobile-375"
+  },
+  "http_status": 200,
+  "wall_ms": 1189,
+  "dom_bytes": 40217,
+  "perf": {
+    "ttfb_ms": 322,
+    "dom_content_loaded_ms": 672,
+    "load_event_ms": 677,
+    "transfer_bytes": 41116,
+    "paints": {
+      "first-paint": 676,
+      "first-contentful-paint": 676
+    },
+    "slowest_resources": [
+      {
+        "name": "http://localhost:8080/api/system/health",
+        "dur": 374,
+        "size": 1589,
+        "type": "fetch"
+      },
+      {
+        "name": "http://localhost:8080/static/js/main.js",
+        "dur": 315,
+        "size": 300,
+        "type": "script"
+      },
+      {
+        "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+        "dur": 315,
+        "size": 300,
+        "type": "other"
+      },
+      {
+        "name": "http://localhost:8080/wraps/download/library/matte_black.png",
+        "dur": 315,
+        "size": 2790,
+        "type": "img"
+      },
+      {
+        "name": "http://localhost:8080/wraps/download/library/racing_stripes.png",
+        "dur": 315,
+        "size": 2812,
+        "type": "img"
+      },
+      {
+        "name": "http://localhost:8080/static/css/style.css",
+        "dur": 314,
+        "size": 300,
+        "type": "link"
+      },
+      {
+        "name": "http://localhost:8080/static/css/bootstrap-icons-subset.css",
+        "dur": 253,
+        "size": 300,
+        "type": "link"
+      },
+      {
+        "name": "http://localhost:8080/static/fonts/inter-variable.woff2",
+        "dur": 1,
+        "size": 300,
+        "type": "css"
+      }
+    ],
+    "resource_count": 8
+  },
+  "console": [],
+  "network": {
+    "total_requests": 9,
+    "failed": [],
+    "slowest": [
+      {
+        "url": "/api/system/health",
+        "method": "GET",
+        "status": 200,
+        "type": "fetch",
+        "ms": 374
+      },
+      {
+        "url": "/wraps/",
+        "method": "GET",
+        "status": 200,
+        "type": "document",
+        "ms": 322
+      },
+      {
+        "url": "/static/icons/lucide-sprite.svg",
+        "method": "GET",
+        "status": 200,
+        "type": "other",
+        "ms": 315
+      },
+      {
+        "url": "/static/js/main.js",
+        "method": "GET",
+        "status": 200,
+        "type": "script",
+        "ms": 315
+      },
+      {
+        "url": "/wraps/download/library/matte_black.png",
+        "method": "GET",
+        "status": 200,
+        "type": "image",
+        "ms": 315
+      },
+      {
+        "url": "/wraps/download/library/racing_stripes.png",
+        "method": "GET",
+        "status": 200,
+        "type": "image",
+        "ms": 315
+      },
+      {
+        "url": "/static/css/style.css",
+        "method": "GET",
+        "status": 200,
+        "type": "stylesheet",
+        "ms": 314
+      },
+      {
+        "url": "/static/css/bootstrap-icons-subset.css",
+        "method": "GET",
+        "status": 200,
+        "type": "stylesheet",
+        "ms": 253
+      }
+    ]
+  }
+}

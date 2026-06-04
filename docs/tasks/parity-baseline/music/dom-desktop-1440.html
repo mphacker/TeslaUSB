@@ -1,0 +1,762 @@
+<!DOCTYPE html><html><head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    
+    <title>Tesla USB Gadget Control</title>
+    <script>
+        // Apply theme immediately before page renders to prevent flash
+        (function() {
+            const savedTheme = localStorage.getItem('theme');
+            const systemPrefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+            const theme = savedTheme || (systemPrefersDark ? 'dark' : 'light');
+            if (theme === 'dark') {
+                document.documentElement.setAttribute('data-theme', 'dark');
+            }
+        })();
+    </script>
+    <link rel="stylesheet" href="/static/css/bootstrap-icons-subset.css">
+    <link rel="stylesheet" href="/static/css/style.css">
+    
+<style>
+    /* Music page layout */
+    .music-layout {
+        display: grid;
+        grid-template-columns: 2fr 1fr;
+        gap: 20px;
+        align-items: start;
+    }
+
+    .music-panel {
+        background: var(--bg-container);
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+        padding: 20px;
+        box-shadow: 0 2px 10px var(--shadow);
+        transition: background-color 0.3s ease, box-shadow 0.3s ease, border-color 0.3s ease;
+    }
+
+    /* Storage summary */
+    .music-summary {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 12px;
+        margin: 15px 0;
+    }
+
+    .music-summary .stat-item {
+        text-align: center;
+    }
+
+    .music-summary .stat-label {
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--text-secondary);
+        margin-bottom: 4px;
+    }
+
+    .music-summary .stat-value {
+        font-size: 18px;
+        font-weight: 600;
+        color: var(--text-primary);
+    }
+
+    /* Usage meter */
+    .music-meter {
+        width: 100%;
+        height: 10px;
+        background: var(--border-light);
+        border-radius: 999px;
+        overflow: hidden;
+        margin: 8px 0 16px 0;
+        transition: background-color 0.3s ease;
+    }
+
+    .music-meter span {
+        display: block;
+        height: 100%;
+        background: linear-gradient(90deg, var(--btn-primary-bg), var(--btn-info-bg));
+        transition: width 0.2s ease;
+    }
+
+    /* Breadcrumb */
+    .music-breadcrumb {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+        flex-wrap: wrap;
+        margin: 12px 0;
+        color: var(--text-secondary);
+        font-size: 0.95rem;
+    }
+
+    .music-breadcrumb a {
+        color: var(--text-link);
+        text-decoration: none;
+    }
+
+    .music-breadcrumb a:hover {
+        text-decoration: underline;
+    }
+
+    /* Drop zone */
+    .music-drop-zone {
+        border: 3px dashed var(--border-input);
+        border-radius: 8px;
+        padding: 30px 20px;
+        text-align: center;
+        background: var(--form-input-bg);
+        cursor: pointer;
+        transition: all 0.3s ease;
+        margin-bottom: 15px;
+    }
+
+    .music-drop-zone:hover {
+        border-color: var(--btn-primary-bg);
+    }
+
+    .music-drop-zone.dragging {
+        border-color: var(--btn-primary-bg);
+        background: var(--bg-info);
+    }
+
+    .music-drop-zone .drop-icon {
+        font-size: 36px;
+        margin-bottom: 8px;
+    }
+
+    .music-drop-zone .drop-label {
+        font-size: 15px;
+        font-weight: 600;
+        color: var(--text-primary);
+        margin-bottom: 4px;
+    }
+
+    .music-drop-zone .drop-hint {
+        font-size: 13px;
+        color: var(--text-secondary);
+    }
+
+    /* Upload queue file rows */
+    .music-file-list {
+        max-height: 220px;
+        overflow-y: auto;
+        margin-top: 10px;
+    }
+
+    .music-file-row {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: space-between;
+        align-items: center;
+        padding: 8px 10px;
+        border: 1px solid var(--border-color);
+        border-radius: 6px;
+        margin-bottom: 8px;
+        background: var(--bg-secondary);
+        transition: border-color 0.3s ease, background-color 0.3s ease;
+    }
+
+    .music-file-row.uploaded {
+        border-color: var(--success-border);
+        box-shadow: 0 0 0 1px rgba(40, 167, 69, 0.25);
+    }
+
+    .music-file-row .meta {
+        color: var(--text-secondary);
+        font-size: 0.85rem;
+    }
+
+    /* Upload progress bar */
+    .music-progress-bar {
+        width: 100%;
+        height: 6px;
+        background: var(--border-light);
+        border-radius: 999px;
+        overflow: hidden;
+        margin-top: 6px;
+        transition: background-color 0.3s ease;
+    }
+
+    .music-progress-bar span {
+        display: block;
+        height: 100%;
+        background: linear-gradient(90deg, var(--btn-success-bg), #52c47a);
+        width: 0;
+        transition: width 0.15s ease;
+    }
+
+    /* Folder row in table */
+    .music-folder-row {
+        cursor: pointer;
+    }
+
+    .music-folder-row:hover {
+        background-color: var(--bg-table-hover);
+    }
+
+    /* Upload status text */
+    .music-status {
+        font-size: 13px;
+        color: var(--text-secondary);
+        margin-top: 8px;
+        transition: color 0.3s ease;
+    }
+
+    .music-status.error {
+        color: var(--error-text);
+    }
+
+    /* Folder input row */
+    .music-folder-input {
+        display: flex;
+        gap: 8px;
+        margin-top: 12px;
+        align-items: center;
+    }
+
+    .music-folder-input input[type="text"] {
+        flex: 1;
+        padding: 8px 12px;
+        border: 2px solid var(--border-input);
+        border-radius: 4px;
+        background: var(--form-input-bg);
+        color: var(--text-primary);
+        font-size: 14px;
+        transition: border-color 0.3s ease, background-color 0.3s ease;
+    }
+
+    .music-folder-input input[type="text"]:focus {
+        border-color: var(--btn-primary-bg);
+        outline: none;
+        box-shadow: 0 0 0 3px rgba(31, 111, 235, 0.1);
+    }
+
+    /* Upload action buttons */
+    .music-upload-actions {
+        display: flex;
+        gap: 8px;
+        margin-top: 10px;
+    }
+
+    /* Responsive */
+    @media (max-width: 960px) {
+        .music-layout {
+            grid-template-columns: 1fr;
+        }
+    }
+
+    /* Hide mobile-only blocks on desktop */
+    .music-mobile-folders,
+    .music-mobile-files {
+        display: none;
+    }
+
+    @media (max-width: 768px) {
+        .music-summary {
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+        }
+        .music-summary .stat-value {
+            font-size: 15px;
+        }
+        .music-drop-zone {
+            padding: 20px 15px;
+        }
+        .music-drop-zone .drop-icon {
+            font-size: 28px;
+        }
+        .music-drop-zone .drop-label {
+            font-size: 14px;
+        }
+        .music-folder-input {
+            flex-direction: column;
+        }
+        .music-folder-input input[type="text"] {
+            width: 100%;
+        }
+        .music-upload-actions {
+            flex-direction: column;
+        }
+        .music-upload-actions button {
+            width: 100%;
+            padding: 12px;
+            font-size: 15px;
+        }
+        .music-breadcrumb {
+            font-size: 0.85rem;
+        }
+        /* Mobile folder cards */
+        .music-mobile-folders,
+        .music-mobile-files {
+            display: block;
+        }
+        .music-mobile-folder {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: var(--bg-container);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 14px 16px;
+            margin-bottom: 10px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .music-mobile-folder:hover,
+        .music-mobile-folder:active {
+            background: var(--bg-table-hover);
+            box-shadow: 0 2px 6px var(--shadow);
+        }
+        .music-mobile-folder-name {
+            color: var(--text-link);
+            font-weight: 500;
+            font-size: 15px;
+            flex: 1;
+            min-width: 0;
+            word-break: break-word;
+        }
+        .music-mobile-folder-actions {
+            flex-shrink: 0;
+            margin-left: 10px;
+        }
+        /* Mobile file cards */
+        .music-mobile-file {
+            background: var(--bg-container);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 14px 16px;
+            margin-bottom: 12px;
+            transition: all 0.2s ease;
+            overflow-wrap: break-word;
+            word-break: break-word;
+        }
+        .music-mobile-file-name {
+            font-weight: 500;
+            font-size: 15px;
+            color: var(--text-primary);
+            margin-bottom: 4px;
+        }
+        .music-mobile-file-size {
+            font-size: 13px;
+            color: var(--text-secondary);
+            margin-bottom: 10px;
+        }
+        .music-mobile-file audio {
+            width: 100%;
+            height: 40px;
+            margin-bottom: 10px;
+        }
+        .music-mobile-file-actions {
+            display: flex;
+            gap: 8px;
+        }
+        .music-mobile-file-actions button {
+            flex: 1;
+            padding: 10px 8px;
+            font-size: 14px;
+            min-height: 44px;
+        }
+    }
+</style>
+
+</head>
+<body>
+    
+    
+
+    <!-- Top Bar -->
+    <header class="top-bar">
+        <div class="top-bar-left">
+            <a href="/" class="top-bar-brand">
+                <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-hard-drive"></use></svg>
+                <span class="top-bar-title">TeslaUSB</span>
+            </a>
+        </div>
+        <div class="top-bar-right">
+            
+            <a href="/settings/#system-health-card" class="health-dot-link" id="health-dot-link" title="teslafat_0: inactive — Partition 0 (exFAT)" aria-label="teslafat_0: inactive — Partition 0 (exFAT)">
+                <span class="status-dot health-dot health-dot-error" id="health-dot" data-status-dot="health"></span>
+            </a>
+            
+            
+            <button class="theme-toggle-btn" onclick="toggleTheme()" aria-label="Toggle dark mode">
+                <svg class="nav-icon" id="theme-icon-svg" aria-hidden="true">
+                    <use href="/static/icons/lucide-sprite.svg#icon-moon"></use>
+                </svg>
+            </button>
+        </div>
+    </header>
+
+    <!-- Desktop Sidebar Rail -->
+    <nav class="sidebar-rail" id="sidebarRail" aria-label="Main navigation">
+        
+        <a href="/" class="nav-item" title="Map">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-map-pin"></use></svg>
+            <span class="nav-label">Map</span>
+        </a>
+        
+        
+        <a href="/analytics/" class="nav-item" title="Analytics">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-bar-chart-2"></use></svg>
+            <span class="nav-label">Analytics</span>
+        </a>
+        
+        
+        <a href="/media/" class="nav-item active" title="Media">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-music"></use></svg>
+            <span class="nav-label">Media</span>
+        </a>
+        
+        
+        <a href="/cloud/" class="nav-item" title="Cloud">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-cloud"></use></svg>
+            <span class="nav-label">Cloud</span>
+        </a>
+        
+        <a href="/settings/" class="nav-item" title="Settings">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-settings"></use></svg>
+            <span class="nav-label">Settings</span>
+        </a>
+    </nav>
+
+    <!-- Mobile Bottom Tab Bar -->
+    <nav class="bottom-tabs" aria-label="Main navigation">
+        
+        <a href="/" class="tab-item">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-map-pin"></use></svg>
+            <span class="tab-label">Map</span>
+        </a>
+        
+        
+        <a href="/analytics/" class="tab-item">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-bar-chart-2"></use></svg>
+            <span class="tab-label">Analytics</span>
+        </a>
+        
+        
+        <a href="/media/" class="tab-item active">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-music"></use></svg>
+            <span class="tab-label">Media</span>
+        </a>
+        
+        
+        <a href="/cloud/" class="tab-item">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-cloud"></use></svg>
+            <span class="tab-label">Cloud</span>
+        </a>
+        
+        <a href="/settings/" class="tab-item">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-settings"></use></svg>
+            <span class="tab-label">Settings</span>
+        </a>
+    </nav>
+
+    <main class="main-content" role="main">
+        
+
+        
+            
+        
+
+        
+<div class="container">
+    
+<div class="media-pills">
+  
+  <a href="/lock_chimes/" class="media-pill ">
+    <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-bell"></use></svg>
+    Chimes
+  </a>
+  
+  
+  <a href="/music/" class="media-pill active">
+    <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-music"></use></svg>
+    Music
+  </a>
+  
+  
+  <a href="/boombox/" class="media-pill ">
+    <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-megaphone"></use></svg>
+    Boombox
+  </a>
+  
+  
+  <a href="/light_shows/" class="media-pill ">
+    <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-sparkles"></use></svg>
+    Shows
+  </a>
+  
+  
+  <a href="/wraps/" class="media-pill ">
+    <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-palette"></use></svg>
+    Wraps
+  </a>
+  
+  
+  <a href="/license_plates/" class="media-pill ">
+    <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-image"></use></svg>
+    Plates
+  </a>
+  
+</div>
+    <h2>Music Library</h2>
+
+    
+
+    <div class="info-box" style="margin-bottom: 20px;">
+        <p style="margin: 0; font-size: 13px; color: var(--text-secondary);">
+            Tesla only scans music inside the <code style="background: var(--bg-code); padding: 2px 5px; border-radius: 3px;">/Music</code> folder.
+            This page always reads and uploads inside that folder; paths shown below are relative to <code style="background: var(--bg-code); padding: 2px 5px; border-radius: 3px;">/Music</code>.
+        </p>
+    </div>
+
+    <div id="music-page" class="music-layout" data-chunk-mb="64" data-max-mb="512" data-upload-url="/music/upload_chunk" data-delete-url="/music/delete/__NAME__" data-delete-dir-url="/music/delete_dir/__DIR__" data-move-url="/music/move" data-current-path="" data-browse-url="/music/" data-mkdir-url="/music/mkdir">
+
+        <!-- File browser panel -->
+        <div class="music-panel">
+            <div class="music-summary">
+                <div class="stat-item">
+                    <div class="stat-label">Used</div>
+                    <div class="stat-value">4323.21 MB</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">Free</div>
+                    <div class="stat-value">974250.41 MB</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">Files</div>
+                    <div class="stat-value">1</div>
+                </div>
+            </div>
+            
+            
+            <div class="music-meter" aria-label="Usage">
+                <span id="musicUsage" data-used="0.42" style="width: 0.42%;"></span>
+            </div>
+
+            <div class="music-breadcrumb">
+                <span style="color: var(--text-secondary);">📂 /Music</span>
+                
+            </div>
+
+            <h3 style="margin-top: 10px;">
+                
+                Files
+            </h3>
+            
+            <div class="video-table-container">
+                <table class="video-table" id="folderTable" style="table-layout: fixed;">
+                    <thead>
+                        <tr>
+                            <th>Folders</th>
+                            <th style="width: 100px; text-align: right;">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        
+                        <tr class="music-folder-row" data-dir="Boombox" tabindex="0" role="link" style="cursor: pointer;">
+                            <td style="color: var(--text-link);">📁 Boombox</td>
+                            <td style="text-align: right;">
+                                <button class="action-btn danger" data-delete-dir="Boombox">Delete</button>
+                            </td>
+                        </tr>
+                        
+                        <tr class="music-folder-row" data-dir="Daft Punk" tabindex="0" role="link" style="cursor: pointer;">
+                            <td style="color: var(--text-link);">📁 Daft Punk</td>
+                            <td style="text-align: right;">
+                                <button class="action-btn danger" data-delete-dir="Daft Punk">Delete</button>
+                            </td>
+                        </tr>
+                        
+                    </tbody>
+                </table>
+            </div>
+            <!-- Mobile folder cards -->
+            <div class="music-mobile-folders" id="mobileFolderList">
+                
+                <div class="music-mobile-folder" data-dir="Boombox" tabindex="0" role="link" style="cursor: pointer;">
+                    <span class="music-mobile-folder-name">📁 Boombox</span>
+                    <span class="music-mobile-folder-actions">
+                        <button class="action-btn danger" data-delete-dir="Boombox">Delete</button>
+                    </span>
+                </div>
+                
+                <div class="music-mobile-folder" data-dir="Daft Punk" tabindex="0" role="link" style="cursor: pointer;">
+                    <span class="music-mobile-folder-name">📁 Daft Punk</span>
+                    <span class="music-mobile-folder-actions">
+                        <button class="action-btn danger" data-delete-dir="Daft Punk">Delete</button>
+                    </span>
+                </div>
+                
+            </div>
+            
+            
+            <div class="video-table-container">
+                <table class="video-table" id="fileTable" style="table-layout: fixed;">
+                    <thead>
+                        <tr>
+                            <th>Name</th>
+                            <th style="width: 120px;">Size</th>
+                            <th style="width: 240px;">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        
+                        <tr data-filename="roadtrip_mix.wav">
+                            <td style="word-wrap: break-word; overflow-wrap: break-word;">roadtrip_mix.wav</td>
+                            <td>172.3 KB</td>
+                            <td>
+                                <audio controls="" preload="none" style="margin-bottom: 6px;">
+                                    
+                                    <source src="/music/play/roadtrip_mix.wav" type="audio/wav">
+                                </audio>
+                                <div style="display: flex; gap: 6px;">
+                                    <button class="action-btn" data-move="roadtrip_mix.wav">Move</button>
+                                    <button class="action-btn danger" data-delete="roadtrip_mix.wav">Delete</button>
+                                </div>
+                            </td>
+                        </tr>
+                        
+                    </tbody>
+                </table>
+            </div>
+            <!-- Mobile file cards -->
+            <div class="music-mobile-files" id="mobileFileList">
+                
+                <div class="music-mobile-file" data-filename="roadtrip_mix.wav">
+                    <div class="music-mobile-file-name">🎵 roadtrip_mix.wav</div>
+                    <div class="music-mobile-file-size">172.3 KB</div>
+                    <audio controls="" preload="none">
+                        
+                        <source src="/music/play/roadtrip_mix.wav" type="audio/wav">
+                    </audio>
+                    <div class="music-mobile-file-actions">
+                        <button class="action-btn" data-move="roadtrip_mix.wav">Move</button>
+                        <button class="action-btn danger" data-delete="roadtrip_mix.wav">Delete</button>
+                    </div>
+                </div>
+                
+            </div>
+            
+        </div>
+
+        <!-- Upload panel -->
+        <div class="music-panel">
+            <h3 style="margin-top: 0;">Upload</h3>
+            <p style="margin: 0 0 15px 0; font-size: 13px; color: var(--text-secondary);">
+                Uploads require Edit mode. Files larger than 64 MiB are sent in chunks.
+                You can drop whole folders to preserve subfolder structure. Target folder:
+                <strong id="currentPathLabel" style="color: var(--text-primary);">/</strong>
+            </p>
+            <div id="dropZone" class="music-drop-zone">
+                <div class="drop-icon">🎵</div>
+                <div class="drop-label">Drop files here or click to choose</div>
+                <div class="drop-hint">Allowed: mp3, flac, wav, aac, m4a. Max 512 MiB per file.</div>
+                <input id="fileInput" type="file" name="music_files" multiple="" webkitdirectory="" directory="" style="display: none;" accept=".mp3,.flac,.wav,.aac,.m4a">
+            </div>
+            <div class="music-file-list" id="fileList"></div>
+            <div class="music-folder-input">
+                <input id="folderName" type="text" placeholder="New folder name" style="">
+                <button id="createFolder" class="action-btn">Create Folder</button>
+            </div>
+            <div class="music-upload-actions">
+                <button id="startUpload" class="action-btn" disabled="">Upload</button>
+                <button id="clearSelection" class="action-btn danger" disabled="">Clear</button>
+            </div>
+            <div id="uploadStatus" class="music-status"></div>
+        </div>
+    </div>
+</div>
+<script>
+    (function () {
+        const usage = document.getElementById('musicUsage');
+        if (usage) {
+            const pct = Math.max(0, Math.min(100, parseFloat(usage.dataset.used || '0')));
+            usage.style.width = `${pct}%`;
+        }
+    })();
+</script>
+<!-- Loading overlay for async operations -->
+<div id="musicLoadingOverlay" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); z-index: 9999; justify-content: center; align-items: center;">
+    <div style="text-align: center; color: white;">
+        <div class="music-spinner"></div>
+        <h3 id="musicOverlayText">Processing...</h3>
+        <p>Please wait</p>
+    </div>
+</div>
+<style>
+@keyframes music-spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+.music-spinner {
+    border: 8px solid #f3f3f3;
+    border-top: 8px solid #007bff;
+    border-radius: 50%;
+    width: 60px;
+    height: 60px;
+    animation: music-spin 1s linear infinite;
+    margin: 0 auto 20px;
+}
+</style>
+<script src="/static/js/music.js"></script>
+
+    </main>
+
+    <!-- Toast notification container -->
+    <div class="toast-container" id="toast-container" aria-live="polite"></div>
+
+    <script src="/static/js/main.js"></script>
+    
+
+    
+    <script>
+        (function() {
+            const POLL_MS = 30000;
+            const link = document.getElementById('health-dot-link');
+            const dot = document.getElementById('health-dot');
+            if (!link || !dot) return;
+
+            // Map subsystem severity to the CSS class + tooltip prefix.
+            // B-1: uses the design-system accent tokens for ok/warn/
+            // error so dark/light mode work automatically. (v1's mode
+            // status-dot vocabulary that this comment used to reference
+            // was removed when legacy mode switching went away.)
+            const SEV_TO_CLASS = {
+                ok:      'health-dot-ok',
+                warn:    'health-dot-warn',
+                error:   'health-dot-error',
+                unknown: 'health-dot-unknown',
+            };
+
+            function applyHealth(payload) {
+                const overall = (payload && payload.overall) || {};
+                const sev = overall.severity || 'unknown';
+                const msg = overall.message || 'System status';
+                // Reset any prior class then apply the new one.
+                dot.className = 'status-dot health-dot ' +
+                    (SEV_TO_CLASS[sev] || SEV_TO_CLASS.unknown);
+                link.title = msg;
+                link.setAttribute('aria-label', msg);
+                link.hidden = false;
+            }
+
+            async function poll() {
+                try {
+                    const r = await fetch('/api/system/health', {
+                        credentials: 'same-origin',
+                    });
+                    if (!r.ok) return;
+                    const data = await r.json();
+                    applyHealth(data);
+                } catch (e) { /* network blip — keep last known colour */ }
+            }
+
+            poll();
+            setInterval(poll, POLL_MS);
+        })();
+    </script>
+    
+
+</body></html>

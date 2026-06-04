@@ -1,0 +1,489 @@
+<!DOCTYPE html><html><head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    
+    <title>Wi-Fi Setup - TeslaUSB</title>
+    <script>
+        // Apply theme immediately before page renders to prevent flash
+        (function() {
+            const savedTheme = localStorage.getItem('theme');
+            const systemPrefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+            const theme = savedTheme || (systemPrefersDark ? 'dark' : 'light');
+            if (theme === 'dark') {
+                document.documentElement.setAttribute('data-theme', 'dark');
+            }
+        })();
+    </script>
+    <link rel="stylesheet" href="/static/css/bootstrap-icons-subset.css">
+    <link rel="stylesheet" href="/static/css/style.css">
+    
+<style>
+.captive-page,
+.captive-hero,
+.captive-grid,
+.captive-card,
+.captive-list,
+.captive-status-list,
+.captive-form,
+.captive-network-list,
+.captive-empty {
+    display: grid;
+    gap: var(--space-4);
+}
+
+.captive-page {
+    gap: var(--space-6);
+}
+
+.captive-hero,
+.captive-card {
+    padding: var(--space-6);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-lg);
+}
+
+.captive-hero-top,
+.captive-card-head,
+.captive-stat-row,
+.captive-network-head,
+.captive-network-meta,
+.captive-network-actions,
+.captive-form-actions,
+.captive-saved-actions,
+.captive-banner,
+.captive-badge,
+.captive-status-chip {
+    display: flex;
+    gap: var(--space-3);
+    flex-wrap: wrap;
+}
+
+.captive-hero-top,
+.captive-card-head,
+.captive-stat-row,
+.captive-network-head,
+.captive-network-actions,
+.captive-form-actions,
+.captive-saved-actions,
+.captive-banner {
+    justify-content: space-between;
+    align-items: flex-start;
+}
+
+.captive-title,
+.captive-card-title,
+.captive-network-name,
+.captive-empty-title {
+    margin: 0;
+    color: var(--text-primary);
+}
+
+.captive-title {
+    font-size: var(--text-3xl);
+}
+
+.captive-copy,
+.captive-card-copy,
+.captive-status-copy,
+.captive-network-copy,
+.captive-empty-copy,
+.captive-field-help,
+.captive-form-label {
+    margin: 0;
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+
+.captive-grid {
+    align-items: start;
+}
+
+@media (min-width: 72rem) {
+    .captive-grid {
+        grid-template-columns: 1.2fr 0.8fr;
+    }
+}
+
+.captive-banner {
+    padding: var(--space-4);
+    border: 1px solid var(--border-input);
+    border-radius: var(--radius-md);
+    background: var(--form-input-bg);
+}
+
+.captive-banner.is-warning {
+    border-color: var(--warning-border);
+    background: var(--msg-warning-bg);
+}
+
+.captive-banner.is-warning .captive-copy,
+.captive-banner.is-warning .captive-field-help {
+    color: var(--msg-warning-text);
+}
+
+.captive-icon,
+.captive-inline-icon {
+    width: 1.25rem;
+    height: 1.25rem;
+    flex: 0 0 auto;
+}
+
+.captive-status-chip,
+.captive-badge {
+    min-height: 44px;
+    align-items: center;
+    padding: var(--space-2) var(--space-4);
+    border-radius: var(--radius-full);
+    border: 1px solid var(--border-input);
+    background: var(--form-label-bg);
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+.captive-status-chip.is-online {
+    background: var(--msg-success-bg);
+    color: var(--msg-success-text);
+}
+
+.captive-status-chip.is-offline {
+    background: var(--msg-warning-bg);
+    color: var(--msg-warning-text);
+}
+
+.captive-list,
+.captive-network-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.captive-network-item,
+.captive-saved-item,
+.captive-stat-card {
+    display: grid;
+    gap: var(--space-3);
+    padding: var(--space-4);
+    border: 1px solid var(--border-input);
+    border-radius: var(--radius-md);
+    background: var(--form-input-bg);
+}
+
+.captive-form {
+    padding: var(--space-4);
+    border: 1px solid var(--border-input);
+    border-radius: var(--radius-md);
+    background: var(--form-input-bg);
+}
+
+.captive-form-row {
+    display: grid;
+    gap: var(--space-3);
+}
+
+.captive-form input {
+    min-height: 44px;
+    width: 100%;
+}
+
+.captive-button-row {
+    display: flex;
+    gap: var(--space-3);
+    flex-wrap: wrap;
+}
+
+.captive-button-row .btn,
+.captive-network-actions .btn,
+.captive-saved-actions .btn {
+    min-height: 44px;
+}
+
+.captive-network-actions {
+    align-items: center;
+}
+
+.captive-empty {
+    justify-items: center;
+    text-align: center;
+    padding: var(--space-6);
+    border: 1px dashed var(--border-input);
+    border-radius: var(--radius-lg);
+    background: var(--form-input-bg);
+}
+</style>
+
+</head>
+<body>
+    
+    
+
+    <!-- Top Bar -->
+    <header class="top-bar">
+        <div class="top-bar-left">
+            <a href="/" class="top-bar-brand">
+                <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-hard-drive"></use></svg>
+                <span class="top-bar-title">TeslaUSB</span>
+            </a>
+        </div>
+        <div class="top-bar-right">
+            
+            <a href="/settings/#system-health-card" class="health-dot-link" id="health-dot-link" title="teslafat_0: inactive — Partition 0 (exFAT)" aria-label="teslafat_0: inactive — Partition 0 (exFAT)">
+                <span class="status-dot health-dot health-dot-error" id="health-dot" data-status-dot="health"></span>
+            </a>
+            
+            
+            <button class="theme-toggle-btn" onclick="toggleTheme()" aria-label="Toggle dark mode">
+                <svg class="nav-icon" id="theme-icon-svg" aria-hidden="true">
+                    <use href="/static/icons/lucide-sprite.svg#icon-moon"></use>
+                </svg>
+            </button>
+        </div>
+    </header>
+
+    <!-- Desktop Sidebar Rail -->
+    <nav class="sidebar-rail" id="sidebarRail" aria-label="Main navigation">
+        
+        <a href="/" class="nav-item" title="Map">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-map-pin"></use></svg>
+            <span class="nav-label">Map</span>
+        </a>
+        
+        
+        <a href="/analytics/" class="nav-item" title="Analytics">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-bar-chart-2"></use></svg>
+            <span class="nav-label">Analytics</span>
+        </a>
+        
+        
+        <a href="/media/" class="nav-item" title="Media">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-music"></use></svg>
+            <span class="nav-label">Media</span>
+        </a>
+        
+        
+        <a href="/settings/" class="nav-item active" title="Settings">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-settings"></use></svg>
+            <span class="nav-label">Settings</span>
+        </a>
+    </nav>
+
+    <!-- Mobile Bottom Tab Bar -->
+    <nav class="bottom-tabs" aria-label="Main navigation">
+        
+        <a href="/" class="tab-item">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-map-pin"></use></svg>
+            <span class="tab-label">Map</span>
+        </a>
+        
+        
+        <a href="/analytics/" class="tab-item">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-bar-chart-2"></use></svg>
+            <span class="tab-label">Analytics</span>
+        </a>
+        
+        
+        <a href="/media/" class="tab-item">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-music"></use></svg>
+            <span class="tab-label">Media</span>
+        </a>
+        
+        
+        <a href="/settings/" class="tab-item active">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-settings"></use></svg>
+            <span class="tab-label">Settings</span>
+        </a>
+    </nav>
+
+    <main class="main-content" role="main">
+        
+
+        
+            
+        
+
+        
+<section class="captive-page" aria-label="Wi-Fi setup">
+    <header class="captive-hero">
+        <div class="captive-hero-top">
+            <div class="captive-list">
+                <div class="captive-badge">
+                    <svg class="captive-inline-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-wifi"></use></svg>
+                    <span>Wi-Fi setup</span>
+                </div>
+                <h1 class="captive-title">Connect TeslaUSB to Wi-Fi</h1>
+                <p class="captive-copy">Scan nearby networks, join a saved network, or keep the setup access point online while you finish setup.</p>
+            </div>
+            
+        </div>
+        
+        <div class="captive-banner is-warning" role="status" aria-live="polite">
+            <div class="captive-badge">
+                <svg class="captive-inline-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-alert-triangle"></use></svg>
+                <span>Scan unavailable</span>
+            </div>
+            <p class="captive-copy">Required Wi-Fi binary 'nmcli' was not found in PATH; configure [wifi.binary_paths].nmcli</p>
+        </div>
+        
+    </header>
+
+    <section class="captive-grid">
+        <div class="captive-list">
+            <article class="captive-card" aria-labelledby="wifi-status-heading">
+                <div class="captive-card-head">
+                    <div>
+                        <h2 class="captive-card-title" id="wifi-status-heading">Current status</h2>
+                        <p class="captive-card-copy">Live connection details for the wireless client and the setup access point.</p>
+                    </div>
+                    <div class="captive-status-chip is-offline">
+                        <svg class="captive-inline-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-alert-circle"></use></svg>
+                        <span>Not connected</span>
+                    </div>
+                </div>
+                <div class="captive-status-list">
+                    <div class="captive-stat-card">
+                        <div class="captive-stat-row"><strong>SSID</strong><span>None</span></div>
+                        <p class="captive-status-copy">Signal Unknown</p>
+                    </div>
+                    <div class="captive-stat-card">
+                        <div class="captive-stat-row"><strong>IP address</strong><span>Unavailable</span></div>
+                        <p class="captive-status-copy">Saved networks 0</p>
+                    </div>
+                    <div class="captive-stat-card">
+                        <div class="captive-stat-row"><strong>Setup AP</strong><span>Offline</span></div>
+                        <p class="captive-status-copy">SSID TeslaUSB</p>
+                    </div>
+                </div>
+                <div class="captive-button-row">
+                    <form action="/settings/wifi/access-point" method="post">
+                        <input type="hidden" name="enabled" value="true" style="">
+                        <button class="btn btn-primary" type="submit" aria-label="Enable setup access point">Enable AP</button>
+                    </form>
+                    <form action="/settings/wifi/disconnect" method="post">
+                        <button class="btn btn-secondary" type="submit" aria-label="Disconnect current Wi-Fi network">Disconnect Wi-Fi</button>
+                    </form>
+                    <form action="/captive-portal" method="get">
+                        <input type="hidden" name="rescan" value="1" style="">
+                        <button class="btn btn-secondary" type="submit" aria-label="Rescan available Wi-Fi networks">Rescan</button>
+                    </form>
+                </div>
+            </article>
+
+            <article class="captive-card" aria-labelledby="wifi-networks-heading">
+                <div class="captive-card-head">
+                    <div>
+                        <h2 class="captive-card-title" id="wifi-networks-heading">Available networks</h2>
+                        <p class="captive-card-copy">Select a visible network or enter the SSID manually for hidden networks.</p>
+                    </div>
+                </div>
+                
+                <div class="captive-empty">
+                    <svg class="captive-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-search"></use></svg>
+                    <h3 class="captive-empty-title">No networks listed</h3>
+                    <p class="captive-empty-copy">Run another scan or use the manual form below if the network is hidden.</p>
+                </div>
+                
+            </article>
+        </div>
+
+        <div class="captive-list">
+            <article class="captive-card" aria-labelledby="wifi-manual-heading">
+                <div class="captive-card-head">
+                    <div>
+                        <h2 class="captive-card-title" id="wifi-manual-heading">Manual connection</h2>
+                        <p class="captive-card-copy">Use this form for hidden SSIDs or when you want to override a saved passphrase.</p>
+                    </div>
+                </div>
+                <form class="captive-form" action="/settings/wifi/connect" method="post">
+                    <div class="captive-form-row">
+                        <label class="captive-form-label" for="manual-ssid">SSID</label>
+                        <input id="manual-ssid" name="ssid" type="text" maxlength="32" required="" aria-label="Wi-Fi network name" style="">
+                    </div>
+                    <div class="captive-form-row">
+                        <label class="captive-form-label" for="manual-passphrase">Passphrase</label>
+                        <input id="manual-passphrase" name="passphrase" type="password" autocomplete="current-password" aria-label="Wi-Fi passphrase" style="">
+                        <p class="captive-field-help">Leave blank for open networks or to reuse a saved passphrase.</p>
+                    </div>
+                    <div class="captive-form-actions">
+                        <button class="btn btn-primary" type="submit" aria-label="Submit manual Wi-Fi connection">Connect now</button>
+                    </div>
+                </form>
+            </article>
+
+            <article class="captive-card" aria-labelledby="wifi-saved-heading">
+                <div class="captive-card-head">
+                    <div>
+                        <h2 class="captive-card-title" id="wifi-saved-heading">Saved networks</h2>
+                        <p class="captive-card-copy">Reconnect quickly or forget credentials that should no longer be stored.</p>
+                    </div>
+                </div>
+                
+                <div class="captive-empty">
+                    <svg class="captive-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-folder-open"></use></svg>
+                    <h3 class="captive-empty-title">No saved Wi-Fi profiles</h3>
+                    <p class="captive-empty-copy">Profiles are stored after a successful connection.</p>
+                </div>
+                
+            </article>
+        </div>
+    </section>
+</section>
+
+    </main>
+
+    <!-- Toast notification container -->
+    <div class="toast-container" id="toast-container" aria-live="polite"></div>
+
+    <script src="/static/js/main.js"></script>
+    
+
+    
+    <script>
+        (function() {
+            const POLL_MS = 30000;
+            const link = document.getElementById('health-dot-link');
+            const dot = document.getElementById('health-dot');
+            if (!link || !dot) return;
+
+            // Map subsystem severity to the CSS class + tooltip prefix.
+            // B-1: uses the design-system accent tokens for ok/warn/
+            // error so dark/light mode work automatically. (v1's mode
+            // status-dot vocabulary that this comment used to reference
+            // was removed when legacy mode switching went away.)
+            const SEV_TO_CLASS = {
+                ok:      'health-dot-ok',
+                warn:    'health-dot-warn',
+                error:   'health-dot-error',
+                unknown: 'health-dot-unknown',
+            };
+
+            function applyHealth(payload) {
+                const overall = (payload && payload.overall) || {};
+                const sev = overall.severity || 'unknown';
+                const msg = overall.message || 'System status';
+                // Reset any prior class then apply the new one.
+                dot.className = 'status-dot health-dot ' +
+                    (SEV_TO_CLASS[sev] || SEV_TO_CLASS.unknown);
+                link.title = msg;
+                link.setAttribute('aria-label', msg);
+                link.hidden = false;
+            }
+
+            async function poll() {
+                try {
+                    const r = await fetch('/api/system/health', {
+                        credentials: 'same-origin',
+                    });
+                    if (!r.ok) return;
+                    const data = await r.json();
+                    applyHealth(data);
+                } catch (e) { /* network blip — keep last known colour */ }
+            }
+
+            poll();
+            setInterval(poll, POLL_MS);
+        })();
+    </script>
+    
+
+</body></html>

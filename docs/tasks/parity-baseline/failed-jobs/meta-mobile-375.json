@@ -1,0 +1,145 @@
+{
+  "screen": "failed-jobs",
+  "spa_screens": [
+    "failed jobs"
+  ],
+  "url": "/jobs",
+  "viewport": {
+    "width": 375,
+    "height": 812,
+    "tag": "mobile-375"
+  },
+  "http_status": 200,
+  "wall_ms": 1827,
+  "dom_bytes": 39396,
+  "perf": {
+    "ttfb_ms": 95,
+    "dom_content_loaded_ms": 427,
+    "load_event_ms": 433,
+    "transfer_bytes": 35985,
+    "paints": {
+      "first-paint": 428,
+      "first-contentful-paint": 428
+    },
+    "slowest_resources": [
+      {
+        "name": "http://localhost:8080/api/system/health",
+        "dur": 385,
+        "size": 1589,
+        "type": "fetch"
+      },
+      {
+        "name": "http://localhost:8080/api/jobs/counts",
+        "dur": 352,
+        "size": 339,
+        "type": "fetch"
+      },
+      {
+        "name": "http://localhost:8080/static/js/main.js",
+        "dur": 306,
+        "size": 300,
+        "type": "script"
+      },
+      {
+        "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-hard-drive",
+        "dur": 306,
+        "size": 300,
+        "type": "other"
+      },
+      {
+        "name": "http://localhost:8080/static/css/style.css",
+        "dur": 305,
+        "size": 300,
+        "type": "link"
+      },
+      {
+        "name": "http://localhost:8080/api/jobs/failed?subsystem=all&limit=200",
+        "dur": 252,
+        "size": 1613,
+        "type": "fetch"
+      },
+      {
+        "name": "http://localhost:8080/static/css/bootstrap-icons-subset.css",
+        "dur": 212,
+        "size": 300,
+        "type": "link"
+      },
+      {
+        "name": "http://localhost:8080/static/icons/lucide-sprite.svg#icon-cloud-upload",
+        "dur": 56,
+        "size": 300,
+        "type": "other"
+      },
+      {
+        "name": "http://localhost:8080/static/fonts/inter-variable.woff2",
+        "dur": 1,
+        "size": 300,
+        "type": "css"
+      }
+    ],
+    "resource_count": 9
+  },
+  "console": [],
+  "network": {
+    "total_requests": 10,
+    "failed": [],
+    "slowest": [
+      {
+        "url": "/api/system/health",
+        "method": "GET",
+        "status": 200,
+        "type": "fetch",
+        "ms": 385
+      },
+      {
+        "url": "/api/jobs/counts",
+        "method": "GET",
+        "status": 200,
+        "type": "fetch",
+        "ms": 352
+      },
+      {
+        "url": "/static/icons/lucide-sprite.svg",
+        "method": "GET",
+        "status": 200,
+        "type": "other",
+        "ms": 306
+      },
+      {
+        "url": "/static/js/main.js",
+        "method": "GET",
+        "status": 200,
+        "type": "script",
+        "ms": 306
+      },
+      {
+        "url": "/static/css/style.css",
+        "method": "GET",
+        "status": 200,
+        "type": "stylesheet",
+        "ms": 305
+      },
+      {
+        "url": "/api/jobs/failed?subsystem=all&limit=200",
+        "method": "GET",
+        "status": 200,
+        "type": "fetch",
+        "ms": 252
+      },
+      {
+        "url": "/static/css/bootstrap-icons-subset.css",
+        "method": "GET",
+        "status": 200,
+        "type": "stylesheet",
+        "ms": 212
+      },
+      {
+        "url": "/jobs",
+        "method": "GET",
+        "status": 200,
+        "type": "document",
+        "ms": 95
+      }
+    ]
+  }
+}

@@ -1,0 +1,978 @@
+<!DOCTYPE html><html><head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    
+    <title>Tesla USB Gadget Control</title>
+    <script>
+        // Apply theme immediately before page renders to prevent flash
+        (function() {
+            const savedTheme = localStorage.getItem('theme');
+            const systemPrefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+            const theme = savedTheme || (systemPrefersDark ? 'dark' : 'light');
+            if (theme === 'dark') {
+                document.documentElement.setAttribute('data-theme', 'dark');
+            }
+        })();
+    </script>
+    <link rel="stylesheet" href="/static/css/bootstrap-icons-subset.css">
+    <link rel="stylesheet" href="/static/css/style.css">
+    
+</head>
+<body>
+    
+    
+
+    <!-- Top Bar -->
+    <header class="top-bar">
+        <div class="top-bar-left">
+            <a href="/" class="top-bar-brand">
+                <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-hard-drive"></use></svg>
+                <span class="top-bar-title">TeslaUSB</span>
+            </a>
+        </div>
+        <div class="top-bar-right">
+            
+            <a href="/settings/#system-health-card" class="health-dot-link" id="health-dot-link" title="teslafat_0: inactive — Partition 0 (exFAT)" aria-label="teslafat_0: inactive — Partition 0 (exFAT)">
+                <span class="status-dot health-dot health-dot-error" id="health-dot" data-status-dot="health"></span>
+            </a>
+            
+            
+            <button class="theme-toggle-btn" onclick="toggleTheme()" aria-label="Toggle dark mode">
+                <svg class="nav-icon" id="theme-icon-svg" aria-hidden="true">
+                    <use href="/static/icons/lucide-sprite.svg#icon-moon"></use>
+                </svg>
+            </button>
+        </div>
+    </header>
+
+    <!-- Desktop Sidebar Rail -->
+    <nav class="sidebar-rail" id="sidebarRail" aria-label="Main navigation">
+        
+        <a href="/" class="nav-item" title="Map">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-map-pin"></use></svg>
+            <span class="nav-label">Map</span>
+        </a>
+        
+        
+        <a href="/analytics/" class="nav-item" title="Analytics">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-bar-chart-2"></use></svg>
+            <span class="nav-label">Analytics</span>
+        </a>
+        
+        
+        <a href="/media/" class="nav-item active" title="Media">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-music"></use></svg>
+            <span class="nav-label">Media</span>
+        </a>
+        
+        
+        <a href="/cloud/" class="nav-item" title="Cloud">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-cloud"></use></svg>
+            <span class="nav-label">Cloud</span>
+        </a>
+        
+        <a href="/settings/" class="nav-item" title="Settings">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-settings"></use></svg>
+            <span class="nav-label">Settings</span>
+        </a>
+    </nav>
+
+    <!-- Mobile Bottom Tab Bar -->
+    <nav class="bottom-tabs" aria-label="Main navigation">
+        
+        <a href="/" class="tab-item">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-map-pin"></use></svg>
+            <span class="tab-label">Map</span>
+        </a>
+        
+        
+        <a href="/analytics/" class="tab-item">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-bar-chart-2"></use></svg>
+            <span class="tab-label">Analytics</span>
+        </a>
+        
+        
+        <a href="/media/" class="tab-item active">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-music"></use></svg>
+            <span class="tab-label">Media</span>
+        </a>
+        
+        
+        <a href="/cloud/" class="tab-item">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-cloud"></use></svg>
+            <span class="tab-label">Cloud</span>
+        </a>
+        
+        <a href="/settings/" class="tab-item">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-settings"></use></svg>
+            <span class="tab-label">Settings</span>
+        </a>
+    </nav>
+
+    <main class="main-content" role="main">
+        
+
+        
+            
+        
+
+        
+<div class="container">
+    
+<div class="media-pills">
+  
+  <a href="/lock_chimes/" class="media-pill ">
+    <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-bell"></use></svg>
+    Chimes
+  </a>
+  
+  
+  <a href="/music/" class="media-pill ">
+    <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-music"></use></svg>
+    Music
+  </a>
+  
+  
+  <a href="/boombox/" class="media-pill ">
+    <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-megaphone"></use></svg>
+    Boombox
+  </a>
+  
+  
+  <a href="/light_shows/" class="media-pill ">
+    <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-sparkles"></use></svg>
+    Shows
+  </a>
+  
+  
+  <a href="/wraps/" class="media-pill active">
+    <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-palette"></use></svg>
+    Wraps
+  </a>
+  
+  
+  <a href="/license_plates/" class="media-pill ">
+    <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-image"></use></svg>
+    Plates
+  </a>
+  
+</div>
+    <h2>Custom Wraps</h2>
+
+    <!-- iOS Safari Warning -->
+    <div id="iosWarning" class="ios-warning">
+        <p><strong>⚠️ iOS Browser Limitation:</strong> File uploading is only available through Safari when running on iOS. Please open this page in Safari to upload files.</p>
+        <p>Note: Desktop browsers (Windows/Mac/Linux) work normally regardless of browser choice.</p>
+    </div>
+
+    <!-- Tesla Requirements Info -->
+    <div class="info-box" style="margin-bottom: 20px;">
+        <p><strong>Tesla Wrap Requirements:</strong></p>
+        <ul style="margin: 10px 0 0 20px; padding: 0; font-size: 13px; color: var(--text-secondary);">
+            <li><strong>Format:</strong> PNG only</li>
+            <li><strong>Size:</strong> 1 MB maximum</li>
+            <li><strong>Dimensions:</strong> 512x512 to 1024x1024 pixels</li>
+            <li><strong>Filename:</strong> 30 characters max (letters, numbers, underscores, dashes, spaces)</li>
+            <li><strong>Count:</strong> Up to 10 wraps at a time (currently: 2/10)</li>
+        </ul>
+        <p style="margin-top: 10px; font-size: 13px; color: var(--text-secondary);">
+            <strong>Usage:</strong> Wraps appear in Toybox → Paint Shop → Wraps tab.
+            <a href="https://github.com/teslamotors/custom-wraps" target="_blank" style="color: var(--text-link);">Download templates from Tesla</a>
+        </p>
+    </div>
+
+    <div class="folder-controls" id="wrapUploadControls">
+        <!-- Desktop Drag & Drop Interface -->
+        <div id="desktopUploadInterface" style="display: none;">
+            <div class="drag-drop-zone" id="dragDropZone" style="border: 3px dashed var(--border-input); border-radius: 8px; padding: 40px; text-align: center; background: var(--form-input-bg); cursor: pointer; transition: all 0.3s; margin-bottom: 20px;">
+                <div style="pointer-events: none;">
+                    <i class="bi bi-image" style="font-size: 48px; color: var(--btn-purple-bg); display: block; margin-bottom: 15px;"></i>
+                    <p style="font-size: 16px; font-weight: 600; margin-bottom: 8px; color: var(--text-primary);">Drag &amp; drop PNG files here or click to browse</p>
+                    <p style="font-size: 13px; color: var(--text-secondary); margin: 0;">
+                        PNG files only • 512-1024px • Max 1 MB each
+                    </p>
+                </div>
+            </div>
+
+            <input type="file" id="wrap_files_multi" accept=".png,image/png" multiple="" style="display: none;">
+
+            <!-- Selected Files Preview -->
+            <div id="selectedFilesPreview" style="display: none; margin-bottom: 20px;">
+                <h4 style="margin: 0 0 10px 0; font-size: 15px; color: var(--text-primary);">📋 Selected Files:</h4>
+                <div id="filesList" style="background: var(--form-input-bg); border: 1px solid var(--border-input); border-radius: 4px; padding: 10px; max-height: 300px; overflow-y: auto;"></div>
+                <div style="display: flex; gap: 10px; margin-top: 10px;">
+                    <button type="button" class="action-btn" id="uploadSelectedBtn">Upload All Files</button>
+                    <button type="button" class="action-btn danger" id="clearSelectedBtn">Clear All</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Mobile/Fallback Simple Upload Interface -->
+        <form method="post" action="/wraps/upload" enctype="multipart/form-data" style="margin-bottom: 20px; display: block;" id="wrapUploadForm">
+            <label for="wrap_file" style="display: block; margin-bottom: 8px; font-weight: 600;">Upload Custom Wrap:</label>
+            <p style="margin: 0 0 10px 0; font-size: 13px; color: var(--text-secondary);">
+                PNG file • 512-1024px • Max 1 MB
+            </p>
+            <input type="file" name="wrap_file" id="wrap_file" accept=".png,image/png" required="" style="display: block; margin-bottom: 10px; padding: 10px; border: 2px solid var(--border-input); border-radius: 4px; background: var(--form-input-bg); width: 100%; max-width: 400px; font-size: 14px; color: var(--text-primary);">
+            <button type="submit" class="action-btn" id="wrapUploadBtn">Upload</button>
+        </form>
+        <!-- Upload Progress Bar -->
+        <div id="wrapUploadProgress" style="display: none; margin-bottom: 20px;">
+            <div style="background: var(--upload-progress-bg); border-radius: 8px; padding: 15px; border: 2px solid var(--btn-purple-bg);">
+                <h4 style="margin: 0 0 10px 0; color: var(--btn-purple-bg);">📤 Uploading Wrap...</h4>
+                <div style="background: var(--upload-progress-bar-bg); border-radius: 4px; height: 30px; overflow: hidden; margin-bottom: 10px;">
+                    <div id="wrapProgressBar" style="background: linear-gradient(90deg, #6f42c1, #5a32a3); height: 100%; width: 0%; transition: width 0.3s; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; font-size: 14px;">
+                        0%
+                    </div>
+                </div>
+                <p id="wrapUploadStatus" style="margin: 0; font-size: 13px; color: var(--text-secondary);">Preparing upload...</p>
+            </div>
+        </div>
+    </div>
+
+    
+    <!-- Desktop Table Layout -->
+    <div class="video-table-container">
+        <table class="video-table" style="table-layout: fixed;">
+            <thead>
+                <tr>
+                    <th style="width: 18%;">Preview</th>
+                    <th style="width: 27%;">Filename</th>
+                    <th style="width: 15%;">Dimensions</th>
+                    <th style="width: 12%;">Size</th>
+                    <th style="width: 28%;">Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                
+                <tr>
+                    <td>
+                        
+                        <img src="/wraps/download/library/matte_black.png" alt="Wrap preview matte_black.png" style="max-width: 120px; max-height: 120px; border: 1px solid var(--border-input); border-radius: 4px; background: var(--bg-secondary);" loading="lazy">
+                    </td>
+                    <td style="word-wrap: break-word; overflow-wrap: break-word;">matte_black.png</td>
+                    <td>512x512</td>
+                    <td>2.4 KB</td>
+                    <td>
+                        <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+                            <a href="/wraps/download/library/matte_black.png" class="action-btn">
+                                Download
+                            </a>
+                            <form method="post" action="/wraps/delete/library/matte_black.png" style="display: inline; margin: 0;" onsubmit="return confirm('Are you sure you want to delete matte_black.png?');">
+                                <button type="submit" class="action-btn danger">Delete</button>
+                            </form>
+                        </div>
+                    </td>
+                </tr>
+                
+                <tr>
+                    <td>
+                        
+                        <img src="/wraps/download/library/racing_stripes.png" alt="Wrap preview racing_stripes.png" style="max-width: 120px; max-height: 120px; border: 1px solid var(--border-input); border-radius: 4px; background: var(--bg-secondary);" loading="lazy">
+                    </td>
+                    <td style="word-wrap: break-word; overflow-wrap: break-word;">racing_stripes.png</td>
+                    <td>512x512</td>
+                    <td>2.5 KB</td>
+                    <td>
+                        <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+                            <a href="/wraps/download/library/racing_stripes.png" class="action-btn">
+                                Download
+                            </a>
+                            <form method="post" action="/wraps/delete/library/racing_stripes.png" style="display: inline; margin: 0;" onsubmit="return confirm('Are you sure you want to delete racing_stripes.png?');">
+                                <button type="submit" class="action-btn danger">Delete</button>
+                            </form>
+                        </div>
+                    </td>
+                </tr>
+                
+            </tbody>
+        </table>
+    </div>
+
+    <!-- Mobile Card Layout for Wraps -->
+    <div class="mobile-card-container">
+        
+        <div class="mobile-card wrap-card">
+            <div style="text-align: center; margin-bottom: 8px;">
+                
+                <img src="/wraps/download/library/matte_black.png" alt="Wrap preview matte_black.png" style="max-width: 100%; max-height: 200px; border: 1px solid var(--border-input); border-radius: 4px; background: var(--bg-secondary);" loading="lazy">
+            </div>
+            <div class="mobile-card-title">
+                <strong>matte_black.png</strong>
+            </div>
+            <div class="mobile-card-info">
+                <div class="mobile-card-info-row">
+                    <span class="mobile-card-info-label">Dimensions:</span>
+                    <span class="mobile-card-info-value">512x512</span>
+                </div>
+                <div class="mobile-card-info-row">
+                    <span class="mobile-card-info-label">Size:</span>
+                    <span class="mobile-card-info-value">2.4 KB</span>
+                </div>
+            </div>
+            <div class="mobile-card-actions" style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+                <a href="/wraps/download/library/matte_black.png" class="action-btn" style="flex: 1;">
+                    Download
+                </a>
+                <form method="post" action="/wraps/delete/library/matte_black.png" onsubmit="return confirm('Are you sure you want to delete matte_black.png?');" style="flex: 1; margin: 0; display: flex;">
+                    <button type="submit" class="action-btn danger" style="width: 100%;">Delete</button>
+                </form>
+            </div>
+        </div>
+        
+        <div class="mobile-card wrap-card">
+            <div style="text-align: center; margin-bottom: 8px;">
+                
+                <img src="/wraps/download/library/racing_stripes.png" alt="Wrap preview racing_stripes.png" style="max-width: 100%; max-height: 200px; border: 1px solid var(--border-input); border-radius: 4px; background: var(--bg-secondary);" loading="lazy">
+            </div>
+            <div class="mobile-card-title">
+                <strong>racing_stripes.png</strong>
+            </div>
+            <div class="mobile-card-info">
+                <div class="mobile-card-info-row">
+                    <span class="mobile-card-info-label">Dimensions:</span>
+                    <span class="mobile-card-info-value">512x512</span>
+                </div>
+                <div class="mobile-card-info-row">
+                    <span class="mobile-card-info-label">Size:</span>
+                    <span class="mobile-card-info-value">2.5 KB</span>
+                </div>
+            </div>
+            <div class="mobile-card-actions" style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+                <a href="/wraps/download/library/racing_stripes.png" class="action-btn" style="flex: 1;">
+                    Download
+                </a>
+                <form method="post" action="/wraps/delete/library/racing_stripes.png" onsubmit="return confirm('Are you sure you want to delete racing_stripes.png?');" style="flex: 1; margin: 0; display: flex;">
+                    <button type="submit" class="action-btn danger" style="width: 100%;">Delete</button>
+                </form>
+            </div>
+        </div>
+        
+    </div>
+    
+</div>
+
+<script>
+// Validation constants from server
+const MAX_FILE_SIZE = 1048576;
+const MIN_DIMENSION = 512;
+const MAX_DIMENSION = 1024;
+const MAX_FILENAME_LENGTH = 30;
+const MAX_WRAP_COUNT = 10;
+const CURRENT_WRAP_COUNT = 2;
+
+// Device and capability detection
+function isMobileDevice() {
+    return /(iPad|iPhone|iPod|Android|Mobile)/i.test(navigator.userAgent) ||
+           window.matchMedia("(max-width: 768px)").matches;
+}
+
+function isIOS() {
+    return /(iPad|iPhone|iPod)/i.test(navigator.userAgent) && !window.MSStream;
+}
+
+function isSafari() {
+    var ua = navigator.userAgent;
+    return /Safari/i.test(ua) && !/Chrome|CriOS|EdgiOS|FxiOS|OPiOS/i.test(ua);
+}
+
+function supportsMultipleUpload() {
+    const input = document.createElement('input');
+    return 'multiple' in input && !isIOS();
+}
+
+// Initialize upload interface based on device capabilities
+document.addEventListener('DOMContentLoaded', function() {
+    const isMobile = isMobileDevice();
+    const supportsMulti = supportsMultipleUpload();
+
+    const desktopInterface = document.getElementById('desktopUploadInterface');
+    const mobileForm = document.getElementById('wrapUploadForm');
+    const iosWarning = document.getElementById('iosWarning');
+    const uploadControls = document.getElementById('wrapUploadControls');
+
+    // Show iOS warning if needed
+    if (isIOS() && !isSafari()) {
+        if (iosWarning) iosWarning.style.display = 'block';
+        if (uploadControls) uploadControls.style.display = 'none';
+        return;
+    }
+
+    // Show appropriate interface
+    if (!isMobile && supportsMulti) {
+        // Desktop: show drag-drop interface
+        if (desktopInterface) desktopInterface.style.display = 'block';
+        if (mobileForm) mobileForm.style.display = 'none';
+        initializeDragDrop();
+    } else {
+        // Mobile/iOS: show simple form (already visible by default)
+        if (desktopInterface) desktopInterface.style.display = 'none';
+        if (mobileForm) mobileForm.style.display = 'block';
+        initializeSimpleUpload();
+    }
+});
+
+// Multi-file upload state
+let selectedFiles = [];
+let fileValidationResults = new Map(); // Store validation results
+
+function initializeDragDrop() {
+    const dropZone = document.getElementById('dragDropZone');
+    const fileInput = document.getElementById('wrap_files_multi');
+    const uploadBtn = document.getElementById('uploadSelectedBtn');
+    const clearBtn = document.getElementById('clearSelectedBtn');
+
+    if (!dropZone || !fileInput) return;
+
+    // Click to browse
+    dropZone.addEventListener('click', function() {
+        fileInput.click();
+    });
+
+    // File input change
+    fileInput.addEventListener('change', function(e) {
+        handleFiles(Array.from(e.target.files));
+    });
+
+    // Drag and drop events
+    dropZone.addEventListener('dragenter', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        dropZone.style.borderColor = 'var(--btn-purple-bg)';
+        dropZone.style.background = 'var(--hover-bg, rgba(111, 66, 193, 0.1))';
+    });
+
+    dropZone.addEventListener('dragover', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+    });
+
+    dropZone.addEventListener('dragleave', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        dropZone.style.borderColor = 'var(--border-input)';
+        dropZone.style.background = 'var(--form-input-bg)';
+    });
+
+    dropZone.addEventListener('drop', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        dropZone.style.borderColor = 'var(--border-input)';
+        dropZone.style.background = 'var(--form-input-bg)';
+
+        const files = Array.from(e.dataTransfer.files);
+        handleFiles(files);
+    });
+
+    // Upload button
+    if (uploadBtn) {
+        uploadBtn.addEventListener('click', function() {
+            uploadMultipleFiles();
+        });
+    }
+
+    // Clear button
+    if (clearBtn) {
+        clearBtn.addEventListener('click', function() {
+            selectedFiles = [];
+            fileValidationResults.clear();
+            updateFilesList();
+        });
+    }
+}
+
+async function handleFiles(files) {
+    // Filter for PNG files only
+    const pngFiles = files.filter(file => {
+        const ext = '.' + file.name.split('.').pop().toLowerCase();
+        return ext === '.png' || file.type === 'image/png';
+    });
+
+    if (pngFiles.length === 0) {
+        alert('Please select PNG files only');
+        return;
+    }
+
+    // Check if we'd exceed max count
+    const remainingSlots = MAX_WRAP_COUNT - CURRENT_WRAP_COUNT - selectedFiles.length;
+    if (remainingSlots <= 0) {
+        alert(`Maximum of ${MAX_WRAP_COUNT} wraps allowed. You already have ${CURRENT_WRAP_COUNT} wraps.`);
+        return;
+    }
+
+    // Process each file
+    for (const file of pngFiles) {
+        // Check for duplicates
+        const exists = selectedFiles.some(f => f.name === file.name && f.size === file.size);
+        if (exists) continue;
+
+        // Validate and add file
+        const validation = await validateFile(file);
+        fileValidationResults.set(file.name + '_' + file.size, validation);
+
+        selectedFiles.push(file);
+
+        // Check remaining slots
+        if (selectedFiles.length >= remainingSlots) {
+            if (pngFiles.indexOf(file) < pngFiles.length - 1) {
+                alert(`Only ${remainingSlots} slot(s) remaining. Some files were not added.`);
+            }
+            break;
+        }
+    }
+
+    updateFilesList();
+}
+
+async function validateFile(file) {
+    const errors = [];
+    let dimensions = null;
+
+    // Check file extension and name
+    const baseName = file.name.replace(/\.png$/i, '');
+    if (baseName.length > MAX_FILENAME_LENGTH) {
+        errors.push(`Filename too long (${baseName.length}/${MAX_FILENAME_LENGTH} chars)`);
+    }
+
+    const validPattern = /^[a-zA-Z0-9_\- ]+$/;
+    if (!validPattern.test(baseName)) {
+        errors.push('Invalid characters in filename');
+    }
+
+    // Check file size
+    if (file.size > MAX_FILE_SIZE) {
+        const sizeMB = (file.size / 1024 / 1024).toFixed(2);
+        errors.push(`File too large (${sizeMB} MB, max 1 MB)`);
+    }
+
+    // Check dimensions by loading image
+    try {
+        dimensions = await getImageDimensions(file);
+        if (dimensions) {
+            if (dimensions.width < MIN_DIMENSION || dimensions.height < MIN_DIMENSION) {
+                errors.push(`Too small (${dimensions.width}x${dimensions.height}, min ${MIN_DIMENSION}x${MIN_DIMENSION})`);
+            }
+            if (dimensions.width > MAX_DIMENSION || dimensions.height > MAX_DIMENSION) {
+                errors.push(`Too large (${dimensions.width}x${dimensions.height}, max ${MAX_DIMENSION}x${MAX_DIMENSION})`);
+            }
+        }
+    } catch (e) {
+        errors.push('Could not read image dimensions');
+    }
+
+    return {
+        valid: errors.length === 0,
+        errors: errors,
+        dimensions: dimensions
+    };
+}
+
+function getImageDimensions(file) {
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        const url = URL.createObjectURL(file);
+
+        img.onload = function() {
+            URL.revokeObjectURL(url);
+            resolve({ width: img.width, height: img.height });
+        };
+
+        img.onerror = function() {
+            URL.revokeObjectURL(url);
+            reject(new Error('Failed to load image'));
+        };
+
+        img.src = url;
+    });
+}
+
+function updateFilesList() {
+    const preview = document.getElementById('selectedFilesPreview');
+    const filesList = document.getElementById('filesList');
+    const uploadBtn = document.getElementById('uploadSelectedBtn');
+
+    if (!preview || !filesList) return;
+
+    if (selectedFiles.length === 0) {
+        preview.style.display = 'none';
+        return;
+    }
+
+    preview.style.display = 'block';
+
+    let html = '';
+    let hasValidFiles = false;
+
+    selectedFiles.forEach((file, index) => {
+        const sizeKB = (file.size / 1024).toFixed(1);
+        const sizeStr = `${sizeKB} KB`;
+        const key = file.name + '_' + file.size;
+        const validation = fileValidationResults.get(key);
+
+        const isValid = validation && validation.valid;
+        if (isValid) hasValidFiles = true;
+
+        const statusIcon = isValid ? '✓' : '⚠️';
+        const statusColor = isValid ? 'var(--success-text, #28a745)' : 'var(--error-text, #dc3545)';
+        const borderColor = isValid ? 'var(--border-input)' : 'var(--error-text, #dc3545)';
+
+        let dimStr = '';
+        if (validation && validation.dimensions) {
+            dimStr = ` (${validation.dimensions.width}x${validation.dimensions.height})`;
+        }
+
+        html += `
+            <div style="display: flex; flex-direction: column; padding: 10px; border-bottom: 1px solid ${borderColor}; color: var(--text-primary);">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <div style="flex: 1; overflow: hidden;">
+                        <span style="color: ${statusColor}; margin-right: 8px;">${statusIcon}</span>
+                        <strong style="word-break: break-word;">${escapeHtml(file.name)}</strong>
+                        <span style="color: var(--text-secondary); font-size: 12px; margin-left: 8px;">${sizeStr}${dimStr}</span>
+                    </div>
+                    <button type="button" onclick="removeFile(${index})" style="background: none; border: none; color: var(--error-text, #dc3545); cursor: pointer; padding: 4px 8px; font-size: 18px; flex-shrink: 0;" title="Remove">✖</button>
+                </div>
+        `;
+
+        if (validation && validation.errors.length > 0) {
+            html += `
+                <div style="margin-top: 5px; font-size: 12px; color: var(--error-text, #dc3545); padding-left: 24px;">
+                    ${validation.errors.map(e => escapeHtml(e)).join('<br>')}
+                </div>
+            `;
+        }
+
+        html += '</div>';
+    });
+
+    filesList.innerHTML = html;
+
+    // Disable upload button if no valid files
+    if (uploadBtn) {
+        uploadBtn.disabled = !hasValidFiles;
+    }
+}
+
+function removeFile(index) {
+    const file = selectedFiles[index];
+    const key = file.name + '_' + file.size;
+    fileValidationResults.delete(key);
+    selectedFiles.splice(index, 1);
+    updateFilesList();
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+async function uploadMultipleFiles() {
+    // Filter to only valid files
+    const validFiles = selectedFiles.filter(file => {
+        const key = file.name + '_' + file.size;
+        const validation = fileValidationResults.get(key);
+        return validation && validation.valid;
+    });
+
+    if (validFiles.length === 0) {
+        alert('No valid files to upload. Please fix validation errors first.');
+        return;
+    }
+
+    const uploadBtn = document.getElementById('uploadSelectedBtn');
+    const clearBtn = document.getElementById('clearSelectedBtn');
+    const progressDiv = document.getElementById('wrapUploadProgress');
+    const progressBar = document.getElementById('wrapProgressBar');
+    const statusText = document.getElementById('wrapUploadStatus');
+
+    // Disable buttons
+    if (uploadBtn) uploadBtn.disabled = true;
+    if (clearBtn) clearBtn.disabled = true;
+
+    // Show progress
+    if (progressDiv) {
+        progressDiv.style.display = 'block';
+        progressBar.style.width = '0%';
+        progressBar.textContent = '0%';
+        statusText.textContent = 'Preparing upload...';
+    }
+
+    const formData = new FormData();
+    validFiles.forEach(file => {
+        formData.append('wrap_files', file);
+    });
+
+    try {
+        const xhr = new XMLHttpRequest();
+
+        // Track progress
+        xhr.upload.addEventListener('progress', function(e) {
+            if (e.lengthComputable) {
+                const percentComplete = Math.round((e.loaded / e.total) * 100);
+                progressBar.style.width = percentComplete + '%';
+                progressBar.textContent = percentComplete + '%';
+
+                const loadedKB = (e.loaded / 1024).toFixed(1);
+                const totalKB = (e.total / 1024).toFixed(1);
+                statusText.textContent = `Uploading ${validFiles.length} file(s)... (${loadedKB} KB / ${totalKB} KB)`;
+            }
+        });
+
+        // Handle completion
+        xhr.addEventListener('load', function() {
+            if (xhr.status === 200) {
+                try {
+                    const response = JSON.parse(xhr.responseText);
+
+                    progressBar.style.width = '100%';
+                    progressBar.textContent = '100%';
+                    progressBar.style.background = '#28a745';
+
+                    if (response.success) {
+                        statusText.textContent = response.summary || 'Upload complete!';
+                        statusText.style.color = '#28a745';
+
+                        // Show detailed results
+                        showUploadResults(response.results);
+
+                        // Clear selections and reload after delay
+                        setTimeout(function() {
+                            selectedFiles = [];
+                            fileValidationResults.clear();
+                            window.location.reload();
+                        }, 2000);
+                    } else {
+                        statusText.textContent = 'Upload completed with errors';
+                        statusText.style.color = '#ffc107';
+                        showUploadResults(response.results);
+
+                        // Re-enable buttons
+                        if (uploadBtn) uploadBtn.disabled = false;
+                        if (clearBtn) clearBtn.disabled = false;
+                    }
+                } catch (e) {
+                    progressBar.style.background = '#dc3545';
+                    statusText.textContent = 'Upload complete! Redirecting...';
+                    statusText.style.color = '#28a745';
+                    setTimeout(function() {
+                        window.location.reload();
+                    }, 1000);
+                }
+            } else {
+                progressBar.style.background = '#dc3545';
+                statusText.textContent = 'Upload failed: ' + xhr.statusText;
+                statusText.style.color = '#dc3545';
+                if (uploadBtn) uploadBtn.disabled = false;
+                if (clearBtn) clearBtn.disabled = false;
+            }
+        });
+
+        // Handle errors
+        xhr.addEventListener('error', function() {
+            progressBar.style.background = '#dc3545';
+            statusText.textContent = 'Upload failed: Network error';
+            statusText.style.color = '#dc3545';
+            if (uploadBtn) uploadBtn.disabled = false;
+            if (clearBtn) clearBtn.disabled = false;
+        });
+
+        // Send request
+        xhr.open('POST', '/wraps/upload_multiple');
+        xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+        xhr.send(formData);
+
+    } catch (error) {
+        console.error('Upload error:', error);
+        alert('Upload failed: ' + error.message);
+        if (uploadBtn) uploadBtn.disabled = false;
+        if (clearBtn) clearBtn.disabled = false;
+    }
+}
+
+function showUploadResults(results) {
+    if (!results || results.length === 0) return;
+
+    let html = '<div style="margin-top: 15px; padding: 10px; background: var(--form-input-bg); border-radius: 4px;"><strong>Upload Results:</strong><ul style="margin: 10px 0 0 20px; padding: 0;">';
+
+    results.forEach(result => {
+        const icon = result.success ? '✓' : '✗';
+        const color = result.success ? '#28a745' : '#dc3545';
+        const dimInfo = result.dimensions ? ` (${result.dimensions})` : '';
+        html += `<li style="color: ${color}; margin: 5px 0;">${icon} ${escapeHtml(result.filename)}${dimInfo}: ${escapeHtml(result.message)}</li>`;
+    });
+
+    html += '</ul></div>';
+
+    const statusText = document.getElementById('wrapUploadStatus');
+    if (statusText && statusText.parentNode) {
+        const resultsDiv = document.createElement('div');
+        resultsDiv.innerHTML = html;
+        statusText.parentNode.appendChild(resultsDiv);
+    }
+}
+
+function initializeSimpleUpload() {
+    const form = document.getElementById('wrapUploadForm');
+    if (!form) return;
+
+    const fileInput = document.getElementById('wrap_file');
+
+    // Add client-side validation on file select
+    if (fileInput) {
+        fileInput.addEventListener('change', async function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const validation = await validateFile(file);
+            if (!validation.valid) {
+                alert('File validation failed:\n• ' + validation.errors.join('\n• '));
+                fileInput.value = '';
+            }
+        });
+    }
+
+    form.addEventListener('submit', function(e) {
+        e.preventDefault();
+
+        const uploadBtn = document.getElementById('wrapUploadBtn');
+        const progressDiv = document.getElementById('wrapUploadProgress');
+        const progressBar = document.getElementById('wrapProgressBar');
+        const statusText = document.getElementById('wrapUploadStatus');
+
+        if (!fileInput.files || fileInput.files.length === 0) {
+            alert('Please select a file to upload');
+            return;
+        }
+
+        const file = fileInput.files[0];
+        const formData = new FormData(form);
+
+        // Disable upload button and show progress
+        uploadBtn.disabled = true;
+        uploadBtn.textContent = '⏳ Uploading...';
+        progressDiv.style.display = 'block';
+
+        // Create AJAX request with progress tracking
+        const xhr = new XMLHttpRequest();
+
+        // Track upload progress
+        xhr.upload.addEventListener('progress', function(e) {
+            if (e.lengthComputable) {
+                const percentComplete = Math.round((e.loaded / e.total) * 100);
+                progressBar.style.width = percentComplete + '%';
+                progressBar.textContent = percentComplete + '%';
+
+                // Format file size display
+                const loadedKB = (e.loaded / 1024).toFixed(1);
+                const totalKB = (e.total / 1024).toFixed(1);
+                statusText.textContent = `Uploading ${file.name}... (${loadedKB} KB / ${totalKB} KB)`;
+            }
+        });
+
+        // Handle completion
+        xhr.addEventListener('load', function() {
+            if (xhr.status === 200 || xhr.status === 302) {
+                progressBar.style.width = '100%';
+                progressBar.textContent = '100%';
+                progressBar.style.background = '#28a745';
+                statusText.textContent = 'Upload complete! Redirecting...';
+                statusText.style.color = '#28a745';
+
+                // Redirect after short delay
+                setTimeout(function() {
+                    window.location.reload();
+                }, 1000);
+            } else {
+                progressBar.style.background = '#dc3545';
+                statusText.textContent = 'Upload failed: ' + xhr.statusText;
+                statusText.style.color = '#dc3545';
+                uploadBtn.disabled = false;
+                uploadBtn.textContent = '📤 Upload';
+            }
+        });
+
+        // Handle errors
+        xhr.addEventListener('error', function() {
+            progressBar.style.background = '#dc3545';
+            statusText.textContent = 'Upload failed: Network error';
+            statusText.style.color = '#dc3545';
+            uploadBtn.disabled = false;
+            uploadBtn.textContent = '📤 Upload';
+        });
+
+        // Send the request
+        xhr.open('POST', form.action);
+        xhr.send(formData);
+    });
+}
+
+// iOS Browser Detection and Warning Display
+(function() {
+    // Show warning and hide controls if iOS + not Safari
+    if (isIOS() && !isSafari()) {
+        var warning = document.getElementById('iosWarning');
+        var controls = document.getElementById('wrapUploadControls');
+        if (warning) warning.style.display = 'block';
+        if (controls) controls.style.display = 'none';
+    }
+})();
+</script>
+
+    </main>
+
+    <!-- Toast notification container -->
+    <div class="toast-container" id="toast-container" aria-live="polite"></div>
+
+    <script src="/static/js/main.js"></script>
+    
+
+    
+    <script>
+        (function() {
+            const POLL_MS = 30000;
+            const link = document.getElementById('health-dot-link');
+            const dot = document.getElementById('health-dot');
+            if (!link || !dot) return;
+
+            // Map subsystem severity to the CSS class + tooltip prefix.
+            // B-1: uses the design-system accent tokens for ok/warn/
+            // error so dark/light mode work automatically. (v1's mode
+            // status-dot vocabulary that this comment used to reference
+            // was removed when legacy mode switching went away.)
+            const SEV_TO_CLASS = {
+                ok:      'health-dot-ok',
+                warn:    'health-dot-warn',
+                error:   'health-dot-error',
+                unknown: 'health-dot-unknown',
+            };
+
+            function applyHealth(payload) {
+                const overall = (payload && payload.overall) || {};
+                const sev = overall.severity || 'unknown';
+                const msg = overall.message || 'System status';
+                // Reset any prior class then apply the new one.
+                dot.className = 'status-dot health-dot ' +
+                    (SEV_TO_CLASS[sev] || SEV_TO_CLASS.unknown);
+                link.title = msg;
+                link.setAttribute('aria-label', msg);
+                link.hidden = false;
+            }
+
+            async function poll() {
+                try {
+                    const r = await fetch('/api/system/health', {
+                        credentials: 'same-origin',
+                    });
+                    if (!r.ok) return;
+                    const data = await r.json();
+                    applyHealth(data);
+                } catch (e) { /* network blip — keep last known colour */ }
+            }
+
+            poll();
+            setInterval(poll, POLL_MS);
+        })();
+    </script>
+    
+
+</body></html>

@@ -1,0 +1,2826 @@
+<!DOCTYPE html><html><head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    
+    <title>Tesla USB Gadget Control</title>
+    <script>
+        // Apply theme immediately before page renders to prevent flash
+        (function() {
+            const savedTheme = localStorage.getItem('theme');
+            const systemPrefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+            const theme = savedTheme || (systemPrefersDark ? 'dark' : 'light');
+            if (theme === 'dark') {
+                document.documentElement.setAttribute('data-theme', 'dark');
+            }
+        })();
+    </script>
+    <link rel="stylesheet" href="/static/css/bootstrap-icons-subset.css">
+    <link rel="stylesheet" href="/static/css/style.css">
+    
+<link rel="stylesheet" href="/static/css/audio_trimmer.css">
+<script src="/static/vendor/lamejs/lame.min.js"></script>
+<script src="/static/js/audio_trimmer.js"></script>
+
+</head>
+<body>
+    
+    
+
+    <!-- Top Bar -->
+    <header class="top-bar">
+        <div class="top-bar-left">
+            <a href="/" class="top-bar-brand">
+                <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-hard-drive"></use></svg>
+                <span class="top-bar-title">TeslaUSB</span>
+            </a>
+        </div>
+        <div class="top-bar-right">
+            
+            <a href="/settings/#system-health-card" class="health-dot-link" id="health-dot-link" title="teslafat_0: inactive — Partition 0 (exFAT)" aria-label="teslafat_0: inactive — Partition 0 (exFAT)">
+                <span class="status-dot health-dot health-dot-error" id="health-dot" data-status-dot="health"></span>
+            </a>
+            
+            
+            <button class="theme-toggle-btn" onclick="toggleTheme()" aria-label="Toggle dark mode">
+                <svg class="nav-icon" id="theme-icon-svg" aria-hidden="true">
+                    <use href="/static/icons/lucide-sprite.svg#icon-moon"></use>
+                </svg>
+            </button>
+        </div>
+    </header>
+
+    <!-- Desktop Sidebar Rail -->
+    <nav class="sidebar-rail" id="sidebarRail" aria-label="Main navigation">
+        
+        <a href="/" class="nav-item" title="Map">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-map-pin"></use></svg>
+            <span class="nav-label">Map</span>
+        </a>
+        
+        
+        <a href="/analytics/" class="nav-item" title="Analytics">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-bar-chart-2"></use></svg>
+            <span class="nav-label">Analytics</span>
+        </a>
+        
+        
+        <a href="/media/" class="nav-item active" title="Media">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-music"></use></svg>
+            <span class="nav-label">Media</span>
+        </a>
+        
+        
+        <a href="/cloud/" class="nav-item" title="Cloud">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-cloud"></use></svg>
+            <span class="nav-label">Cloud</span>
+        </a>
+        
+        <a href="/settings/" class="nav-item" title="Settings">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-settings"></use></svg>
+            <span class="nav-label">Settings</span>
+        </a>
+    </nav>
+
+    <!-- Mobile Bottom Tab Bar -->
+    <nav class="bottom-tabs" aria-label="Main navigation">
+        
+        <a href="/" class="tab-item">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-map-pin"></use></svg>
+            <span class="tab-label">Map</span>
+        </a>
+        
+        
+        <a href="/analytics/" class="tab-item">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-bar-chart-2"></use></svg>
+            <span class="tab-label">Analytics</span>
+        </a>
+        
+        
+        <a href="/media/" class="tab-item active">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-music"></use></svg>
+            <span class="tab-label">Media</span>
+        </a>
+        
+        
+        <a href="/cloud/" class="tab-item">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-cloud"></use></svg>
+            <span class="tab-label">Cloud</span>
+        </a>
+        
+        <a href="/settings/" class="tab-item">
+            <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-settings"></use></svg>
+            <span class="tab-label">Settings</span>
+        </a>
+    </nav>
+
+    <main class="main-content" role="main">
+        
+
+        
+            
+        
+
+        
+<div class="container">
+    
+<div class="media-pills">
+  
+  <a href="/lock_chimes/" class="media-pill active">
+    <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-bell"></use></svg>
+    Chimes
+  </a>
+  
+  
+  <a href="/music/" class="media-pill ">
+    <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-music"></use></svg>
+    Music
+  </a>
+  
+  
+  <a href="/boombox/" class="media-pill ">
+    <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-megaphone"></use></svg>
+    Boombox
+  </a>
+  
+  
+  <a href="/light_shows/" class="media-pill ">
+    <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-sparkles"></use></svg>
+    Shows
+  </a>
+  
+  
+  <a href="/wraps/" class="media-pill ">
+    <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-palette"></use></svg>
+    Wraps
+  </a>
+  
+  
+  <a href="/license_plates/" class="media-pill ">
+    <svg class="nav-icon" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-image"></use></svg>
+    Plates
+  </a>
+  
+</div>
+    <h2>Lock Chimes</h2>
+    
+    <!-- iOS Safari Warning -->
+    <div id="iosWarning" class="ios-warning">
+        <p><strong>iOS Browser Limitation:</strong> File uploading is only available through Safari when running on iOS. Please open this page in Safari to upload files.</p>
+        <p>Note: Desktop browsers (Windows/Mac/Linux) work normally regardless of browser choice.</p>
+    </div>
+    
+    <!-- Active Lock Chime - Moved to top -->
+    
+    <div style="background: var(--bg-secondary); padding: 15px; border-radius: 8px; margin-bottom: 20px; border: 1px solid var(--border-color);">
+        <h3 style="margin: 0 0 10px 0; color: var(--text-primary);">Active Lock Chime</h3>
+        <div style="display: flex; align-items: center; gap: 15px; flex-wrap: wrap;">
+            <div>
+                <strong>LockChime.wav</strong><br>
+                <span style="color: var(--text-secondary); font-size: 13px;">258.4 KB</span>
+            </div>
+            <audio controls="" preload="none" style="flex: 1;">
+                <source src="/lock_chimes/play/active?v=2026-06-04T19:14:30.359448+00:00" type="audio/wav">
+            </audio>
+        </div>
+    </div>
+    
+    
+    <!-- Upload Controls - Collapsible -->
+    <details class="settings-section" id="chimeUploadControls" open="">
+        <summary>Upload New Chime</summary>
+        <div class="section-content">
+            
+            <!-- Upload Mode Toggle -->
+            <div style="margin-bottom: 20px;">
+                <label class="toggle-switch">
+                    <input type="checkbox" id="bulkUploadToggle" style="">
+                    <span class="toggle-slider"></span>
+                    <span class="toggle-label">Bulk Upload</span>
+                </label>
+            </div>
+            
+            <!-- Single File Upload Mode (with trim editor) -->
+            <div id="singleUploadMode">
+                <form method="post" action="/lock_chimes/upload" enctype="multipart/form-data" id="chimeUploadForm">
+                    <input type="hidden" name="pre_trimmed" id="preTrimmedFlag" value="false" style="">
+                    <input type="hidden" name="original_filename" id="originalFilename" value="" style="">
+                    <div style="display: flex; gap: 10px; align-items: flex-start; flex-wrap: wrap; margin-bottom: 10px;">
+                        <input type="file" name="chime_file" id="chime_file" accept=".wav,.mp3" required="" style="padding: 10px; border: 2px solid var(--border-input); border-radius: 4px; background: var(--form-input-bg); flex: 1 1 0%; min-width: 250px; max-width: 400px; font-size: 14px; color: var(--text-primary);">
+                        <button type="submit" class="action-btn" id="chimeUploadBtn" style="display: none;">Upload</button>
+                    </div>
+                    <p style="margin: 0 0 15px 0; font-size: 12px; color: var(--text-secondary);">
+                        WAV or MP3 files - auto-converted to Tesla format (PCM 16-bit, 44.1 kHz, under 1MB)
+                    </p>
+                </form>
+            </div>
+            
+            <!-- Bulk Upload Mode (validation only, no processing) -->
+            <div id="bulkUploadMode" style="display: none;">
+                <div class="bulk-upload-info" style="background: var(--ios-warning-bg); border: 2px solid var(--ios-warning-border); border-radius: 8px; padding: 12px; margin-bottom: 15px;">
+                    <p style="margin: 0 0 8px 0; font-weight: 600; color: var(--text-primary);">Bulk Upload Requirements:</p>
+                    <ul style="margin: 0; padding-left: 20px; font-size: 13px; color: var(--text-secondary);">
+                        <li>Only WAV files accepted (no MP3)</li>
+                        <li>Files must already meet Tesla requirements:</li>
+                        <li>PCM 16-bit, 44.1 or 48 kHz, mono or stereo</li>
+                        <li>Under 1 MB file size</li>
+                        <li>No audio processing or conversion will be performed</li>
+                        <li>Invalid files will be rejected with detailed reasons</li>
+                    </ul>
+                </div>
+                
+                <!-- Desktop Drag & Drop Interface -->
+                <div id="desktopBulkUpload" style="display: none;">
+                    <div class="drag-drop-zone" id="chimeDragDropZone" style="border: 3px dashed var(--border-input); border-radius: 8px; padding: 40px; text-align: center; background: var(--form-input-bg); cursor: pointer; transition: all 0.3s; margin-bottom: 20px;">
+                        <div style="pointer-events: none;">
+                            <svg style="width: 48px; height: 48px; color: var(--btn-primary-bg); display: block; margin: 0 auto 15px;" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-upload"></use></svg>
+                            <p style="font-size: 16px; font-weight: 600; margin-bottom: 8px; color: var(--text-primary);">Drag &amp; drop WAV files here or click to browse</p>
+                            <p style="font-size: 13px; color: var(--text-secondary); margin: 0;">
+                                Tesla-ready WAV files only (multiple selection supported)
+                            </p>
+                        </div>
+                    </div>
+                    
+                    <input type="file" id="chime_files_multi" accept=".wav" multiple="" style="display: none;">
+                    
+                    <!-- Selected Files Preview -->
+                    <div id="selectedChimesPreview" style="display: none; margin-bottom: 20px;">
+                        <h4 style="margin: 0 0 10px 0; font-size: 15px; color: var(--text-primary);">Selected Files:</h4>
+                        <div id="chimeFilesList" style="background: var(--form-input-bg); border: 1px solid var(--border-input); border-radius: 4px; padding: 10px; max-height: 200px; overflow-y: auto;"></div>
+                        <div style="display: flex; gap: 10px; margin-top: 10px;">
+                            <button type="button" class="action-btn" id="uploadSelectedChimesBtn">Upload All Files</button>
+                            <button type="button" class="action-btn danger" id="clearSelectedChimesBtn">Clear All</button>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Mobile/Fallback Simple Bulk Upload -->
+                <div id="mobileBulkUpload" style="display: block;">
+                    <label for="chime_file_bulk" style="display: block; margin-bottom: 8px; font-weight: 600;">Select Tesla-ready WAV files:</label>
+                    <input type="file" id="chime_file_bulk" accept=".wav" multiple="" style="display: block; margin-bottom: 10px; padding: 10px; border: 2px solid var(--border-input); border-radius: 4px; background: var(--form-input-bg); width: 100%; max-width: 400px; font-size: 14px; color: var(--text-primary);">
+                    <button type="button" class="action-btn" id="uploadBulkBtn" style="display: none;">Upload Files</button>
+                </div>
+            </div>
+            
+            <!-- Upload Progress Bar -->
+            <div id="chimeUploadProgress" style="display: none; margin-top: 15px;">
+                <div style="background: var(--upload-progress-bg); border-radius: 8px; padding: 15px; border: 2px solid var(--btn-primary-bg);">
+                    <h4 style="margin: 0 0 10px 0; color: var(--btn-primary-bg);">Uploading Chime...</h4>
+                    <div style="background: var(--upload-progress-bar-bg); border-radius: 4px; height: 30px; overflow: hidden; margin-bottom: 10px;">
+                        <div id="chimeProgressBar" style="background: linear-gradient(90deg, #007bff, #0056b3); height: 100%; width: 0%; transition: width 0.3s; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; font-size: 14px;">
+                            0%
+                        </div>
+                    </div>
+                    <p id="chimeUploadStatus" style="margin: 0; font-size: 13px; color: var(--text-secondary);">Preparing upload...</p>
+                    <div id="chimeUploadResults" style="display: none; margin-top: 15px;"></div>
+                </div>
+            </div>
+        </div>
+    </details>
+    
+    <!-- Audio Trim Editor -->
+    <div id="trimEditorSection" class="trim-editor-section" style="display: none;">
+        <div class="trim-editor-header">
+            <span id="trimEditorTitle">Trim &amp; Adjust Audio</span>
+            <span id="trimEditorBadge" class="trim-editor-badge" style="display: none;">Editing</span>
+        </div>
+        
+        <!-- Loading State -->
+        <div id="trimEditorLoading" class="trim-editor-loading" style="display: none;">
+            <div class="trim-editor-spinner"></div>
+            <p style="margin-top: 15px;">Decoding audio...</p>
+        </div>
+        
+        <!-- Editor Content -->
+        <div id="trimEditorContent" style="display: none;">
+            <!-- Warning Message -->
+            <div id="trimMessage" class="trim-message" style="display: none;"></div>
+            
+            <!-- Waveform -->
+            <div class="waveform-container">
+                <canvas id="waveformCanvas" class="waveform-canvas" width="0" height="0" style="width: 0px;"></canvas>
+            </div>
+            
+            <!-- Trim Controls -->
+            <div class="trim-controls">
+                <!-- Start/End Time -->
+                <div class="trim-control-row">
+                    <div class="trim-control-group">
+                        <label class="trim-control-label">
+                            Start Time
+                            <span class="trim-control-sublabel" id="startTimeDisplay">0.00s</span>
+                        </label>
+                        <input type="range" id="startTimeSlider" class="trim-slider" min="0" max="100" value="0" step="0.1" style="">
+                    </div>
+                    <div class="trim-control-group">
+                        <label class="trim-control-label">
+                            End Time
+                            <span class="trim-control-sublabel" id="endTimeDisplay">0.00s</span>
+                        </label>
+                        <input type="range" id="endTimeSlider" class="trim-slider" min="0" max="100" value="100" step="0.1" style="">
+                    </div>
+                </div>
+                
+                <!-- Playback Speed - HIDDEN FOR NOW (pitch preservation needs improvement) -->
+                <div class="trim-control-group" style="display: none;">
+                    <label class="trim-control-label">
+                        Playback Speed
+                        <span class="trim-control-sublabel" id="speedDisplay">1.00x</span>
+                    </label>
+                    <input type="range" id="speedSlider" class="speed-slider" min="0.5" max="2.0" value="1.0" step="0.05" style="">
+                </div>
+                
+                <!-- Volume Normalization -->
+                <div class="trim-control-group" style="margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--border-input);">
+                    <label class="trim-control-label" style="display: flex; align-items: center; cursor: pointer; user-select: none;">
+                        <input type="checkbox" id="trimNormalizeVolume" checked="" style="width: 18px; height: 18px; margin-right: 8px; cursor: pointer;">
+                        <span>Normalize Volume</span>
+                    </label>
+                    <div id="trimNormalizationSettings" style="margin-top: 12px;">
+                        <div style="margin-bottom: 8px;">
+                            <input type="range" id="trimTargetLufs" class="speed-slider" min="0" max="3" value="1" step="1" style="">
+                        </div>
+                        <div class="slider-labels" style="display: grid; grid-template-columns: repeat(4, 1fr); font-size: 11px; color: var(--text-secondary); margin-top: 4px;">
+                            <span style="text-align: left;">Broadcast</span>
+                            <span style="text-align: center;">Streaming</span>
+                            <span style="text-align: center;">Loud</span>
+                            <span style="text-align: right;">Maximum</span>
+                        </div>
+                        <div style="margin-top: 10px; padding: 8px; background: var(--form-input-bg); border-radius: 4px; border: 1px solid var(--border-input);">
+                            <strong id="trimCurrentLevel" style="display: block; margin-bottom: 4px; font-size: 13px;">Streaming</strong>
+                            <small id="trimLevelDescription" style="color: var(--text-secondary); font-size: 11px;">Recommended for balanced playback</small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Stats Display -->
+            <div class="trim-stats">
+                <div class="trim-stats-grid">
+                    <div class="trim-stat">
+                        <span class="trim-stat-label">Duration</span>
+                        <span class="trim-stat-value" id="statDuration">0.0s</span>
+                    </div>
+                    <div class="trim-stat">
+                        <span class="trim-stat-label">Effective Duration</span>
+                        <span class="trim-stat-value" id="statEffective">0.0s</span>
+                    </div>
+                    <div class="trim-stat">
+                        <span class="trim-stat-label">File Size</span>
+                        <span class="trim-stat-value" id="statFileSize">0 KB</span>
+                    </div>
+                    <div class="trim-stat">
+                        <span class="trim-stat-label">Status</span>
+                        <span class="trim-stat-value success" id="statStatus">Ready</span>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Filename Editor -->
+            <div style="margin: 15px 0; padding: 15px; background: var(--form-input-bg); border-radius: 8px; border: 2px solid var(--border-input);">
+                <label for="trimFilename" style="display: block; margin-bottom: 8px; font-weight: 600; color: var(--text-primary);">
+                    Output Filename:
+                </label>
+                <div style="display: flex; gap: 10px; align-items: center;">
+                    <input type="text" id="trimFilename" style="flex: 1 1 0%; padding: 10px; border: 2px solid var(--border-input); border-radius: 4px; font-size: 14px; background: var(--bg-secondary); color: var(--text-primary);" placeholder="Enter filename (without extension)">
+                    <span style="color: var(--text-secondary); font-weight: 600;">.wav</span>
+                </div>
+                <div id="filenameValidation" style="margin-top: 8px; font-size: 13px; display: none;"></div>
+            </div>
+            
+            <!-- Playback Controls -->
+            <div class="playback-controls">
+                <button id="playBtn" class="play-btn" title="Play preview" aria-label="Play preview">
+                    <svg style="width: 20px; height: 20px;" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-play"></use></svg>
+                </button>
+                <button id="autoFitBtn" class="trim-btn trim-btn-purple">
+                    Auto-Fit to Limits
+                </button>
+                <button id="resetBtn" class="trim-btn trim-btn-secondary">
+                    Reset
+                </button>
+            </div>
+            
+            <!-- Action Buttons -->
+            <div class="trim-actions">
+                <button id="uploadTrimmedBtn" class="trim-btn trim-btn-success">
+                    Upload Trimmed Audio
+                </button>
+                <button id="cancelTrimBtn" class="trim-btn trim-btn-secondary">
+                    Cancel
+                </button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Chime Scheduler -->
+    <details class="settings-section" id="scheduler-section">
+        <summary>Chime Scheduler </summary>
+        <div class="section-content">
+            <!-- Add New Schedule Form -->
+            <details open="" style="margin-bottom: 15px;" id="schedule-form-details">
+                <summary style="cursor: pointer; font-weight: 600; padding: 10px; background: var(--form-input-bg); border-radius: 4px; list-style: none; border: 1px solid var(--border-input);">
+                    <span id="form-title">Add New Schedule</span>
+                </summary>
+            
+            <form id="schedule-form" method="post" action="/lock_chimes/schedule/add" style="background: var(--form-input-bg); padding: 15px; border-radius: 4px; margin-top: 10px; border: 1px solid var(--border-input);">
+                <div style="display: grid; gap: 15px;">
+                    <!-- Schedule Name -->
+                    <div>
+                        <label style="display: block; margin-bottom: 5px; font-weight: 600;">Schedule Name:</label>
+                        <input type="text" id="schedule-name" name="schedule_name" placeholder="e.g., Morning Chime" required="" style="width: 100%; padding: 8px; border: 2px solid var(--border-input); border-radius: 4px; font-size: 14px; box-sizing: border-box; background: var(--bg-secondary); color: var(--text-primary);">
+                    </div>
+                    
+                    <!-- Chime Selection -->
+                    <div>
+                        <label style="display: block; margin-bottom: 5px; font-weight: 600;">Chime:</label>
+                        <select id="chime-select" name="chime_filename" required="" style="width: 100%; padding: 8px; border: 2px solid var(--border-input); border-radius: 4px; font-size: 14px; background: var(--bg-secondary); color: var(--text-primary);">
+                            <option value="">-- Select a chime --</option>
+                            <option value="RANDOM">Random Chime</option>
+                            
+                                
+                                <option value="Classic.wav">Classic.wav</option>
+                                
+                            
+                                
+                                <option value="Horn.wav">Horn.wav</option>
+                                
+                            
+                                
+                                <option value="Spaceship.wav">Spaceship.wav</option>
+                                
+                            
+                        </select>
+                    </div>
+                    
+                    <!-- Schedule Type Selection -->
+                    <div>
+                        <label style="display: block; margin-bottom: 8px; font-weight: 600;">Schedule Type:</label>
+                        <div style="display: flex; flex-wrap: wrap; gap: 10px;">
+                            <label style="display: flex; align-items: center; padding: 8px 12px; background: var(--form-label-bg); border-radius: 4px; cursor: pointer; user-select: none; border: 1px solid var(--border-input);">
+                                <input type="radio" name="schedule_type" value="weekly" class="schedule-type-radio" checked="" style="margin-right: 6px;">
+                                <span>Days of Week</span>
+                            </label>
+                            <label style="display: flex; align-items: center; padding: 8px 12px; background: var(--form-label-bg); border-radius: 4px; cursor: pointer; user-select: none; border: 1px solid var(--border-input);">
+                                <input type="radio" name="schedule_type" value="date" class="schedule-type-radio" style="margin-right: 6px;">
+                                <span>Specific Date</span>
+                            </label>
+                            <label style="display: flex; align-items: center; padding: 8px 12px; background: var(--form-label-bg); border-radius: 4px; cursor: pointer; user-select: none; border: 1px solid var(--border-input);">
+                                <input type="radio" name="schedule_type" value="holiday" class="schedule-type-radio" style="margin-right: 6px;">
+                                <span>US Holiday</span>
+                            </label>
+                            <label style="display: flex; align-items: center; padding: 8px 12px; background: var(--form-label-bg); border-radius: 4px; cursor: pointer; user-select: none; border: 1px solid var(--border-input);">
+                                <input type="radio" name="schedule_type" value="recurring" class="schedule-type-radio" style="margin-right: 6px;">
+                                <span>Recurring Rotation</span>
+                            </label>
+                        </div>
+                    </div>
+                    
+                    <!-- Interval Selection (for recurring schedules) -->
+                    <div id="interval-selection" class="schedule-type-field" style="display: none;">
+                        <label style="display: block; margin-bottom: 8px; font-weight: 600;">Rotation Frequency:</label>
+                        <select id="interval-select" name="interval" style="width: 100%; padding: 8px; border: 2px solid var(--border-input); border-radius: 4px; font-size: 14px; background: var(--bg-secondary); color: var(--text-primary);">
+                            <option value="">-- Select frequency --</option>
+                            
+                            <option value="on_boot">On every boot/startup</option>
+                            
+                            <option value="15min">Every 15 minutes</option>
+                            
+                            <option value="30min">Every 30 minutes</option>
+                            
+                            <option value="1hour">Every hour</option>
+                            
+                            <option value="2hour">Every 2 hours</option>
+                            
+                            <option value="4hour">Every 4 hours</option>
+                            
+                            <option value="6hour">Every 6 hours</option>
+                            
+                            <option value="12hour">Every 12 hours</option>
+                            
+                        </select>
+                        <p style="margin: 5px 0 0 0; font-size: 12px; color: var(--text-secondary);">
+                            Recurring schedules always use <strong>Random Chime</strong> and automatically avoid repeating the currently active chime
+                        </p>
+                    </div>
+                    
+                    <!-- Days Selection (for weekly schedules) -->
+                    <div id="days-selection" class="schedule-type-field" style="display: block;">
+                        <label style="display: block; margin-bottom: 8px; font-weight: 600;">Days:</label>
+                        <div style="display: flex; flex-wrap: wrap; gap: 10px;">
+                            
+                            <label style="display: flex; align-items: center; padding: 8px 12px; background: var(--form-label-bg); border-radius: 4px; cursor: pointer; user-select: none; border: 1px solid var(--border-input);">
+                                <input type="checkbox" name="days" value="Monday" class="day-checkbox" id="day-Monday" style="margin-right: 6px;">
+                                <span>Mon</span>
+                            </label>
+                            
+                            <label style="display: flex; align-items: center; padding: 8px 12px; background: var(--form-label-bg); border-radius: 4px; cursor: pointer; user-select: none; border: 1px solid var(--border-input);">
+                                <input type="checkbox" name="days" value="Tuesday" class="day-checkbox" id="day-Tuesday" style="margin-right: 6px;">
+                                <span>Tue</span>
+                            </label>
+                            
+                            <label style="display: flex; align-items: center; padding: 8px 12px; background: var(--form-label-bg); border-radius: 4px; cursor: pointer; user-select: none; border: 1px solid var(--border-input);">
+                                <input type="checkbox" name="days" value="Wednesday" class="day-checkbox" id="day-Wednesday" style="margin-right: 6px;">
+                                <span>Wed</span>
+                            </label>
+                            
+                            <label style="display: flex; align-items: center; padding: 8px 12px; background: var(--form-label-bg); border-radius: 4px; cursor: pointer; user-select: none; border: 1px solid var(--border-input);">
+                                <input type="checkbox" name="days" value="Thursday" class="day-checkbox" id="day-Thursday" style="margin-right: 6px;">
+                                <span>Thu</span>
+                            </label>
+                            
+                            <label style="display: flex; align-items: center; padding: 8px 12px; background: var(--form-label-bg); border-radius: 4px; cursor: pointer; user-select: none; border: 1px solid var(--border-input);">
+                                <input type="checkbox" name="days" value="Friday" class="day-checkbox" id="day-Friday" style="margin-right: 6px;">
+                                <span>Fri</span>
+                            </label>
+                            
+                            <label style="display: flex; align-items: center; padding: 8px 12px; background: var(--form-label-bg); border-radius: 4px; cursor: pointer; user-select: none; border: 1px solid var(--border-input);">
+                                <input type="checkbox" name="days" value="Saturday" class="day-checkbox" id="day-Saturday" style="margin-right: 6px;">
+                                <span>Sat</span>
+                            </label>
+                            
+                            <label style="display: flex; align-items: center; padding: 8px 12px; background: var(--form-label-bg); border-radius: 4px; cursor: pointer; user-select: none; border: 1px solid var(--border-input);">
+                                <input type="checkbox" name="days" value="Sunday" class="day-checkbox" id="day-Sunday" style="margin-right: 6px;">
+                                <span>Sun</span>
+                            </label>
+                            
+                        </div>
+                        <p style="margin: 5px 0 0 0; font-size: 12px; color: var(--text-secondary);">Select at least one day</p>
+                    </div>
+                    
+                    <!-- Date Selection (for date schedules) -->
+                    <div id="date-selection" class="schedule-type-field" style="display: none;">
+                        <label style="display: block; margin-bottom: 8px; font-weight: 600;">Date (Month/Day):</label>
+                        <div style="display: flex; gap: 10px; align-items: center;">
+                            <select id="month-select" name="month" style="padding: 8px; border: 2px solid var(--border-input); border-radius: 4px; font-size: 14px; background: var(--bg-secondary); color: var(--text-primary);">
+                                <option value="">Month</option>
+                                <option value="1">January</option>
+                                <option value="2">February</option>
+                                <option value="3">March</option>
+                                <option value="4">April</option>
+                                <option value="5">May</option>
+                                <option value="6">June</option>
+                                <option value="7">July</option>
+                                <option value="8">August</option>
+                                <option value="9">September</option>
+                                <option value="10">October</option>
+                                <option value="11">November</option>
+                                <option value="12">December</option>
+                            </select>
+                            <select id="day-select" name="day" style="padding: 8px; border: 2px solid var(--border-input); border-radius: 4px; font-size: 14px; background: var(--bg-secondary); color: var(--text-primary);">
+                                <option value="">Day</option>
+                                
+                                <option value="1">1</option>
+                                
+                                <option value="2">2</option>
+                                
+                                <option value="3">3</option>
+                                
+                                <option value="4">4</option>
+                                
+                                <option value="5">5</option>
+                                
+                                <option value="6">6</option>
+                                
+                                <option value="7">7</option>
+                                
+                                <option value="8">8</option>
+                                
+                                <option value="9">9</option>
+                                
+                                <option value="10">10</option>
+                                
+                                <option value="11">11</option>
+                                
+                                <option value="12">12</option>
+                                
+                                <option value="13">13</option>
+                                
+                                <option value="14">14</option>
+                                
+                                <option value="15">15</option>
+                                
+                                <option value="16">16</option>
+                                
+                                <option value="17">17</option>
+                                
+                                <option value="18">18</option>
+                                
+                                <option value="19">19</option>
+                                
+                                <option value="20">20</option>
+                                
+                                <option value="21">21</option>
+                                
+                                <option value="22">22</option>
+                                
+                                <option value="23">23</option>
+                                
+                                <option value="24">24</option>
+                                
+                                <option value="25">25</option>
+                                
+                                <option value="26">26</option>
+                                
+                                <option value="27">27</option>
+                                
+                                <option value="28">28</option>
+                                
+                                <option value="29">29</option>
+                                
+                                <option value="30">30</option>
+                                
+                                <option value="31">31</option>
+                                
+                            </select>
+                        </div>
+                        <p style="margin: 5px 0 0 0; font-size: 12px; color: var(--text-secondary);">Chime will play every year on this date</p>
+                    </div>
+                    
+                    <!-- Holiday Selection (for holiday schedules) -->
+                    <div id="holiday-selection" class="schedule-type-field" style="display: none;">
+                        <label style="display: block; margin-bottom: 8px; font-weight: 600;">Holiday:</label>
+                        <select id="holiday-select" name="holiday" style="width: 100%; padding: 8px; border: 2px solid var(--border-input); border-radius: 4px; font-size: 14px; background: var(--bg-secondary); color: var(--text-primary);">
+                            <option value="">-- Select a holiday --</option>
+                            
+                            <option value="New Year's Day">New Year's Day (1/1)</option>
+                            
+                            <option value="Martin Luther King Jr. Day">Martin Luther King Jr. Day (1/19)</option>
+                            
+                            <option value="Valentine's Day">Valentine's Day (2/14)</option>
+                            
+                            <option value="Presidents' Day">Presidents' Day (2/16)</option>
+                            
+                            <option value="St. Patrick's Day">St. Patrick's Day (3/17)</option>
+                            
+                            <option value="Easter">Easter (4/5)</option>
+                            
+                            <option value="Mother's Day">Mother's Day (5/10)</option>
+                            
+                            <option value="Memorial Day">Memorial Day (5/25)</option>
+                            
+                            <option value="Father's Day">Father's Day (6/21)</option>
+                            
+                            <option value="Independence Day">Independence Day (7/4)</option>
+                            
+                            <option value="Labor Day">Labor Day (9/7)</option>
+                            
+                            <option value="Columbus Day">Columbus Day (10/12)</option>
+                            
+                            <option value="Halloween">Halloween (10/31)</option>
+                            
+                            <option value="Veterans Day">Veterans Day (11/11)</option>
+                            
+                            <option value="Thanksgiving">Thanksgiving (11/26)</option>
+                            
+                            <option value="Christmas Eve">Christmas Eve (12/24)</option>
+                            
+                            <option value="Christmas Day">Christmas Day (12/25)</option>
+                            
+                            <option value="New Year's Eve">New Year's Eve (12/31)</option>
+                            
+                        </select>
+                        <p style="margin: 5px 0 0 0; font-size: 12px; color: var(--text-secondary);">Chime will play at 12:00 AM on the holiday</p>
+                    </div>
+                    
+                    <!-- Time Selection (12-hour format) - hidden for holidays -->
+                    <div id="time-selection" style="display: block;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 600;">Time:</label>
+                        <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                            <select id="hour-select" name="hour" required="" style="padding: 8px; border: 2px solid var(--border-input); border-radius: 4px; font-size: 14px; background: var(--bg-secondary); color: var(--text-primary);">
+                                
+                                <option value="1">1</option>
+                                
+                                <option value="2">2</option>
+                                
+                                <option value="3">3</option>
+                                
+                                <option value="4">4</option>
+                                
+                                <option value="5">5</option>
+                                
+                                <option value="6">6</option>
+                                
+                                <option value="7">7</option>
+                                
+                                <option value="8">8</option>
+                                
+                                <option value="9">9</option>
+                                
+                                <option value="10">10</option>
+                                
+                                <option value="11">11</option>
+                                
+                                <option value="12" selected="">12</option>
+                                
+                            </select>
+                            <span style="font-weight: bold;">:</span>
+                            <select id="minute-select" name="minute" required="" style="padding: 8px; border: 2px solid var(--border-input); border-radius: 4px; font-size: 14px; background: var(--bg-secondary); color: var(--text-primary);">
+                                
+                                <option value="00" selected="">00</option>
+                                
+                                <option value="05">05</option>
+                                
+                                <option value="10">10</option>
+                                
+                                <option value="15">15</option>
+                                
+                                <option value="20">20</option>
+                                
+                                <option value="25">25</option>
+                                
+                                <option value="30">30</option>
+                                
+                                <option value="35">35</option>
+                                
+                                <option value="40">40</option>
+                                
+                                <option value="45">45</option>
+                                
+                                <option value="50">50</option>
+                                
+                                <option value="55">55</option>
+                                
+                            </select>
+                            <select id="ampm-select" name="am_pm" required="" style="padding: 8px; border: 2px solid var(--border-input); border-radius: 4px; font-size: 14px; background: var(--bg-secondary); color: var(--text-primary);">
+                                <option value="AM" id="ampm-am-option" selected="">AM</option>
+                                <option value="PM" id="ampm-pm-option">PM</option>
+                            </select>
+                        </div>
+                    </div>
+                    
+                    <!-- Enable Schedule -->
+                    <div>
+                        <label style="display: flex; align-items: center; cursor: pointer;">
+                            <input type="checkbox" id="enabled-checkbox" name="enabled" value="true" checked="" style="margin-right: 8px;">
+                            <span style="font-weight: 600;">Enable this schedule immediately</span>
+                        </label>
+                    </div>
+                    
+                    <!-- Submit Button -->
+                    <div>
+                        <button type="submit" id="submit-btn" class="action-btn primary" style="padding: 12px 25px;">Save Schedule</button>
+                        <button type="button" id="cancel-btn" class="action-btn danger" style="margin-left: 10px; display: none; padding: 12px 25px;" onclick="cancelEdit()">Cancel</button>
+                    </div>
+                </div>
+            </form>
+            </details>
+        
+        <!-- Existing Schedules List -->
+        
+        <p style="margin: 10px 0 0 0; color: var(--text-secondary); font-size: 14px;">No schedules configured. Add one above to automatically change chimes at specific times.</p>
+        
+        
+        <div style="background: var(--msg-info-bg); padding: 10px; border-radius: 4px; margin-top: 15px; font-size: 13px; border: 1px solid var(--border-color); color: var(--msg-info-text);">
+            <strong>How it works:</strong> Schedules run automatically every minute. The most recent schedule for each day will be active. Chimes change without interrupting Tesla recording!
+        </div>
+        </div>
+    </details>
+    
+    <!-- Chime Groups Section -->
+    <details class="settings-section" id="groups-section">
+        <summary>Random Chime Groups </summary>
+        <div class="section-content">
+            
+            <!-- Random Mode Configuration -->
+            <div class="random-mode-section " id="randomModeSection">
+                <div class="random-mode-header">
+                    <div class="random-mode-info">
+                        <h3>Random Mode on Boot</h3>
+                        <span class="random-mode-status disabled" id="randomModeStatus">
+                            Disabled
+                        </span>
+                    </div>
+                    <div class="random-mode-controls">
+                        <select class="random-group-select" id="randomGroupSelect">
+                            <option value="">-- Select a group --</option>
+                            
+                        </select>
+                        <button class="group-btn group-btn-edit" id="toggleRandomMode">
+                            Enable
+                        </button>
+                    </div>
+                </div>
+                <div class="random-mode-description">
+                    <strong>How it works:</strong> When enabled, a random chime from the selected group will be chosen each time your device boots up. The system uses high-resolution time seeding for true randomness and avoids repeating the previously selected chime.
+                </div>
+            </div>
+            
+            <!-- Add New Group Button -->
+            <div style="margin: 20px 0;">
+                <button class="action-btn" id="createGroupBtn">Create New Group</button>
+            </div>
+            
+            <!-- Groups List -->
+            <div class="groups-container" id="groupsContainer">
+                
+                    <div class="group-empty-state">
+                        <svg style="width: 48px; height: 48px; margin-bottom: 15px; color: var(--text-muted);" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-folder"></use></svg>
+                        <p>No chime groups yet. Create a group to organize your lock chimes!</p>
+                    </div>
+                
+            </div>
+            
+            <div style="background: var(--msg-info-bg); padding: 10px; border-radius: 4px; margin-top: 15px; font-size: 13px; border: 1px solid var(--border-color); color: var(--msg-info-text);">
+                <strong>About Groups:</strong> Create groups to organize your chimes by theme (Holidays, Funny, Seasonal, etc.). Enable random mode to have the system automatically pick a different chime from your selected group each time the device boots.
+            </div>
+        </div>
+    </details>
+    
+    <!-- Group Modal -->
+    <div id="groupModal" class="group-modal">
+        <div class="group-modal-content">
+            <div class="group-modal-header">
+                <h3 id="groupModalTitle">Create New Group</h3>
+                <span class="group-modal-close" id="groupModalClose">×</span>
+            </div>
+            <form id="groupForm">
+                <input type="hidden" id="groupFormId" value="" style="">
+                
+                <div class="group-form-field">
+                    <label for="groupName">Group Name <span style="color: var(--error-text);">*</span></label>
+                    <input type="text" id="groupName" required="" placeholder="e.g., Holiday Chimes" style="">
+                </div>
+                
+                <div class="group-form-field">
+                    <label for="groupDescription">Description (optional)</label>
+                    <textarea id="groupDescription" placeholder="Describe what chimes belong in this group..." style=""></textarea>
+                </div>
+                
+                <div class="chime-selector-section">
+                    <h4>Add Chimes to Group:</h4>
+                    <div class="chime-checkboxes" id="chimeCheckboxes">
+                        
+                            
+                                
+                                <div class="chime-checkbox-item">
+                                    <input type="checkbox" id="chime_1" value="Classic.wav" style="">
+                                    <label for="chime_1">Classic.wav</label>
+                                </div>
+                                
+                            
+                                
+                                <div class="chime-checkbox-item">
+                                    <input type="checkbox" id="chime_2" value="Horn.wav" style="">
+                                    <label for="chime_2">Horn.wav</label>
+                                </div>
+                                
+                            
+                                
+                                <div class="chime-checkbox-item">
+                                    <input type="checkbox" id="chime_3" value="Spaceship.wav" style="">
+                                    <label for="chime_3">Spaceship.wav</label>
+                                </div>
+                                
+                            
+                        
+                    </div>
+                </div>
+                
+                <div class="group-form-actions">
+                    <button type="button" class="group-btn" style="background: var(--btn-primary-bg); color: var(--btn-primary-text);" id="cancelGroupBtn">
+                        Cancel
+                    </button>
+                    <button type="submit" class="group-btn" style="background: var(--btn-success-bg); color: var(--btn-success-text);" id="saveGroupBtn">
+                        Save Group
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+    
+    <!-- Chime Library -->
+    <h3 style="margin: 20px 0 10px 0;">Chime Library</h3>
+    
+    <div class="video-table-container">
+        <table class="video-table">
+            <thead>
+                <tr>
+                    <th>Filename</th>
+                    <th>Size</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                
+                <tr style="">
+                    <td>Classic.wav</td>
+                    <td>206.8 KB</td>
+                    <td>
+                        
+                        <span style="color: #4caf50;">Valid</span>
+                        
+                    </td>
+                    <td>
+                        <div style="display: flex; flex-direction: column; gap: 8px;">
+                            <audio controls="" preload="none">
+                                <source src="/lock_chimes/play/Classic.wav?v=2026-06-04T19:14:30.367588+00:00" type="audio/wav">
+                            </audio>
+                            <div style="display: flex; gap: 5px; flex-wrap: wrap; align-items: center;">
+                                <a href="/lock_chimes/download/Classic.wav" class="action-btn">Download</a>
+                                <button type="button" class="action-btn" onclick="editChime(&quot;Classic.wav&quot;)">Edit</button>
+                                
+                                <form method="post" action="/lock_chimes/set/Classic.wav" style="display: inline;" onsubmit="return handleSetChime(this);">
+                                    <button type="submit" class="action-btn primary">Set Active</button>
+                                </form>
+                                
+                                <form method="post" action="/lock_chimes/delete/Classic.wav" style="display: inline;" onsubmit="return confirm('Are you sure you want to delete \'Classic.wav\'?');">
+                                    <button type="submit" class="action-btn danger">Delete</button>
+                                </form>
+                            </div>
+                        </div>
+                    </td>
+                </tr>
+                
+                <tr style="">
+                    <td>Horn.wav</td>
+                    <td>206.8 KB</td>
+                    <td>
+                        
+                        <span style="color: #4caf50;">Valid</span>
+                        
+                    </td>
+                    <td>
+                        <div style="display: flex; flex-direction: column; gap: 8px;">
+                            <audio controls="" preload="none">
+                                <source src="/lock_chimes/play/Horn.wav?v=2026-06-04T19:14:30.416422+00:00" type="audio/wav">
+                            </audio>
+                            <div style="display: flex; gap: 5px; flex-wrap: wrap; align-items: center;">
+                                <a href="/lock_chimes/download/Horn.wav" class="action-btn">Download</a>
+                                <button type="button" class="action-btn" onclick="editChime(&quot;Horn.wav&quot;)">Edit</button>
+                                
+                                <form method="post" action="/lock_chimes/set/Horn.wav" style="display: inline;" onsubmit="return handleSetChime(this);">
+                                    <button type="submit" class="action-btn primary">Set Active</button>
+                                </form>
+                                
+                                <form method="post" action="/lock_chimes/delete/Horn.wav" style="display: inline;" onsubmit="return confirm('Are you sure you want to delete \'Horn.wav\'?');">
+                                    <button type="submit" class="action-btn danger">Delete</button>
+                                </form>
+                            </div>
+                        </div>
+                    </td>
+                </tr>
+                
+                <tr style="">
+                    <td>Spaceship.wav</td>
+                    <td>206.8 KB</td>
+                    <td>
+                        
+                        <span style="color: #4caf50;">Valid</span>
+                        
+                    </td>
+                    <td>
+                        <div style="display: flex; flex-direction: column; gap: 8px;">
+                            <audio controls="" preload="none">
+                                <source src="/lock_chimes/play/Spaceship.wav?v=2026-06-04T19:14:30.404213+00:00" type="audio/wav">
+                            </audio>
+                            <div style="display: flex; gap: 5px; flex-wrap: wrap; align-items: center;">
+                                <a href="/lock_chimes/download/Spaceship.wav" class="action-btn">Download</a>
+                                <button type="button" class="action-btn" onclick="editChime(&quot;Spaceship.wav&quot;)">Edit</button>
+                                
+                                <form method="post" action="/lock_chimes/set/Spaceship.wav" style="display: inline;" onsubmit="return handleSetChime(this);">
+                                    <button type="submit" class="action-btn primary">Set Active</button>
+                                </form>
+                                
+                                <form method="post" action="/lock_chimes/delete/Spaceship.wav" style="display: inline;" onsubmit="return confirm('Are you sure you want to delete \'Spaceship.wav\'?');">
+                                    <button type="submit" class="action-btn danger">Delete</button>
+                                </form>
+                            </div>
+                        </div>
+                    </td>
+                </tr>
+                
+            </tbody>
+        </table>
+    </div>
+    
+    <!-- Mobile Card Layout for Lock Chimes -->
+    <div class="mobile-card-container">
+        
+        <div class="mobile-card" style="">
+            <div class="mobile-card-title">
+                <strong>Classic.wav</strong>
+            </div>
+            <div class="mobile-card-info">
+                <div class="mobile-card-info-row">
+                    <span class="mobile-card-info-label">Size:</span>
+                    <span class="mobile-card-info-value">206.8 KB</span>
+                </div>
+                <div class="mobile-card-info-row">
+                    <span class="mobile-card-info-label">Status:</span>
+                    <span class="mobile-card-info-value">
+                        
+                        <span class="mobile-card-status valid">Valid</span>
+                        
+                    </span>
+                </div>
+            </div>
+            <div class="mobile-card-audio">
+                <audio controls="" preload="none">
+                    <source src="/lock_chimes/play/Classic.wav?v=2026-06-04T19:14:30.367588+00:00" type="audio/wav">
+                </audio>
+            </div>
+            <div class="mobile-card-actions">
+                <a href="/lock_chimes/download/Classic.wav" class="action-btn">Download</a>
+                <button type="button" class="action-btn" onclick="editChime(&quot;Classic.wav&quot;)">Edit</button>
+                
+                <form method="post" action="/lock_chimes/set/Classic.wav" onsubmit="return handleSetChime(this);">
+                    <button type="submit" class="action-btn primary">Set Active</button>
+                </form>
+                
+                <form method="post" action="/lock_chimes/delete/Classic.wav" onsubmit="return confirm('Are you sure you want to delete \'Classic.wav\'?');">
+                    <button type="submit" class="action-btn danger">Delete</button>
+                </form>
+            </div>
+        </div>
+        
+        <div class="mobile-card" style="">
+            <div class="mobile-card-title">
+                <strong>Horn.wav</strong>
+            </div>
+            <div class="mobile-card-info">
+                <div class="mobile-card-info-row">
+                    <span class="mobile-card-info-label">Size:</span>
+                    <span class="mobile-card-info-value">206.8 KB</span>
+                </div>
+                <div class="mobile-card-info-row">
+                    <span class="mobile-card-info-label">Status:</span>
+                    <span class="mobile-card-info-value">
+                        
+                        <span class="mobile-card-status valid">Valid</span>
+                        
+                    </span>
+                </div>
+            </div>
+            <div class="mobile-card-audio">
+                <audio controls="" preload="none">
+                    <source src="/lock_chimes/play/Horn.wav?v=2026-06-04T19:14:30.416422+00:00" type="audio/wav">
+                </audio>
+            </div>
+            <div class="mobile-card-actions">
+                <a href="/lock_chimes/download/Horn.wav" class="action-btn">Download</a>
+                <button type="button" class="action-btn" onclick="editChime(&quot;Horn.wav&quot;)">Edit</button>
+                
+                <form method="post" action="/lock_chimes/set/Horn.wav" onsubmit="return handleSetChime(this);">
+                    <button type="submit" class="action-btn primary">Set Active</button>
+                </form>
+                
+                <form method="post" action="/lock_chimes/delete/Horn.wav" onsubmit="return confirm('Are you sure you want to delete \'Horn.wav\'?');">
+                    <button type="submit" class="action-btn danger">Delete</button>
+                </form>
+            </div>
+        </div>
+        
+        <div class="mobile-card" style="">
+            <div class="mobile-card-title">
+                <strong>Spaceship.wav</strong>
+            </div>
+            <div class="mobile-card-info">
+                <div class="mobile-card-info-row">
+                    <span class="mobile-card-info-label">Size:</span>
+                    <span class="mobile-card-info-value">206.8 KB</span>
+                </div>
+                <div class="mobile-card-info-row">
+                    <span class="mobile-card-info-label">Status:</span>
+                    <span class="mobile-card-info-value">
+                        
+                        <span class="mobile-card-status valid">Valid</span>
+                        
+                    </span>
+                </div>
+            </div>
+            <div class="mobile-card-audio">
+                <audio controls="" preload="none">
+                    <source src="/lock_chimes/play/Spaceship.wav?v=2026-06-04T19:14:30.404213+00:00" type="audio/wav">
+                </audio>
+            </div>
+            <div class="mobile-card-actions">
+                <a href="/lock_chimes/download/Spaceship.wav" class="action-btn">Download</a>
+                <button type="button" class="action-btn" onclick="editChime(&quot;Spaceship.wav&quot;)">Edit</button>
+                
+                <form method="post" action="/lock_chimes/set/Spaceship.wav" onsubmit="return handleSetChime(this);">
+                    <button type="submit" class="action-btn primary">Set Active</button>
+                </form>
+                
+                <form method="post" action="/lock_chimes/delete/Spaceship.wav" onsubmit="return confirm('Are you sure you want to delete \'Spaceship.wav\'?');">
+                    <button type="submit" class="action-btn danger">Delete</button>
+                </form>
+            </div>
+        </div>
+        
+    </div>
+    
+</div>
+
+<!-- Loading overlay for Set as Chime operation -->
+<div id="chimeLoadingOverlay" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); z-index: 9999; justify-content: center; align-items: center;">
+    <div style="text-align: center; color: white;">
+        <div class="spinner" style="border: 8px solid #f3f3f3; border-top: 8px solid #007bff; border-radius: 50%; width: 60px; height: 60px; animation: spin 1s linear infinite; margin: 0 auto 20px;"></div>
+        <h3>Setting lock chime...</h3>
+        <p>Please wait, this may take a few seconds</p>
+    </div>
+</div>
+
+<style>
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+/* Toggle Switch Styles */
+.toggle-switch {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.toggle-switch input[type="checkbox"] {
+    display: none;
+}
+
+.toggle-slider {
+    position: relative;
+    width: 44px;
+    height: 24px;
+    background-color: #ccc;
+    border-radius: 12px;
+    transition: background-color 0.3s;
+    cursor: pointer;
+}
+
+.toggle-slider::before {
+    content: '';
+    position: absolute;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background-color: white;
+    top: 3px;
+    left: 3px;
+    transition: transform 0.3s;
+}
+
+.toggle-switch input[type="checkbox"]:checked + .toggle-slider {
+    background-color: #4CAF50;
+}
+
+.toggle-switch input[type="checkbox"]:checked + .toggle-slider::before {
+    transform: translateX(20px);
+}
+
+.toggle-switch:hover .toggle-slider {
+    opacity: 0.8;
+}
+
+.toggle-switch input[type="checkbox"]:disabled + .toggle-slider {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.toggle-label {
+    font-weight: 500;
+    color: var(--text-primary, #333);
+}
+</style>
+
+<script>
+// Preserve scheduler section state across page loads
+document.addEventListener('DOMContentLoaded', function() {
+    const schedulerSection = document.getElementById('scheduler-section');
+    const scheduleFormDetails = document.getElementById('schedule-form-details');
+    
+    // Check if there are any flash messages (indicates an action was just performed)
+    const hasFlashMessages = document.querySelector('.flash-message') !== null;
+    
+    // Open scheduler section if:
+    // 1. There are flash messages (user just performed an action)
+    // 2. Session storage indicates it was previously open
+    // 3. User manually opened it (tracked in session storage)
+    const wasOpen = sessionStorage.getItem('schedulerSectionOpen') === 'true';
+    
+    if (hasFlashMessages || wasOpen) {
+        schedulerSection.open = true;
+        sessionStorage.setItem('schedulerSectionOpen', 'true');
+    }
+    
+    // Track when user manually opens/closes the section
+    schedulerSection.addEventListener('toggle', function() {
+        sessionStorage.setItem('schedulerSectionOpen', schedulerSection.open ? 'true' : 'false');
+    });
+    
+    // Similarly track the form details section
+    if (scheduleFormDetails) {
+        const formWasOpen = sessionStorage.getItem('scheduleFormOpen') === 'true';
+        if (formWasOpen || hasFlashMessages) {
+            scheduleFormDetails.open = true;
+        }
+        
+        scheduleFormDetails.addEventListener('toggle', function() {
+            sessionStorage.setItem('scheduleFormOpen', scheduleFormDetails.open ? 'true' : 'false');
+        });
+    }
+});
+
+function handleSetChime(form) {
+    // Disable all Set as Active buttons
+    const allChimeButtons = document.querySelectorAll('.set-chime-btn');
+    allChimeButtons.forEach(btn => btn.disabled = true);
+    
+    // Show loading overlay
+    document.getElementById('chimeLoadingOverlay').style.display = 'flex';
+    
+    return true;  // Allow form submission
+}
+
+// Handle schedule type switching
+document.addEventListener('DOMContentLoaded', function() {
+    const scheduleTypeRadios = document.querySelectorAll('.schedule-type-radio');
+    const daysSelection = document.getElementById('days-selection');
+    const dateSelection = document.getElementById('date-selection');
+    const holidaySelection = document.getElementById('holiday-selection');
+    const intervalSelection = document.getElementById('interval-selection');
+    const timeSelection = document.getElementById('time-selection');
+    const hourSelect = document.getElementById('hour-select');
+    const minuteSelect = document.getElementById('minute-select');
+    const ampmSelect = document.getElementById('ampm-select');
+    const chimeSelect = document.getElementById('chime-select');
+    
+    function updateScheduleTypeFields() {
+        const selectedType = document.querySelector('.schedule-type-radio:checked').value;
+        
+        // Hide all type-specific fields
+        daysSelection.style.display = 'none';
+        dateSelection.style.display = 'none';
+        holidaySelection.style.display = 'none';
+        intervalSelection.style.display = 'none';
+        
+        // Reset chime select to normal state
+        chimeSelect.disabled = false;
+        chimeSelect.style.pointerEvents = '';
+        chimeSelect.style.opacity = '';
+        chimeSelect.style.cursor = '';
+        
+        // Show relevant field and manage time selection/chime selection
+        if (selectedType === 'weekly') {
+            daysSelection.style.display = 'block';
+            timeSelection.style.display = 'block';
+            // Make time fields required
+            hourSelect.required = true;
+            minuteSelect.required = true;
+            ampmSelect.required = true;
+        } else if (selectedType === 'date') {
+            dateSelection.style.display = 'block';
+            timeSelection.style.display = 'block';
+            // Make time fields required
+            hourSelect.required = true;
+            minuteSelect.required = true;
+            ampmSelect.required = true;
+        } else if (selectedType === 'holiday') {
+            holidaySelection.style.display = 'block';
+            // Hide time selection for holidays
+            timeSelection.style.display = 'none';
+            // Auto-set time to 12:00 AM and make fields not required
+            hourSelect.value = '12';
+            minuteSelect.value = '00';
+            ampmSelect.value = 'AM';
+            hourSelect.required = false;
+            minuteSelect.required = false;
+            ampmSelect.required = false;
+        } else if (selectedType === 'recurring') {
+            intervalSelection.style.display = 'block';
+            // Hide time selection for recurring schedules
+            timeSelection.style.display = 'none';
+            // Force chime to RANDOM - don't disable so value submits
+            chimeSelect.value = 'RANDOM';
+            chimeSelect.style.pointerEvents = 'none';
+            chimeSelect.style.opacity = '0.6';
+            chimeSelect.style.cursor = 'not-allowed';
+            hourSelect.required = false;
+            minuteSelect.required = false;
+            ampmSelect.required = false;
+        }
+    }
+    
+    // Add listeners to schedule type radios
+    scheduleTypeRadios.forEach(radio => {
+        radio.addEventListener('change', updateScheduleTypeFields);
+    });
+    
+    // Initialize on page load
+    updateScheduleTypeFields();
+});
+
+// Handle recurring schedule confirmation for disabling other schedules
+document.addEventListener('DOMContentLoaded', function() {
+    const scheduleForm = document.getElementById('schedule-form');
+    if (!scheduleForm) return;
+    
+    scheduleForm.addEventListener('submit', async function(e) {
+        const scheduleType = document.querySelector('.schedule-type-radio:checked').value;
+        const enabled = document.getElementById('enabled-checkbox').checked;
+        const confirmField = scheduleForm.querySelector('input[name="confirm_disable_others"]');
+        
+        // Only intercept for enabled recurring schedules
+        if (scheduleType === 'recurring' && enabled && (!confirmField || confirmField.value !== 'true')) {
+            e.preventDefault();
+            
+            // Submit via AJAX to check if confirmation needed
+            const formData = new FormData(scheduleForm);
+            
+            try {
+                const response = await fetch(scheduleForm.action, {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                // Check if response is JSON (confirmation needed) or redirect (success)
+                const contentType = response.headers.get('content-type');
+                if (contentType && contentType.includes('application/json')) {
+                    const data = await response.json();
+                    
+                    if (data.needs_confirmation) {
+                        // Show confirmation dialog
+                        const schedulesText = data.schedules_to_disable.map(s => `  - ${s.name}`).join('\n');
+                        const confirmed = confirm(
+                            `${data.message}\n\nSchedules that will be disabled:\n${schedulesText}`
+                        );
+                        
+                        if (confirmed) {
+                            // Add confirmation field and resubmit
+                            const input = document.createElement('input');
+                            input.type = 'hidden';
+                            input.name = 'confirm_disable_others';
+                            input.value = 'true';
+                            scheduleForm.appendChild(input);
+                            scheduleForm.submit();
+                        }
+                    }
+                } else {
+                    // Server returned HTML (redirect), reload to show result
+                    window.location.reload();
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                // On error, reload to show any flash messages
+                window.location.reload();
+            }
+        }
+    });
+});
+
+// Handle chime upload with progress bar
+document.addEventListener('DOMContentLoaded', function() {
+    const form = document.getElementById('chimeUploadForm');
+    if (!form) return;
+    
+    form.addEventListener('submit', function(e) {
+        e.preventDefault();
+        
+        const fileInput = document.getElementById('chime_file');
+        const uploadBtn = document.getElementById('chimeUploadBtn');
+        const progressDiv = document.getElementById('chimeUploadProgress');
+        const progressBar = document.getElementById('chimeProgressBar');
+        const statusText = document.getElementById('chimeUploadStatus');
+        
+        if (!fileInput.files || fileInput.files.length === 0) {
+            alert('Please select a file to upload');
+            return;
+        }
+        
+        const file = fileInput.files[0];
+        
+        // Validate file size before upload
+        const maxSize = 1048576;
+        if (file.size > maxSize) {
+            const fileSizeMB = (file.size / 1024 / 1024).toFixed(2);
+            const maxSizeMB = (maxSize / 1024 / 1024).toFixed(2);
+            alert(`File is too large: ${fileSizeMB} MB\n\nTesla requires lock chimes to be under ${maxSizeMB} MB.\nPlease use the audio trimmer or compress your file.`);
+            return;
+        }
+        
+        const formData = new FormData(form);
+        
+        // Disable upload button and show progress
+        uploadBtn.disabled = true;
+        uploadBtn.textContent = 'Uploading...';
+        progressDiv.style.display = 'block';
+        
+        // Create AJAX request with progress tracking
+        const xhr = new XMLHttpRequest();
+        
+        // Track upload progress
+        xhr.upload.addEventListener('progress', function(e) {
+            if (e.lengthComputable) {
+                const percentComplete = Math.round((e.loaded / e.total) * 100);
+                progressBar.style.width = percentComplete + '%';
+                progressBar.textContent = percentComplete + '%';
+                statusText.textContent = `Uploading ${file.name}... (${(e.loaded / 1024).toFixed(1)} KB / ${(e.total / 1024).toFixed(1)} KB)`;
+            }
+        });
+        
+        // When upload finishes, show processing status
+        xhr.upload.addEventListener('loadend', function() {
+            if (xhr.readyState !== 4) {  // If request not complete yet
+                progressBar.style.width = '100%';
+                progressBar.textContent = 'Processing...';
+                progressBar.style.background = '#ffc107';
+                statusText.textContent = 'Upload complete! Processing and validating file...';
+                statusText.style.color = '#856404';
+            }
+        });
+        
+        // Handle completion
+        xhr.addEventListener('load', function() {
+            let response;
+            try {
+                response = JSON.parse(xhr.responseText);
+            } catch (e) {
+                response = null;
+            }
+            
+            if (xhr.status === 200 && response && response.success) {
+                progressBar.style.width = '100%';
+                progressBar.textContent = 'Complete';
+                progressBar.style.background = '#28a745';
+                
+                // Show re-encoding info if present
+                let successMsg = 'Upload complete!';
+                if (response.reencoded && response.details) {
+                    const details = response.details;
+                    successMsg = `Upload successful! File was automatically re-encoded to ${details.strategy || 'Tesla format'} (${details.size_mb || '<1'} MB)`;
+                }
+                
+                statusText.textContent = successMsg;
+                statusText.style.color = '#28a745';
+                
+                // Redirect after short delay
+                setTimeout(function() {
+                    window.location.reload();
+                }, 1000);
+            } else {
+                progressBar.style.background = '#dc3545';
+                const errorMsg = response && response.error ? response.error : xhr.statusText || 'Upload failed';
+                statusText.textContent = 'Upload failed: ' + errorMsg;
+                statusText.style.color = '#dc3545';
+                uploadBtn.disabled = false;
+                uploadBtn.textContent = 'Upload';
+            }
+        });
+        
+        // Handle errors
+        xhr.addEventListener('error', function() {
+            progressBar.style.background = '#dc3545';
+            statusText.textContent = 'Upload failed: Network error';
+            statusText.style.color = '#dc3545';
+            uploadBtn.disabled = false;
+            uploadBtn.textContent = 'Upload';
+        });
+        
+        // Send the request
+        xhr.open('POST', form.action);
+        xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');  // Mark as AJAX request
+        xhr.send(formData);
+    });
+});
+
+// iOS Browser Detection and Warning Display
+(function() {
+    // Detect iOS device
+    function isIOS() {
+        return /(iPad|iPhone|iPod)/i.test(navigator.userAgent) && !window.MSStream;
+    }
+    
+    // Detect Safari (true Safari, not other browsers using WebKit on iOS)
+    function isSafari() {
+        var ua = navigator.userAgent;
+        // Safari should have "Safari" but NOT Chrome, CriOS, EdgiOS, FxiOS, OPiOS
+        return /Safari/i.test(ua) && !/Chrome|CriOS|EdgiOS|FxiOS|OPiOS/i.test(ua);
+    }
+    
+    // Show warning and hide controls if iOS + not Safari
+    if (isIOS() && !isSafari()) {
+        var warning = document.getElementById('iosWarning');
+        var controls = document.getElementById('chimeUploadControls');
+        if (warning) warning.style.display = 'block';
+        if (controls) controls.style.display = 'none';
+    }
+})();
+
+// Schedule edit functionality
+async function editSchedule(scheduleId) {
+    try {
+        // Fetch schedule data
+        const response = await fetch(`/lock_chimes/schedule/${scheduleId}/edit`);
+        const data = await response.json();
+        
+        if (!data.success) {
+            alert('Error loading schedule: ' + (data.error || 'Unknown error'));
+            return;
+        }
+        
+        const schedule = data.schedule;
+        
+        // Populate form fields
+        document.getElementById('schedule-name').value = schedule.name;
+        document.getElementById('chime-select').value = schedule.chime_filename;
+        
+        // Set schedule type
+        const scheduleTypeRadio = document.querySelector(`.schedule-type-radio[value="${schedule.schedule_type}"]`);
+        if (scheduleTypeRadio) {
+            scheduleTypeRadio.checked = true;
+            // Trigger change event to show appropriate fields
+            scheduleTypeRadio.dispatchEvent(new Event('change'));
+        }
+        
+        // Set time (12-hour format)
+        if (schedule.hour_12 && schedule.minute && schedule.am_pm) {
+            document.getElementById('hour-select').value = schedule.hour_12;
+            document.getElementById('minute-select').value = schedule.minute;
+            document.getElementById('ampm-select').value = schedule.am_pm;
+        }
+        
+        // Set type-specific fields
+        if (schedule.schedule_type === 'weekly') {
+            // Clear all day checkboxes first
+            document.querySelectorAll('.day-checkbox').forEach(cb => {
+                cb.checked = false;
+            });
+            
+            // Check selected days
+            schedule.days.forEach(day => {
+                const checkbox = document.getElementById('day-' + day);
+                if (checkbox) checkbox.checked = true;
+            });
+        } else if (schedule.schedule_type === 'date') {
+            document.getElementById('month-select').value = schedule.month;
+            document.getElementById('day-select').value = schedule.day;
+        } else if (schedule.schedule_type === 'holiday') {
+            document.getElementById('holiday-select').value = schedule.holiday;
+        } else if (schedule.schedule_type === 'recurring') {
+            document.getElementById('interval-select').value = schedule.interval;
+        }
+        
+        // Set enabled checkbox
+        document.getElementById('enabled-checkbox').checked = schedule.enabled;
+        
+        // Switch form to schedule update state
+        const form = document.getElementById('schedule-form');
+        form.action = `/lock_chimes/schedule/${scheduleId}/edit`;
+        form.dataset.editingId = scheduleId;
+        
+        // Update UI
+        document.getElementById('form-title').textContent = 'Edit Schedule';
+        document.getElementById('submit-btn').textContent = 'Update Schedule';
+        document.getElementById('cancel-btn').style.display = 'inline-block';
+        
+        // Open the form
+        document.getElementById('schedule-form-details').open = true;
+        
+        // Scroll to form
+        document.getElementById('schedule-form-details').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        
+    } catch (error) {
+        console.error('Error loading schedule:', error);
+        alert('Error loading schedule. Please try again.');
+    }
+}
+
+function cancelEdit() {
+    // Reset form
+    const form = document.getElementById('schedule-form');
+    form.reset();
+    form.action = '/lock_chimes/schedule/add';
+    delete form.dataset.editingId;
+    
+    // Reset schedule type to weekly
+    const weeklyRadio = document.querySelector('.schedule-type-radio[value="weekly"]');
+    if (weeklyRadio) {
+        weeklyRadio.checked = true;
+        weeklyRadio.dispatchEvent(new Event('change'));
+    }
+    
+    // Reset UI
+    document.getElementById('form-title').textContent = 'Add New Schedule';
+    document.getElementById('submit-btn').textContent = 'Save Schedule';
+    document.getElementById('cancel-btn').style.display = 'none';
+    
+    // Close the form
+    document.getElementById('schedule-form-details').open = false;
+}
+
+// Audio Trimmer Integration
+let audioTrimmer = null;
+let currentTrimFile = null;
+let isEditingExistingChime = false;
+let existingChimeFilenames = []; // Cache of existing filenames on server
+
+// Fetch existing chime filenames from server
+async function fetchExistingFilenames() {
+    try {
+        const response = await fetch('/api/chime_filenames');
+        if (response.ok) {
+            const data = await response.json();
+            existingChimeFilenames = data.filenames || [];
+        }
+    } catch (error) {
+        console.warn('Failed to fetch existing filenames:', error);
+        existingChimeFilenames = [];
+    }
+}
+
+// Generate unique filename that doesn't conflict with existing files
+function generateUniqueFilename(baseName, extension, isEditing) {
+    if (!isEditing) {
+        // New upload - just use the base name
+        let fileName = baseName + extension;
+        // If it already exists, add a number
+        if (existingChimeFilenames.includes(fileName)) {
+            let counter = 2;
+            while (existingChimeFilenames.includes(baseName + counter + extension)) {
+                counter++;
+            }
+            fileName = baseName + counter + extension;
+        }
+        return fileName;
+    } else {
+        // Editing existing file - add or increment _edited suffix
+        const editedMatch = baseName.match(/^(.+?)_edited(\d*)$/);
+        let prefix, startNum;
+        
+        if (editedMatch) {
+            // Already has _edited suffix
+            prefix = editedMatch[1];
+            startNum = editedMatch[2] ? parseInt(editedMatch[2]) + 1 : 2;
+        } else {
+            // First time editing
+            prefix = baseName;
+            startNum = null; // Will try _edited first, then _edited2
+        }
+        
+        // Find next available _editedN
+        if (startNum === null) {
+            let fileName = prefix + '_edited' + extension;
+            if (!existingChimeFilenames.includes(fileName)) {
+                return fileName;
+            }
+            startNum = 2;
+        }
+        
+        let counter = startNum;
+        let fileName;
+        do {
+            fileName = prefix + '_edited' + counter + extension;
+            counter++;
+        } while (existingChimeFilenames.includes(fileName));
+        
+        return fileName;
+    }
+}
+
+// Check for Web Audio API support
+if (!AudioTrimmer.isSupported()) {
+    console.warn('Web Audio API not supported - trimmer disabled');
+    // Fallback: show upload button, hide trim editor
+    document.getElementById('chimeUploadBtn').style.display = 'inline-block';
+} else {
+    // Initialize trimmer
+    audioTrimmer = new AudioTrimmer({
+        maxFileSize: 1048576,
+        maxDuration: 5,
+        minDuration: 1,
+        speedMin: 0.5,
+        speedMax: 2.0,
+        speedStep: 0.1
+    });
+    
+    // Fetch existing filenames on page load
+    fetchExistingFilenames();
+    
+    // File input handler - intercept file selection
+    document.getElementById('chime_file').addEventListener('change', function(e) {
+        const file = e.target.files[0];
+        if (file) {
+            isEditingExistingChime = false;
+            loadAudioForTrimming(file);
+        }
+    });
+    
+    // Setup trim editor UI handlers
+    setupTrimEditorUI();
+}
+
+function setupTrimEditorUI() {
+    const canvas = document.getElementById('waveformCanvas');
+    const startSlider = document.getElementById('startTimeSlider');
+    const endSlider = document.getElementById('endTimeSlider');
+    const speedSlider = document.getElementById('speedSlider');
+    const playBtn = document.getElementById('playBtn');
+    const autoFitBtn = document.getElementById('autoFitBtn');
+    const resetBtn = document.getElementById('resetBtn');
+    const uploadBtn = document.getElementById('uploadTrimmedBtn');
+    const cancelBtn = document.getElementById('cancelTrimBtn');
+    const normalizeCheckbox = document.getElementById('trimNormalizeVolume');
+    const normalizationSettings = document.getElementById('trimNormalizationSettings');
+    const targetLufsSlider = document.getElementById('trimTargetLufs');
+    const currentLevelEl = document.getElementById('trimCurrentLevel');
+    const levelDescriptionEl = document.getElementById('trimLevelDescription');
+    
+    // Volume normalization level definitions
+    const volumeLevels = [
+        { name: 'Broadcast', lufs: -23, description: 'Broadcast standard (quieter, more headroom)' },
+        { name: 'Streaming', lufs: -16, description: 'Recommended for balanced playback' },
+        { name: 'Loud', lufs: -14, description: 'Louder output (less dynamic range)' },
+        { name: 'Maximum', lufs: -12, description: 'Maximum loudness (may clip on some systems)' }
+    ];
+    
+    // Set canvas size based on container
+    function resizeCanvas() {
+        const container = canvas.parentElement;
+        const dpr = window.devicePixelRatio || 1;
+        canvas.width = container.clientWidth * dpr;
+        canvas.height = canvas.offsetHeight * dpr;
+        canvas.style.width = container.clientWidth + 'px';
+        
+        if (audioTrimmer && audioTrimmer.audioBuffer) {
+            audioTrimmer.renderWaveform(canvas);
+        }
+    }
+    
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+    
+    // Slider handlers
+    startSlider.addEventListener('input', function() {
+        if (!audioTrimmer || !audioTrimmer.audioBuffer) return;
+        const duration = audioTrimmer.audioBuffer.duration;
+        const startTime = (parseFloat(this.value) / 100) * duration;
+        audioTrimmer.setTrimRegion(startTime, audioTrimmer.endTime);
+        updateTrimUI();
+    });
+    
+    endSlider.addEventListener('input', function() {
+        if (!audioTrimmer || !audioTrimmer.audioBuffer) return;
+        const duration = audioTrimmer.audioBuffer.duration;
+        const endTime = (parseFloat(this.value) / 100) * duration;
+        audioTrimmer.setTrimRegion(audioTrimmer.startTime, endTime);
+        updateTrimUI();
+    });
+    
+    speedSlider.addEventListener('input', function() {
+        if (!audioTrimmer) return;
+        audioTrimmer.setPlaybackSpeed(parseFloat(this.value));
+        updateTrimUI();
+    });
+    
+    // Volume normalization checkbox
+    normalizeCheckbox.addEventListener('change', async function() {
+        normalizationSettings.style.display = this.checked ? 'block' : 'none';
+        
+        if (!audioTrimmer) return;
+        
+        // Update trimmer normalization settings
+        if (this.checked) {
+            const sliderIndex = parseInt(targetLufsSlider.value);
+            const targetLufs = volumeLevels[sliderIndex].lufs;
+            audioTrimmer.setNormalization(true, targetLufs);
+            
+            // Calculate and display gain
+            await audioTrimmer.calculateNormalizationGain();
+            updateTrimUI();
+        } else {
+            audioTrimmer.setNormalization(false);
+            updateTrimUI();
+        }
+    });
+    
+    // Volume normalization slider
+    targetLufsSlider.addEventListener('input', async function() {
+        const level = volumeLevels[parseInt(this.value)];
+        currentLevelEl.textContent = level.name;
+        levelDescriptionEl.textContent = level.description;
+        
+        // Update trimmer with new target LUFS
+        if (audioTrimmer && normalizeCheckbox.checked) {
+            audioTrimmer.setNormalization(true, level.lufs);
+            await audioTrimmer.calculateNormalizationGain();
+            updateTrimUI();
+        }
+    });
+    
+    // Filename validation
+    const trimFilenameInput = document.getElementById('trimFilename');
+    const filenameValidation = document.getElementById('filenameValidation');
+    
+    function validateFilename() {
+        if (!trimFilenameInput || !filenameValidation) return true;
+        
+        const value = trimFilenameInput.value.trim();
+        if (!value) {
+            filenameValidation.style.display = 'none';
+            return true;
+        }
+        
+        // Add .wav if not present
+        const fileName = value.endsWith('.wav') ? value : value + '.wav';
+        const lowerFileName = fileName.toLowerCase();
+        
+        // Check for invalid characters
+        const invalidChars = /[<>:"|?*\/\\]/;
+        if (invalidChars.test(value)) {
+            filenameValidation.textContent = '❌ Filename contains invalid characters';
+            filenameValidation.style.color = '#f44336';
+            filenameValidation.style.display = 'block';
+            return false;
+        }
+        
+        // Check if it already exists
+        if (existingChimeFilenames.some(f => f.toLowerCase() === lowerFileName)) {
+            filenameValidation.textContent = '❌ This filename already exists';
+            filenameValidation.style.color = '#f44336';
+            filenameValidation.style.display = 'block';
+            return false;
+        }
+        
+        filenameValidation.textContent = '✅ Filename available';
+        filenameValidation.style.color = '#4CAF50';
+        filenameValidation.style.display = 'block';
+        return true;
+    }
+    
+    if (trimFilenameInput) {
+        trimFilenameInput.addEventListener('input', validateFilename);
+        trimFilenameInput.addEventListener('blur', validateFilename);
+    }
+    
+    // Play button
+    playBtn.addEventListener('click', function() {
+        if (!audioTrimmer) return;
+        if (audioTrimmer.isPlaying) {
+            audioTrimmer.stopPreview();
+            playBtn.innerHTML = '<svg style="width: 20px; height: 20px;" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-play"></use></svg>';
+            playBtn.classList.remove('playing');
+        } else {
+            audioTrimmer.playPreview();
+            playBtn.innerHTML = '<svg style="width: 20px; height: 20px;" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-x"></use></svg>';
+            playBtn.classList.add('playing');
+            // Auto-reset after playback
+            setTimeout(() => {
+                if (!audioTrimmer.isPlaying) {
+                    playBtn.innerHTML = '<svg style="width: 20px; height: 20px;" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-play"></use></svg>';
+                    playBtn.classList.remove('playing');
+                }
+            }, (audioTrimmer.endTime - audioTrimmer.startTime) / audioTrimmer.playbackSpeed * 1000 + 100);
+        }
+    });
+    
+    // Auto-fit button
+    autoFitBtn.addEventListener('click', function() {
+        if (!audioTrimmer) return;
+        const result = audioTrimmer.autoFit();
+        if (result) {
+            updateTrimUI();
+            showTrimMessage(result.message, result.trimmed ? 'warning' : 'success');
+        }
+    });
+    
+    // Reset button
+    resetBtn.addEventListener('click', function() {
+        if (!audioTrimmer || !audioTrimmer.audioBuffer) return;
+        const duration = audioTrimmer.audioBuffer.duration;
+        audioTrimmer.setTrimRegion(0, Math.min(duration, audioTrimmer.maxDuration));
+        audioTrimmer.setPlaybackSpeed(1.0);
+        updateTrimUI();
+        showTrimMessage('Reset to original settings', 'info');
+    });
+    
+    // Upload button
+    uploadBtn.addEventListener('click', async function() {
+        if (!audioTrimmer) return;
+        
+        try {
+            uploadBtn.disabled = true;
+            uploadBtn.textContent = 'Processing...';
+            
+            // Refresh filename list to check for collisions
+            await fetchExistingFilenames();
+            
+            // Get filename input (declare once at the top)
+            const customFilenameInput = document.getElementById('trimFilename');
+            const hasCustomFilename = customFilenameInput && customFilenameInput.value.trim();
+            
+            // Check whether only the filename changed (no audio modifications)
+            if (isEditingExistingChime && hasCustomFilename && !audioTrimmer.hasAudioBeenModified()) {
+                // Rename only - no need to re-encode
+                const customName = customFilenameInput.value.trim();
+                const newFilename = customName.endsWith('.wav') ? customName : customName + '.wav';
+                
+                // Validate filename
+                const invalidChars = /[<>:"|?*\/\\]/;
+                if (invalidChars.test(customName)) {
+                    showTrimMessage('Filename contains invalid characters. Please use only letters, numbers, spaces, hyphens, and underscores.', 'error');
+                    uploadBtn.disabled = false;
+                    uploadBtn.textContent = 'Upload Trimmed Audio';
+                    return;
+                }
+                
+                // Check for collisions
+                const lowerFileName = newFilename.toLowerCase();
+                if (existingChimeFilenames.some(f => f.toLowerCase() === lowerFileName)) {
+                    showTrimMessage(`Filename "${newFilename}" already exists. Please choose a different name.`, 'error');
+                    uploadBtn.disabled = false;
+                    uploadBtn.textContent = 'Upload Trimmed Audio';
+                    return;
+                }
+                
+                // Perform rename via API
+                uploadBtn.textContent = 'Renaming...';
+                const response = await fetch(`/api/rename_chime/${encodeURIComponent(audioTrimmer.originalFileName)}/${encodeURIComponent(newFilename)}`, {
+                    method: 'POST',
+                    headers: {
+                        'X-Requested-With': 'XMLHttpRequest'
+                    }
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    showTrimMessage('File renamed successfully!', 'success');
+                    setTimeout(() => {
+                        window.location.reload();
+                    }, 1000);
+                } else {
+                    showTrimMessage('Rename failed: ' + (result.error || 'Unknown error'), 'error');
+                    uploadBtn.disabled = false;
+                    uploadBtn.textContent = 'Upload Trimmed Audio';
+                }
+                return;
+            }
+            
+            // Full upload with audio processing
+            // Export as WAV (Tesla requirement)
+            const wavBlob = await audioTrimmer.exportWAV();
+            
+            // Check actual file size
+            if (wavBlob.size > 1048576) {
+                const actualSizeMB = (wavBlob.size / 1024 / 1024).toFixed(2);
+                showTrimMessage(`Pre-trimmed file validation failed: File is ${actualSizeMB} MB. Tesla requires lock chimes to be under 1 MB. ['success':false]`, 'error');
+                uploadBtn.disabled = false;
+                uploadBtn.textContent = 'Upload Trimmed Audio';
+                return;
+            }
+            
+            // Create FormData and submit
+            const formData = new FormData();
+            
+            // Determine final filename
+            let fileName;
+            
+            if (hasCustomFilename) {
+                // Use custom filename (add .wav extension)
+                const customName = customFilenameInput.value.trim();
+                
+                // Check for invalid characters
+                const invalidChars = /[<>:"|?*\/\\]/;
+                if (invalidChars.test(customName)) {
+                    showTrimMessage('Filename contains invalid characters. Please use only letters, numbers, spaces, hyphens, and underscores.', 'error');
+                    uploadBtn.disabled = false;
+                    uploadBtn.textContent = 'Upload Trimmed Audio';
+                    return;
+                }
+                
+                fileName = customName.endsWith('.wav') ? customName : customName + '.wav';
+                
+                // Validate it doesn't already exist (case-insensitive)
+                const lowerFileName = fileName.toLowerCase();
+                if (existingChimeFilenames.some(f => f.toLowerCase() === lowerFileName)) {
+                    showTrimMessage(`Filename "${fileName}" already exists. Please choose a different name.`, 'error');
+                    uploadBtn.disabled = false;
+                    uploadBtn.textContent = 'Upload Trimmed Audio';
+                    return;
+                }
+            } else {
+                // Generate filename based on whether this is a new upload or editing existing
+                let baseName = audioTrimmer.originalFileName.replace(/\.[^.]+$/, '');
+                fileName = generateUniqueFilename(baseName, '.wav', isEditingExistingChime);
+            }
+            
+            console.log('Original filename:', audioTrimmer.originalFileName);
+            console.log('Editing existing:', isEditingExistingChime);
+            console.log('Final filename:', fileName);
+            formData.append('chime_file', wavBlob, fileName);
+            formData.append('pre_trimmed', 'true'); // WAV already in correct format and normalized in browser
+            formData.append('original_filename', audioTrimmer.originalFileName);
+            
+            // Note: Normalization is now done client-side in the browser
+            // The uploaded WAV blob already has normalization applied if enabled
+            
+            // Submit via fetch
+            const response = await fetch('/lock_chimes/upload', {
+                method: 'POST',
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest'
+                },
+                body: formData
+            });
+            
+            if (response.ok) {
+                const result = await response.json();
+                if (result.success) {
+                    // Reload page to show new chime
+                    window.location.reload();
+                } else {
+                    showTrimMessage('Upload failed: ' + (result.error || 'Unknown error'), 'error');
+                    uploadBtn.disabled = false;
+                    uploadBtn.textContent = 'Upload Trimmed Audio';
+                }
+            } else {
+                const text = await response.text();
+                showTrimMessage('Upload failed: ' + text, 'error');
+                uploadBtn.disabled = false;
+                uploadBtn.textContent = 'Upload Trimmed Audio';
+            }
+        } catch (error) {
+            console.error('Upload error:', error);
+            showTrimMessage('Upload failed: ' + error.message, 'error');
+            uploadBtn.disabled = false;
+            uploadBtn.textContent = 'Upload Trimmed Audio';
+        }
+    });
+    
+    // Cancel button
+    cancelBtn.addEventListener('click', function() {
+        closeTrimEditor();
+    });
+}
+
+function loadAudioForTrimming(file) {
+    if (!audioTrimmer) return;
+    
+    // Show editor section
+    document.getElementById('trimEditorSection').style.display = 'block';
+    document.getElementById('trimEditorLoading').style.display = 'block';
+    document.getElementById('trimEditorContent').style.display = 'none';
+    document.getElementById('chimeUploadControls').open = false;
+    
+    // Load audio
+    audioTrimmer.loadFile(file).then(async result => {
+        if (result.success) {
+            currentTrimFile = file.name;
+            document.getElementById('trimEditorLoading').style.display = 'none';
+            document.getElementById('trimEditorContent').style.display = 'block';
+            
+            // Pre-populate filename field with base name (no extension)
+            const trimFilenameInput = document.getElementById('trimFilename');
+            if (trimFilenameInput) {
+                const baseName = file.name.replace(/\.[^.]+$/, '');
+                trimFilenameInput.value = baseName;
+                // Clear validation message
+                const filenameValidation = document.getElementById('filenameValidation');
+                if (filenameValidation) {
+                    filenameValidation.style.display = 'none';
+                }
+            }
+            
+            // Apply normalization settings if checkbox is checked
+            const normalizeCheckbox = document.getElementById('trimNormalizeVolume');
+            const targetLufsSlider = document.getElementById('trimTargetLufs');
+            if (normalizeCheckbox && normalizeCheckbox.checked && targetLufsSlider) {
+                const sliderIndex = parseInt(targetLufsSlider.value);
+                const volumeLevels = [
+                    { name: "Very Quiet", lufs: -23, description: "Barely audible" },
+                    { name: "Quiet", lufs: -18, description: "Soft and subtle" },
+                    { name: "Normal", lufs: -14, description: "Standard loudness" },
+                    { name: "Loud", lufs: -11, description: "Attention-grabbing" },
+                    { name: "Very Loud", lufs: -9, description: "Maximum volume" }
+                ];
+                audioTrimmer.setNormalization(true, volumeLevels[sliderIndex].lufs);
+                await audioTrimmer.calculateNormalizationGain();
+            }
+            
+            // Wait for layout to update, then resize and render canvas
+            setTimeout(() => {
+                const canvas = document.getElementById('waveformCanvas');
+                const container = canvas.parentElement;
+                const dpr = window.devicePixelRatio || 1;
+                canvas.width = container.clientWidth * dpr;
+                canvas.height = canvas.offsetHeight * dpr;
+                canvas.style.width = container.clientWidth + 'px';
+                
+                audioTrimmer.renderWaveform(canvas);
+                updateTrimUI();
+            }, 100);
+            
+            // Scroll to editor
+            document.getElementById('trimEditorSection').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        } else {
+            showTrimMessage('Failed to decode audio: ' + result.error, 'error');
+            closeTrimEditor();
+        }
+    });
+}
+
+function editChime(filename) {
+    if (!audioTrimmer) {
+        alert('Audio trimmer not available');
+        return;
+    }
+    
+    isEditingExistingChime = true;
+    currentTrimFile = filename;
+    
+    // Show editor section
+    document.getElementById('trimEditorSection').style.display = 'block';
+    document.getElementById('trimEditorSection').classList.add('edit-mode');
+    document.getElementById('trimEditorLoading').style.display = 'block';
+    document.getElementById('trimEditorContent').style.display = 'none';
+    document.getElementById('trimEditorBadge').style.display = 'inline-block';
+    document.getElementById('trimEditorBadge').textContent = 'Editing: ' + filename;
+    
+    // Pre-populate filename field with _edited suffix suggestion
+    const trimFilenameInput = document.getElementById('trimFilename');
+    if (trimFilenameInput) {
+        const baseName = filename.replace(/\.[^.]+$/, '');
+        const suggestedName = generateUniqueFilename(baseName, '.wav', true).replace('.wav', '');
+        trimFilenameInput.value = suggestedName;
+        // Clear validation message
+        const filenameValidation = document.getElementById('filenameValidation');
+        if (filenameValidation) {
+            filenameValidation.style.display = 'none';
+        }
+    }
+    
+    // Load audio from server
+    const url = '/lock_chimes/play/PLACEHOLDER'.replace('PLACEHOLDER', filename);
+    
+    audioTrimmer.loadFile(url, filename).then(async result => {
+        if (result.success) {
+            document.getElementById('trimEditorLoading').style.display = 'none';
+            document.getElementById('trimEditorContent').style.display = 'block';
+            
+            // Apply normalization settings if checkbox is checked
+            const normalizeCheckbox = document.getElementById('trimNormalizeVolume');
+            const targetLufsSlider = document.getElementById('trimTargetLufs');
+            if (normalizeCheckbox && normalizeCheckbox.checked && targetLufsSlider) {
+                const sliderIndex = parseInt(targetLufsSlider.value);
+                const volumeLevels = [
+                    { name: "Very Quiet", lufs: -23, description: "Barely audible" },
+                    { name: "Quiet", lufs: -18, description: "Soft and subtle" },
+                    { name: "Normal", lufs: -14, description: "Standard loudness" },
+                    { name: "Loud", lufs: -11, description: "Attention-grabbing" },
+                    { name: "Very Loud", lufs: -9, description: "Maximum volume" }
+                ];
+                audioTrimmer.setNormalization(true, volumeLevels[sliderIndex].lufs);
+                await audioTrimmer.calculateNormalizationGain();
+            }
+            
+            // Wait for layout to update, then resize and render canvas
+            setTimeout(() => {
+                const canvas = document.getElementById('waveformCanvas');
+                const container = canvas.parentElement;
+                const dpr = window.devicePixelRatio || 1;
+                canvas.width = container.clientWidth * dpr;
+                canvas.height = canvas.offsetHeight * dpr;
+                canvas.style.width = container.clientWidth + 'px';
+                
+                audioTrimmer.renderWaveform(canvas);
+                updateTrimUI();
+            }, 100);
+            
+            // Scroll to editor
+            updateTrimUI();
+            
+            // Scroll to editor
+            document.getElementById('trimEditorSection').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        } else {
+            showTrimMessage('Failed to load audio: ' + result.error, 'error');
+            closeTrimEditor();
+        }
+    });
+}
+
+function updateTrimUI() {
+    if (!audioTrimmer || !audioTrimmer.audioBuffer) return;
+    
+    const stats = audioTrimmer.getStats();
+    const duration = audioTrimmer.audioBuffer.duration;
+    
+    // Update sliders
+    document.getElementById('startTimeSlider').value = (stats.startTime / duration) * 100;
+    document.getElementById('endTimeSlider').value = (stats.endTime / duration) * 100;
+    document.getElementById('speedSlider').value = stats.playbackSpeed;
+    
+    // Update displays to show OUTPUT timeline (speed-adjusted time values)
+    // The trim markers stay at same visual position, but the time labels update
+    const outputStartTime = stats.startTime / stats.playbackSpeed;
+    const outputEndTime = stats.endTime / stats.playbackSpeed;
+    document.getElementById('startTimeDisplay').textContent = outputStartTime.toFixed(2) + 's';
+    document.getElementById('endTimeDisplay').textContent = outputEndTime.toFixed(2) + 's';
+    document.getElementById('speedDisplay').innerHTML = stats.playbackSpeed !== 1.0 
+        ? '<span class="speed-badge">' + stats.playbackSpeed.toFixed(2) + 'x</span>' 
+        : stats.playbackSpeed.toFixed(2) + 'x';
+    
+    // Update stats
+    document.getElementById('statDuration').textContent = stats.trimDuration.toFixed(2) + 's';
+    document.getElementById('statEffective').textContent = stats.effectiveDuration.toFixed(2) + 's';
+    
+    // Use actual file size if available, otherwise use estimate
+    const fileSize = stats.actualFileSize || stats.estimatedFileSize;
+    const fileSizeKB = (fileSize / 1024).toFixed(1);
+    const fileSizeMB = (fileSize / 1024 / 1024).toFixed(2);
+    const sizeText = fileSize < 1024 * 100 ? fileSizeKB + ' KB' : fileSizeMB + ' MB';
+    document.getElementById('statFileSize').textContent = stats.actualFileSize ? sizeText : '~' + sizeText;
+    
+    // Update status
+    const statusEl = document.getElementById('statFileSize');
+    const statusTextEl = document.getElementById('statStatus');
+    
+    statusEl.classList.remove('success', 'warning', 'error');
+    statusTextEl.classList.remove('success', 'warning', 'error');
+    
+    const withinLimit = fileSize <= 1048576;
+    
+    if (!withinLimit) {
+        statusEl.classList.add('error');
+        statusTextEl.classList.add('error');
+        statusTextEl.textContent = 'Too Large';
+    } else if (fileSize > 1048576 * 0.9) {
+        statusEl.classList.add('warning');
+        statusTextEl.classList.add('warning');
+        statusTextEl.textContent = 'Close to Limit';
+    } else {
+        statusEl.classList.add('success');
+        statusTextEl.classList.add('success');
+        statusTextEl.textContent = 'Ready';
+    }
+    
+    // Recalculate actual size periodically to update UI (debounced)
+    clearTimeout(window.trimUIUpdateTimeout);
+    window.trimUIUpdateTimeout = setTimeout(async () => {
+        try {
+            const accurateStats = await audioTrimmer.getStatsWithActualSize();
+            if (accurateStats) {
+                // Update file size display with actual value
+                const actualFileSize = accurateStats.actualFileSize;
+                const actualFileSizeKB = (actualFileSize / 1024).toFixed(1);
+                const actualFileSizeMB = (actualFileSize / 1024 / 1024).toFixed(2);
+                const actualSizeText = actualFileSize < 1024 * 100 ? actualFileSizeKB + ' KB' : actualFileSizeMB + ' MB';
+                document.getElementById('statFileSize').textContent = actualSizeText;
+                
+                // Update status based on actual size
+                const withinActualLimit = actualFileSize <= 1048576;
+                
+                statusEl.classList.remove('success', 'warning', 'error');
+                statusTextEl.classList.remove('success', 'warning', 'error');
+                
+                if (!withinActualLimit) {
+                    statusEl.classList.add('error');
+                    statusTextEl.classList.add('error');
+                    statusTextEl.textContent = 'Too Large';
+                } else if (actualFileSize > 1048576 * 0.9) {
+                    statusEl.classList.add('warning');
+                    statusTextEl.classList.add('warning');
+                    statusTextEl.textContent = 'Close to Limit';
+                } else {
+                    statusEl.classList.add('success');
+                    statusTextEl.classList.add('success');
+                    statusTextEl.textContent = 'Ready';
+                }
+            }
+        } catch (error) {
+            console.error('Error updating actual file size:', error);
+        }
+    }, 500); // Wait 500ms after user stops adjusting
+}
+
+function showTrimMessage(message, type) {
+    const messageEl = document.getElementById('trimMessage');
+    messageEl.textContent = message;
+    messageEl.className = 'trim-message ' + type;
+    messageEl.style.display = 'block';
+    
+    // Auto-hide success/info messages
+    if (type === 'success' || type === 'info') {
+        setTimeout(() => {
+            messageEl.style.display = 'none';
+        }, 5000);
+    }
+}
+
+function closeTrimEditor() {
+    // Stop playback
+    if (audioTrimmer && audioTrimmer.isPlaying) {
+        audioTrimmer.stopPreview();
+    }
+    
+    // Hide editor
+    document.getElementById('trimEditorSection').style.display = 'none';
+    document.getElementById('trimEditorSection').classList.remove('edit-mode');
+    document.getElementById('trimEditorBadge').style.display = 'none';
+    document.getElementById('trimMessage').style.display = 'none';
+    
+    // Reset file input
+    document.getElementById('chime_file').value = '';
+    
+    // Reset state
+    isEditingExistingChime = false;
+    currentTrimFile = null;
+    
+    // Reset play button
+    const playBtn = document.getElementById('playBtn');
+    playBtn.innerHTML = '<svg style="width: 20px; height: 20px;" aria-hidden="true"><use href="/static/icons/lucide-sprite.svg#icon-play"></use></svg>';
+    playBtn.classList.remove('playing');
+}
+</script>
+
+<style>
+/* Rotate arrow when details is open */
+details[open] > summary > span:first-child {
+    transform: rotate(90deg);
+    display: inline-block;
+}
+
+details > summary > span:first-child {
+    transition: transform 0.2s;
+    display: inline-block;
+}
+
+/* Remove default marker */
+details > summary {
+    list-style: none;
+}
+
+details > summary::-webkit-details-marker {
+    display: none;
+}
+</style>
+
+<script>
+// Check gadget state on page load
+document.addEventListener('DOMContentLoaded', function() {
+    initializeUploadModeToggle();
+});
+
+// Upload mode management
+let currentUploadMode = 'single';
+let selectedChimeFiles = [];
+
+function initializeUploadModeToggle() {
+    const bulkToggle = document.getElementById('bulkUploadToggle');
+    const singleUploadMode = document.getElementById('singleUploadMode');
+    const bulkUploadMode = document.getElementById('bulkUploadMode');
+    
+    if (!bulkToggle) return;
+    
+    // Mode switching
+    bulkToggle.addEventListener('change', function() {
+        if (this.checked) {
+            switchUploadMode('bulk');
+        } else {
+            switchUploadMode('single');
+        }
+    });
+    
+    // Initialize bulk upload UI based on device
+    if (!isMobileDevice() && supportsMultipleUpload()) {
+        initializeDesktopBulkUpload();
+    } else {
+        initializeMobileBulkUpload();
+    }
+}
+
+function switchUploadMode(mode) {
+    currentUploadMode = mode;
+    const singleUploadMode = document.getElementById('singleUploadMode');
+    const bulkUploadMode = document.getElementById('bulkUploadMode');
+    
+    if (mode === 'single') {
+        singleUploadMode.style.display = 'block';
+        bulkUploadMode.style.display = 'none';
+    } else {
+        singleUploadMode.style.display = 'none';
+        bulkUploadMode.style.display = 'block';
+    }
+}
+
+function isMobileDevice() {
+    return /(iPad|iPhone|iPod|Android|Mobile)/i.test(navigator.userAgent) || 
+           window.matchMedia("(max-width: 768px)").matches;
+}
+
+function supportsMultipleUpload() {
+    const input = document.createElement('input');
+    return 'multiple' in input && !/(iPad|iPhone|iPod)/i.test(navigator.userAgent);
+}
+
+function initializeDesktopBulkUpload() {
+    const desktopUpload = document.getElementById('desktopBulkUpload');
+    const mobileUpload = document.getElementById('mobileBulkUpload');
+    
+    if (desktopUpload) desktopUpload.style.display = 'block';
+    if (mobileUpload) mobileUpload.style.display = 'none';
+    
+    const dropZone = document.getElementById('chimeDragDropZone');
+    const fileInput = document.getElementById('chime_files_multi');
+    const uploadBtn = document.getElementById('uploadSelectedChimesBtn');
+    const clearBtn = document.getElementById('clearSelectedChimesBtn');
+    
+    if (!dropZone || !fileInput) return;
+    
+    // Click to browse
+    dropZone.addEventListener('click', function() {
+        fileInput.click();
+    });
+    
+    // File input change
+    fileInput.addEventListener('change', function(e) {
+        handleChimeFiles(Array.from(e.target.files));
+    });
+    
+    // Drag and drop events
+    dropZone.addEventListener('dragenter', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        dropZone.style.borderColor = 'var(--btn-primary-bg)';
+        dropZone.style.background = 'var(--hover-bg, rgba(0, 123, 255, 0.1))';
+    });
+    
+    dropZone.addEventListener('dragover', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+    });
+    
+    dropZone.addEventListener('dragleave', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        dropZone.style.borderColor = 'var(--border-input)';
+        dropZone.style.background = 'var(--form-input-bg)';
+    });
+    
+    dropZone.addEventListener('drop', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        dropZone.style.borderColor = 'var(--border-input)';
+        dropZone.style.background = 'var(--form-input-bg)';
+        
+        const files = Array.from(e.dataTransfer.files);
+        handleChimeFiles(files);
+    });
+    
+    // Upload button
+    if (uploadBtn) {
+        uploadBtn.addEventListener('click', function() {
+            uploadBulkChimes();
+        });
+    }
+    
+    // Clear button
+    if (clearBtn) {
+        clearBtn.addEventListener('click', function() {
+            selectedChimeFiles = [];
+            updateChimeFilesList();
+        });
+    }
+}
+
+function initializeMobileBulkUpload() {
+    const desktopUpload = document.getElementById('desktopBulkUpload');
+    const mobileUpload = document.getElementById('mobileBulkUpload');
+    
+    if (desktopUpload) desktopUpload.style.display = 'none';
+    if (mobileUpload) mobileUpload.style.display = 'block';
+    
+    const fileInput = document.getElementById('chime_file_bulk');
+    const uploadBtn = document.getElementById('uploadBulkBtn');
+    
+    if (!fileInput || !uploadBtn) return;
+    
+    fileInput.addEventListener('change', function(e) {
+        if (e.target.files.length > 0) {
+            uploadBtn.style.display = 'inline-block';
+        } else {
+            uploadBtn.style.display = 'none';
+        }
+    });
+    
+    uploadBtn.addEventListener('click', function() {
+        const files = Array.from(fileInput.files);
+        uploadBulkChimesFromArray(files);
+    });
+}
+
+function handleChimeFiles(files) {
+    // Filter for WAV files only
+    const validFiles = files.filter(file => file.name.toLowerCase().endsWith('.wav'));
+    
+    if (validFiles.length === 0) {
+        alert('Please select valid WAV files that meet Tesla requirements');
+        return;
+    }
+    
+    if (validFiles.length < files.length) {
+        alert('Note: Only WAV files are accepted in bulk upload mode. MP3 files were filtered out.');
+    }
+    
+    // Check for files that are too large
+    const maxSize = 1048576;
+    const oversizedFiles = validFiles.filter(file => file.size > maxSize);
+    
+    if (oversizedFiles.length > 0) {
+        const fileList = oversizedFiles.map(f => {
+            const sizeMB = (f.size / 1024 / 1024).toFixed(2);
+            return `  - ${f.name} (${sizeMB} MB)`;
+        }).join('\n');
+        const maxSizeMB = (maxSize / 1024 / 1024).toFixed(2);
+        alert(`The following files are too large (max ${maxSizeMB} MB):\n\n${fileList}\n\nBulk upload requires files to already meet Tesla requirements. To upload these files, use the Single Upload mode and the Audio Trimmer tool to reduce their size.`);
+        return;
+    }
+    
+    // Add to selected files (avoid duplicates)
+    validFiles.forEach(file => {
+        const exists = selectedChimeFiles.some(f => f.name === file.name && f.size === file.size);
+        if (!exists) {
+            selectedChimeFiles.push(file);
+        }
+    });
+    
+    updateChimeFilesList();
+}
+
+function updateChimeFilesList() {
+    const preview = document.getElementById('selectedChimesPreview');
+    const filesList = document.getElementById('chimeFilesList');
+    
+    if (!preview || !filesList) return;
+    
+    if (selectedChimeFiles.length === 0) {
+        preview.style.display = 'none';
+        return;
+    }
+    
+    preview.style.display = 'block';
+    
+    let html = '';
+    selectedChimeFiles.forEach((file, index) => {
+        const sizeKB = (file.size / 1024).toFixed(1);
+        const sizeMB = (file.size / 1024 / 1024).toFixed(2);
+        const sizeStr = file.size > 1024 * 1024 ? `${sizeMB} MB` : `${sizeKB} KB`;
+        
+        // Highlight files that are too large
+        const maxSize = 1048576;
+        const sizeWarning = file.size > maxSize ? ' style="color: var(--error-text, #dc3545); font-weight: bold;"' : '';
+        
+        html += `
+            <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px; border-bottom: 1px solid var(--border-input); color: var(--text-primary);">
+                <div style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                    <strong>${escapeHtml(file.name)}</strong>
+                    <span${sizeWarning} style="font-size: 12px; margin-left: 8px;">${sizeStr}</span>
+                </div>
+                <button type="button" onclick="removeChimeFile(${index})" style="background: none; border: none; color: var(--error-text, #dc3545); cursor: pointer; padding: 4px 8px; font-size: 18px;" title="Remove">Remove</button>
+            </div>
+        `;
+    });
+    
+    filesList.innerHTML = html;
+}
+
+function removeChimeFile(index) {
+    selectedChimeFiles.splice(index, 1);
+    updateChimeFilesList();
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+async function uploadBulkChimes() {
+    if (selectedChimeFiles.length === 0) {
+        alert('Please select files to upload');
+        return;
+    }
+    
+    uploadBulkChimesFromArray(selectedChimeFiles);
+}
+
+async function uploadBulkChimesFromArray(files) {
+    const uploadBtn = document.getElementById('uploadSelectedChimesBtn') || document.getElementById('uploadBulkBtn');
+    const clearBtn = document.getElementById('clearSelectedChimesBtn');
+    const progressDiv = document.getElementById('chimeUploadProgress');
+    const progressBar = document.getElementById('chimeProgressBar');
+    const statusText = document.getElementById('chimeUploadStatus');
+    
+    // Disable buttons
+    if (uploadBtn) uploadBtn.disabled = true;
+    if (clearBtn) clearBtn.disabled = true;
+    
+    // Show progress
+    if (progressDiv) {
+        progressDiv.style.display = 'block';
+        progressBar.style.width = '0%';
+        progressBar.textContent = '0%';
+        statusText.textContent = 'Preparing upload...';
+    }
+    
+    const formData = new FormData();
+    files.forEach(file => {
+        formData.append('chime_files', file);
+    });
+    
+    try {
+        const xhr = new XMLHttpRequest();
+        
+        // Track progress
+        xhr.upload.addEventListener('progress', function(e) {
+            if (e.lengthComputable) {
+                const percentComplete = Math.round((e.loaded / e.total) * 100);
+                progressBar.style.width = percentComplete + '%';
+                progressBar.textContent = percentComplete + '%';
+                
+                const loadedMB = (e.loaded / 1024 / 1024).toFixed(2);
+                const totalMB = (e.total / 1024 / 1024).toFixed(2);
+                statusText.textContent = `Uploading ${files.length} file(s)... (${loadedMB} MB / ${totalMB} MB)`;
+            }
+        });
+        
+        // Handle completion
+        xhr.addEventListener('load', function() {
+            if (xhr.status === 200) {
+                try {
+                    const response = JSON.parse(xhr.responseText);
+                    
+                    progressBar.style.width = '100%';
+                    progressBar.textContent = '100%';
+                    
+                    if (response.success) {
+                        progressBar.style.background = '#28a745';
+                        statusText.textContent = response.summary || 'Upload complete!';
+                        statusText.style.color = '#28a745';
+                    } else {
+                        progressBar.style.background = '#ffc107';
+                        statusText.textContent = 'Upload completed with some errors';
+                        statusText.style.color = '#ffc107';
+                    }
+                    
+                    // Show detailed results
+                    showChimeUploadResults(response.results, response.success);
+                    
+                    // Clear file selection and re-enable buttons
+                    selectedChimeFiles = [];
+                    updateChimeFilesList();
+                    if (uploadBtn) uploadBtn.disabled = false;
+                    if (clearBtn) clearBtn.disabled = false;
+                    
+                } catch (e) {
+                    progressBar.style.background = '#28a745';
+                    statusText.textContent = 'Upload complete!';
+                    statusText.style.color = '#28a745';
+                    
+                    // Re-enable buttons
+                    if (uploadBtn) uploadBtn.disabled = false;
+                    if (clearBtn) clearBtn.disabled = false;
+                    
+                    // Reload to show new files
+                    setTimeout(function() {
+                        window.location.reload();
+                    }, 2000);
+                }
+            } else {
+                progressBar.style.background = '#dc3545';
+                statusText.textContent = 'Upload failed: ' + xhr.statusText;
+                statusText.style.color = '#dc3545';
+                if (uploadBtn) uploadBtn.disabled = false;
+                if (clearBtn) clearBtn.disabled = false;
+            }
+        });
+        
+        // Handle errors
+        xhr.addEventListener('error', function() {
+            progressBar.style.background = '#dc3545';
+            statusText.textContent = 'Upload failed: Network error';
+            statusText.style.color = '#dc3545';
+            if (uploadBtn) uploadBtn.disabled = false;
+            if (clearBtn) clearBtn.disabled = false;
+        });
+        
+        // Send request
+        xhr.open('POST', '/lock_chimes/upload_bulk');
+        xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+        xhr.send(formData);
+        
+    } catch (error) {
+        console.error('Upload error:', error);
+        alert('Upload failed: ' + error.message);
+        if (uploadBtn) uploadBtn.disabled = false;
+        if (clearBtn) clearBtn.disabled = false;
+    }
+}
+
+function showChimeUploadResults(results, overallSuccess) {
+    const resultsDiv = document.getElementById('chimeUploadResults');
+    if (!resultsDiv || !results || results.length === 0) return;
+    
+    let successCount = 0;
+    let failCount = 0;
+    
+    let html = '<div style="margin-top: 15px; padding: 15px; background: var(--bg-info); border: 2px solid var(--border-color); border-radius: 8px; max-height: 400px; overflow-y: auto;">';
+    html += '<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">';
+    html += '<h4 style="margin: 0; color: var(--text-primary);">Upload Results</h4>';
+    html += '<button type="button" onclick="document.getElementById(\'chimeUploadResults\').style.display=\'none\';document.getElementById(\'chimeUploadProgress\').style.display=\'none\'" style="background: var(--btn-secondary-bg); color: var(--btn-secondary-text); border: none; padding: 5px 10px; border-radius: 4px; cursor: pointer;">Close</button>';
+    html += '</div>';
+    html += '<ul style="margin: 10px 0 0 0; padding: 0; list-style: none;">';
+    
+    results.forEach(result => {
+        if (result.success) {
+            successCount++;
+            html += `<li style="padding: 8px; margin: 5px 0; background: var(--msg-success-bg); border-left: 4px solid var(--success-border); border-radius: 4px; color: var(--text-primary);">
+                <strong style="color: var(--success-text);">Success: ${escapeHtml(result.filename)}</strong><br>
+                <span style="font-size: 12px; color: var(--text-secondary);">${escapeHtml(result.message)}</span>
+            </li>`;
+        } else {
+            failCount++;
+            html += `<li style="padding: 8px; margin: 5px 0; background: var(--msg-error-bg); border-left: 4px solid var(--error-text); border-radius: 4px; color: var(--text-primary);">
+                <strong style="color: var(--error-text);">Failed: ${escapeHtml(result.filename)}</strong><br>
+                <span style="font-size: 12px; color: var(--text-secondary);">${escapeHtml(result.message)}</span>
+            </li>`;
+        }
+    });
+    
+    html += '</ul>';
+    html += `<div style="margin-top: 15px; padding: 10px; background: var(--form-input-bg); border-radius: 4px; color: var(--text-primary);">`;
+    html += `<strong>Summary:</strong> ${successCount} succeeded, ${failCount} failed out of ${results.length} total file(s)`;
+    html += '</div>';
+    
+    if (successCount > 0) {
+        html += '<div style="margin-top: 10px; text-align: center;">';
+        html += '<button type="button" onclick="window.location.reload()" style="background: var(--btn-primary-bg); color: var(--btn-primary-text); border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 14px;">Refresh to See New Files</button>';
+        html += '</div>';
+    }
+    
+    html += '</div>';
+    
+    resultsDiv.innerHTML = html;
+    resultsDiv.style.display = 'block';
+}
+</script>
+
+    </main>
+
+    <!-- Toast notification container -->
+    <div class="toast-container" id="toast-container" aria-live="polite"></div>
+
+    <script src="/static/js/main.js"></script>
+    
+
+    
+    <script>
+        (function() {
+            const POLL_MS = 30000;
+            const link = document.getElementById('health-dot-link');
+            const dot = document.getElementById('health-dot');
+            if (!link || !dot) return;
+
+            // Map subsystem severity to the CSS class + tooltip prefix.
+            // B-1: uses the design-system accent tokens for ok/warn/
+            // error so dark/light mode work automatically. (v1's mode
+            // status-dot vocabulary that this comment used to reference
+            // was removed when legacy mode switching went away.)
+            const SEV_TO_CLASS = {
+                ok:      'health-dot-ok',
+                warn:    'health-dot-warn',
+                error:   'health-dot-error',
+                unknown: 'health-dot-unknown',
+            };
+
+            function applyHealth(payload) {
+                const overall = (payload && payload.overall) || {};
+                const sev = overall.severity || 'unknown';
+                const msg = overall.message || 'System status';
+                // Reset any prior class then apply the new one.
+                dot.className = 'status-dot health-dot ' +
+                    (SEV_TO_CLASS[sev] || SEV_TO_CLASS.unknown);
+                link.title = msg;
+                link.setAttribute('aria-label', msg);
+                link.hidden = false;
+            }
+
+            async function poll() {
+                try {
+                    const r = await fetch('/api/system/health', {
+                        credentials: 'same-origin',
+                    });
+                    if (!r.ok) return;
+                    const data = await r.json();
+                    applyHealth(data);
+                } catch (e) { /* network blip — keep last known colour */ }
+            }
+
+            poll();
+            setInterval(poll, POLL_MS);
+        })();
+    </script>
+    
+
+</body></html>

@@ -1,24 +1,46 @@
 ---
 name: charter-review
 description: >
-  Review code changes against the TeslaUSB B-1 Code Quality Charter
-  (`docs/03-CODE-QUALITY-CHARTER.md`). Use when asked to charter-review,
-  do a charter check, audit charter compliance, gate-review a phase,
-  do a pre-commit charter sweep, or review code for code smells / dead
-  code / shortcut violations / architecture-layering violations on the
-  B-1 branch (`b1-userspace-rust`). Scope can be: a specific commit, a
-  range of commits, a working-tree diff, a PR number, an entire phase
-  deliverable, or specific files. Posts findings to PR if PR-scoped;
-  otherwise writes a structured report to the session log. Distinct from
-  `review-pr` (which targets v1's Flask architecture) and from
-  `security-review` (which is a separate pillar).
+  Review code changes against the binding engineering standards for
+  the TeslaUSB B-1 rewrite, which live in the spec set —
+  `docs/specs/SPEC.md` §7 (code style & engineering standards),
+  §8 (testing), §10 (boundaries) — plus the relevant component spec
+  (`gadgetd.md`, `scannerd.md`, `indexd.md`, `webd.md`, `uploadd.md`,
+  `retentiond.md`, `wifid.md`, `spa.md`, `storage.md`,
+  `tesla-usb-contract.md`). Use when asked to charter-review, do a
+  standards check, gate-review a spec deliverable or a migration step,
+  do a pre-commit sweep, or review code for code smells / dead code /
+  shortcut violations / architecture-layering violations on the B-1
+  branch (`b1-userspace-rust`). Scope can be: a specific commit, a
+  commit range, a working-tree diff, a PR number, a component-spec
+  deliverable, a `migration.md` M-step, or specific files. Reviews
+  Rust + the static SPA (TypeScript/JS) — there is NO Python in the
+  B-1 runtime. Posts findings to the PR if PR-scoped; otherwise writes
+  a structured report to the session log. Delegates security topics to
+  a `security-review` skill if one is available.
 ---
 
-# Code Quality Charter Review
+# Standards / Charter Review (B-1)
 
-Audit code changes against `docs/03-CODE-QUALITY-CHARTER.md` — the
-binding standards for the B-1 rewrite. The charter encodes the
-operator's directive (2026-05-19, verbatim):
+Audit code changes against the **binding engineering standards of the
+B-1 rewrite**. After the reset there is no separate charter document:
+the standards ARE the spec set. The source of truth is, in priority
+order:
+
+1. **`docs/specs/SPEC.md` §7** — Code style & engineering standards.
+2. **`docs/specs/SPEC.md` §10** — Boundaries (ALWAYS / ASK FIRST / NEVER).
+3. **`docs/specs/SPEC.md` §8** — Testing strategy.
+4. The **component spec** that owns the changed code (its "Boundaries"
+   section is binding for that component).
+5. This skill's **Five Pillars** review philosophy (below), which
+   operationalises the operator's standing quality directive.
+
+If anything in this skill contradicts the specs, **the specs win** (and
+this skill should be updated). If the specs are *silent* on something
+this skill flags, see "When to STOP and ASK".
+
+The operator's standing quality directive (verbatim) that the Five
+Pillars encode:
 
 > *"We also want to make sure we don't have code smells, we follow
 > best architecture practices, we don't take shortcuts or go with
@@ -26,561 +48,456 @@ operator's directive (2026-05-19, verbatim):
 > just take a bit more work. Don't be lazy. Never leave bad code
 > or bugs, fix things as they are found. No dead code."*
 
-This skill operationalises that directive at review time. It is
-NOT a stylistic lint pass (CI does that). It is a substantive review
-that finds smells, architecture violations, shortcut patterns, dead
-code, and other charter breaches that automation cannot detect.
+This is NOT a stylistic lint pass (CI / `clippy`/`fmt`/`eslint` do
+that). It is a substantive review that finds smells, architecture
+violations, shortcut patterns, dead code, and boundary breaches that
+automation cannot detect.
 
-**When to use this skill (vs. other review skills):**
+**The non-negotiable backdrop — the #1 invariant.** The car must ALWAYS
+be able to write TeslaCam. `gadgetd` is the only CRITICAL service and
+the only code allowed near the car-facing write path
+([`SPEC.md` §2, §10](../../../docs/specs/SPEC.md)). Any change that
+could add latency or a failure mode to that path, or that lets a
+non-`gadgetd` component touch the LUN, is a **Blocker** regardless of
+code quality.
 
-| Skill | Scope | When to invoke |
+**Architecture the review assumes** (full Rust + static SPA — no
+Python, no NBD):
+
+| Crate / area | Role |
+|---|---|
+| `teslausb-core` | shared types, config, SQLite access, **SEI model** (pure parsing) — KEEP/extend |
+| `gadgetd` | **CRITICAL**: kernel LUN + eject-handoff; sole owner of the write path |
+| `scannerd` | raw exFAT/MP4/SEI reader; capped keyframe thumbnails |
+| `indexd` | trips/events/clips derivation → SQLite; **sole SQLite writer** |
+| `webd` | axum API + static SPA host |
+| `uploadd` | cloud upload queue |
+| `retentiond` | retention + archive + the space governor (`storage.md`) |
+| `wifid` | STA/AP state machine + SDIO watchdog |
+| `spa/` | static SPA (Preact/Svelte/Solid + vendored Leaflet + Chart.js) |
+| `teslafat`, `teslausb-worker` | **LEGACY** — removed from the runtime; flag any *new* runtime use as a Blocker |
+
+**When to use this skill (vs. others):**
+
+| Skill | Scope | When |
 |---|---|---|
-| `charter-review` (this) | B-1 charter compliance, architecture, code smells, dead code | Every phase gate, every B-1 PR, on demand |
-| `review-pr` | v1 PR conventions (Flask, mount safety, IMG gating) | v1 PRs only — NOT applicable to B-1 |
-| `security-review` | Subprocess injection, path traversal, root usage, gadget safety | Both v1 and B-1; charter-review delegates here for security topics |
-
-**Charter sections this skill enforces:**
-
-1. The Five Pillars (no code smells, best architecture, no shortcuts,
-   fix bugs immediately, no dead code)
-2. Rust standards (`unsafe_code = "deny"`, `unwrap_used = "deny"`,
-   etc., plus `thiserror` for libs / `anyhow` for binary outer layer,
-   `tracing` not `println!`)
-3. Python standards (ruff rule families, `mypy --strict`, no `Any`,
-   no `print()`)
-4. Architectural Principles — Layering Rule, Dependencies inversion,
-   ADR discipline
-5. Anti-patterns rejected with concrete examples (see charter)
-6. "Pick the Hard Right" decision framework
+| `charter-review` (this) | B-1 standards, architecture, code smells, dead code, boundaries | Every spec-deliverable gate, every B-1 PR, on demand |
+| `security-review` (if available) | subprocess injection, path traversal, root usage, gadget/configfs safety, secrets | charter-review delegates security topics here; if absent, apply the inline checklist in Phase 6 |
 
 ---
 
 ## Phase 0 — Prerequisites
 
-### Load the charter
+### Load the standards
 
-Read `docs/03-CODE-QUALITY-CHARTER.md` in full. The charter is the
-source of truth. If anything in this skill contradicts the charter,
-the charter wins (and this skill should be updated). Read also
-`docs/00-PLAN.md` "Non-negotiable invariants" and "Decisions" tables —
-those carry charter-adjacent rules.
+Read, in full:
+
+- `docs/specs/SPEC.md` (§7 standards, §8 testing, §9 prototype-first
+  unknowns, §10 boundaries are the load-bearing sections).
+- The **component spec** for whatever changed (e.g. a diff under the
+  scanner → read `docs/specs/scannerd.md`).
+- `docs/specs/README.md` for the spec index, and `docs/plan.md` for
+  background architecture synthesis.
+
+The specs are the source of truth. If this skill and a spec disagree,
+the spec wins.
 
 ### Verify the branch
 
-Charter-review is only meaningful on the B-1 branch:
+Standards review is only meaningful on the B-1 branch:
 
 ```bash
 git branch --show-current
 ```
 
-If the current branch is `main` or any v1 branch (`v2/*`, etc.),
-inform the user and ask whether they want to switch — charter-review
-on v1 code will produce massive false-positive output because v1
-predates the charter.
+If the current branch is `main`, inform the user and ask whether they
+want to switch — `main` predates the B-1 spec set and will produce
+false positives.
 
 ### Confirm scope
 
-Ask the user (or accept from invocation context) which scope to
-review. Default to "working tree diff vs. base branch" if unclear.
+Accept the scope from the invocation, or default to "working-tree diff
+vs. base branch".
 
 | Mode | Trigger examples | Behaviour |
 |---|---|---|
-| **commit** | "commit abc1234", "charter-review the last commit" | One commit (`git show <sha>`) |
+| **commit** | "commit abc1234", "review the last commit" | One commit (`git show <sha>`) |
 | **range** | "commits abc1234..def5678" | All commits in the range |
 | **working-tree** | "what I have now", "before I commit", default | `git diff` + untracked files |
 | **pr** | "PR #42", "#42" | Fetch via `gh pr diff` and review |
-| **phase** | "Phase 1 deliverable", "Phase 4b deliverable" | All files for that phase per `docs/01-PROGRESS.md` (use the file checklist to derive paths) |
-| **files** | "review `crates/teslafat/src/nbd/transmission.rs`" | Specific files |
+| **spec-deliverable** | "the `webd` deliverable", "the scanner work" | All files implementing a component spec; gate against that spec's Boundaries + SPEC §7–§10 (Phase 7) |
+| **migration-step** | "M3", "the migration step" | The files/operations for an M-series step in `docs/specs/migration.md` (Phase 7) |
+| **files** | "review `rust/crates/scannerd/src/reader.rs`" | Specific files |
 
 ---
 
 ## Phase 1 — Pre-flight automated gates
 
-Charter-review starts by running every automated check the charter
-prescribes. If these are red, **stop and report immediately** — fix
-the automated failures before doing manual review (no point
-hand-reviewing code that won't compile / fails lints).
+Run the automated checks the specs prescribe (`SPEC.md` §5 commands,
+§8 testing). If these are red, **stop and report immediately** — fix
+the automated failures before manual review.
 
 ### Rust gates
 
-If any Rust files are in scope:
+If any Rust files are in scope (from `rust/`):
 
 ```bash
-cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets --all-features
-cargo llvm-cov --fail-under-lines 80 \
-    --include-files 'rust/crates/teslafat/src/fs/**' \
-    --include-files 'rust/crates/teslafat/src/nbd/**' \
-    --include-files 'rust/crates/teslausb-worker/src/indexer.rs' \
-    --include-files 'rust/crates/teslausb-worker/src/cleanup.rs'
-cargo deny check
-cargo machete
-cargo doc --no-deps --document-private-items --all-features
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo deny check                 # licenses + advisories (rust/deny.toml)
 ```
 
-Any non-zero exit = block. Report which gate failed with output.
-
-### Python gates
-
-If any Python files are in scope:
+Dead-code / docs (Pillar 5 support), run if the tools are installed:
 
 ```bash
-ruff check .
-ruff format --check .
-mypy web/
-pytest --strict-markers --strict-config --cov=web --cov-fail-under=80
-vulture web/ --min-confidence 80
-bandit -r web/ -ll
+cargo machete                    # unused dependencies
+cargo +nightly udeps             # unused deps (alt), if nightly available
+cargo doc --no-deps --document-private-items --workspace
 ```
 
-Any non-zero exit = block.
+Coverage (if `cargo-llvm-cov` is installed): focus on the **critical
+paths** SPEC §8 calls out — the raw parser, the stability gating, the
+eject-handoff state machine, the SEI decoder, and the `gadgetd`
+invariant tests — not a blanket repo number.
 
-### Pre-commit hooks
+Any non-zero exit on the four primary gates = **block**. Report which
+gate failed with output.
+
+### SPA gates
+
+If any SPA files are in scope (`spa/`):
 
 ```bash
-pre-commit run --all-files
+npm ci
+npm run build                    # must emit a hashed static bundle
+npm run test                     # component/unit tests
+npx playwright test              # E2E + perf + console assertions
 ```
 
-If this hasn't been installed yet (Phase 0 deliverable), note it
-and skip — but include "pre-commit not installed" as a Phase 0
-gap in the report.
+Plus, if configured in the SPA toolchain: `tsc --noEmit` (strict) and
+the project's `eslint`. Any non-zero exit = **block**.
+
+> **UI changes are not "done" on green unit tests.** Per
+> `.github/copilot-instructions.md` and `SPEC.md` §8, every
+> UI-affecting change is verified end-to-end in a real browser
+> (perf, zero console/pageerror, screenshots at 375px + ≥1280px, proof
+> the changed JS module is actually loaded). See Phase 6 UI/UX.
 
 ---
 
 ## Phase 2 — The Five Pillars (manual review)
 
-For each changed file, walk through the pillars in order. Cite
-the charter section being enforced for every finding. Severity:
+For each changed file, walk the pillars in order. Cite the SPEC section
+(or component spec) for every finding. Severity:
 
-- **Blocker** — must fix before merge. Charter breach with no
-  acceptable mitigation.
-- **Major** — should fix before merge. Charter breach with a
-  documented mitigation (e.g., ADR justifying an exception).
-- **Minor** — fix opportunistically. Style or naming nit that
-  the charter mentions but doesn't strictly forbid.
+- **Blocker** — must fix before merge. Standards breach with no
+  acceptable mitigation, or any #1-invariant / §10-NEVER breach.
+- **Major** — should fix before merge. Standards breach with a
+  documented mitigation.
+- **Minor** — fix opportunistically.
 - **Nit** — purely cosmetic. Optional.
 
-### Pillar 1: No Code Smells (charter §1)
+### Pillar 1: No Code Smells (SPEC §7 — "no dead code, no speculative abstractions")
 
-For every changed file, check:
+- [ ] **Function length** — any function over ~50 SLOC?
+  `grep -nE '^\s*(pub\s+)?(async\s+)?fn ' <file>` (Rust) /
+  `grep -nE '^\s*(export\s+)?(async\s+)?function ' <file>` (TS). **Major** if long without justification.
+- [ ] **Nesting depth** — `if`/`for`/`match` deeper than 3 levels? **Major**.
+- [ ] **Magic values** — semantic literals (`timeout = 30`, `max_retries = 5`) not named consts? **Major**. (Array indices, `0`/`1`, are fine.)
+- [ ] **God modules** — file > 500 lines (target < 300)? **Blocker** > 500, **Major** 300–500. `wc -l <file>`.
+- [ ] **Duplication** — does the diff re-add logic that already exists (often something that belongs in `teslausb-core`)? **Major** on third occurrence; **Minor** on second.
+- [ ] **Primitive obsession** — `String`/`u64`/`PathBuf` crossing module boundaries where a newtype would carry meaning? **Minor** unless it crosses a boundary.
+- [ ] **Data clumps** — 3+ params that always travel together but aren't a struct? **Major** if seen at 3+ call sites.
+- [ ] **What-comments** — comments describing *what* the next line does rather than *why*. **Minor** each; **Major** if pervasive.
+- [ ] **Cyclomatic complexity** — clippy flags Rust (`cognitive_complexity`). For TS, eyeball deeply-branched functions. **Major** for egregious cases.
 
-- [ ] **Function length** — any function over 50 SLOC?
-  - Use `grep -n '^\(fn\|def\|pub fn\|async fn\) ' <file>` to find
-    function starts; count lines between starts.
-  - **Blocker** if any function > 50 SLOC without an ADR exception.
+### Pillar 2: Best Architecture Practices (SPEC §3, §6, §10)
 
-- [ ] **Nesting depth** — any code with `if` inside `if` inside `if`,
-  or equivalent `for`/`match` combinations, deeper than 3 levels?
-  - Visual inspection on the diff is fine for small changes;
-    `tokei` or `lizard` for bulk audits.
-  - **Major** if > 3 levels without justification.
+- [ ] **Write-path isolation (#1 invariant)** — does any non-`gadgetd`
+  code write to `disk.img`, the LUN, or mount the Tesla FS read-write
+  while the car owns it? → **Blocker**. Pi-side writes happen via the
+  eject-handoff in `gadgetd` only.
+- [ ] **Single-writer discipline** — does anything other than `indexd`
+  write to `index.sqlite3`? → **Blocker** (indexd is the sole SQLite
+  writer; [`indexd.md`](../../../docs/specs/indexd.md)).
+- [ ] **Domain purity** — the SEI/parse model in
+  `teslausb-core/src/sei` (and other pure parsing/model code) must stay
+  I/O-free: no `tokio::net`, `std::process`, `tokio::fs`, sockets, or
+  SQLite calls inside the parser. Service binaries own process /
+  network / filesystem orchestration. → **Blocker** for I/O in a pure
+  model module.
+- [ ] **No legacy runtime** — any *new* runtime dependency on
+  `teslafat` (NBD synthesizer) or `teslausb-worker`, or any
+  reintroduction of NBD / Python-Flask? → **Blocker**
+  ([`SPEC.md` §10 NEVER](../../../docs/specs/SPEC.md)).
+- [ ] **Dependency inversion** — new code that constructs its own
+  infrastructure deps instead of accepting them via parameters? **Major**.
+- [ ] **SRP** — a new `utils.rs` / `helpers.ts` is a red flag (`utils`
+  is not a responsibility). **Major** for new catch-all modules;
+  **Blocker** if a module mixes 3+ unrelated concerns.
+- [ ] **Pure functions where possible** — new code mixing I/O with
+  logic where a pure function + thin adapter would be clearer? **Major**.
 
-- [ ] **Magic values** — any bare numbers or strings in logic?
-  - `grep -n -E '\b[0-9]{2,}\b' <file>` finds candidates; review
-    each. Numbers that ARE just data (array indices 0/1, math
-    constants) are fine; numbers with semantic meaning
-    (`timeout = 30`, `max_retries = 5`) MUST be named consts.
-  - **Major** for unnamed semantic literals.
+### Pillar 3: No Shortcuts (SPEC §7)
 
-- [ ] **God modules** — any file > 500 lines (target < 300)?
-  - `wc -l <file>` — block at > 500 unless justified by ADR.
-  - **Blocker** > 500, **Major** 300-500.
-
-- [ ] **Duplication** — does the diff add code that already exists
-  elsewhere in the workspace?
-  - For Rust: search `crates/` for similar function signatures
-    or repeated patterns.
-  - For Python: search `web/` for similar logic.
-  - **Major** on third duplication; **Minor** on second.
-
-- [ ] **Primitive obsession** — are `u32`, `String`, `PathBuf` used
-  where a newtype would communicate meaning?
-  - Example: `fn read(offset: u64, len: u32)` is fine; the names
-    carry the meaning. But `fn enqueue(file: String, priority: u8)`
-    cries out for `Priority(u8)` newtype.
-  - **Minor** unless the primitive is used across module boundaries.
-
-- [ ] **Data clumps** — three+ parameters that always travel
-  together but aren't a struct?
-  - **Major** if the same triple appears in 3+ call sites.
-
-- [ ] **Comments explaining "what"** — every `//` or `#` comment
-  must explain WHY, WHY NOT, or document an invariant. Comments
-  that describe what the next line does are noise.
-  - **Minor** for individual offenders; **Major** if the file
-    is comment-heavy with what-comments.
-
-- [ ] **Cyclomatic complexity** — clippy will flag this for Rust
-  (`cognitive_complexity` lint, threshold 25). For Python, use
-  `radon cc -nb <file>` and flag anything rated D or worse.
-  - **Major** any D/E/F rating; **Blocker** any F.
-
-### Pillar 2: Best Architecture Practices (charter §2)
-
-- [ ] **Hexagonal layering** — does the change respect the four-layer
-  rule (Layer 1 domain → 2 services → 3 adapters → 4 entry points)?
-  - Specific Rust violations: `crates/teslausb-core/src/sei/`,
-    `crates/teslafat/src/fs/`, `crates/teslafat/src/retention.rs`,
-    `crates/teslafat/src/cluster_map.rs` MUST NOT import
-    `tokio::net`, `std::process`, `tokio::fs`, `rusqlite`, or
-    anything else with I/O semantics.
-  - Specific Python violations: anything in `web/teslausb_web/services/`
-    MUST NOT import `flask`; it MUST be callable from a non-Flask
-    context.
-  - **Blocker** for any layer-up import.
-
-- [ ] **Dependency inversion** — does the new code construct its
-  dependencies directly (`Foo::new()` that internally calls
-  `Bar::open()`) or accept them via parameters?
-  - **Major** if a new type instantiates its own infrastructure
-    deps instead of accepting them.
-
-- [ ] **SRP** — does each module do one thing? A new file named
-  `utils.rs` or `helpers.py` is a red flag — `utils` is not a
-  responsibility.
-  - **Major** for new `utils`/`helpers` files; **Blocker** if
-    the module mixes 3+ unrelated concerns.
-
-- [ ] **Composition over inheritance** — Python: no class hierarchies
-  > 2 levels deep. Rust: no enum-with-data carrying 6+ variants where
-  a trait would be clearer.
-  - **Major** for 3+ level Python hierarchies.
-
-- [ ] **Immutability** — does the code mutate where a return-new-value
-  would be just as clear? `&mut self` on a method that only needs
-  `&self` reads is a smell.
-  - **Minor** in most cases; **Major** if the mutation is shared
-    state across tasks/threads.
-
-- [ ] **Pure functions where possible** — does the new code mix I/O
-  with logic? Pure function carved out + adapter calling it is the
-  charter's pattern.
-  - **Major** if a new "logic" function takes a file path or
-    database handle and does both I/O and computation.
-
-### Pillar 3: No Shortcuts (charter §3)
-
-Cross-reference the charter's shortcut table:
-
-| Shortcut | Required alternative | Severity if found |
+| Shortcut | Required alternative | Severity |
 |---|---|---|
-| `unwrap()` / `expect()` on result that could realistically fail | `?` propagation or specific error handling | **Blocker** (Rust); **Major** (Python equivalent: bare `except`) |
-| `print!`/`println!` / Python `print()` | `tracing::info!` / `logging.getLogger` | **Blocker** |
-| `panic!`/`assert!` for runtime errors | `Result` return | **Blocker** |
-| `# type: ignore` / `Any` | Specific type or `# type: ignore[specific-rule]` with comment | **Blocker** without comment, **Major** with comment |
-| `unsafe` block without `// SAFETY:` comment | Add comment justifying every invariant | **Blocker** |
-| `TODO`/`FIXME` without linked issue | `# TODO(#123): ...` with linked GitHub issue | **Major** |
-| Commented-out code | Delete it (`git` remembers) | **Blocker** |
-| "It works, ship it" — no test for new public function | Tests required | **Major** for non-trivial; **Minor** for one-liners |
-| "I'll add the test later" | Add it now | **Blocker** |
-| Catching `Exception:` / `Box<dyn Error>` at module boundary | Specific error types | **Blocker** at public boundary, **Major** internal |
-| `time.sleep` / `tokio::time::sleep` as a synchronisation primitive | Use channels/condvars | **Major** |
-| Magic retry counts and timeouts buried in code | Named const at top of file, ideally in config | **Major** |
-| Boolean parameters that change behaviour | Enum variants | **Major** |
+| `unwrap()` / `expect()` in a service path that could realistically fail | `?` propagation / explicit handling, return `Result` | **Blocker** (Rust) |
+| `panic!`/`assert!` for a runtime (non-invariant) error | `Result` return | **Blocker** |
+| `unsafe` block without a `// SAFETY:` comment **and** a test | justify every invariant; add the test | **Blocker** |
+| `println!`/`eprintln!`/`print!`/`dbg!` | `tracing` | **Blocker** |
+| `console.log`/`debugger` shipped in the SPA bundle | remove / use a gated logger | **Blocker** |
+| `TODO`/`FIXME` without a linked issue | `// TODO(#123): …` | **Major** |
+| Commented-out code | delete it (git remembers) | **Blocker** |
+| New public function with no test (non-trivial) | add the test now | **Major** |
+| Blocking I/O on the tokio runtime (`std::fs`, blocking SQLite/lock across an `await`) | async equivalents / `spawn_blocking` | **Blocker** |
+| `time::sleep` used as a synchronisation primitive | channels / notifications | **Major** |
+| Loading a whole video/clip into RAM | streaming, bounded buffers | **Blocker** (memory discipline, SPEC §7) |
+| Magic retry counts / timeouts buried in code | named const or config | **Major** |
+| Boolean parameter that switches behaviour | enum variants | **Major** |
 
-### Pillar 4: Fix Bugs Immediately (charter §4)
+### Pillar 4: Fix Bugs Immediately (SPEC §7 directive)
 
-- [ ] **Bug fix without regression test** — every bug fix MUST add a
-  test that fails before the fix and passes after.
-  - **Blocker** if a fix lands without a regression test.
+- [ ] **Bug fix without a regression test** — every fix MUST add a test
+  that fails before and passes after. **Blocker**.
+- [ ] **Boy-Scout rule** — adjacent smells in a touched file either
+  fixed or filed. **Minor** for not-fixed; **Major** for not-filed.
+- [ ] **TODO sweep** — new unlinked `TODO`? **Major**.
 
-- [ ] **Boy Scout rule** — if the diff touches a file with adjacent
-  smells (e.g., a 200-line function next to a 5-line bug fix), are
-  the adjacent smells either fixed or filed as issues?
-  - **Minor** for not-fixed; **Major** for not-filed.
+### Pillar 5: No Dead Code (SPEC §7, §10)
 
-- [ ] **TODO sweep** — are any new `TODO` comments added without a
-  linked issue? Are any old `TODO` comments next to the diff that
-  should be acted on now?
-  - **Major** for new unlinked TODO; **Minor** for not-actioned
-    adjacent old TODO.
-
-### Pillar 5: No Dead Code (charter §5)
-
-- [ ] **Unused imports** — Rust: `cargo machete` + clippy
-  `unused_imports`. Python: ruff `F401`.
-  - **Blocker** (CI should catch, but verify locally).
-
-- [ ] **Unused functions/methods** — Rust: `cargo +nightly udeps`
-  (if available); Python: `vulture web/ --min-confidence 80`.
-  - **Major** any unused public API; **Blocker** if added in
-    this PR.
-
-- [ ] **Unused parameters** — Rust: `#[allow(unused)]` is a
-  blocker without ADR. Python: ruff `ARG001-ARG005`.
-  - **Major**.
-
-- [ ] **Commented-out code** — `grep -nE '^\s*(//|#)\s*(let|fn|def|class|use|import)' <file>`
-  - **Blocker** — delete it.
-
-- [ ] **Empty modules / placeholder files** — anything that has no
-  exports and isn't a known scaffold (`mod.rs` is OK, even when
-  thin).
-  - **Major** for new empty modules outside scaffolding.
-
-- [ ] **Vestigial config** — any new TOML key that no code reads?
-  Any old key removed from code but still in the example config?
-  - **Major** if added; **Minor** if existing.
-
-- [ ] **"Backup" / "old" files** — anything named `*.bak`,
-  `*_old.*`, `*_v2.*`, `*_new.*`?
-  - **Blocker** — must not be committed.
+- [ ] **Unused imports / deps** — Rust: `cargo machete` + clippy
+  `unused_imports`. TS: `eslint` no-unused-vars. **Blocker** (CI
+  should catch; verify).
+- [ ] **Unused functions / unreachable code** — `cargo udeps` /
+  `#[allow(dead_code)]` without justification. **Major**; **Blocker**
+  if introduced in this change.
+- [ ] **Unused parameters** — `#[allow(unused)]` without an ADR-style
+  justification. **Major**.
+- [ ] **Commented-out code** —
+  `grep -nE '^\s*(//|/\*).*(let |fn |use |function |const |import )' <file>`. **Blocker** — delete it.
+- [ ] **Empty / placeholder modules** outside known scaffolding. **Major**.
+- [ ] **Vestigial config** — a new config key no code reads, or a
+  removed key still in the example config. **Major** if added.
+- [ ] **"Backup"/"old" files** — `*.bak`, `*_old.*`, `*_v2.*`,
+  `*_new.*`. **Blocker** — must not be committed.
 
 ---
 
 ## Phase 3 — Language-specific rules
 
-### Rust deep-dive (charter §"Rust Standards")
+### Rust deep-dive (SPEC §7 "Rust" + "Memory discipline")
 
 For every Rust file in the diff:
 
-- [ ] **`[lints]` config** — does the crate's `Cargo.toml` have the
-  charter's `[lints.rust]` and `[lints.clippy]` blocks? Specifically:
-  - `unsafe_code = "deny"`
-  - `clippy::unwrap_used = "deny"`
-  - `clippy::expect_used = "warn"`
-  - `clippy::print_stdout = "deny"`
-  - `clippy::print_stderr = "deny"`
-  - `clippy::dbg_macro = "deny"`
-  - `clippy::all = "deny"`
-  - `clippy::pedantic = "warn"`
-  - `clippy::cognitive_complexity = { level = "deny", priority = -1 }` with threshold 25
-  - **Blocker** if any are missing.
+- [ ] **Lints enforced** — the crate inherits the workspace lints that
+  make `clippy -D warnings`, no-`unwrap`/`expect` in service paths,
+  and `unsafe` discipline real. Flag a crate that opts out of the
+  workspace lints without justification. **Blocker**.
+- [ ] **No `unwrap()`/`expect()` in service paths** — return `Result`
+  and handle errors. **Blocker** (test code may use them).
+- [ ] **`unsafe` only at the kernel/FFI boundary** — with a `// SAFETY:`
+  comment **and** a test exercising the invariant. **Blocker** otherwise.
+- [ ] **`tracing`, not `println!`/`eprintln!`/`dbg!`**. **Blocker**.
+- [ ] **No `static mut` / mutable `lazy_static!`** — use `OnceLock`
+  for immutable init, `Mutex`/`RwLock` for mutable, or inject state.
+- [ ] **Memory discipline (512 MB Pi)** — bounded buffers, streaming
+  I/O, no whole-video-in-RAM. Non-critical services must run under a
+  cgroup `MemoryMax`; `gadgetd` gets `OOMScoreAdjust=-1000`. If the
+  change adds a systemd unit or buffer, verify it respects the OOM
+  kill order `uploadd → wifid → webd → scannerd → retentiond → indexd
+  → NEVER gadgetd`. **Major** (or **Blocker** if it risks `gadgetd`).
+- [ ] **Async correctness** — no blocking I/O on the runtime (Pillar 3).
+- [ ] **Typed errors in libraries** — library/shared code prefers
+  typed errors; only a binary's outer layer uses a catch-all error.
+  **Major** for a catch-all (`Box<dyn Error>`) at a public library
+  boundary.
+- [ ] **Public API docs** — `///` on every `pub` item. **Minor** for
+  self-evident one-liners; **Major** otherwise.
 
-- [ ] **`thiserror` for library errors, `anyhow` only at binary outer layer**
-  - Domain crates (`teslausb-core`, fs/, sei/) use `thiserror`-derived
-    typed errors. Only `main.rs` of each binary may use `anyhow::Result`.
-  - **Blocker** for `anyhow::Result` in library code.
+### SPA deep-dive (SPEC §7 "SPA" + §8 UI)
 
-- [ ] **`tracing`, not `println!`/`eprintln!`**
-  - Any `println!`, `eprintln!`, `print!`, `eprint!`, `dbg!` →
-    **Blocker**.
+For every SPA file in the diff:
 
-- [ ] **No `static mut`, no `lazy_static!` for mutable state**
-  - Use `OnceLock` for immutable global init, `Mutex`/`RwLock` for
-    mutable, or pass state via dependency injection.
-
-- [ ] **Public API doc comments** — every `pub fn`, `pub struct`,
-  `pub enum`, `pub trait` has a `///` doc comment.
-  - **Major** for missing doc; **Minor** for one-liner public items
-    that are self-evident.
-
-- [ ] **`#[must_use]` on builders, on `Result`-returning functions
-  that callers might accidentally ignore**
-  - **Minor** suggestion to add.
-
-- [ ] **`Send`/`Sync` discipline** — any new `Arc<T>` where `T: ?Send`?
-  - **Major** if it crosses an `await` point.
-
-- [ ] **Async correctness** — any blocking I/O inside an async
-  function? (`std::fs` instead of `tokio::fs`, blocking SQLite call,
-  blocking lock?)
-  - **Blocker** if it blocks the tokio runtime.
-
-### Python deep-dive (charter §"Python Standards")
-
-For every Python file in the diff:
-
-- [ ] **`pyproject.toml` ruff config** — ruff rule families enabled
-  per charter: at minimum `E`, `F`, `W`, `C90`, `I`, `N`, `D`, `UP`,
-  `ANN`, `S`, `BLE`, `FBT`, `B`, `A`, `COM`, `C4`, `DTZ`, `EM`,
-  `EXE`, `ISC`, `ICN`, `G`, `INP`, `PIE`, `T20` (no print!), `PT`,
-  `Q`, `RSE`, `RET`, `SLF`, `SIM`, `TID`, `TCH`, `ARG`, `PTH`,
-  `ERA` (no commented-out code!), `PD`, `PGH`, `PL`, `TRY`, `FLY`,
-  `NPY`, `RUF`.
-  - **Blocker** if `pyproject.toml` doesn't enable T20, ANN, ERA.
-
-- [ ] **`mypy --strict`** with `disallow_any_explicit = true`
-  - **Blocker** if config relaxed.
-
-- [ ] **`from __future__ import annotations`** at top of every module
-  - **Major** if missing.
-
-- [ ] **`typing.Any` usage** — any `Any` in new code? It must have
-  an inline justification comment.
-  - **Major** without justification.
-
-- [ ] **`print()` calls** — none, ever, in production code. Use
-  `logging.getLogger(__name__)`.
-  - **Blocker**.
-
-- [ ] **Bare `except:`** — banned. Catch specific exception types.
-  - **Blocker**.
-
-- [ ] **`assert` for production logic** — banned (asserts can be
-  optimised away with `-O`). Use explicit `if not x: raise`.
-  - **Blocker** for asserts in non-test code (excluding type-narrowing
-    `assert isinstance(x, T)` which mypy needs).
-
-- [ ] **`datetime.now()` without `tz=`** — ruff DTZ catches this.
-  Always pass `tz=timezone.utc` (or another explicit tz).
-  - **Major**.
-
-- [ ] **Public function docstrings** — every `def` exported from a
-  module has a docstring (D rule family).
-  - **Minor** for missing.
+- [ ] **No heavy framework** — the SPA is a *small* framework
+  (Preact/Svelte/Solid). Adding React+Redux or another heavyweight
+  stack is a **Blocker** (SPEC §7; ASK FIRST per §10).
+- [ ] **Vendored parity libs** — map/charts are **Leaflet +
+  MarkerCluster** and **Chart.js**; the HUD uses the existing
+  `dashcam-mp4` SEI approach. Swapping to **MapLibre** (explicitly
+  rejected) or another lib that changes look/feel is a **Blocker**.
+- [ ] **Hashed static bundle** — the build emits a hashed bundle served
+  by `webd`. Flag un-hashed/un-fingerprinted asset wiring. **Major**.
+- [ ] **No secrets in the bundle** — no OAuth tokens, WiFi/Samba creds,
+  or API keys baked into client code or shipped to the Tesla volume.
+  **Blocker** ([`SPEC.md` §7 security](../../../docs/specs/SPEC.md)).
+- [ ] **Client-side HUD only / no transcoding** — telemetry HUD is
+  rendered client-side over native `<video>`; the Pi never transcodes.
+  Flag any server-side frame work. **Blocker**.
+- [ ] **TypeScript strictness** — if TS, no implicit `any`; strict mode
+  on. **Major** for new implicit `any`.
+- [ ] **No shipped `console.log`/`debugger`**. **Blocker** (Pillar 3).
+- [ ] **Look/feel + feature parity preserved** — the rewrite must keep
+  the existing UX ([`spa.md`](../../../docs/specs/spa.md)). A dropped
+  or materially redesigned screen is **ASK FIRST** (SPEC §10), not a
+  silent change.
 
 ---
 
-## Phase 4 — Architectural compliance (charter §"Architectural Principles")
+## Phase 4 — Boundary compliance (SPEC §10)
 
-For every change:
+Turn `SPEC.md` §10 into review checks. For every change:
 
-- [ ] **The Layering Rule** — repeat from Pillar 2 with concrete
-  module names:
-  - Does any file in `rust/crates/teslausb-core/src/{sei,fs,retention,cluster_map}/`
-    import `tokio::net`, `std::process`, `rusqlite`, `notify`?
-    → **Blocker**.
-  - Does any file in `rust/crates/teslafat/src/fs/{fat32,exfat}/`
-    import `nbd::*`, `backend::dir_tree`? → **Blocker**.
-  - Does any file in `web/teslausb_web/services/` import `flask`,
-    `werkzeug`? → **Blocker**.
-
-- [ ] **The Boundaries Are Real** — IPC messages between Rust and
-  Python:
-  - Any new message type added to `crates/teslausb-core/src/ipc/messages.rs`
-    has a corresponding Python type stub in `web/teslausb_web/ipc.py`?
-    → **Blocker** if not.
-  - Is the message schema versioned (envelope contains a version
-    field, additive changes only)? → **Blocker** if schema is
-    changed in a breaking way without bumping version.
-
-- [ ] **ADR discipline** — does this change meet ANY of the ADR
-  trigger criteria?
-  - Affects > 1 module?
-  - Locks in a new third-party dependency?
-  - Changes a protocol or schema?
-  - Makes a performance/correctness trade-off?
-  - Was contested in review?
-  - If YES to any, is there a new `docs/adr/NNNN-title.md`?
-    → **Blocker** if missing. New deps in `Cargo.toml` /
-    `pyproject.toml` always trigger an ADR.
+- [ ] **#1 invariant supreme** — nothing adds latency/failure to the
+  car's write path; only `gadgetd` is CRITICAL; everything else is
+  memory-capped. **Blocker** on breach.
+- [ ] **Eject-handoff for Pi-side writes** — never mount the Tesla FS
+  RW while the car owns it; never mutate during an active save.
+  **Blocker**.
+- [ ] **Parse-once / render-client-side / never transcode**. **Blocker**.
+- [ ] **Derived state stays on Pi-side ext4** — SQLite/WAL and derived
+  state live outside `disk.img`, never on the Tesla volume. **Blocker**.
+- [ ] **Deploy/migrate only via the hardware-test skill** — reversibly,
+  backups first, SSH/WiFi/boot protected. Flag any code/script that
+  hand-deploys to the device. **Major**.
+- [ ] **NEVER list** — dm-thin/CoW under the LUN; an unbounded block
+  snapshot under the live LUN; a non-`gadgetd` service rebooting the
+  Pi or restarting the gadget; concurrent RW mount of the Tesla FS;
+  Python/Flask or NBD/`teslafat` back in the runtime/write path;
+  committed secrets. Any hit = **Blocker**.
+- [ ] **ASK-FIRST triggers** — write-path latency/failure risk;
+  reflash/repartition (S2); dropping/redesigning a user-facing
+  feature; a new heavyweight dependency/language/toolchain; any
+  irreversible live-device op. If the change does one of these without
+  the operator having explicitly approved it, **flag for confirmation**
+  rather than approving.
+- [ ] **Hardware-dependent claims are spike-backed** — if the change
+  *depends on* an unproven hardware behavior (a §9 unknown — LUN
+  acceptance, eject/rebind, boot time, parse stability, WiFi TX cap,
+  microSD contention, disk.img sizing), the gating spike must have
+  PASSed per
+  [`hardware-first-development.md`](../../../docs/specs/hardware-first-development.md).
+  Building on an unproven assumption = **Blocker** (it is the exact
+  failure mode that doc exists to prevent).
 
 ---
 
-## Phase 5 — Anti-pattern sweep (charter §"Anti-patterns")
+## Phase 5 — Anti-pattern sweep
 
-Concrete examples the charter rejects. For each, do a project-wide
-`grep` (constrained to the diff context) and flag any hits.
+For each, do a `grep` constrained to the diff context and flag hits:
 
-- [ ] **"Just suppress the warning"** — any new `#[allow(...)]` /
-  `# noqa` / `# type: ignore` without a comment explaining why?
-  → **Blocker** without comment.
-
-- [ ] **"It's just a quick fix"** — any new bare `except:` /
-  `Box<dyn Error>` catch at module boundary? → **Blocker**.
-
-- [ ] **Stringly-typed code** — any new `dict[str, str]` or
-  `HashMap<String, String>` where a struct would carry the schema?
-  → **Major**.
-
-- [ ] **Boolean trap** — any new function signature with a `bool`
-  parameter that changes behaviour (not "is feature enabled")?
-  Use enum variants. → **Major**.
-
-- [ ] **Catch-all retry** — any new generic `retry(times=N)` wrapper
-  that hides specific recoverable vs. non-recoverable errors?
-  → **Major**.
-
-- [ ] **Magic timeout** — any timeout literal not pulled from
-  config or a named const? → **Major**.
-
-- [ ] **Mega-function** — any function that does parse + validate +
-  compute + I/O + format + log? Split. → **Major**.
-
-- [ ] **Comment-as-bug-deferral** — `// FIXME: this is wrong but
-  works most of the time` — fix it now or file an issue, do not
-  ship a known wrong behaviour. → **Blocker**.
+- [ ] **"Just suppress the warning"** — new `#[allow(...)]` /
+  `// eslint-disable` / `@ts-ignore` without a comment explaining why.
+  **Blocker** without comment.
+- [ ] **"It's just a quick fix"** — a catch-all error swallow
+  (`Box<dyn Error>` / `catch {}`) at a module boundary. **Blocker**.
+- [ ] **Stringly-typed code** — new `HashMap<String, String>` (or TS
+  `Record<string, string>`) where a struct/interface would carry the
+  schema. **Major**.
+- [ ] **Boolean trap** — a `bool` parameter that switches behaviour.
+  Use enum variants. **Major**.
+- [ ] **Catch-all retry** — a generic `retry(times=N)` that hides
+  recoverable vs. non-recoverable errors. **Major**.
+- [ ] **Magic timeout** — a timeout literal not from config or a named
+  const. **Major**.
+- [ ] **Mega-function** — one function doing parse + validate + compute
+  + I/O + format + log. Split it. **Major**.
+- [ ] **Comment-as-bug-deferral** — `// FIXME: wrong but works most of
+  the time`. Fix now or file an issue; never ship a known-wrong
+  behaviour. **Blocker**.
 
 ---
 
 ## Phase 6 — Delegated reviews
 
-### Security review
+### Security
 
-If the diff touches:
-- Subprocess invocation (`std::process::Command`, `subprocess.Popen`)
-- File path construction from user input
-- Configfs writes (gadget LUN management)
-- Network listener setup (NBD socket, Flask binding, nginx config)
-- Samba on/off toggle
-- WiFi/AP control
-- Any code running as root or with `sudo`
-- Cloud credentials, rclone config, token refresh
-- Lock chime / lightshow / wraps / music / boombox file upload
-- Cache-invalidation triggering
-- Cleanup worker (anything that deletes files)
+If the diff touches any of:
 
-→ **Invoke the `security-review` skill** in changed-mode against
-the same scope. Charter-review does not duplicate security work;
-it ensures security-review is invoked when it should be.
+- Subprocess invocation (`std::process::Command`).
+- File path construction from request/user input.
+- configfs writes / gadget LUN management (`gadgetd`).
+- The axum listener / network binding (`webd`), or `wifid` AP/STA
+  control, or the Samba on/off toggle.
+- Any code running as root or via `sudo`.
+- Secrets: cloud **OAuth refresh tokens**, rclone config, WiFi/Samba
+  credentials (must be root-only `0600`, never logged, never in the
+  bundle or on the Tesla volume — SPEC §7 trust model).
+- Media install (chime/lightshow/boombox/music upload to p2).
+- The cleanup / retention / space-governor path (anything that deletes
+  files — `retentiond`, [`storage.md`](../../../docs/specs/storage.md)).
 
-### UI/UX review
+→ **If a `security-review` skill is available, invoke it** in
+changed-mode against the same scope. If it is **not** available, apply
+the trust-model checklist inline (SPEC §7 +
+[`webd.md` security](../../../docs/specs/webd.md)) and record findings
+here. Charter-review does not duplicate security work; it ensures the
+security topics are reviewed.
 
-If the diff touches `web/teslausb_web/templates/`,
-`web/teslausb_web/static/`, or any Jinja-rendering code:
+### UI/UX
 
-→ Open `docs/05-UI-UX-DESIGN-SYSTEM.md` (when copied from v1) and
-walk the pre-merge checklist. Specifically verify:
-- No emoji icons (Lucide SVG only)
-- CSS custom properties only (no hex literals)
-- Dark + light mode tested
-- 44×44 touch targets
-- Mobile (375px) + desktop (≥1024px) layouts
+If the diff touches the SPA (`spa/`) or anything `webd` serves to the
+browser:
 
-→ **Major** for any deviation; **Blocker** for emoji / hex literal.
+→ Apply the UI verification rules in `.github/copilot-instructions.md`
+and [`spa.md`](../../../docs/specs/spa.md). Confirm the change was
+verified **end-to-end with Playwright**:
+
+- Real browser drive (not just a 200 from the endpoint).
+- Perf captured: navigation TTFB, DOMContentLoaded, FCP, slowest 5–10
+  requests.
+- **Zero** console / pageerror.
+- Screenshots at **375px** and **≥1280px**.
+- Proof the changed JS module is actually loaded by the served page.
+- Look/feel + feature parity preserved.
+
+→ **Blocker** if a UI-affecting change is declared done without this
+verification; **Major** for partial verification.
 
 ---
 
-## Phase 7 — Phase-gate criteria (charter + plan)
+## Phase 7 — Deliverable / migration gate
 
-When invoked with `scope = phase`, additionally verify the phase's
-acceptance criteria from `docs/00-PLAN.md`. Examples:
+### `scope = spec-deliverable`
 
-- **Phase 1 gate** — `cargo build --release` green on Pi; `nbd-client`
-  handshake smoke test passes; `Cargo.toml` has the charter's `[lints]`
-  blocks; `teslausb-core` shared lib created; config loader on TOML.
-- **Phase 2 gate** — `fsck.vfat` and `fsck.exfat` both clean against
-  `/dev/nbd0`; cold-start synthesis ≤ 1 s for 10K-file tree;
-  byte-identical `cmp` of files via mount vs. backing path.
-- **Phase 3 gate** — power-cut simulation harness passes; cluster_map
-  rebuild byte-identical after restart.
-- **Phase 4b gate** — SEI parser parity test vs. v1 fixture set
-  byte-identical; cleanup worker preserves GPS-tagged clips and
-  reaps no-GPS clips per policy.
-- **Phase 4c gate** — hardware test: upload chime → Tesla plays new
-  chime on next lock event within 3 s; rapid burst coalesces to one
-  invalidation; LUN-0 recording uninterrupted during LUN-1 invalidation.
-- **Phase 5 gate** — UI parity screenshot diff (v1 vs. B-1) at
-  375px + 1280px, dark + light mode — zero visible diff except
-  documented mode-removal edits.
-- **Phase 6 gate** — `setup.sh` on clean Pi OS Lite Bookworm → all
-  services healthy in < 60 s; `uninstall.sh` returns the Pi to a
-  near-vanilla state.
+Verify the component spec's own **"Boundaries"** section is satisfied,
+its required tests exist (SPEC §8 — e.g. property/fixture tests for the
+parser/stability/SEI; `gadgetd` invariant tests proving a
+crash/handoff looks like a clean unplug), and there are **no** SPEC §10
+NEVER violations. If the deliverable depends on a §9 hardware unknown,
+its gating spike must have PASSed
+([`hardware-first-development.md`](../../../docs/specs/hardware-first-development.md)).
 
-**If the phase's acceptance criteria are not met, the entire
-charter-review concludes with status `BLOCKED — phase incomplete`,
-even if individual file reviews are clean.**
+### `scope = migration-step`
+
+Verify the M-step's "verify after" checks in
+[`migration.md`](../../../docs/specs/migration.md), that the step is
+reversible with backups taken first, and that it was (or will be) run
+**only** through the hardware-test skill.
+
+**If the deliverable's / step's acceptance criteria are not met, the
+review concludes `BLOCKED — deliverable incomplete`, even if individual
+file reviews are clean.**
 
 ---
 
 ## Phase 8 — Report
 
 Output a structured report. If `scope = pr`, post via
-`gh pr review --comment` (multi-paragraph review body). Otherwise
-write to `~/.copilot/session-state/<session-id>/files/charter-review-<timestamp>.md`
-and surface the path to the user.
+`gh pr review --comment` (multi-paragraph body). Otherwise write to
+`~/.copilot/session-state/<session-id>/files/charter-review-<timestamp>.md`
+and surface the path.
 
 ### Report template
 
 ```markdown
-# Charter Review — <scope description>
+# Standards Review — <scope description>
 
-**Scope:** <commit / range / pr / phase / files>
+**Scope:** <commit / range / pr / spec-deliverable / migration-step / files>
 **Reviewer:** charter-review skill (B-1)
 **Date:** <ISO date>
-**Charter version:** docs/03-CODE-QUALITY-CHARTER.md @ <git sha>
+**Standards:** docs/specs/SPEC.md §7–§10 @ <git sha> (+ <component spec>)
 
 ## Summary
 
@@ -588,7 +505,7 @@ and surface the path to the user.
 - **Majors:** N
 - **Minors:** N
 - **Nits:** N
-- **Automated gates:** PASS / FAIL (lint / type / test / coverage / deny)
+- **Automated gates:** PASS / FAIL (fmt / clippy / test / deny / SPA build / Playwright)
 
 **Verdict:** APPROVED / APPROVED WITH NITS / CHANGES REQUESTED / BLOCKED
 
@@ -596,27 +513,22 @@ and surface the path to the user.
 
 | Gate | Status | Notes |
 |---|---|---|
-| `cargo fmt` | ✅ | |
+| `cargo fmt --all --check` | ✅ | |
 | `cargo clippy -D warnings` | ❌ | 3 warnings, see findings |
-| ... | | |
+| `cargo test --workspace` | ✅ | |
+| `cargo deny check` | ✅ | |
+| `npm run build` / `playwright test` | ✅ | |
 
 ## Findings
 
-For each finding, in priority order (Blocker → Major → Minor → Nit):
+For each, in priority order (Blocker → Major → Minor → Nit):
 
 ### [BLOCKER] <one-line title>
 **File:** `path/to/file.rs:LINE`
-**Charter section:** §N — Pillar M, rule "..."
+**Standard:** SPEC §<n> / <component spec> / Pillar <m> — "<rule>"
 **Issue:** <what's wrong>
-**Why it matters:** <how it violates the charter, what could go wrong>
+**Why it matters:** <how it breaches the standard / what could go wrong>
 **Required action:** <specific fix>
-**Diff suggestion** (optional):
-```rust
-// before
-...
-// after
-...
-```
 
 ---
 
@@ -624,56 +536,52 @@ For each finding, in priority order (Blocker → Major → Minor → Nit):
 
 ## Delegated reviews
 
-- Security: invoked? scope? findings?
-- UI/UX: invoked? findings?
+- Security: invoked? (skill / inline) scope? findings?
+- UI/UX: Playwright-verified? findings?
 
-## Phase-gate status (if scope = phase)
+## Deliverable / migration gate (if applicable)
 
 - [x] Criterion 1 — verified
 - [ ] Criterion 2 — NOT MET, see Blocker #N
-- ...
 
 ## Recommended next actions (in order)
 
 1. ...
 2. ...
-3. ...
 ```
 
 ---
 
 ## When to STOP and ASK
 
-This skill autonomously enforces the charter. It does NOT make
-judgment calls that override the charter. If the diff contains
-something that LOOKS like it should be flagged but the charter
-is silent, do this:
+This skill enforces the specs; it does NOT override them. If the diff
+contains something that looks flaggable but the specs are **silent**:
 
-1. Note the pattern in the report under "Charter-silent
-   observations" — describe it neutrally.
-2. Surface it to the user with a question:
-   "The charter doesn't currently cover X. The diff does Y.
-    Should the charter be amended?"
-3. If the user wants the charter amended, ALSO open a PR to
-   `docs/03-CODE-QUALITY-CHARTER.md` adding the rule.
+1. Note it in the report under "Spec-silent observations" — neutrally.
+2. Surface it to the user:
+   "The specs don't currently cover X. The diff does Y. Should
+   `SPEC.md` §7 be amended?"
+3. If the user wants the standard added, ALSO open a PR to
+   `docs/specs/SPEC.md` (or the relevant component spec) adding the
+   rule.
 
-**Never silently rubber-stamp** something the charter forbids
-because "it's a small case." The charter is binding; exceptions
-go through ADRs.
+**Never silently rubber-stamp** something the specs forbid because
+"it's a small case." The specs are binding; exceptions are explicit.
 
-**Never block** something the charter doesn't forbid because
-"reviewer's intuition." Add a Charter-silent observation; raise
-it for discussion; charter wins until amended.
+**Never block** something the specs don't forbid on reviewer intuition
+alone. Add a spec-silent observation and raise it; the spec wins until
+amended.
 
 ---
 
 ## Performance note
 
-A full charter review on a multi-file PR can take 10-20 minutes
-of analysis. For working-tree diffs during active development,
-the user may invoke `charter-review --fast` which:
-- Skips automated gates (assumes the dev runs them locally)
-- Reads only the diff hunks, not full files
-- Reports only Blockers + Majors
+A full review on a multi-file PR can take 10–20 minutes of analysis.
+For working-tree diffs during active development, the user may invoke
+`charter-review --fast`, which:
+
+- Skips automated gates (assumes the dev runs them locally).
+- Reads only the diff hunks, not full files.
+- Reports only Blockers + Majors.
 
 `--fast` is for pre-commit sanity. Real PR review always runs full.

@@ -1,18 +1,20 @@
 ---
 name: hardware-test
 description: >
-  Run an H-series increment on the live B-1 hardware target
-  (`cybertruckusb.local`, user `pi`) using the mandatory safety
-  wrapper: dead-man reboot timer, SSH liveness checks, file
-  backups, idempotent operations. Use when asked to run a
-  hardware smoke test, deploy a B-1 binary to the Pi, run an
-  H-series increment (H0/H1/H2/H3/H4/H4c/H5/H6/H7), verify a
-  hardware change, capture diagnostics from the device, or do
-  any work that requires the live device to be touched. NEVER
-  use this skill for v1 production work — it is B-1-only and
-  assumes the device runs (or is being decommissioned to) the
-  B-1 architecture. Refuses to proceed without explicit operator
-  confirmation when the action could affect SSH, WiFi, or boot.
+  Run a hardware spike / PoC or a migration step on the live B-1
+  hardware target (`cybertruckusb.local`, user `pi`) using the
+  mandatory safety wrapper: dead-man reboot timer, SSH liveness
+  checks, file backups, idempotent operations. Use when asked to
+  run a hardware spike from the de-risking backlog
+  (`docs/specs/hardware-first-development.md`), deploy a B-1
+  binary to the Pi, run a migration step
+  (`docs/specs/migration.md`), verify a hardware change, capture
+  diagnostics from the device, or do any work that requires the
+  live device to be touched. NEVER use this skill for v1
+  production work — it is B-1-only and assumes the device runs
+  (or is being decommissioned to) the B-1 architecture. Refuses
+  to proceed without explicit operator confirmation when the
+  action could affect SSH, WiFi, or boot.
 ---
 
 # Hardware Test on `cybertruckusb.local`
@@ -111,20 +113,32 @@ have evidence.
 
 ## Phase 1 — Scope resolution
 
-Determine which H-series increment (per `docs/00-PLAN.md`
-"Phased implementation") is being run. The user will name one,
-e.g. "H0", "H1.4", "H4c.5", "H5.b". Refuse to run if:
+Determine **what** is being run and **why it is safe to run now**. Every run is
+one of:
 
-- The increment number does not appear in `00-PLAN.md`.
-- The increment's predecessor in the plan has not been
-  completed (check `01-PROGRESS.md` for the predecessor's
-  ✅ mark).
-- Any 🔍 REVIEW GATE between the predecessor and this
-  increment has not produced a charter-review report
-  marked APPROVED.
+- A **spike** from the de-risking backlog in
+  [`docs/specs/hardware-first-development.md`](../../../docs/specs/hardware-first-development.md)
+  (e.g. *LUN acceptance*, *Eject / rebind*, *Boot time*, *Parse stability*,
+  *SEI / HUD*, *WiFi TX cap*, *microSD contention*, *disk.img sizing*). The spike
+  MUST have a written **pass/fail predicate** and the *smallest* throwaway probe
+  that answers it.
+- A **migration step** from
+  [`docs/specs/migration.md`](../../../docs/specs/migration.md) (the in-place
+  M-series rollout / v1 decommissioning).
+- An **ad-hoc diagnostic** — a read-only capture to root-cause a hardware fault.
 
-This skill is part of the gate enforcement, not separate from
-it.
+Refuse to run if:
+
+- A spike has **no written pass/fail predicate**. Frame it first (the spike loop
+  in `hardware-first-development.md` §3).
+- A spike/step that this one **gates on** has not PASSed. Honor the ordering in
+  `hardware-first-development.md` §5 (e.g. don't build past *LUN acceptance* until
+  it PASSes).
+- The work is a **long buildout on an unproven hardware assumption** — the exact
+  failure mode the hardware-first methodology exists to prevent. Spike it first.
+
+This skill is the only sanctioned path to the device and enforces the
+hardware-first gates; it does not replace them.
 
 ---
 
@@ -168,7 +182,8 @@ sudo cp -a /etc/systemd/system/gadget_web.service \
 EOF
 ```
 
-For `~/TeslaUSB` v1 decommissioning specifically (Phase H0.1):
+For `~/TeslaUSB` v1 decommissioning specifically (see
+[`migration.md`](../../../docs/specs/migration.md) M-series):
 
 ```bash
 ssh ... 'sudo tar -czf /home/pi/v1-backup-$(date +%Y%m%d).tar.gz \
@@ -185,11 +200,11 @@ retry.
 
 ---
 
-## Phase 4 — Execute the increment
+## Phase 4 — Execute
 
-For each sub-step in the increment's table from `00-PLAN.md`:
+For each step of the spike probe (or migration step):
 
-1. Print the sub-step description to the user.
+1. Print the step description to the user.
 2. Run the command via the SSH wrapper:
    ```bash
    ssh -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
@@ -197,7 +212,7 @@ For each sub-step in the increment's table from `00-PLAN.md`:
        pi@cybertruckusb.local \
        'set -euo pipefail; <command>'
    ```
-3. **Liveness check after every sub-step:**
+3. **Liveness check after every step:**
    ```bash
    ssh ... 'echo alive && uptime'
    ```
@@ -210,16 +225,17 @@ For each sub-step in the increment's table from `00-PLAN.md`:
      immediately** with the full transcript. Do not attempt
      further commands.
 4. Log every command + exit code + (truncated) stdout/stderr
-   to `~/.copilot/session-state/<sid>/files/hw-<increment>-<timestamp>.log`.
+   to `~/.copilot/session-state/<sid>/files/hw-<spike>-<timestamp>.log`.
 5. Re-arm dead-man if elapsed > 120 s since last arm.
 
 ---
 
 ## Phase 5 — Verify post-conditions
 
-Each increment in `00-PLAN.md` has an explicit "Verify after"
-column. Each one MUST pass before the increment is marked done.
-Common verifications:
+Every run has explicit post-conditions: for a **spike**, the **pass/fail
+predicate** framed in Phase 1; for a **migration step**, its "verify after"
+checks in [`migration.md`](../../../docs/specs/migration.md). Each one MUST pass
+before the run is marked done. Common verifications:
 
 | Verification | Command |
 |---|---|
@@ -233,9 +249,8 @@ Common verifications:
 | Process running | `ssh ... 'pgrep -f <binary> >/dev/null && echo running'` |
 | Process NOT running | `ssh ... '! pgrep -f <binary>'` |
 
-If ANY verification fails, the increment is FAILED. Do not
-mark it done. Stop and report. Do not attempt the next
-increment.
+If ANY verification fails, the run is FAILED. Do not mark it
+done. Stop and report. Do not start the next spike or step.
 
 ---
 
@@ -244,7 +259,7 @@ increment.
 ```bash
 ssh ... 'sudo systemctl stop b1-deadman.timer 2>/dev/null; echo dead-man-cancelled'
 ssh ... 'sudo journalctl --since "10 min ago" --no-pager' \
-    > ~/.copilot/session-state/<sid>/files/hw-<increment>-journal-<timestamp>.log
+    > ~/.copilot/session-state/<sid>/files/hw-<spike>-journal-<timestamp>.log
 ```
 
 ---
@@ -254,19 +269,26 @@ ssh ... 'sudo journalctl --since "10 min ago" --no-pager' \
 Append to `~/.copilot/session-state/<sid>/files/hw-results.md`:
 
 ```markdown
-## Hardware test: <increment>
+## Hardware run: <spike-or-step name>
 
 - **Started:** <ISO>
 - **Ended:** <ISO>
 - **Target:** cybertruckusb.local (pi)
-- **Result:** PASS / FAIL
+- **Kind:** spike | migration step | diagnostic
+- **Pass/fail predicate:** <the predicate framed in Phase 1>
+- **Result:** PASS / FAIL / INCONCLUSIVE
 
-### Sub-steps
+### Steps
 | # | Description | Status | Notes |
 |---|---|---|---|
-| H0.1 | snapshot | ✅ | sha256 match |
-| H0.2 | stop services | ✅ | all 6 stopped cleanly |
+| 1 | snapshot | ✅ | sha256 match |
+| 2 | <probe step> | ✅ | <observed signal> |
 | ... | | | |
+
+### Proven parameters (on PASS)
+| Parameter | Measured value |
+|---|---|
+| <e.g. TX cap Mbps / boot seconds / dropout window / disk.img size> | <value> |
 
 ### Verifications
 | Check | Result |
@@ -278,23 +300,28 @@ Append to `~/.copilot/session-state/<sid>/files/hw-results.md`:
 | Specific post-conditions | ✅ |
 
 ### Logs
-- Command log: `hw-<increment>-<timestamp>.log`
-- Journal: `hw-<increment>-journal-<timestamp>.log`
+- Command log: `hw-<spike>-<timestamp>.log`
+- Journal: `hw-<spike>-journal-<timestamp>.log`
 - Snapshots: `<list>`
 
 ### Next action
-- [✅ if PASS] Update `docs/01-PROGRESS.md`, mark increment done, proceed to next 🔍 REVIEW GATE.
-- [❌ if FAIL] STOP. Surface failure to operator. Do not run further increments.
+- [✅ if PASS] **Fold the proven parameters back into the owning spec** (and mark
+  the corresponding `SPEC.md` §9 unknown resolved), per
+  `hardware-first-development.md` §3–§4. Discard the throwaway probe. Unblock the
+  dependent buildout.
+- [⚠️ if INCONCLUSIVE] Refine the predicate / add instrumentation and re-run.
+  Never downgrade "inconclusive" to "probably fine."
+- [❌ if FAIL] STOP. Surface failure to operator. Do not build on the assumption;
+  pivot to the documented alternative or escalate for an architecture decision.
 ```
 
-If PASS, then surface to user: "H<n> complete. The next step
-is the charter-review gate on this increment. Shall I invoke
-the `charter-review` skill on `scope: increment H<n>`?"
+If PASS, surface to user: "<spike> PASSed. I'll record the proven parameters in
+`<owning spec>` and mark `SPEC.md` §9 #<n> resolved. Proceed?"
 
-If FAIL, surface to user with full transcript and **do not
-suggest a workaround**. The operator decides whether to
-rollback (via the `.b1-backup` snapshots and the `v1-backup`
-tarball) or investigate.
+If FAIL, surface to user with full transcript and **do not suggest a workaround**.
+The operator decides whether to rollback (via the `.b1-backup` snapshots and the
+`v1-backup` tarball) or to re-frame the architecture. A FAIL caught in a spike is
+a cheap win, not a setback (`hardware-first-development.md` §1).
 
 ---
 
@@ -302,23 +329,26 @@ tarball) or investigate.
 
 Hard stops where the skill SHALL NOT do the operation:
 
-- The increment touches `/etc/ssh/`, `/etc/NetworkManager/`,
+- The step touches `/etc/ssh/`, `/etc/NetworkManager/`,
   `/etc/wpa_supplicant/`, `/etc/sudoers`, or
   `/etc/systemd/system/sshd*` AND operator has not explicitly
   confirmed the change in THIS session's prior turn.
-- The increment proposes to edit `/boot/firmware/cmdline.txt`
+- The step proposes to edit `/boot/firmware/cmdline.txt`
   or `config.txt` without a `.b1-backup-<timestamp>` step
   immediately preceding it.
-- The increment proposes to run `systemctl mask` without first
+- The step proposes to run `systemctl mask` without first
   running `systemctl disable` and rebooting (two-stage
   reversibility — disable lets us re-enable, mask is harder
   to recover from accidentally).
-- The increment proposes to `rm -rf` outside `/home/pi/teslausb-b1/`
+- The step proposes to `rm -rf` outside `/home/pi/teslausb-b1/`
   or `/home/pi/v1-backup-*` without explicit operator
   confirmation in the prior turn.
 - The dead-man wrapper isn't installed (cannot arm timer).
-- Three consecutive sub-steps have logged SSH retry warnings —
+- Three consecutive steps have logged SSH retry warnings —
   the network is unreliable, stop before something breaks.
+- The request is a **long buildout on an unproven hardware
+  assumption** whose gating spike has not PASSed — spike it
+  first (`hardware-first-development.md`).
 
 In all these cases: surface the refusal with the specific rule
 that blocked, ask the operator to either confirm or amend the
@@ -326,20 +356,24 @@ plan, then resume only after explicit confirmation.
 
 ---
 
-## Notes on testing across phases
+## Notes on ordering & cadence
 
-| Phase H-series | Frequency in plan |
-|---|---|
-| H0 | once, before any other H |
-| H1 | once, after Phase 1 increments complete + charter-review approved |
-| H2 | once per phase 2 batch (~ every 4 increments) |
-| H3 | once after phase 3 increments |
-| H4 | once after phase 4 + 4b increments |
-| H4c | once after phase 4c increments |
-| H5.a, H5.b, ... | every 3 phase 5 increments (UI screenshot diff) |
-| H6 | once after phase 6 increments (on second Pi, or on the live device with a clean SD card) |
-| H7 | the soak runs — 24 h then 72 h |
+The spike order, gating, and "don't build until PASS" rules live in
+[`hardware-first-development.md`](../../../docs/specs/hardware-first-development.md)
+§5 — that doc is the single source of truth for *which* spike runs *when*. In
+short:
 
-Plan-level rule: NO H-series increment runs without ALL
-non-hardware predecessors having a green charter-review +
-green automated tests on the dev box.
+- Run spikes in the gated order: `LUN acceptance → {Eject/rebind, Boot time} →
+  {Parse stability, SEI / HUD} → {WiFi TX cap, microSD contention} → disk.img
+  sizing`. **LUN acceptance is make-or-break** for the whole S1 architecture.
+- A spike is **time-boxed** (≤ ~half a day of device time). Overrunning the box
+  is itself a signal — stop, re-frame, or escalate.
+- Re-run a spike whenever its inputs change (new firmware, new SD card, new kernel
+  module config). A mid-build hardware surprise is a **new spike**, not a reason to
+  push through on assumption.
+- Soak/longevity runs (e.g. 24 h then 72 h) gate anything that must survive
+  continuous car-write + Pi-side I/O over time.
+
+General rule: no **long buildout** starts until its gating spike has PASSed with
+**captured parameters**, and non-hardware logic has green automated tests on the
+dev box.

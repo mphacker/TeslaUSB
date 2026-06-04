@@ -137,6 +137,11 @@ The **SD-card space-management** design (the continuous space governor, reserve
 tiers, value-scoring eviction, single-deleter authority, crash-safe deletion) is
 specified in [`storage.md`](./storage.md) and implemented inside `retentiond`.
 
+The **development methodology** — spike/PoC on real hardware before any long
+buildout, with an ordered, risk-gated de-risking backlog and a fail-fast agile
+loop — is [`hardware-first-development.md`](./hardware-first-development.md). It
+governs the order in which §9's unknowns are proven and turned into buildout.
+
 **Reuse vs. new.** KEEP the existing Rust SEI/indexing parser knowledge and the
 hard-won feature behavior (event thresholds, retention rules, cloud layout,
 every screen's look/feel). REMOVE teslafat/NBD and the Flask app entirely. NEW:
@@ -326,6 +331,9 @@ future code-quality document is added, it supplements (does not replace) these.
   "endpoint 200" is **not** sufficient.
 - **Hardware acceptance:** the highest-risk unknowns (§9) are prototyped on the
   live device first, via the hardware-test skill, before anything depends on them.
+  The spike methodology (time-boxed PoC loop, ordered/gated risk backlog,
+  fail-fast outcomes, fold-back-into-specs) is
+  [`hardware-first-development.md`](./hardware-first-development.md).
 - **Second-opinion gate:** for root-causing issues and before any risky
   live-hardware step, run a parallel GPT-5.5 second opinion and reconcile (per
   `.github/copilot-instructions.md`).
@@ -334,7 +342,12 @@ future code-quality document is added, it supplements (does not replace) these.
 
 ## 9. Prototype-first unknowns (gate everything else)
 
-These must be proven on hardware before downstream work depends on them:
+These must be proven on hardware before downstream work depends on them. **The
+*process* for spiking these — the time-boxed spike loop, the ordered/gated spike
+backlog of risk-named spikes, PASS/FAIL/INCONCLUSIVE outcomes, and the agile feedback cycle
+— is specified in [`hardware-first-development.md`](./hardware-first-development.md).**
+That doc is binding: do not start a long buildout on any unknown below until its
+gating spike PASSes with captured parameters.
 
 1. Tesla acceptance of **one image-file LUN with MBR + 2 partitions** (chimes/
    lightshow read from p2). Prove first.

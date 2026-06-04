@@ -23,4 +23,5 @@ self-contained — there is no separate B-1 charter or ADR set anymore).
 | [`retentiond.md`](./retentiond.md) | Per-folder archiving + retention (never lose Saved/Sentry; bounded RecentClips mirror) |
 | [`storage.md`](./storage.md) | SD-card space governance: continuous low-space governor, reserve tiers, value-based eviction, crash-safe deletion |
 | [`wifid.md`](./wifid.md) | STA/AP state machine + SDIO chip-reset watchdog |
+| [`hardware-first-development.md`](./hardware-first-development.md) | Methodology: spike/PoC on real hardware before buildout; ordered/gated risk-named de-risking backlog; agile feedback loop |
 | [`migration.md`](./migration.md) | In-place M1–M5 migration + hardening |

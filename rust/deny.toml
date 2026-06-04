@@ -1,6 +1,6 @@
 # cargo-deny configuration.
 #
-# Enforces the supply-chain side of the code quality charter:
+# Enforces the supply-chain side of SPEC.md §7 (engineering standards):
 #   * Only permissive open-source licences (MIT/Apache/BSD/ISC/Unicode-3.0).
 #   * No yanked crates.
 #   * No advisory hits without an explicit, justified ignore.

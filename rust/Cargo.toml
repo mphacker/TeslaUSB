@@ -1,26 +1,17 @@
 # TeslaUSB B-1 Rust workspace.
 #
-# Three crates live here:
-#   * teslausb-core   — shared domain types (BlockBackend trait, IPC envelope,
-#                       Filesystem trait). Pure logic; no I/O dependencies.
-#                       Phase 1.2 onwards.
-#   * teslafat        — userspace FAT/exFAT synthesizer + NBD server. Speaks
-#                       the NBD newstyle protocol to a kernel nbd-client
-#                       which in turn backs the g_mass_storage USB gadget.
-#                       Phase 1 onwards.
-#   * teslausb-worker — background retention + cloud-sync + indexer worker.
-#                       Talks to teslafat via the IPC envelope in
-#                       teslausb-core. Phase 14 onwards.
-#
-# Phase 0.2 establishes empty crate skeletons; all three build clean against
-# `cargo build` with no source code beyond placeholder entry points.
+# One crate lives here today:
+#   * teslausb-core — shared domain types: the raw exFAT read/parse
+#                     path and the Tesla SEI extractor. Pure logic;
+#                     no I/O dependencies. The full-Rust service
+#                     crates (gadgetd, scannerd, indexd, webd,
+#                     uploadd, retentiond, wifid) are added here as
+#                     they are built (SPEC.md §4, §6).
 
 [workspace]
 resolver = "3"
 members = [
     "crates/teslausb-core",
-    "crates/teslafat",
-    "crates/teslausb-worker",
 ]
 
 # Shared package metadata. Each crate inherits via `field.workspace = true`
@@ -33,9 +24,9 @@ authors = ["TeslaUSB B-1 authors"]
 license = "MIT"
 repository = "https://github.com/mphacker/TeslaUSB"
 
-# Charter-mandated lint configuration. Every crate inherits via
-# `[lints] workspace = true`. Source of truth is
-# docs/03-CODE-QUALITY-CHARTER.md §"Lints"; this block must match it.
+# Lint configuration mandated by SPEC.md §7 (Code style &
+# engineering standards). Every crate inherits via
+# `[lints] workspace = true`. This block must match SPEC.md §7.
 [workspace.lints.rust]
 unsafe_code = "deny"
 missing_docs = "warn"

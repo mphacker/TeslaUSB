@@ -1,14 +1,11 @@
-//! exFAT write-side **decoder**.
+//! exFAT region **decoder**.
 //!
-//! The inverse of [`crate::fs::exfat::synth::ExfatSynth::read`]:
-//! given an arbitrary `(offset, &[u8])` write that the kernel
-//! issued against the synthesized volume, classify every byte
-//! into the exFAT region it lands in and return a sequence of
-//! typed per-region chunks the consumer (`backend::dir_tree`
-//! POSIX adapter) can route.
+//! Given an arbitrary `(offset, &[u8])` slice of an exFAT volume,
+//! classify every byte into the exFAT region it lands in and
+//! return a sequence of typed per-region chunks the raw reader can
+//! route.
 //!
-//! Salient structural points of the exFAT layout, mirrored on the
-//! read-side [`crate::fs::exfat::synth`] dispatcher:
+//! Salient structural points of the exFAT layout:
 //!
 //! 1. **Boot regions are 12 contiguous sectors each.** The
 //!    [`crate::fs::geometry::RegionKind::ExfatMainBootRegion`]
@@ -19,8 +16,8 @@
 //!    mirrors that at sectors 12..24 (§3.2).
 //! 2. **There is no `FsInfo`.** exFAT has no free-cluster summary
 //!    sector — free-cluster bookkeeping lives in the
-//!    [`AllocationBitmap`](crate::fs::exfat::allocation_bitmap),
-//!    itself stored as clusters in the data region.
+//!    allocation bitmap, itself stored as clusters in the data
+//!    region.
 //! 3. **`NumberOfFats = 1`** (pinned by
 //!    [`crate::fs::exfat::geometry::NUMBER_OF_FATS`]). The
 //!    [`RegionKind::FatTable`] variant therefore always carries
@@ -76,11 +73,10 @@
 //! FAT Region, §5 Cluster Heap, §6 Directory Entries.
 //! Region-kind tags are [`crate::fs::geometry::RegionKind`].
 
-use crate::fs::cluster_layout::FIRST_DATA_CLUSTER;
-use crate::fs::exfat::geometry::ExfatGeometry;
+use crate::fs::exfat::geometry::{ExfatGeometry, FIRST_CLUSTER_NUMBER};
 use crate::fs::geometry::{Geometry, Region, RegionKind};
 
-/// One per-region chunk of a decoded NBD write against an exFAT
+/// One per-region chunk of a decoded write against an exFAT
 /// volume.
 ///
 /// The `bytes` field is borrowed from the caller's input buffer;
@@ -133,7 +129,7 @@ pub enum DecodedWrite<'a> {
     /// differentiates by `cluster_number` against its layout
     /// model.
     DataCluster {
-        /// FAT cluster number ([`FIRST_DATA_CLUSTER`] and up).
+        /// FAT cluster number ([`FIRST_CLUSTER_NUMBER`] and up).
         /// Cluster numbers `0` and `1` are reserved per spec
         /// and never appear here.
         cluster_number: u32,
@@ -161,9 +157,6 @@ pub enum DecodedWrite<'a> {
 }
 
 /// Errors returned by [`decode_write`].
-///
-/// The bounds-check variants mirror
-/// [`crate::fs::exfat::synth::ExfatSynthError`].
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum DecodeWriteError {
     /// `offset` is at or beyond the geometry's volume size.
@@ -298,7 +291,7 @@ fn emit_region_chunks<'a>(
 /// Sub-divide a data-region chunk into one
 /// [`DecodedWrite::DataCluster`] per cluster boundary it crosses.
 ///
-/// Cluster numbering: [`FIRST_DATA_CLUSTER`] (cluster 2) is the
+/// Cluster numbering: [`FIRST_CLUSTER_NUMBER`] (cluster 2) is the
 /// first cluster of the data region; exFAT reserves cluster
 /// numbers 0 and 1 (per spec §4 the FAT\[0\] slot holds the media
 /// descriptor and FAT\[1\] is unused). Cluster numbers can in
@@ -328,7 +321,7 @@ fn emit_data_chunks<'a>(
         let byte_in_cluster_u64 = byte_in_data % bytes_per_cluster_u64;
         let byte_in_cluster = usize::try_from(byte_in_cluster_u64).unwrap_or(usize::MAX);
         let cluster_number =
-            u32::try_from(cluster_index.saturating_add(u64::from(FIRST_DATA_CLUSTER)))
+            u32::try_from(cluster_index.saturating_add(u64::from(FIRST_CLUSTER_NUMBER)))
                 .unwrap_or(u32::MAX);
         let chunk_remaining_in_cluster = bytes_per_cluster_usize.saturating_sub(byte_in_cluster);
         let take = chunk_remaining_in_cluster.min(sub_remaining.len());
@@ -356,8 +349,7 @@ mod tests {
     use crate::fs::exfat::geometry::{BOOT_REGION_SECTORS, FAT_OFFSET_SECTORS};
     use crate::fs::geometry::SECTOR_SIZE_BYTES;
 
-    /// 64 MiB exFAT — matches the convention used in
-    /// `exfat/synth.rs` test modules. Comfortably above the
+    /// 64 MiB exFAT. Comfortably above the
     /// 8 MiB exFAT floor; small enough that geometry
     /// construction is microseconds; large enough that the
     /// data region holds enough clusters to exercise the

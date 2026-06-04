@@ -7,20 +7,19 @@
 //! compute: no I/O, no syscalls, no allocations beyond the
 //! [`Region`] list owned by each concrete implementation.
 //!
-//! The [`Geometry`] trait is the seam consumed by the
-//! `synth::read` dispatcher: given an incoming byte offset (from
-//! the NBD wire) the dispatcher calls [`Geometry::region_at`] to
-//! decide which sub-synthesizer (`crate::fs::exfat::geometry` for
-//! the exFAT boot region, the FAT table, directory entries, etc.)
-//! should produce the bytes for that offset.
+//! The [`Geometry`] trait is the seam consumed by the raw reader:
+//! given an incoming byte offset the reader calls
+//! [`Geometry::region_at`] to decide which region
+//! (`crate::fs::exfat::geometry` for the exFAT boot region, the
+//! FAT table, directory entries, etc.) a given offset falls in.
 //!
 //! ## Why a trait?
 //!
 //! The region map has a shared shape (header → metadata tables →
 //! data), but the *count* and *kind* of regions are exFAT-specific.
-//! A trait lets the dispatcher and integration tests be written
-//! once and parameterised over `<G: Geometry>` (charter §"Best
-//! Architecture Practices" — dependency-inversion seam).
+//! A trait lets the reader and integration tests be written
+//! once and parameterised over `<G: Geometry>` (SPEC.md §7 —
+//! dependency-inversion seam).
 //!
 //! ## Region kinds are FS-narrow
 //!
@@ -36,8 +35,8 @@ use core::ops::Range;
 ///
 /// 512 bytes is the universal default — every USB mass-storage
 /// peripheral on the planet announces 512-byte logical sectors,
-/// `mkfs.vfat` defaults to 512, Linux's `nbd-client` driver pins
-/// `BLKSSZGET` to whatever the export reports, and the FAT32
+/// `mkfs.vfat` defaults to 512, the Linux block layer reports it
+/// via `BLKSSZGET`, and the FAT32
 /// cluster-size lookup tables Microsoft published assume 512.
 ///
 /// If a future increment needs a non-512 sector size (Advanced

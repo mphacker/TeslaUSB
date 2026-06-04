@@ -6,24 +6,18 @@
 //! the 32-byte on-disk entries: a File primary (`0x85`) followed
 //! by a Stream Extension secondary (`0xC0`) and one or more File
 //! Name secondaries (`0xC1`). This module does the inverse:
-//! given a cluster's worth of directory bytes (as written by
-//! Tesla into the synth volume), it walks the entries in order,
-//! reassembles entry sets, validates the `SetChecksum` (spec
-//! §6.3.3), reconstructs the UTF-16 file name, and returns a
-//! stream of [`DecodedExfatEntry`] values.
+//! given a cluster's worth of directory bytes, it walks the
+//! entries in order, reassembles entry sets, validates the
+//! `SetChecksum` (spec §6.3.3), reconstructs the UTF-16 file
+//! name, and returns a stream of [`DecodedExfatEntry`] values.
 //!
-//! Phase 3.5e will compose this decoder with the
-//! [`crate::fs::cluster_map`] mutator inside the exFAT write
-//! state machine: every directory-cluster write is decoded,
-//! every [`DecodedExfatEntry::File`] produces a
-//! `(first_cluster, file_path, data_length, no_fat_chain)`
-//! tuple that gets converted into one or more
-//! [`crate::fs::cluster_map::FileExtent`] inserts. For
-//! `no_fat_chain == true` the extent is just
-//! `[first_cluster, first_cluster + ceil(data_length /
-//! bytes_per_cluster))`; for `no_fat_chain == false` the
-//! companion chain walker visits the FAT to enumerate the
-//! actual cluster sequence.
+//! Each [`DecodedExfatEntry::File`] yields a
+//! `(first_cluster, file_path, data_length, no_fat_chain)` tuple.
+//! For `no_fat_chain == true` the file occupies the contiguous
+//! extent `[first_cluster, first_cluster + ceil(data_length /
+//! bytes_per_cluster))`; for `no_fat_chain == false` a companion
+//! chain walker visits the FAT to enumerate the actual cluster
+//! sequence.
 //!
 //! ## Decoder contract
 //!
@@ -293,9 +287,8 @@ pub enum DecodedExfatEntry {
         primary_offset: usize,
     },
     /// A deleted File entry set (`0x05` primary, `0x40`/`0x41`
-    /// secondaries). The data still exists on disk; the
-    /// caller (Phase 3.5e) routes this through
-    /// `cluster_map.remove_file` and `dir_tree.discard`.
+    /// secondaries). The data still exists on disk; the caller
+    /// decides how to treat the reclaimed extent.
     DeletedFile {
         /// UTF-8 file name if the deleted secondaries' chunks
         /// still decode cleanly. exFAT does NOT scribble over

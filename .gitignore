@@ -1,49 +1,28 @@
 # Playwright MCP browser automation folder
 .playwright-mcp/
 
-# Python bytecode
-__pycache__/
-*.pyc
+# ── Rust build artifacts ────────────────────────────────────────────
+# target/ is per-workspace, never committed. Cargo.lock IS committed
+# (workspace contains binary crates).
+rust/target/
+**/target/
+*.rs.bk
 
-# USB disk image files (large, device-specific, not source code)
-*.img
+# ── Node / SPA build output ─────────────────────────────────────────
+# node_modules is generated; package.json / package-lock.json ARE
+# committed for the SPA (spa/), so they are intentionally NOT ignored.
+node_modules/
+dist/
+.cache/
+*.tsbuildinfo
 
-# Runtime data files — NEVER commit. These are produced on-device and contain
-# user trip data, location history, OAuth tokens, etc. They must never appear
-# in git history or on GitHub.
-#
-# Equally important: an untracked data file gets swept into a `git stash -u`
-# during deploy, which has caused production data loss before. Keep this list
-# comprehensive so `git stash`, `git clean`, and `git add .` all skip them.
-
-# SQLite databases (live + journals + backups)
-*.db
-*.db-shm
-*.db-wal
-*.db-journal
-*.db.bak
-*.db.bak.*
-*.db.broken*
-*.db.recovered*
-
-# Runtime state files
-state.txt
-boot_cleanup.log
-*.log
-fsck_status.json
-fsck_history.json
-cleanup_config.json
-archive_lost_dismissed.json
-present_usb_web.log
-edit_usb_web.log
-
-# Crypto material / secrets
-tesla_salt.bin
-*.key
-*.pem
-
-# Config backups (timestamped copies left by setup_usb.sh)
-config.yaml.bak.*
+# ── Editor / OS cruft ───────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
 
 # AI tool configs (managed externally, not part of the repo)
 .claude/
@@ -51,6 +30,7 @@ config.yaml.bak.*
 .codebuddy/
 .codex/
 .continue/
+.copilot/
 .cursor/
 .gemini/
 .kiro/
@@ -60,31 +40,53 @@ config.yaml.bak.*
 .trae/
 .windsurf/
 
-# Generated protobuf (compiled on-device by setup_usb.sh)
-scripts/web/services/dashcam_pb2.py
+# ═══════════════════════════════════════════════════════════════════
+# Runtime data files — NEVER commit. These are produced on-device and
+# contain user trip data, location history, OAuth tokens, etc. They
+# must never appear in git history or on GitHub.
+#
+# Equally important: an untracked data file gets swept into a
+# `git stash -u` during deploy, which has caused production data loss
+# before. Keep this list comprehensive so `git stash`, `git clean`,
+# and `git add .` all skip them.
+# ═══════════════════════════════════════════════════════════════════
 
-# Rust build artifacts (target/ is per-workspace, never committed).
-# Cargo.lock IS committed (workspace contains binary crates).
-rust/target/
-**/target/
+# USB disk image / backing store (large, device-specific, not source)
+*.img
+*.img.*
 
-# Python tooling caches and build artifacts (under web/, never committed)
-.mypy_cache/
-.pytest_cache/
-.ruff_cache/
-.coverage
-.coverage.*
-htmlcov/
-*.egg-info/
-build/
-dist/
-.venv/
-.tox/
-rust/teslafat-out
+# SQLite databases (live + journals + backups/recovery copies)
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.db.*
 
+# Runtime state / status files
+state.txt
+*.log
+fsck_status.json
+fsck_history.json
+cleanup_config.json
+archive_lost_dismissed.json
 
-rust/target-aarch64-out/
+# Captured media / dashcam clips
+*.wav
+*.mp3
+*.mp4
 
-node_modules/
-package.json
-package-lock.json
+# Crypto material / secrets
+tesla_salt.bin
+*.key
+*.pem
+*.crt
+*.p12
+secrets.*
+credentials.*
+*.env
+.env
+.env.*
+
+# Operator config that may carry secrets / timestamped backups
+config.local.*
+config.yaml.bak.*

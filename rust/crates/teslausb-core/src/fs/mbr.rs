@@ -9,10 +9,10 @@
 //! lands on the synthesized disk and rendering the 512-byte sector 0.
 //!
 //! It lives in `teslausb-core::fs` because it is filesystem-adjacent
-//! pure logic with no I/O — the same charter layer as the FAT/exFAT
-//! geometry planners. The `teslafat` `PartitionedDiskBackend` consumes
-//! a [`DiskLayout`] to both serve sector 0 and route every other byte
-//! offset into the correct child filesystem backend.
+//! pure logic with no I/O — the same domain-core layer as the exFAT
+//! geometry/decoders. A consumer pairs a [`DiskLayout`] with the
+//! exFAT decoders to interpret sector 0 and route every other byte
+//! offset into the correct child partition.
 //!
 //! ## What is and is not modelled
 //!
@@ -148,7 +148,7 @@ impl PlannedPartition {
 /// A planned single-disk MBR layout: the disk signature plus the
 /// placement of every partition. Produced by [`DiskLayout::plan`];
 /// consumed to [`render`](DiskLayout::render_mbr) sector 0 and to
-/// route byte offsets in `teslafat`'s `PartitionedDiskBackend`.
+/// route byte offsets across the disk's partitions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiskLayout {
     /// 32-bit disk signature written at offset 440 of sector 0.

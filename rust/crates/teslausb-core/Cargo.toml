@@ -1,6 +1,6 @@
 [package]
 name = "teslausb-core"
-description = "Shared domain types for the TeslaUSB B-1 daemon (BlockBackend trait, IPC envelope, Filesystem trait). No I/O dependencies."
+description = "Shared domain types for the TeslaUSB B-1 reset: the raw exFAT read/parse path and the Tesla SEI extractor. No I/O dependencies."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,36 +8,13 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# Domain-types crate. Charter §"Best Architecture Practices":
-# pure logic, no I/O. The two `serde`-derived data crates plus
-# `thiserror` for typed errors are the only run-time deps allowed
-# at this layer.
+# Domain-types crate (SPEC.md §7): pure logic, no I/O. `thiserror`
+# for typed library errors is the only run-time dependency at this
+# layer.
 [dependencies]
-# Wire-format-agnostic ser/de derives for the IPC envelope + payload
-# types. No `serde_json` here — the messages module stays format-
-# agnostic; the encoder choice (JSON / length-prefixed / etc.) is a
-# transport-layer decision (Phase 1.5+).
-serde = { version = "1.0", features = ["derive"] }
-# Typed library errors per charter §"Rust standards" — `thiserror`
-# at lib boundary, `anyhow` only at the binary outer layer.
+# Typed library errors per SPEC.md §7 — `thiserror` at the lib
+# boundary, `anyhow` only at the binary outer layer.
 thiserror = "1.0"
-
-[dev-dependencies]
-# serde_test for plain-tokens round-trip tests (the canonical
-# format-agnostic ser/de verifier — flagged explicitly in
-# `docs/00-PLAN.md` row 1.2).
-serde_test = "1.0"
-# Additionally exercise the wire format we'll likely pick for
-# Phase 1.5 (length-prefixed JSON over Unix socket); a handful of
-# round-trips guard against accidental breakage of the JSON
-# representation even though no production code depends on it yet.
-serde_json = "1.0"
-# Drive `async fn` test bodies without pulling in a tokio runtime
-# at the domain-core boundary (charter §"Best Architecture
-# Practices" — teslausb-core is pure logic, no runtime). pollster
-# is ~30 LOC of safe `block_on` and is the canonical pick when
-# you want exactly one future driven to completion.
-pollster = "0.3"
 
 [lints]
 workspace = true

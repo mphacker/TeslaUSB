@@ -1,61 +1,33 @@
-# Pre-commit hook configuration for TeslaUSB B-1.
-#
-# All Rust / Python / hygiene gates funnel through scripts/check.sh
-# so the charter (docs/03-CODE-QUALITY-CHARTER.md "CI Gates") has a
-# single source of truth. Upstream pre-commit-hooks are kept ONLY
-# for cheap whitespace / EOF / yaml / TOML fixes that have no
-# equivalent in scripts/check.sh.
-#
-# Install with:
-#     pip install pre-commit            # or: pip install -e web/[dev]
-#     pre-commit install                # registers .git/hooks/pre-commit
-#
-# Run manually against every tracked file:
-#     pre-commit run --all-files
-#
-# Same gates also run via:
-#     ./scripts/check.sh --all
-# (which is what these hooks ultimately call for the heavy work).
-
+# Pre-commit hooks for the TeslaUSB B-1 (Rust) tree.
+# Install once:  pip install pre-commit && pre-commit install
+# Run on all files:  pre-commit run --all-files
 repos:
-  # Cheap formatting / safety fixes that have no equivalent in scripts/check.sh.
-  # One-time clone; cached under ~/.cache/pre-commit thereafter.
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v6.0.0
+    rev: v5.0.0
     hooks:
       - id: trailing-whitespace
-        exclude: '\.md$'  # markdown trailing spaces are intentional line breaks
       - id: end-of-file-fixer
-      - id: check-yaml
-      - id: check-toml
-      - id: check-merge-conflict
-      - id: check-added-large-files
-        args: [--maxkb=1024]  # 1 MiB cap per charter "CI Gates" hygiene rule
-      - id: detect-private-key
       - id: mixed-line-ending
         args: [--fix=lf]
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+        args: [--maxkb=512]
 
-  # Heavy gates: delegate to scripts/check.sh so the gate definitions
-  # are NOT duplicated between YAML and the script.
+  # Local Rust gates (mirror SPEC.md §7 / CI). Scoped to rust/ via manifest-path
+  # so they work regardless of the commit's working directory.
   - repo: local
     hooks:
-      - id: scripts-check-hygiene
-        name: scripts/check.sh --hygiene
-        entry: ./scripts/check.sh --hygiene
+      - id: cargo-fmt
+        name: cargo fmt --check
+        entry: cargo fmt --manifest-path rust/Cargo.toml --all --check
         language: system
+        types: [rust]
         pass_filenames: false
-        always_run: true
-
-      - id: scripts-check-rust
-        name: scripts/check.sh --rust
-        entry: ./scripts/check.sh --rust
+      - id: cargo-clippy
+        name: cargo clippy -D warnings
+        entry: cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings
         language: system
+        types: [rust]
         pass_filenames: false
-        files: '\.rs$|^rust/.*Cargo\.(toml|lock)$|^rust/rust-toolchain\.toml$'
-
-      - id: scripts-check-python
-        name: scripts/check.sh --python
-        entry: ./scripts/check.sh --python
-        language: system
-        pass_filenames: false
-        files: '\.py$|^web/pyproject\.toml$'

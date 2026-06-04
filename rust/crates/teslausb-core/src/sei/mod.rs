@@ -23,11 +23,11 @@
 //! ```
 //!
 //! Each layer is byte-in / structured-data-out, no I/O. The
-//! `teslausb-worker::sei` adapter (Phase 4b.1 wrap-up) drives
-//! these against `mmap`-ed MP4 files so the worker's RSS stays
-//! bounded regardless of clip size.
+//! `scannerd`/`indexd` SEI adapter drives these against `mmap`-ed
+//! MP4 files so resident memory stays bounded regardless of clip
+//! size.
 //!
-//! ## Charter compliance
+//! ## Layering compliance (SPEC.md §7)
 //!
 //! Pure logic, no `tokio`, no `std::fs`, no syscalls. Lives in
 //! `teslausb-core` per the layering rule. Every public API has
@@ -37,9 +37,9 @@
 //!
 //! ## Why a port from scratch instead of FFI
 //!
-//! Per `docs/00-PLAN.md` Decision #19, the Rust rewrite is
-//! warranted by a measured 5-10× speedup over Python and a
-//! 10× reduction in resident memory. Both come from cutting the
+//! The Rust SEI parser is warranted by a measured 5-10× speedup
+//! over the v1 Python parser and a 10× reduction in resident
+//! memory. Both come from cutting the
 //! protobuf-runtime + Python-object overhead per yielded
 //! waypoint, which dominates the indexer's CPU budget on Pi
 //! Zero 2 W.

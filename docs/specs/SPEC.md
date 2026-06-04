@@ -63,7 +63,13 @@ recovers a latched port. Therefore:
    mutate → fsync → re-present), never during an active Sentry/honk save.
 4. `gadgetd` is the **only** critical service. Everything else is disposable and
    memory-capped, and **nothing else may ever trigger a reboot or gadget restart
-   on the car's behalf**.
+   on the car's behalf** — with **one narrowly sanctioned exception**: `wifid` may,
+   as a **last-resort SDIO-deadlock recovery** after a chip-reset
+   (`rmmod`/`modprobe brcmfmac`) has failed, request a **Pi reboot only while the
+   USB write path is idle**, gated on `gadgetd`'s write-heartbeat (never during an
+   active write/save). This is the *only* permitted non-`gadgetd` reboot path; see
+   [`wifid.md` §4](./wifid.md). It is safe precisely because a Pi reboot with the
+   LUN idle presents to the car as a clean unplug, never EIO.
 
 Any change that adds risk to the write path is rejected by default. When a spec
 and this invariant conflict, the invariant wins.
@@ -410,7 +416,9 @@ gating spike PASSes with captured parameters.
 - Put the sacred LUN on dm-thin / CoW, or take an unbounded block snapshot under
   the live LUN.
 - Let any non-`gadgetd` service reboot the Pi or restart the gadget on the car's
-  behalf.
+  behalf — **except** `wifid`'s last-resort SDIO-recovery reboot, permitted **only
+  while the USB write path is idle** (gated on `gadgetd`'s write-heartbeat, chip-reset
+  tried first). See [`§2 invariant 4`](#) and [`wifid.md` §4](./wifid.md).
 - Mount the Tesla filesystem read-write concurrently with the car.
 - Transcode video on the Pi, or load whole clips into RAM.
 - Reintroduce Python/Flask into the runtime, or NBD/teslafat into the write path.

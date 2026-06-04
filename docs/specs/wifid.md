@@ -28,7 +28,8 @@ avoid the BCM43436 SDIO deadlock.
 4. **Liveness watchdog:** detect a wedged chip and recover by **resetting the WiFi
    chip only** (`rmmod/modprobe brcmfmac`) — **not** the whole Pi. A full Pi
    reboot is permitted **only if USB is already idle** (car not writing), and
-   even then is a last resort.
+   even then is a last resort. This is the **single sanctioned non-`gadgetd`
+   reboot** recorded in [`SPEC.md` §2 invariant 4](./SPEC.md).
 5. **AP onboarding** integration with the captive portal (`webd` `/portal`):
    serve the portal over the AP's DHCP/DNS so a joining phone is redirected to it.
 6. **Expose status** (mode, link, signal, throttle state) to `webd`.

@@ -25,3 +25,4 @@ self-contained — there is no separate B-1 charter or ADR set anymore).
 | [`wifid.md`](./wifid.md) | STA/AP state machine + SDIO chip-reset watchdog |
 | [`hardware-first-development.md`](./hardware-first-development.md) | Methodology: spike/PoC on real hardware before buildout; ordered/gated risk-named de-risking backlog; agile feedback loop |
 | [`migration.md`](./migration.md) | In-place M1–M5 migration + hardening |
+| [`setup.md`](./setup.md) | Idempotent `setup.sh` device install/configure (public clone-and-install + maintainer release) |

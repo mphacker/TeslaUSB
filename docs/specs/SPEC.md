@@ -127,6 +127,7 @@ flowchart LR
 | `retentiond` | disposable | Retention + archive rules so the car buffer never loses wanted clips and the disk never fills | [`retentiond.md`](./retentiond.md) |
 | `wifid` | disposable | STA/AP state machine; TX rate cap; SDIO chip-reset watchdog | [`wifid.md`](./wifid.md) |
 | Migration | ops | In-place M1–M5 + hardening; reversible, rails-safe | [`migration.md`](./migration.md) |
+| Setup / install | ops | Idempotent `setup.sh` to install/configure a device from a clone; public + maintainer-release | [`setup.md`](./setup.md) |
 
 The external Tesla USB interface every component must respect is captured
 separately (not a service): [`tesla-usb-contract.md`](./tesla-usb-contract.md) —
@@ -199,6 +200,9 @@ rust/
 spa/                         # static SPA source (Preact/Svelte/Solid + Leaflet + Chart.js)
   src/, public/, dist/
 deploy/                      # systemd units, configfs templates, hardening configs
+setup.sh                     # idempotent installer (thin orchestrator) — see setup.md
+setup-lib/                   # numbered idempotent step files + shared helpers
+uninstall.sh                 # safe-by-default reversal (see setup.md §9)
 docs/
   plan.md                    # architecture synthesis (background)
   specs/                     # THIS spec set
@@ -206,6 +210,9 @@ docs/
 
 Each service is a **small, single-purpose binary**. Shared logic goes in
 `teslausb-core`. No service except `gadgetd` may touch the car-facing write path.
+The device is installed/configured **only** via `setup.sh`
+([`setup.md`](./setup.md)) — prebuilt aarch64 artifacts + the hashed SPA bundle;
+never built on the Pi.
 
 ### 6.1 On-device storage layout (no-reflash reality)
 
@@ -328,7 +335,10 @@ future code-quality document is added, it supplements (does not replace) these.
   navigation TTFB, DOMContentLoaded, FCP, the slowest 5–10 network requests,
   **zero** console/pageerror, a screenshot at 375px and ≥1280px, and proof the
   changed JS module is actually loaded by the served page. "Tests pass" /
-  "endpoint 200" is **not** sufficient.
+  "endpoint 200" is **not** sufficient. Drive the served app through the
+  **Playwright MCP** for interactive UI/UX user-acceptance testing (accuracy,
+  render speed, professional/parity appearance), backed by a **durable, checked-in
+  Playwright suite** as the repeatable gate ([`spa.md` §5–§6](./spa.md)).
 - **Hardware acceptance:** the highest-risk unknowns (§9) are prototyped on the
   live device first, via the hardware-test skill, before anything depends on them.
   The spike methodology (time-boxed PoC loop, ordered/gated risk backlog,

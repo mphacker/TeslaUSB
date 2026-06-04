@@ -66,29 +66,71 @@ Every capability above must exist post-rebuild; appearance must match.
 - **Retention/cloud/wifi config** screens drive the respective services via
   `webd`.
 
-## 5. Performance & quality gates (mandatory — `.github/copilot-instructions.md`)
+## 5. UI/UX user-acceptance testing (Playwright MCP + durable suite)
 
-Every UI change is verified with **Playwright** against the served app:
-- [ ] Interactive in < ~2 s on the Pi; report navigation TTFB, DOMContentLoaded,
-      FCP, and the slowest 5–10 network requests.
+UI/UX quality is a **user-acceptance gate**, not an afterthought. Two
+complementary mechanisms, both required:
+
+- **Playwright MCP — interactive UI/UX inspection (agent-driven).** During
+  development and review, drive the **served app** through the **Playwright MCP**
+  to interactively verify the UI is **accurate**, **renders quickly**, **looks
+  professional**, and would pass **strict user-acceptance testing**. Use it to
+  open each screen, exercise real flows, capture perf/console/screenshots, and
+  catch CSS/layout/z-index/wiring bugs DOM-only assertions miss.
+- **Durable Playwright suite — the repeatable gate (CI + humans).** The MCP
+  session is interactive and agent-scoped; it is **not** the portable gate. A
+  **checked-in Playwright suite** (with screenshots / perf / console evidence as
+  artifacts) is the acceptance gate that CI and human contributors run. "Used the
+  MCP once" does **not** satisfy this — the durable tests must exist (§6).
+
+### UAT criteria (every UI-affecting change)
+
+- [ ] **Functional accuracy / parity** — the screen does what the corresponding
+      current screen does (§3 checklist); flows produce correct results.
+- [ ] **Render speed** — report navigation TTFB, DOMContentLoaded, FCP, time-to-
+      interactive, and the slowest 5–10 network requests; interactive in **< ~2 s**
+      under the defined test environment below.
+- [ ] **Professional appearance** — polished **execution of the existing parity
+      baseline**: aligned, no overflow/clipping/jank, consistent spacing/typography
+      (Inter), correct light/dark behavior. This is *parity done well*, **not** a
+      new visual language (changing the design is ASK-FIRST, §7).
 - [ ] **Zero** console warnings/errors and **zero** `pageerror`.
-- [ ] Screenshot at **375px** and **≥1280px**; the change is visibly present.
-- [ ] Prove the changed JS module is actually loaded by the served HTML (inspect
-      `<script>` tags / `window` bootstrap / network waterfall).
-- [ ] Visual parity confirmed against the corresponding current screen.
+- [ ] **Responsive** at **375px** and **≥1280px**; the change is visibly present;
+      basic accessibility (focus order, contrast, 44×44 touch targets) holds.
+- [ ] **Wiring proof** — the changed JS module is actually loaded by the served
+      HTML (inspect `<script>` tags / `window` bootstrap / network waterfall).
+
+### Test environment (state it; don't conflate)
+
+Perf numbers are meaningless without the environment. Each run records:
+
+- **Server:** the Pi (`webd` serving the hashed bundle) for the on-device target,
+  or a local dev `webd` for fast iteration — say which.
+- **Browser host + network:** the machine running the browser (phone/laptop/dev
+  box) and the network profile (LAN vs throttled), since the SPA runs in the
+  *client's* browser, not on the Pi.
+- **Cache state:** cold vs warm; **viewport:** 375px and ≥1280px.
+
+The headline "**interactive < ~2 s**" target is for the **on-device** profile
+(server on the Pi, browser on a typical LAN client, cold cache). Dev-server runs
+are for iteration, not the acceptance number.
 
 ## 6. Testing
 
 - Component/unit tests for map, player/HUD sync, and media managers.
-- Playwright E2E covering each screen in the parity checklist, with the perf +
-  console + screenshot + wiring assertions above.
+- **Durable Playwright E2E** covering each screen in the parity checklist, with
+  the UAT criteria above asserted (perf budgets, zero console/pageerror,
+  screenshots at 375px + ≥1280px, wiring proof) and the artifacts retained. This
+  suite is the acceptance gate; the Playwright MCP is the interactive companion
+  for authoring/diagnosing it.
 
 ## 7. Boundaries
 
 **ALWAYS** preserve the existing look/feel and full feature set; render the HUD
-client-side; verify with Playwright (perf/console/screenshot/wiring).
+client-side; verify with the **Playwright MCP** (interactive UI/UX UAT) **and** a
+**durable Playwright suite** (perf/console/screenshot/wiring) as the gate.
 **ASK FIRST** before changing the visual design, removing a screen, or swapping a
 parity-critical library (Leaflet/Chart.js/`dashcam-mp4`).
 **NEVER** transcode on the client's behalf server-side; never ship a UI change
-unverified by Playwright; never adopt MapLibre or a heavy framework that breaks
-parity.
+unverified by Playwright; never treat a one-off MCP look as a substitute for the
+durable test; never adopt MapLibre or a heavy framework that breaks parity.

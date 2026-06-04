@@ -33,9 +33,12 @@ restart) **before** removing the old safety nets. Gate: prototype unknowns #1, #
 #6 from `SPEC.md` §9 must pass here.
 
 ### M4 — Deploy the Rust app + migrate media
-Deploy `scannerd`, `indexd`, `webd`, `uploadd`, `retentiond`, `wifid` + the SPA.
-Migrate existing clips into the new image/archive layout. Verify the UI
-**end-to-end with Playwright** (perf + console + screenshot + wiring) per
+Deploy `scannerd`, `indexd`, `webd`, `uploadd`, `retentiond`, `wifid` + the SPA
+via **`setup.sh deploy-app`** (the **non-destructive** install mode — it touches
+binaries, the SPA bundle, units, and config only, never `disk.img`/partitions/boot,
+which M3 already provisioned and proved; see [`setup.md`](./setup.md)). Migrate
+existing clips into the new image/archive layout. Verify the UI **end-to-end with
+Playwright** (perf + console + screenshot + wiring) per
 `.github/copilot-instructions.md`.
 
 ### M5 — Harden + soak

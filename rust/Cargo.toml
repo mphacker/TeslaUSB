@@ -19,6 +19,7 @@ members = [
     "crates/scannerd",
     "crates/indexd",
     "crates/webd",
+    "crates/retentiond",
 ]
 
 # Shared package metadata. Each crate inherits via `field.workspace = true`

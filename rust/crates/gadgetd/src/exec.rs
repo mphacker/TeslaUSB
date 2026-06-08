@@ -186,6 +186,106 @@ fn read_trimmed(path: &Path) -> Option<String> {
         .map(|s| s.trim().to_owned())
 }
 
+/// Live [`LunControl`]: ejects/re-presents by writing `lun.0/file` and reads the
+/// gadget binding from configfs/sysfs. This is the only writer of the LUN
+/// backing attribute, preserving the single-writer guarantee on the write path.
+#[cfg(unix)]
+pub(crate) struct LiveLun {
+    cfg: GadgetConfig,
+}
+
+#[cfg(unix)]
+impl LiveLun {
+    /// Build a live LUN controller for `cfg`.
+    pub(crate) fn new(cfg: GadgetConfig) -> Self {
+        Self { cfg }
+    }
+
+    fn lun_file_path(&self) -> PathBuf {
+        self.cfg.lun_dir().join("file")
+    }
+}
+
+#[cfg(unix)]
+impl crate::handoff::LunControl for LiveLun {
+    fn is_bound(&self) -> io::Result<bool> {
+        Ok(read_trimmed(&self.cfg.udc_path()).is_some_and(|u| !u.is_empty()))
+    }
+
+    fn udc_configured(&self) -> io::Result<bool> {
+        Ok(read_status(&self.cfg).udc_state.as_deref() == Some("configured"))
+    }
+
+    fn lun_is_empty(&self) -> io::Result<bool> {
+        Ok(read_trimmed(&self.lun_file_path()).is_none_or(|f| f.is_empty()))
+    }
+
+    fn eject(&self) -> io::Result<()> {
+        let path = self.lun_file_path();
+        // A newline (not a zero-length buffer) guarantees a `write(2)` fires.
+        std::fs::write(&path, "\n").map_err(|e| annotate(&e, "eject (clear lun file)", &path))?;
+        if self.lun_is_empty()? {
+            Ok(())
+        } else {
+            Err(io::Error::other(
+                "eject verification failed: lun.0/file not empty",
+            ))
+        }
+    }
+
+    fn represent(&self) -> io::Result<()> {
+        let path = self.lun_file_path();
+        let image = self.cfg.lun_file.to_string_lossy().into_owned();
+        std::fs::write(&path, &image)
+            .map_err(|e| annotate(&e, "represent (set lun file)", &path))?;
+        if self.lun_is_empty()? {
+            Err(io::Error::other(
+                "re-present verification failed: lun.0/file still empty",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Heuristic [`SaveGuard`] that samples the backing image's mtime across a short
+/// interval. If the on-disk mtime advances between the two samples the car is
+/// actively writing, so the handoff is refused.
+///
+/// This compares two mtimes (a delta) and never reads the wall clock, so the
+/// Pi's missing RTC cannot skew it. It is explicitly a heuristic, not a proof of
+/// quiescence (`SPEC.md` §9 #2): it cannot see host-side dirty cache nor a save
+/// that begins after the second sample. The hot-handoff gate in
+/// [`crate::handoff::run_handoff`] is the primary protection; this is one more
+/// layer.
+#[cfg(unix)]
+pub(crate) struct MtimeSaveGuard {
+    image: PathBuf,
+    interval: std::time::Duration,
+}
+
+#[cfg(unix)]
+impl MtimeSaveGuard {
+    /// Build a guard sampling `image` across `interval`.
+    pub(crate) fn new(image: PathBuf, interval: std::time::Duration) -> Self {
+        Self { image, interval }
+    }
+
+    fn mtime(&self) -> io::Result<std::time::SystemTime> {
+        std::fs::metadata(&self.image)?.modified()
+    }
+}
+
+#[cfg(unix)]
+impl crate::handoff::SaveGuard for MtimeSaveGuard {
+    fn is_save_active(&self) -> io::Result<bool> {
+        let first = self.mtime()?;
+        std::thread::sleep(self.interval);
+        let second = self.mtime()?;
+        Ok(first != second)
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::panic, clippy::expect_used, clippy::unwrap_used)]
 mod tests {

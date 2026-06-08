@@ -13,6 +13,9 @@
 //! - `up [--image <p>]` — build the gadget tree and bind the UDC.
 //! - `down [--image <p>]` — unbind and dismantle the gadget tree.
 //! - `status [--image <p>]` — print the current binding.
+//! - `serve [--image <p>] [--allow-hot-handoff]` — run the control daemon: serve
+//!   the eject-handoff IPC over a Unix socket (gadget bring-up is owned by a
+//!   separate unit, so this never disturbs the car-facing LUN).
 
 // systemd captures this binary's stdout/stderr into the journal, so direct
 // console output is the intended logging path for the daemon entrypoint only.
@@ -20,6 +23,12 @@
 
 mod config;
 mod exec;
+#[cfg(unix)]
+mod handoff;
+#[cfg(unix)]
+mod ipc;
+#[cfg(unix)]
+mod mutate;
 mod provision;
 
 use std::path::{Path, PathBuf};
@@ -34,6 +43,12 @@ const DEFAULT_IMAGE: &str = "/data/teslausb/disk.img";
 const DEFAULT_SIZE_MIB: u64 = 4096;
 /// Default media-partition size (MiB) carved off the tail.
 const DEFAULT_MEDIA_MIB: u64 = 1024;
+/// Control socket path served by `gadgetd serve`.
+#[cfg(unix)]
+const DEFAULT_SOCKET: &str = "/run/teslausb/gadgetd.sock";
+/// Runtime root for per-handoff mount dirs.
+#[cfg(unix)]
+const DEFAULT_RUNTIME_ROOT: &str = "/run/teslausb/handoff";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -57,6 +72,7 @@ fn run(args: &[String]) -> Result<(), String> {
         "provision" => cmd_provision(args, &image),
         "up" => cmd_up(args, image),
         "down" => cmd_down(image),
+        "serve" => cmd_serve(args, image),
         "status" => {
             cmd_status(image);
             Ok(())
@@ -67,6 +83,28 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         other => Err(format!("unknown command `{other}`\n{}", usage())),
     }
+}
+
+#[cfg(unix)]
+fn cmd_serve(args: &[String], image: PathBuf) -> Result<(), String> {
+    let allow_hot = args.iter().any(|a| a == "--allow-hot-handoff");
+    let socket =
+        opt_flag(args, "--socket")?.map_or_else(|| PathBuf::from(DEFAULT_SOCKET), PathBuf::from);
+    let runtime_root = PathBuf::from(DEFAULT_RUNTIME_ROOT);
+    let cfg = GadgetConfig::teslausb(image.clone());
+    if allow_hot {
+        eprintln!(
+            "gadgetd serve: --allow-hot-handoff is set; handoffs may eject while the \
+             host is enumerated. This is unsafe on the car until prototype-unknown #2 \
+             is measured (SPEC.md §9)."
+        );
+    }
+    ipc::serve(cfg, image, runtime_root, &socket, allow_hot).map_err(|e| e.to_string())
+}
+
+#[cfg(not(unix))]
+fn cmd_serve(_args: &[String], _image: PathBuf) -> Result<(), String> {
+    Err("`serve` is only supported on Linux (Unix sockets + loop devices)".to_owned())
 }
 
 fn cmd_provision(args: &[String], image: &Path) -> Result<(), String> {
@@ -182,7 +220,8 @@ fn parse_flag(args: &[String], name: &str, default: u64) -> Result<u64, String> 
 }
 
 fn usage() -> String {
-    "usage: gadgetd <provision|up|down|status> [--image <path>] \
-[--size-mib <n>] [--media-mib <n>] [--udc <name>]"
+    "usage: gadgetd <provision|up|down|status|serve> [--image <path>] \
+[--size-mib <n>] [--media-mib <n>] [--udc <name>] [--socket <path>] \
+[--allow-hot-handoff]"
         .to_owned()
 }

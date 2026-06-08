@@ -1,0 +1,420 @@
+//! Live image-mutation path for the eject-handoff: loop-mount the backing image,
+//! apply a validated [`Mutation`], and tear the mount down durably. Implements
+//! [`ImageMutator`] for [`LoopMutator`].
+//!
+//! Every external command (`losetup`/`mount`/`umount`) runs under a hard
+//! timeout so a hang on a corrupt filesystem can never leave the LUN ejected
+//! forever. The mount happens under a deterministic per-handoff runtime dir so
+//! an interrupted handoff is recoverable by scanning, not by guessing temp
+//! paths. On success or failure the implementation reports — via
+//! [`MutateError::image_released`] — whether the loop + mount were fully torn
+//! down, which the state machine uses to decide whether re-presenting is safe.
+
+use std::io;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{Duration, Instant};
+
+use crate::handoff::{ImageMutator, MutateError, Mutation, Partition, validate_rel_path};
+
+/// Cap on an `InstallFile` source (media assets are MB-scale; refuse anything
+/// that would blow the ~5 s handoff window or the card).
+const MAX_INSTALL_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Per-phase command timeouts.
+const LOSETUP_TIMEOUT: Duration = Duration::from_secs(5);
+const MOUNT_TIMEOUT: Duration = Duration::from_secs(10);
+const UMOUNT_TIMEOUT: Duration = Duration::from_secs(10);
+const SYNC_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Mutates a backing image by loop-mounting it.
+pub(crate) struct LoopMutator {
+    /// Backing image path (`disk.img`).
+    image: PathBuf,
+    /// Runtime root for per-handoff mount dirs (e.g. `/run/teslausb/handoff`).
+    runtime_root: PathBuf,
+}
+
+impl LoopMutator {
+    /// Build a mutator for `image`, mounting under `runtime_root`.
+    pub(crate) fn new(image: PathBuf, runtime_root: PathBuf) -> Self {
+        Self {
+            image,
+            runtime_root,
+        }
+    }
+}
+
+impl ImageMutator for LoopMutator {
+    fn cleanup_stale(&self) -> io::Result<()> {
+        let loops = losetup_for_image(&self.image)?;
+        for loopdev in &loops {
+            for mountpoint in mounts_for_loop(loopdev)? {
+                umount(Path::new(&mountpoint))?;
+            }
+            losetup_detach(loopdev)?;
+        }
+        // Verify nothing remains tied to the image.
+        if losetup_for_image(&self.image)?.is_empty() {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!(
+                "stale loop devices still attached to {}",
+                self.image.display()
+            )))
+        }
+    }
+
+    fn apply(&self, partition: Partition, mutation: &Mutation) -> Result<(), MutateError> {
+        // Attach the loop; before any mount, a failure means the image is still
+        // released (the eject already closed the kernel's fd).
+        let loopdev = match losetup_attach(&self.image) {
+            Ok(d) => d,
+            Err(e) => return Err(released_err(format!("losetup attach: {e}"))),
+        };
+
+        let node = format!("{loopdev}p{}", partition.index());
+        if let Err(e) = wait_for_block(Path::new(&node), Duration::from_secs(3)) {
+            let _ = losetup_detach(&loopdev);
+            return Err(released_err(format!("partition node {node}: {e}")));
+        }
+
+        let mnt = self.runtime_root.join(format!("h-{}", std::process::id()));
+        if let Err(e) = std::fs::create_dir_all(&mnt) {
+            let _ = losetup_detach(&loopdev);
+            return Err(released_err(format!("mkdir mountpoint: {e}")));
+        }
+
+        if let Err(e) = mount_exfat(&node, &mnt) {
+            let _ = std::fs::remove_dir(&mnt);
+            let _ = losetup_detach(&loopdev);
+            return Err(released_err(format!("mount {node}: {e}")));
+        }
+
+        // Mounted: from here we must umount + detach before reporting released.
+        let op_result = apply_op(&mnt, mutation);
+
+        // Durability: flush the filesystem before unmount (exFAT has no journal).
+        sync_all();
+
+        let umount_ok = umount(&mnt).is_ok();
+        let detach_ok = losetup_detach(&loopdev).is_ok();
+        let _ = std::fs::remove_dir(&mnt);
+        let image_released = umount_ok && detach_ok;
+
+        match op_result {
+            Ok(()) if image_released => Ok(()),
+            Ok(()) => Err(MutateError {
+                detail: format!(
+                    "op applied but teardown incomplete (umount_ok={umount_ok}, \
+                     detach_ok={detach_ok})"
+                ),
+                image_released,
+            }),
+            Err(e) => Err(MutateError {
+                detail: e.to_string(),
+                image_released,
+            }),
+        }
+    }
+}
+
+/// Build a `MutateError` for a failure that occurred while the image was still
+/// released (no mount held).
+fn released_err(detail: String) -> MutateError {
+    MutateError {
+        detail,
+        image_released: true,
+    }
+}
+
+/// Apply the validated op against the freshly-mounted partition root.
+fn apply_op(mnt: &Path, mutation: &Mutation) -> io::Result<()> {
+    match mutation {
+        Mutation::DeletePath { rel_path } => {
+            let target = resolve_within(mnt, rel_path)?;
+            let meta = std::fs::symlink_metadata(&target)?;
+            if meta.is_dir() {
+                std::fs::remove_dir_all(&target)
+            } else {
+                std::fs::remove_file(&target)
+            }
+        }
+        Mutation::InstallFile {
+            rel_path,
+            source_path,
+        } => install_file(mnt, rel_path, Path::new(source_path)),
+    }
+}
+
+/// Resolve a validated relative path under `mnt` and prove it stays within the
+/// mount after canonicalization (defence against symlink/TOCTOU escape on the
+/// untrusted exFAT). The path must exist (used by delete).
+fn resolve_within(mnt: &Path, rel_path: &str) -> io::Result<PathBuf> {
+    let rel = validate_rel_path(rel_path).map_err(io::Error::other)?;
+    let mnt_canon = std::fs::canonicalize(mnt)?;
+    let joined = mnt_canon.join(&rel);
+    let canon = std::fs::canonicalize(&joined)?;
+    if canon == mnt_canon {
+        return Err(io::Error::other("refusing to operate on the mount root"));
+    }
+    if !canon.starts_with(&mnt_canon) {
+        return Err(io::Error::other(format!(
+            "resolved path {} escapes the mount",
+            canon.display()
+        )));
+    }
+    Ok(canon)
+}
+
+/// Copy a staged source file into the partition via temp + atomic rename.
+fn install_file(mnt: &Path, rel_path: &str, source: &Path) -> io::Result<()> {
+    let rel = validate_rel_path(rel_path).map_err(io::Error::other)?;
+
+    // Open the source with O_NOFOLLOW so a swapped-in symlink can't redirect us,
+    // and require a regular file within the size cap (TOCTOU/special-file guard).
+    let src = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(source)
+        .map_err(|e| io::Error::other(format!("open source {}: {e}", source.display())))?;
+    let src_meta = src.metadata()?;
+    if !src_meta.is_file() {
+        return Err(io::Error::other("source is not a regular file"));
+    }
+    if src_meta.len() > MAX_INSTALL_BYTES {
+        return Err(io::Error::other(format!(
+            "source exceeds {MAX_INSTALL_BYTES} byte install cap"
+        )));
+    }
+
+    let mnt_canon = std::fs::canonicalize(mnt)?;
+    let dest = mnt_canon.join(&rel);
+    let parent = dest
+        .parent()
+        .ok_or_else(|| io::Error::other("destination has no parent"))?;
+    // The destination's parent must already resolve inside the mount.
+    let parent_canon = std::fs::canonicalize(parent)?;
+    if !parent_canon.starts_with(&mnt_canon) {
+        return Err(io::Error::other("destination escapes the mount"));
+    }
+
+    let tmp = parent_canon.join(format!(".gadgetd-install-{}.partial", std::process::id()));
+    let mut reader = src;
+    {
+        let mut writer = std::fs::File::create(&tmp)?;
+        io::copy(&mut reader, &mut writer)?;
+        writer.sync_all()?;
+    }
+    std::fs::rename(&tmp, &dest)?;
+    Ok(())
+}
+
+/// `losetup -fP --show <image>` → loop device path.
+fn losetup_attach(image: &Path) -> io::Result<String> {
+    let out = run_with_timeout(
+        Command::new("losetup").arg("-fP").arg("--show").arg(image),
+        LOSETUP_TIMEOUT,
+    )?;
+    let dev = String::from_utf8_lossy(&out).trim().to_owned();
+    if dev.is_empty() {
+        return Err(io::Error::other("losetup returned no device"));
+    }
+    Ok(dev)
+}
+
+/// `losetup -d <loopdev>`.
+fn losetup_detach(loopdev: &str) -> io::Result<()> {
+    run_with_timeout(
+        Command::new("losetup").arg("-d").arg(loopdev),
+        LOSETUP_TIMEOUT,
+    )
+    .map(|_| ())
+}
+
+/// `losetup -j <image>` → the loop devices currently backing `image`.
+fn losetup_for_image(image: &Path) -> io::Result<Vec<String>> {
+    let out = run_with_timeout(
+        Command::new("losetup").arg("-j").arg(image),
+        LOSETUP_TIMEOUT,
+    )?;
+    let text = String::from_utf8_lossy(&out);
+    Ok(text
+        .lines()
+        .filter_map(|line| line.split(':').next())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+        .collect())
+}
+
+/// Mount points whose source device is a partition of `loopdev`, parsed from
+/// `/proc/self/mountinfo`.
+fn mounts_for_loop(loopdev: &str) -> io::Result<Vec<String>> {
+    let info = std::fs::read_to_string("/proc/self/mountinfo")?;
+    let mut found = Vec::new();
+    for line in info.lines() {
+        let Some((left, right)) = line.split_once(" - ") else {
+            continue;
+        };
+        let left_fields: Vec<&str> = left.split_whitespace().collect();
+        let right_fields: Vec<&str> = right.split_whitespace().collect();
+        // mountinfo: ... [4]=mountpoint ... ` - ` fstype source superopts
+        let (Some(mountpoint), Some(source)) = (left_fields.get(4), right_fields.get(1)) else {
+            continue;
+        };
+        if source.starts_with(loopdev) {
+            found.push(unescape_mountinfo(mountpoint));
+        }
+    }
+    Ok(found)
+}
+
+/// mountinfo escapes spaces/tabs/newlines as octal (`\040` etc.); decode them.
+fn unescape_mountinfo(raw: &str) -> String {
+    let mut decoded = String::with_capacity(raw.len());
+    let mut bytes = raw.bytes().peekable();
+    while let Some(b) = bytes.next() {
+        if b == b'\\' {
+            // Try to read exactly three following octal digits.
+            let mut octal = String::with_capacity(3);
+            while octal.len() < 3 {
+                match bytes.peek() {
+                    Some(&d) if d.is_ascii_digit() => {
+                        octal.push(d as char);
+                        bytes.next();
+                    }
+                    _ => break,
+                }
+            }
+            if octal.len() == 3 {
+                if let Ok(code) = u8::from_str_radix(&octal, 8) {
+                    decoded.push(code as char);
+                    continue;
+                }
+            }
+            // Not a valid escape: emit the backslash and any consumed digits.
+            decoded.push('\\');
+            decoded.push_str(&octal);
+            continue;
+        }
+        decoded.push(b as char);
+    }
+    decoded
+}
+
+/// `mount -t exfat <node> <mountpoint>`.
+fn mount_exfat(node: &str, mountpoint: &Path) -> io::Result<()> {
+    run_with_timeout(
+        Command::new("mount")
+            .arg("-t")
+            .arg("exfat")
+            .arg(node)
+            .arg(mountpoint),
+        MOUNT_TIMEOUT,
+    )
+    .map(|_| ())
+}
+
+/// `umount <mountpoint>`.
+fn umount(mountpoint: &Path) -> io::Result<()> {
+    run_with_timeout(Command::new("umount").arg(mountpoint), UMOUNT_TIMEOUT).map(|_| ())
+}
+
+/// Flush all filesystem buffers before unmount (exFAT has no journal). The file
+/// data is already `fsync`'d via `writer.sync_all()` and `umount` flushes the
+/// mounted fs; this global `sync` is belt-and-braces to push the backing
+/// `disk.img` pages toward stable storage. Best-effort: a `sync` failure does
+/// not by itself indicate data loss, so it is logged by the caller's flow only
+/// via the subsequent umount verification.
+fn sync_all() {
+    let _ = run_with_timeout(&mut Command::new("sync"), SYNC_TIMEOUT);
+}
+
+/// Wait until `path` is a block device or the deadline passes.
+fn wait_for_block(path: &Path, timeout: Duration) -> io::Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if path.exists() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::other("timed out waiting for block device"));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Run `cmd` to completion under `timeout`, killing it on overrun. Returns
+/// stdout on success; maps a non-zero exit or timeout to an error.
+fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> io::Result<Vec<u8>> {
+    use std::process::Stdio;
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            if let Some(mut o) = child.stdout.take() {
+                io::Read::read_to_end(&mut o, &mut stdout)?;
+            }
+            if let Some(mut e) = child.stderr.take() {
+                io::Read::read_to_end(&mut e, &mut stderr)?;
+            }
+            if status.success() {
+                return Ok(stdout);
+            }
+            return Err(io::Error::other(format!(
+                "command failed ({status}): {}",
+                String::from_utf8_lossy(&stderr).trim()
+            )));
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(io::Error::other("command timed out"));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::panic, clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::{run_with_timeout, unescape_mountinfo};
+    use std::process::Command;
+    use std::time::Duration;
+
+    #[test]
+    fn unescape_mountinfo_decodes_octal_spaces() {
+        assert_eq!(unescape_mountinfo("/run/a\\040b"), "/run/a b");
+        assert_eq!(unescape_mountinfo("/plain/path"), "/plain/path");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_with_timeout_returns_stdout_on_success() {
+        let out = run_with_timeout(
+            Command::new("/bin/echo").arg("hello"),
+            Duration::from_secs(5),
+        )
+        .expect("echo runs");
+        assert_eq!(String::from_utf8_lossy(&out).trim(), "hello");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_with_timeout_kills_an_overrunning_command() {
+        let err = run_with_timeout(
+            Command::new("/bin/sleep").arg("10"),
+            Duration::from_millis(200),
+        )
+        .expect_err("should time out");
+        assert!(err.to_string().contains("timed out"));
+    }
+}

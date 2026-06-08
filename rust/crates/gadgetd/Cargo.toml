@@ -11,6 +11,15 @@ description = "CRITICAL invariant guardian: owns the kernel usb_f_mass_storage g
 [lints]
 workspace = true
 
+# IPC (control daemon) only. serde/serde_json frame the typed UDS request/
+# response (`gadgetd serve`); they are not on the steady-state write path.
+# libc gives the hardening primitives the handoff needs: O_NOFOLLOW on caller-
+# supplied source files, SO_PEERCRED authz on the socket, and syncfs(2).
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+
 [[bin]]
 name = "gadgetd"
 path = "src/main.rs"

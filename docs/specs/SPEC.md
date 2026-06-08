@@ -366,7 +366,10 @@ That doc is binding: do not start a long buildout on any unknown below until its
 gating spike PASSes with captured parameters.
 
 1. Tesla acceptance of **one image-file LUN with MBR + 2 partitions** (chimes/
-   lightshow read from p2). Prove first.
+   lightshow read from p2). Prove first. **[2026-06-08: MECHANISM PASS, gate still
+   OPEN — `usb_f_mass_storage`+`file=disk.img` enumerates and round-trips R/W on a
+   real USB host (bench); car acceptance of MBR+2-exFAT / p2 media read is car-only
+   and unconfirmed. See [`hardware-first-development.md` §5.1](./hardware-first-development.md).]**
 2. **Clean eject + rebind** behavior — soft-eject treated as benign (no latch);
    re-insert resumes recording in ~2 s; measure mid-write disappearance tolerance.
 3. **Raw exFAT parsing + clip-stability detection while the car writes** — no

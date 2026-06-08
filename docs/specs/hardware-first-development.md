@@ -97,6 +97,35 @@ is make-or-break**: if the car won't accept the single-image 2-partition LUN, th
 whole S1 architecture is reconsidered before anything else is built. A **FAIL**
 anywhere re-orders the roadmap.
 
+## 5.1 Spike status (live results)
+
+> Append-only log of spike outcomes. The newest hardware truth wins (§6).
+
+### LUN acceptance (#1) — **MECHANISM PASS** · car-acceptance **OPEN** (2026-06-08)
+
+Proven on the bench (Pi Zero 2W, kernel `6.12.47+rpt-rpi-v8`, USB-OTG to the
+**Windows dev PC** standing in for the car): a kernel `usb_f_mass_storage`
+function backed by a **plain `file=disk.img`** enumerates on a real USB host
+("Linux File-Stor Gadget"), the host mounts the exFAT, and a **bidirectional
+read/write round-trip is sha256-verified** (Pi-written 8 MB read identically by
+the host; host-written 4 MB read back identically from the backing image after
+unbind). `udc state=configured`; SSH/WiFi/boot unaffected (USB-OTG path is
+independent of the WiFi/SSH rails). This **retires the architecture pivot's core
+technical risk** — the kernel-gadget + plain-image-file approach works on this
+exact Pi/kernel — and **unblocks `gadgetd`** buildout of the bring-up/teardown
+mechanism, built to the real MBR+2-exFAT layout.
+
+**Still OPEN — car-only, cannot be proven against a PC host** (keep the gate
+open; confirm against a car before declaring §9 #1 resolved):
+1. Tesla acceptance of **MBR + 2 exFAT partitions** and reading media from **p2**
+   (a Windows host mounts only the first partition of a removable disk, so the
+   two-partition read is fundamentally car-only).
+2. Tesla **records continuously to p1** over the kernel LUN.
+3. **Clean eject/rebind, no latch, never EIO** on Pi crash/reboot (#2) — the
+   #1-invariant property; bench crash-consistency is being de-risked separately
+   (observe the host's error mode under abrupt Pi reboot mid-write), but final
+   car tolerance is car-measured.
+
 ## 6. Agile cadence (responding fast)
 
 - **Living backlog.** This table + `SPEC.md` §9 are re-ranked as findings land;

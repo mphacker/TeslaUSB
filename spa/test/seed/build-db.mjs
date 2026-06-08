@@ -205,19 +205,85 @@ const CLIPS = [
 
 const ANGLES = ["front", "back", "left_repeater", "right_repeater"];
 
+// Each trip route is a list of [lat, lon, speed_mps] points. Speeds deliberately
+// span all six viridis speed buckets (≈11→81 mph) so the speed-coloured
+// polylines AND the mph/kmh toggle have a visible, assertable effect. Trip 1 and
+// Trip 2 SHARE an overlapping segment (≈37.802,-122.404 → 37.805,-122.401) so a
+// click there yields TWO route-disambiguation candidates. Events are seeded at
+// coordinates that lie ON a route so their bubbles land on the drawn path.
+const ROUTE_1 = [
+  [37.772, -122.445, 5], [37.778, -122.438, 9], [37.785, -122.430, 16],
+  [37.790, -122.420, 24], [37.796, -122.412, 30], [37.802, -122.404, 16],
+  [37.805, -122.401, 9], [37.808, -122.392, 5],
+];
+const ROUTE_2 = [
+  [37.801, -122.408, 9], [37.802, -122.404, 16], [37.805, -122.401, 24],
+  [37.815, -122.392, 30], [37.825, -122.384, 36], [37.830, -122.380, 24],
+  [37.842, -122.362, 16], [37.858, -122.342, 9],
+];
+// Trip 3 has NO trip_points — it exercises the pre-decoded polyline-BLOB
+// fallback render path (webd decodes trips.polyline when points are absent).
+const ROUTE_3_POLYLINE = [
+  [37.745, -122.465], [37.760, -122.450], [37.775, -122.430], [37.788, -122.402],
+];
+
 const TRIPS = [
-  // id, start(h), end(h), bbox(minlat,minlon,maxlat,maxlon), distance_m, pts
-  [1, 7, 7.5, [37.77, -122.45, 37.81, -122.39], 8230.4, 2],
-  [2, 12, 12.6, [37.8, -122.41, 37.86, -122.34], 12450.9, 2],
-  [3, 18, 18.7, [37.74, -122.47, 37.79, -122.4], 9875.0, 0],
+  // id, start(h), end(h), distance_m, points([lat,lon,mps]), polylineSegments|null
+  // Trip 1: full per-point geometry AND a cached polyline BLOB (both paths live).
+  [1, 7, 7.5, 8230.4, ROUTE_1, [ROUTE_1.map((p) => [p[0], p[1]])]],
+  // Trip 2: per-point geometry only (NULL polyline → exercises points path).
+  [2, 12, 12.6, 12450.9, ROUTE_2, null],
+  // Trip 3: no points, polyline BLOB only (exercises the fallback path).
+  [3, 18, 18.7, 9875.0, [], [ROUTE_3_POLYLINE]],
 ];
 
 const EVENTS = [
   // id, trip_id, clip_id, type, severity, t(h), lat, lon, off_ms, frame, desc
+  // Two trip-linked, on-route bubbles (Sentry-derived hard-brake + accel) …
   [1, 1, 2, "harsh_braking", 2, 7.3, 37.79, -122.42, 1500, 45, "Harsh braking"],
-  [2, 2, 3, "sharp_turn", 2, 12.4, 37.83, -122.38, 1800, 54, "Sharp turn"],
+  [2, 2, 3, "hard_acceleration", 2, 12.4, 37.83, -122.38, 1800, 54, "Hard acceleration"],
+  // … and one trip-less Sentry event (panel-only; not a per-trip map bubble).
   [3, null, 4, "sentry", 1, 14.15, 37.76, -122.44, null, null, "Sentry event"],
 ];
+
+/** Axis-aligned bbox of a [lat,lon][] list (nulls when empty). */
+function bboxOf(coords) {
+  if (!coords.length) {
+    return { minLat: null, minLon: null, maxLat: null, maxLon: null };
+  }
+  let minLat = Infinity, minLon = Infinity, maxLat = -Infinity, maxLon = -Infinity;
+  for (const [la, lo] of coords) {
+    if (la < minLat) minLat = la;
+    if (la > maxLat) maxLat = la;
+    if (lo < minLon) minLon = lo;
+    if (lo > maxLon) maxLon = lo;
+  }
+  return { minLat, minLon, maxLat, maxLon };
+}
+
+/**
+ * Encode polyline segments into the indexd big-endian BLOB webd decodes:
+ * `u32 segment_count`, then per segment `u32 point_count` followed by
+ * `point_count × (f64 lat, f64 lon)` (see webd/src/polyline.rs).
+ */
+function encodePolyline(segments) {
+  const totalPoints = segments.reduce((n, s) => n + s.length, 0);
+  const buf = Buffer.alloc(4 + segments.length * 4 + totalPoints * 16);
+  let off = 0;
+  buf.writeUInt32BE(segments.length, off);
+  off += 4;
+  for (const seg of segments) {
+    buf.writeUInt32BE(seg.length, off);
+    off += 4;
+    for (const [lat, lon] of seg) {
+      buf.writeDoubleBE(lat, off);
+      off += 8;
+      buf.writeDoubleBE(lon, off);
+      off += 8;
+    }
+  }
+  return buf;
+}
 
 const db = new DatabaseSync(out);
 db.exec("PRAGMA foreign_keys=ON;");
@@ -234,7 +300,7 @@ const insClip = db.prepare(
   "INSERT INTO clips (id, canonical_key, started_at, ended_at, partition, folder_class, is_sentry, duration_s, availability, created_at, updated_at) VALUES (?, ?, ?, ?, 'p1', ?, ?, ?, 'present', 0, 0)",
 );
 const insAngle = db.prepare(
-  "INSERT INTO angles (clip_id, camera, file_ref, view_kind, offset_ms, duration_s, size_bytes) VALUES (?, ?, ?, 'live', 0, ?, ?)",
+  "INSERT INTO angles (clip_id, camera, file_ref, view_kind, offset_ms, duration_s, size_bytes) VALUES (?, ?, ?, 'ro_usb', 0, ?, ?)",
 );
 for (const [id, key, sh, eh, fc, sentry, dur] of CLIPS) {
   insClip.run(id, key, T(Math.floor(sh), (sh % 1) * 60), T(Math.floor(eh), (eh % 1) * 60), fc, sentry, dur);
@@ -244,16 +310,36 @@ for (const [id, key, sh, eh, fc, sentry, dur] of CLIPS) {
 }
 
 const insTrip = db.prepare(
-  "INSERT INTO trips (id, day, started_at, ended_at, bbox_min_lat, bbox_min_lon, bbox_max_lat, bbox_max_lon, distance_m, point_count, polyline, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, 0)",
+  "INSERT INTO trips (id, day, started_at, ended_at, bbox_min_lat, bbox_min_lon, bbox_max_lat, bbox_max_lon, distance_m, point_count, polyline, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)",
 );
 const insPoint = db.prepare(
   "INSERT INTO trip_points (trip_id, seq, t, lat, lon, speed, heading) VALUES (?, ?, ?, ?, ?, ?, ?)",
 );
-for (const [id, sh, eh, bbox, dist, pts] of TRIPS) {
-  insTrip.run(id, DAY, T(Math.floor(sh), (sh % 1) * 60), T(Math.floor(eh), (eh % 1) * 60), bbox[0], bbox[1], bbox[2], bbox[3], dist, pts);
-  for (let s = 0; s < pts; s++) {
-    insPoint.run(id, s, T(Math.floor(sh)) + s * 60, bbox[0] + s * 0.01, bbox[1] + s * 0.01, 10 + s * 2, 90 + s * 5);
-  }
+for (const [id, sh, eh, dist, route, polySegs] of TRIPS) {
+  const coords = route.length
+    ? route.map((p) => [p[0], p[1]])
+    : polySegs
+      ? polySegs.flat()
+      : [];
+  const bbox = bboxOf(coords);
+  const blob = polySegs ? encodePolyline(polySegs) : null;
+  const startSec = T(Math.floor(sh), (sh % 1) * 60);
+  insTrip.run(
+    id,
+    DAY,
+    startSec,
+    T(Math.floor(eh), (eh % 1) * 60),
+    bbox.minLat,
+    bbox.minLon,
+    bbox.maxLat,
+    bbox.maxLon,
+    dist,
+    route.length,
+    blob,
+  );
+  route.forEach((p, s) => {
+    insPoint.run(id, s, startSec + s * 60, p[0], p[1], p[2], 90);
+  });
 }
 
 const insEvent = db.prepare(
@@ -312,6 +398,23 @@ const counts = {
 };
 if (counts.trips !== 3 || counts.clips !== 6 || counts.events !== 3)
   checks.push(`unexpected counts ${JSON.stringify(counts)}`);
+
+// Map-render preconditions: routes must form a visible path, the overlapping
+// segment must exist on two trips (disambiguation), and the BLOB fallback path
+// (trip 3) must carry a non-NULL polyline that trip has no points for.
+const tripPoints = one("SELECT COUNT(*) FROM trip_points");
+if (tripPoints !== ROUTE_1.length + ROUTE_2.length)
+  checks.push(`trip_points=${tripPoints} (expected ${ROUTE_1.length + ROUTE_2.length})`);
+const polyTrips = one("SELECT COUNT(*) FROM trips WHERE polyline IS NOT NULL");
+if (polyTrips !== 2) checks.push(`trips with polyline BLOB=${polyTrips} (expected 2)`);
+const t3pts = one("SELECT COUNT(*) FROM trip_points WHERE trip_id=3");
+if (t3pts !== 0) checks.push(`trip 3 must have 0 points (got ${t3pts})`);
+const t3poly = one("SELECT polyline IS NOT NULL FROM trips WHERE id=3");
+if (!t3poly) checks.push("trip 3 must carry a polyline BLOB for the fallback path");
+const eventTypes = one("SELECT COUNT(DISTINCT type) FROM events");
+if (eventTypes !== 3) checks.push(`distinct event types=${eventTypes} (expected 3)`);
+const tripLinked = one("SELECT COUNT(*) FROM events WHERE trip_id IS NOT NULL");
+if (tripLinked !== 2) checks.push(`trip-linked events=${tripLinked} (expected 2)`);
 
 db.close();
 

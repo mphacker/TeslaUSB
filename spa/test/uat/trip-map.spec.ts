@@ -1,0 +1,500 @@
+import { test, expect, loadState, ARTIFACTS, type Probe } from "./helpers";
+import type { Page } from "@playwright/test";
+import { writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+
+// ── Task 5.3 UAT gate (spa.md §5/§6) ──────────────────────────────────────
+// Drives the REAL bundle served by webd against the seeded read-only catalog
+// (global-setup). The trip map is the new HOME route `/`; the 5.2 media hub
+// moved to `/media` (its suite is retargeted, stays green).
+//
+// PARITY NOTE — day switching: the seed has a single driving day (2024-06-01)
+// because the relocated media-hub suite asserts "1 driving day" / a single
+// recent-day row. We therefore assert the day-nav controls are present and that
+// their prev/next boundary-disable logic is correct at the single-day boundary
+// (cycleDay is wired but has no second day to move to). Flagged to the
+// integrator: a 2nd driving day would break the media-hub day-count assertions.
+//
+// PARITY NOTE — offline tiles: UAT forces `window.__TESLAUSB_TILE_URL__ = ""`
+// so the controller skips the tile layer entirely. This keeps every request
+// same-origin (the "zero off-origin / zero non-2xx" gate) and asserts the map
+// renders trips/events WITHOUT any external basemap fetch.
+
+const SHARED_SEG_LAT = 37.8035; // midpoint of the trip1∩trip2 overlap …
+const SHARED_SEG_LON = -122.4025; // … (37.802,-122.404 → 37.805,-122.401).
+
+/** Float tolerance for comparing decoded lat/lon against seed coordinates. */
+function near(a: number, b: number, eps = 1e-4): boolean {
+  return Math.abs(a - b) < eps;
+}
+
+/** webd read paths the trip map is permitted to call (read-only API). */
+const TRIPMAP_API = new Set([
+  "/api/days",
+  "/api/settings",
+  "/api/trips",
+  "/api/events",
+  "/api/clips",
+]);
+function apiAllowed(pathname: string): boolean {
+  return TRIPMAP_API.has(pathname) || /^\/api\/trips\/\d+$/.test(pathname);
+}
+
+interface MapHookSnapshot {
+  tripPolylineCount: number;
+  eventMarkerCount: number;
+  tripCount: number;
+  unit: string;
+  hasTileLayer: boolean;
+  build: string;
+}
+
+/** Read the live controller hooks (controller-level truth, not just DOM). */
+function hooks(page: Page): Promise<MapHookSnapshot> {
+  return page.evaluate(() => {
+    const h = (window as unknown as { __TESLAUSB_MAP_HOOKS__?: MapHookSnapshot })
+      .__TESLAUSB_MAP_HOOKS__;
+    if (!h) throw new Error("map hooks absent");
+    return {
+      tripPolylineCount: h.tripPolylineCount,
+      eventMarkerCount: h.eventMarkerCount,
+      tripCount: h.tripCount,
+      unit: h.unit,
+      hasTileLayer: h.hasTileLayer,
+      build: h.build,
+    };
+  });
+}
+
+/** Force offline tiles, navigate to the map home, wait for the first render. */
+async function gotoMap(page: Page) {
+  await page.addInitScript(() => {
+    (window as unknown as { __TESLAUSB_TILE_URL__?: string }).__TESLAUSB_TILE_URL__ = "";
+  });
+  await page.goto("/", { waitUntil: "load" });
+  await expect(page.locator(".map-container[data-screen=trip-map]")).toBeVisible();
+  // Leaflet initialised AND the first day's trips rendered.
+  await page.waitForFunction(() => {
+    const h = (window as unknown as { __TESLAUSB_MAP_HOOKS__?: { tripCount: number } })
+      .__TESLAUSB_MAP_HOOKS__;
+    return !!h && h.tripCount > 0;
+  });
+}
+
+function assertCleanConsole(probe: Probe) {
+  expect(probe.pageErrors, `pageerror(s): ${JSON.stringify(probe.pageErrors)}`).toEqual([]);
+  expect(
+    probe.consoleErrors,
+    `console error(s): ${JSON.stringify(probe.consoleErrors)}`,
+  ).toEqual([]);
+  expect(
+    probe.consoleWarnings,
+    `console warning(s): ${JSON.stringify(probe.consoleWarnings)}`,
+  ).toEqual([]);
+}
+
+test.describe("trip map UAT", () => {
+  // ── Gate 1: functional parity ──────────────────────────────────────────
+  test("functional parity — day nav, polylines, bubbles, clustering, speed toggle, disambiguation, panel", async ({
+    page,
+  }, testInfo) => {
+    await gotoMap(page);
+
+    // App shell (base.html parity): brand present, MAP nav active.
+    await expect(page.locator(".top-bar .top-bar-title")).toHaveText("TeslaUSB");
+    const isMobile = testInfo.project.name.includes("375");
+    const activeNav = page.locator(
+      isMobile ? ".bottom-tabs .tab-item.active" : ".sidebar-rail .nav-item.active",
+    );
+    await expect(activeNav).toBeVisible();
+    await expect(activeNav).toHaveAttribute("aria-current", "page");
+    await expect(activeNav).toContainText("Map");
+
+    // (a) Day navigation present + labelled with the seeded driving day + stats.
+    await expect(page.locator("#dayCardDate")).toContainText("2024");
+    await expect(page.locator("#dayCardStats")).toContainText("3 trips");
+    await expect(page.locator("#dayCardStats")).toContainText("19.0 mi");
+    // Single-day boundary: both prev (older) and next (newer) are disabled.
+    await expect(page.locator("#dayPrev")).toBeDisabled();
+    await expect(page.locator("#dayNext")).toBeDisabled();
+
+    // (b) Trip polylines drawn as REAL Leaflet layers — read back the live
+    //     L.Polyline geometry from the layer group (not a controller counter).
+    const h0 = await hooks(page);
+    expect(h0.tripCount).toBe(3);
+    expect(h0.tripPolylineCount).toBeGreaterThanOrEqual(3);
+    expect(h0.hasTileLayer, "offline UAT must skip the tile layer").toBe(false);
+    // Canvas renderer is live in the overlay pane (Leaflet uses ≥1 canvas).
+    await expect(page.locator(".leaflet-overlay-pane canvas").first()).toBeVisible();
+
+    // Real geometry proof: collect every visible route vertex and confirm BOTH
+    // render data-paths produced on-map geometry —
+    //   · Trip 2 (per-point geometry, NULL polyline) → its start (37.801,-122.408)
+    //   · Trip 3 (NO points, polyline-BLOB fallback)  → its start (37.745,-122.465)
+    // If either path were broken, its endpoint would be absent from the map.
+    const routeLayers = await page.evaluate(
+      () =>
+        (
+          window as unknown as {
+            __TESLAUSB_MAP_HOOKS__?: {
+              visibleRouteLayers: () => { color: string; coords: [number, number][] }[];
+            };
+          }
+        ).__TESLAUSB_MAP_HOOKS__!.visibleRouteLayers(),
+    );
+    expect(routeLayers.length, "≥3 visible speed-bucket polylines").toBeGreaterThanOrEqual(3);
+    const allVerts = routeLayers.flatMap((l) => l.coords);
+    expect(
+      allVerts.some(([la, lo]) => near(la, 37.801) && near(lo, -122.408)),
+      "Trip 2 (points path) start vertex must be on the map",
+    ).toBe(true);
+    expect(
+      allVerts.some(([la, lo]) => near(la, 37.745) && near(lo, -122.465)),
+      "Trip 3 (polyline-BLOB fallback) start vertex must be on the map",
+    ).toBe(true);
+    // Speed buckets actually colour the route (≥2 distinct viridis stops).
+    const routeColors = new Set(routeLayers.map((l) => l.color.toLowerCase()));
+    expect(routeColors.size, "route is speed-bucket coloured").toBeGreaterThanOrEqual(2);
+
+    // (c) Event bubbles: 2 on-route, trip-linked events (harsh_braking + accel),
+    //     verified at their REAL marker coordinates. The trip-less sentry event
+    //     is panel-only, NOT a map bubble.
+    expect(h0.eventMarkerCount).toBe(2);
+    const eventCoords = await page.evaluate(
+      () =>
+        (
+          window as unknown as {
+            __TESLAUSB_MAP_HOOKS__?: { eventLatLngs: () => [number, number][] };
+          }
+        ).__TESLAUSB_MAP_HOOKS__!.eventLatLngs(),
+    );
+    expect(eventCoords.length).toBe(2);
+    expect(
+      eventCoords.some(([la, lo]) => near(la, 37.79) && near(lo, -122.42)),
+      "harsh_braking bubble at its seeded on-route coord",
+    ).toBe(true);
+    expect(
+      eventCoords.some(([la, lo]) => near(la, 37.83) && near(lo, -122.38)),
+      "hard_acceleration bubble at its seeded on-route coord",
+    ).toBe(true);
+
+    // (d) Speed-unit toggle flips mph↔kmh and updates the legend labels. The
+    //     legend is a togglable overlay (display:none until shown) — open it via
+    //     its FAB first, then exercise the unit buttons.
+    await page.locator("#btnSpeedLegend").click();
+    await expect(page.locator("#speedLegend")).toBeVisible();
+    await expect(page.locator(".speed-legend-title")).toContainText("Speed (mph)");
+    await expect(page.locator(".speed-legend-row").first()).toContainText("0\u201315");
+    await page.locator("#speedUnitKph").click();
+    await page.waitForFunction(() => {
+      const h = (window as unknown as { __TESLAUSB_MAP_HOOKS__?: { unit: string } })
+        .__TESLAUSB_MAP_HOOKS__;
+      return !!h && h.unit === "kph";
+    });
+    await expect(page.locator(".speed-legend-title")).toContainText("Speed (kph)");
+    await expect(page.locator(".speed-legend-row").first()).toContainText("0\u201325");
+    // flip back to mph for a stable baseline.
+    await page.locator("#speedUnitMph").click();
+    await page.waitForFunction(() => {
+      const h = (window as unknown as { __TESLAUSB_MAP_HOOKS__?: { unit: string } })
+        .__TESLAUSB_MAP_HOOKS__;
+      return !!h && h.unit === "mph";
+    });
+
+    // (e) Route disambiguation. We invoke the disambiguation through the
+    //     `triggerDisambig` hook, which runs the EXACT app logic the on-map
+    //     click handler runs — `findCandidatesNearClick(latlng)` →
+    //     `showDisambigPopup(...)` — at the shared trip1∩trip2 segment midpoint.
+    //     (A synthetic Playwright mouse click on Leaflet's *canvas* hit-target
+    //     is non-deterministic across viewports; the hook exercises our own
+    //     disambiguation code deterministically, leaving only Leaflet's
+    //     already-tested canvas hit-test out of scope.)
+    //     (Trip 3 has no per-point waypoints — polyline-only — so it never
+    //     participates in disambiguation.)
+    const candidates = await page.evaluate(
+      ({ lat, lon }) =>
+        (
+          window as unknown as {
+            __TESLAUSB_MAP_HOOKS__?: { triggerDisambig: (a: number, b: number) => number };
+          }
+        ).__TESLAUSB_MAP_HOOKS__!.triggerDisambig(lat, lon),
+      { lat: SHARED_SEG_LAT, lon: SHARED_SEG_LON },
+    );
+    expect(candidates, "shared segment resolves to exactly 2 overlapping trips").toBe(2);
+    await expect(page.locator(".disambig-popup")).toBeVisible();
+    await expect(page.locator(".disambig-popup .disambig-row")).toHaveCount(2);
+    await expect(page.locator(".disambig-header")).toContainText("2 clips through here");
+    // Each row shows its trip's real summary (distance · duration).
+    await expect(page.locator(".disambig-row-secondary").first()).toContainText("mi");
+    // dismiss the popup deterministically so it doesn't bleed into later
+    // assertions (Leaflet's Escape-to-close needs map focus; call the API).
+    await page.evaluate(() =>
+      (window as unknown as { __TESLAUSB_MAP__?: { closePopup: () => void } })
+        .__TESLAUSB_MAP__!.closePopup(),
+    );
+    await expect(page.locator(".disambig-popup")).toHaveCount(0);
+
+    // (f) Events side panel opens and lists seeded events / trips / clips —
+    //     assert representative CONTENT, not just row counts.
+    await page.locator("#btnVideos").click();
+    await expect(page.locator("#videoPanel")).toHaveClass(/open/);
+    // Events tab (global /api/events) → all 3 events incl. the trip-less sentry.
+    const vpEvents = page.locator("[data-testid=vp-events]");
+    await expect(vpEvents.locator(".st-event")).toHaveCount(3);
+    await expect(vpEvents).toContainText("harsh braking");
+    await expect(vpEvents).toContainText("hard acceleration");
+    await expect(vpEvents).toContainText("sentry");
+    // Trips tab → the 3 seeded trips for the day, labelled by id.
+    await page.locator("#vpTabTrips").click();
+    const vpTrips = page.locator("[data-testid=vp-trips]");
+    await expect(vpTrips.locator(".vp-clip")).toHaveCount(3);
+    await expect(vpTrips).toContainText("Trip #1");
+    await expect(vpTrips).toContainText("Trip #3");
+    // All Clips tab → the 6 seeded clips.
+    await page.locator("#vpTabClips").click();
+    await expect(page.locator("[data-testid=vp-clips] .vp-clip")).toHaveCount(6);
+
+    // (g) Marker clustering active (done LAST — it zooms the map out): the 2
+    //     event bubbles collapse into a SINGLE `.marker-cluster` whose badge
+    //     reads "2". Proves leaflet.markercluster actually grouped the markers
+    //     (not bare pins, not a stale DOM node).
+    await page.evaluate(() => {
+      (window as unknown as { __TESLAUSB_MAP__?: { setZoom: (z: number) => void } })
+        .__TESLAUSB_MAP__!.setZoom(5);
+    });
+    const cluster = page.locator(".marker-cluster").first();
+    await expect(cluster).toBeVisible();
+    await expect(cluster).toContainText("2");
+    // The two markers were absorbed into the cluster (no loose bubbles left).
+    await expect(page.locator(".event-svg-icon")).toHaveCount(0);
+  });
+
+  // ── Gate 5: wiring proof — the served HTML runs the freshly-built bundle ─
+  test("wiring — served HTML runs the built bundle and Leaflet initialised", async ({
+    page,
+  }) => {
+    const state = loadState();
+    await gotoMap(page);
+
+    // (a) build id baked on disk == build id the live page exposes.
+    const winBuild = await page.evaluate(
+      () => (window as unknown as { __TESLAUSB_BUILD__?: string }).__TESLAUSB_BUILD__,
+    );
+    expect(winBuild, "window.__TESLAUSB_BUILD__ must be defined").toBeTruthy();
+    expect(winBuild).not.toBe("dev");
+    expect(winBuild).toBe(state.buildId);
+
+    // (b) the controller's own hook reports the SAME build → the trip-map JS that
+    //     created the map is the bundle under test (defends the documented
+    //     "edited JS the page never loaded" failure mode).
+    const h = await hooks(page);
+    expect(h.build).toBe(state.buildId);
+
+    // (c) Leaflet actually initialised: the global map handle + a Leaflet root.
+    const hasMap = await page.evaluate(
+      () => !!(window as unknown as { __TESLAUSB_MAP__?: unknown }).__TESLAUSB_MAP__,
+    );
+    expect(hasMap, "window.__TESLAUSB_MAP__ (Leaflet) must exist").toBe(true);
+    await expect(page.locator("#map.leaflet-container")).toBeVisible();
+
+    // (d) served index references the hashed assets, not the TS dev entry.
+    const html = await (await page.request.get("/")).text();
+    expect(html).toContain(state.jsAsset);
+    expect(html).not.toContain("/src/main.tsx");
+    expect(html).toMatch(/\/assets\/index-[\w-]+\.js/);
+    if (state.cssAsset) expect(html).toContain(state.cssAsset);
+
+    // (e) the JS asset is served as JavaScript (not HTML via SPA fallback).
+    const jsResp = await page.request.get(state.jsAsset);
+    expect(jsResp.status()).toBe(200);
+    expect(jsResp.headers()["content-type"] ?? "").toMatch(/javascript/);
+  });
+
+  // ── Gate 3 (read-only): no mutations; only allowed catalog reads ────────
+  test("read-only — mutations impossible, required catalog GETs all made", async ({
+    page,
+    probe,
+  }) => {
+    const origin = new URL(loadState().baseURL).origin;
+    await gotoMap(page);
+    // Open the panel + cycle tabs so clips/events/trips endpoints are exercised.
+    await page.locator("#btnVideos").click();
+    await expect(page.locator("#videoPanel")).toHaveClass(/open/);
+    await page.locator("#vpTabTrips").click();
+    await expect(page.locator("[data-testid=vp-trips]")).toBeVisible();
+    await page.locator("#vpTabClips").click();
+    await expect(page.locator("[data-testid=vp-clips]")).toBeVisible();
+    await page.waitForLoadState("networkidle");
+
+    // No mutating HTTP method, ever (webd is read-only).
+    const mutating = probe.requests.filter((r) =>
+      ["POST", "PUT", "PATCH", "DELETE"].includes(r.method.toUpperCase()),
+    );
+    expect(mutating, `mutating request(s): ${JSON.stringify(mutating)}`).toEqual([]);
+
+    // Same-origin only; every /api/ call is a GET to a whitelisted path.
+    const apiSeen = new Map<string, string>();
+    for (const req of probe.requests) {
+      const u = new URL(req.url);
+      expect(u.origin, `off-origin request to ${req.url}`).toBe(origin);
+      if (!u.pathname.startsWith("/api/")) continue;
+      expect(req.method.toUpperCase(), `${req.method} ${u.pathname}`).toBe("GET");
+      expect(apiAllowed(u.pathname), `unexpected API path ${u.pathname}`).toBe(true);
+      apiSeen.set(u.pathname, u.search);
+    }
+
+    // Each required endpoint was actually hit (defends against partial wiring).
+    for (const p of ["/api/days", "/api/settings", "/api/trips", "/api/events", "/api/clips"]) {
+      expect(apiSeen.has(p), `required endpoint ${p} was never requested`).toBe(true);
+    }
+    // Per-trip detail (points + speed) was fetched for EVERY rendered trip —
+    // proves the route geometry is wired per trip, not just for the first one.
+    for (const id of [1, 2, 3]) {
+      expect(
+        apiSeen.has(`/api/trips/${id}`),
+        `per-trip detail /api/trips/${id} was never requested`,
+      ).toBe(true);
+    }
+
+    // No mutation surface in the DOM (read-only screen has no submit forms).
+    await expect(page.locator("button[type=submit]")).toHaveCount(0);
+  });
+
+  // ── Gate 3 (console + network): zero warnings/errors/pageerror, no failures ─
+  test("clean — zero console warnings/errors/pageerror and no failed/non-2xx requests", async ({
+    page,
+    probe,
+  }) => {
+    const origin = new URL(loadState().baseURL).origin;
+    await gotoMap(page);
+    // Exercise the interactive paths that the parity test drives.
+    await page.locator("#btnSpeedLegend").click();
+    await page.locator("#speedUnitKph").click();
+    await page.locator("#btnVideos").click();
+    await expect(page.locator("#videoPanel")).toHaveClass(/open/);
+    await page.waitForLoadState("networkidle");
+    // Let any deferred Leaflet/markercluster animation callbacks flush so a
+    // late-arriving console warning can't slip past the assertion.
+    await page.waitForTimeout(300);
+
+    assertCleanConsole(probe);
+
+    expect(
+      probe.failedRequests,
+      `failed request(s): ${JSON.stringify(probe.failedRequests)}`,
+    ).toEqual([]);
+
+    // No external (off-origin) request at all — proves offline tiles held.
+    const offOrigin = probe.requests.filter((r) => new URL(r.url).origin !== origin);
+    expect(offOrigin, `off-origin request(s): ${JSON.stringify(offOrigin)}`).toEqual([]);
+
+    // No same-origin error status (webd's SPA fallback 200s unknown routes, so a
+    // 4xx/5xx here is a real failure).
+    const bad = probe.responses.filter(
+      (r) => new URL(r.url).origin === origin && r.status >= 400,
+    );
+    expect(bad, `non-2xx response(s): ${JSON.stringify(bad)}`).toEqual([]);
+  });
+
+  // ── Gate 2: performance — capture + report (dev-box profile) ────────────
+  test("perf — capture TTFB/DCL/FCP/interactive + slowest requests", async ({
+    page,
+  }, testInfo) => {
+    const navStart = Date.now();
+    await gotoMap(page);
+    const mapReadyMs = await page.evaluate(() => performance.now());
+
+    const timings = await page.evaluate(() => {
+      const nav = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming;
+      const fcp = performance
+        .getEntriesByType("paint")
+        .find((p) => p.name === "first-contentful-paint");
+      const resources = (performance.getEntriesByType("resource") as PerformanceResourceTiming[])
+        .map((r) => ({ url: r.name, ms: Math.round(r.duration * 10) / 10, type: r.initiatorType }))
+        .sort((a, b) => b.ms - a.ms)
+        .slice(0, 10);
+      return {
+        ttfbMs: Math.round(nav.responseStart - nav.requestStart),
+        domContentLoadedMs: Math.round(nav.domContentLoadedEventEnd),
+        domInteractiveMs: Math.round(nav.domInteractive),
+        loadMs: Math.round(nav.loadEventEnd),
+        fcpMs: fcp ? Math.round(fcp.startTime) : null,
+        slowestRequests: resources,
+      };
+    });
+
+    // Interaction responsiveness: the speed-unit toggle must take effect (the
+    // controller re-renders and the hook unit flips) — proves real interactivity.
+    await page.locator("#btnSpeedLegend").click();
+    await expect(page.locator("#speedLegend")).toBeVisible();
+    const tToggleStart = Date.now();
+    await page.locator("#speedUnitKph").click();
+    await page.waitForFunction(() => {
+      const h = (window as unknown as { __TESLAUSB_MAP_HOOKS__?: { unit: string } })
+        .__TESLAUSB_MAP_HOOKS__;
+      return !!h && h.unit === "kph";
+    });
+    const speedToggleMs = Date.now() - tToggleStart;
+
+    const report = {
+      environment:
+        "dev webd (cargo debug build) on Windows host; Chromium via Playwright; " +
+        "fresh context per test (cold cache); OFFLINE tiles (no basemap fetch). " +
+        "NOTE: spa.md's <~2s 'interactive' target is the ON-DEVICE (Raspberry Pi) " +
+        "profile — these are dev-box numbers, reported not asserted against that bar.",
+      viewport: testInfo.project.name,
+      ttfbMs: timings.ttfbMs,
+      domContentLoadedMs: timings.domContentLoadedMs,
+      domInteractiveMs: timings.domInteractiveMs,
+      loadMs: timings.loadMs,
+      fcpMs: timings.fcpMs,
+      mapReadyMs: Math.round(mapReadyMs),
+      speedToggleResponseMs: speedToggleMs,
+      wallClockNavMs: Date.now() - navStart,
+      slowestRequests: timings.slowestRequests,
+    };
+
+    const out = resolve(ARTIFACTS, `perf-tripmap-${testInfo.project.name}.json`);
+    writeFileSync(out, JSON.stringify(report, null, 2));
+    await testInfo.attach(`perf-tripmap-${testInfo.project.name}.json`, {
+      body: JSON.stringify(report, null, 2),
+      contentType: "application/json",
+    });
+    console.log(`[uat][perf:tripmap:${testInfo.project.name}]`, JSON.stringify(report, null, 2));
+
+    expect(report.fcpMs, "FCP should be present").not.toBeNull();
+    expect(report.fcpMs!).toBeLessThan(6000);
+    expect(report.mapReadyMs).toBeLessThan(8000);
+  });
+
+  // ── Gate 4: responsive — render + screenshot at this project's viewport ─
+  test("responsive — renders at viewport and screenshot captured", async ({
+    page,
+  }, testInfo) => {
+    await gotoMap(page);
+
+    // Map + day card present regardless of breakpoint.
+    await expect(page.locator("#map.leaflet-container")).toBeVisible();
+    await expect(page.locator(".trip-card")).toBeVisible();
+
+    // Breakpoint-specific chrome: desktop shows the rail, mobile the bottom tabs.
+    const isMobile = testInfo.project.name.includes("375");
+    const rail = page.locator(".sidebar-rail");
+    const tabs = page.locator(".bottom-tabs");
+    if (isMobile) {
+      await expect(tabs).toBeVisible();
+      await expect(rail).toBeHidden();
+    } else {
+      await expect(rail).toBeVisible();
+      await expect(tabs).toBeHidden();
+    }
+
+    const shot = resolve(ARTIFACTS, `tripmap-${testInfo.project.name}.png`);
+    await page.screenshot({ path: shot, fullPage: false });
+    await testInfo.attach(`tripmap-${testInfo.project.name}.png`, {
+      path: shot,
+      contentType: "image/png",
+    });
+    console.log(`[uat][screenshot:tripmap:${testInfo.project.name}] ${shot}`);
+  });
+});

@@ -59,7 +59,11 @@ test.describe("webd catalog client", () => {
     const t = await api.trip(1);
     expect(t.id).toBe(1);
     expect(Array.isArray(t.points)).toBe(true);
-    expect(t.points.length).toBe(2);
+    // Trip detail returns the full ordered point path. The 5.3 map seed enriches
+    // each driving trip into a realistic multi-point route (trip 1 = an 8-point
+    // path that also forms the trip1∩trip2 overlap used by route disambiguation),
+    // so this asserts a multi-point path rather than the original 2-point stub.
+    expect(t.points.length).toBeGreaterThanOrEqual(2);
     expect(t.points[0]).toHaveProperty("lat");
     expect(t.points[0]).toHaveProperty("lon");
 

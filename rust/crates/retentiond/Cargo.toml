@@ -1,0 +1,28 @@
+[package]
+name = "retentiond"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Archiving + retention + the SD-card space governor. Copies clips off the car-visible LUN into the Pi-side archive (per-folder policy), runs the value-scoring space governor, is the SOLE deleter of Pi-side archive files (crash-safe), and honors playback/upload leases. Decision/policy/governor/lease/crash-safety core is host-unit-tested behind traits; Linux I/O is gated."
+
+[lints]
+workspace = true
+
+# thiserror gives typed error boundaries (no `unwrap`/`panic` in library code).
+# serde frames the status/health payload reported to webd and the typed IPC
+# request/response shared with gadgetd/indexd. libc (unix-only) backs the gated
+# statfs/fsync seam used by the live daemon; the policy core never touches it.
+[dependencies]
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[[bin]]
+name = "retentiond"
+path = "src/main.rs"

@@ -1,0 +1,32 @@
+# scannerd — R1 raw exFAT/MP4/SEI reader (docs/specs/scannerd.md).
+#
+# Indexes the car's recorded media by reading the RAW mass-storage
+# backing image directly (pread) — MBR -> exFAT -> FAT chain -> MP4 ->
+# H.264 SEI — and NEVER mounting the Tesla filesystem. Emits facts only
+# for files proven stable across scans. The parsing/traversal/gating
+# logic is pure (host-testable); the syscalls live in the binary behind
+# the `BlockReader` trait.
+[package]
+name = "scannerd"
+description = "TeslaUSB B-1 raw exFAT/MP4/SEI reader: indexes car media without mounting the filesystem."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "scannerd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "scannerd"
+path = "src/main.rs"
+
+[dependencies]
+teslausb-core = { path = "../teslausb-core" }
+thiserror = "1"
+
+[lints]
+workspace = true

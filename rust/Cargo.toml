@@ -16,6 +16,7 @@ resolver = "3"
 members = [
     "crates/teslausb-core",
     "crates/gadgetd",
+    "crates/scannerd",
 ]
 
 # Shared package metadata. Each crate inherits via `field.workspace = true`

@@ -126,6 +126,21 @@ open; confirm against a car before declaring §9 #1 resolved):
    (observe the host's error mode under abrupt Pi reboot mid-write), but final
    car tolerance is car-measured.
 
+**Bench follow-ups (2026-06-08, same session):**
+- **Real layout built + host-mounted.** A 4 GB image with an **MBR + 2 exFAT
+  partitions** (p1 `TESLACAM` ~3 GB, p2 `MEDIA` ~1 GB, both MBR type `0x07`) is
+  served as the single LUN; modern Windows mounted **both** partitions (`E:`/`F:`)
+  and read each. gadgetd will provision exactly this layout (not a superfloppy).
+- **Crash-consistency (partial #2, bench).** With the host mid-write to p1, an
+  **abrupt `sysrq` crash-reboot** (no sync/unmount) of the Pi: the Pi recovered
+  cleanly (SSH/WiFi/boot healthy in ~1–2 min); **`fsck.exfat` on both partitions
+  was clean**; the p1/p2 markers and a host-flushed 1 MB write all survived
+  (durably persisted through the gadget into `file=disk.img` on ext4). Key input
+  for gadgetd: keep the LUN `nofua=0` (honor FUA) so host flushes are durable, and
+  keep the backing image fully `fallocate`d on ext4. The host OS stayed responsive
+  (no BSOD). NOT yet captured: the exact Windows mid-write error-exception; and the
+  ultimate "Tesla treats this as a clean unplug, never EIO/latch" remains car-only.
+
 ## 6. Agile cadence (responding fast)
 
 - **Living backlog.** This table + `SPEC.md` §9 are re-ranked as findings land;

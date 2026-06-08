@@ -1,17 +1,21 @@
 # TeslaUSB B-1 Rust workspace.
 #
-# One crate lives here today:
+# Crates live here:
 #   * teslausb-core — shared domain types: the raw exFAT read/parse
 #                     path and the Tesla SEI extractor. Pure logic;
-#                     no I/O dependencies. The full-Rust service
-#                     crates (gadgetd, scannerd, indexd, webd,
-#                     uploadd, retentiond, wifid) are added here as
-#                     they are built (SPEC.md §4, §6).
+#                     no I/O dependencies.
+#   * gadgetd       — guardian of the car-facing write path: owns the
+#                     kernel usb_f_mass_storage gadget (file=disk.img),
+#                     provisions the backing image, and brings the gadget
+#                     up at boot (SPEC.md §4, §6; docs/specs/gadgetd.md).
+# The remaining service crates (scannerd, indexd, webd, uploadd,
+# retentiond, wifid) are added here as they are built.
 
 [workspace]
 resolver = "3"
 members = [
     "crates/teslausb-core",
+    "crates/gadgetd",
 ]
 
 # Shared package metadata. Each crate inherits via `field.workspace = true`

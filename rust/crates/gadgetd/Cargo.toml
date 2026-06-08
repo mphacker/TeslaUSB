@@ -1,0 +1,16 @@
+[package]
+name = "gadgetd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CRITICAL invariant guardian: owns the kernel usb_f_mass_storage gadget backed by file=disk.img (the car-facing write path). Brings the gadget up at boot, reports status, and tears it down cleanly. No userspace in the steady-state write path."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "gadgetd"
+path = "src/main.rs"

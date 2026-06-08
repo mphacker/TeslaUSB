@@ -1,0 +1,12 @@
+# Cross-compilation config for the Raspberry Pi Zero 2 W (aarch64).
+#
+# The Pi has no Rust toolchain and only ~464 MB RAM, so service binaries are
+# built on the dev host and deployed statically. The musl target produces a
+# fully static binary with no glibc/version dependency on the Pi. `rust-lld`
+# is bundled with the Rust toolchain, so no external cross `gcc` linker is
+# required on Windows.
+#
+# This only affects builds that explicitly target aarch64-unknown-linux-musl;
+# the default host build/test path is untouched.
+[target.aarch64-unknown-linux-musl]
+linker = "rust-lld"

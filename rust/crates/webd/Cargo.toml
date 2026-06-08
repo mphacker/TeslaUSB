@@ -1,0 +1,43 @@
+# webd — axum/tokio web backend (docs/specs/webd.md, contract D2).
+#
+# Task 5.1a slice: serves a READ-ONLY REST API over the indexd SQLite
+# catalog plus the static-SPA host plumbing (placeholder bundle). The DB
+# is opened read-only (SQLITE_OPEN_READ_ONLY) — indexd is the sole writer.
+# No mutations, no video streaming, no auth, no SSE in this slice.
+[package]
+name = "webd"
+description = "TeslaUSB B-1 web backend: read-only REST API over the indexd SQLite catalog + static SPA host."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "webd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "webd"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+tower-http = { version = "0.6", features = ["fs"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+
+[dev-dependencies]
+# Tests build a fixture catalog via indexd's authoritative migration
+# ladder so they bind to the as-built schema. webd never depends on
+# indexd at runtime — production code is a self-contained read-only layer.
+indexd = { path = "../indexd" }
+tower = { version = "0.5", features = ["util"] }
+tempfile = "3"
+
+[lints]
+workspace = true

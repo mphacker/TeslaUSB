@@ -256,4 +256,108 @@ mod tests {
         assert!(t2.observe(&grown, 12).is_empty()); // only 1 stable scan since reset window/quiescence
         assert_eq!(t2.observe(&grown, 20), vec![0]);
     }
+
+    /// Adversarial record with explicit completeness/consistency fields.
+    fn record_full(vdl: u64, dlen: u64, checksum_ok: bool, modify_10ms: u8) -> FileRecord {
+        FileRecord {
+            partition_slot: 0,
+            path: "TeslaCam/SavedClips/2026-06-01_20-10-53/front.mp4".to_owned(),
+            name: "front.mp4".to_owned(),
+            first_cluster: 100,
+            data_length: dlen,
+            valid_data_length: vdl,
+            no_fat_chain: false,
+            timestamps: FileTimestamps {
+                modify_10ms,
+                ..FileTimestamps::default()
+            },
+            set_checksum_ok: checksum_ok,
+            dir_first_cluster: 50,
+        }
+    }
+
+    /// Property fuzz: across thousands of randomized write timelines — grow,
+    /// stall mid-write (`VDL` < `DataLength`), finalize, flip checksum, touch
+    /// the modify clock, advance the wall clock arbitrarily — the gate must
+    /// NEVER emit a record that is not fully written + self-consistent, never
+    /// emit before the quiescence floor of the *current* fingerprint streak,
+    /// never emit on the scan a change is observed, and never double-emit
+    /// within a streak. A deterministic LCG keeps any failure reproducible.
+    #[test]
+    fn fuzz_gate_never_false_stable() {
+        let mut rng: u64 = 0x1234_5678_9abc_def1;
+        let next = |r: &mut u64| -> u32 {
+            *r = r
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (*r >> 33) as u32
+        };
+        let cfg = StabilityConfig {
+            required_stable_scans: 2,
+            quiescence_secs: 30,
+        };
+
+        for _trial in 0..3000 {
+            let mut t = StabilityTracker::new(cfg);
+            let mut last_fp: Option<u64> = None;
+            let mut streak_start: u64 = 0;
+            let mut emitted_for_fp = false;
+            let mut clock: u64 = 0;
+            let mut dlen: u64 = 1000;
+            let mut vdl: u64 = 1000;
+            let mut checksum_ok = true;
+            let mut modify_10ms: u8 = 0;
+
+            for _scan in 0..24 {
+                clock += u64::from(next(&mut rng) % 40);
+                match next(&mut rng) % 6 {
+                    0 => {
+                        dlen += 1 + u64::from(next(&mut rng) % 500);
+                        vdl = dlen; // grow, fully written
+                    }
+                    1 => {
+                        dlen += 1 + u64::from(next(&mut rng) % 500);
+                        vdl = dlen.saturating_sub(1 + u64::from(next(&mut rng) % 200)); // mid-write
+                    }
+                    2 => vdl = dlen, // finalize a stalled write
+                    3 => checksum_ok = next(&mut rng) % 2 == 0,
+                    4 => modify_10ms = (next(&mut rng) % 100) as u8,
+                    _ => {} // no change this scan
+                }
+
+                let recs = vec![record_full(vdl, dlen, checksum_ok, modify_10ms)];
+                let fp = fingerprint(&recs[0]);
+                let fp_changed = last_fp != Some(fp);
+                if fp_changed {
+                    last_fp = Some(fp);
+                    streak_start = clock;
+                    emitted_for_fp = false;
+                }
+
+                let out = t.observe(&recs, clock);
+                if fp_changed {
+                    assert!(out.is_empty(), "emitted on the scan content changed");
+                }
+                if let Some(&idx) = out.first() {
+                    let r = &recs[idx];
+                    assert!(
+                        r.valid_data_length == r.data_length && r.set_checksum_ok,
+                        "FALSE-STABLE: emitted an incomplete/inconsistent record \
+                         (vdl={}, dlen={}, checksum_ok={})",
+                        r.valid_data_length,
+                        r.data_length,
+                        r.set_checksum_ok,
+                    );
+                    assert!(
+                        clock - streak_start >= cfg.quiescence_secs,
+                        "emitted before quiescence floor (held {}s < {}s)",
+                        clock - streak_start,
+                        cfg.quiescence_secs,
+                    );
+                    assert!(!emitted_for_fp, "double-emit within one fingerprint streak");
+                    emitted_for_fp = true;
+                }
+            }
+        }
+    }
 }

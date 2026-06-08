@@ -1,247 +1,420 @@
 import { useEffect, useState } from "preact/hooks";
 import { Shell } from "../components/Shell";
-import { Icon } from "../components/Icon";
-import { api, ApiError } from "../api/client";
-import type { Analytics, DaySummary } from "../api/types";
-
-interface HubData {
-  analytics: Analytics;
-  days: DaySummary[];
-  /** Clip count from the first page; `clipsHasMore` if the page was full. */
-  clipCount: number;
-  clipsHasMore: boolean;
-  /** True when speed_unit pref selects imperial (miles). */
-  imperial: boolean;
-}
-
-const nf = new Intl.NumberFormat("en-US");
-
-/** Format a count with a correctly pluralised unit (e.g. "1 day", "3 days"). */
-function plur(n: number, singular: string, plural = `${singular}s`): string {
-  return `${nf.format(n)} ${n === 1 ? singular : plural}`;
-}
-
-function formatDistance(meters: number, imperial: boolean): string {
-  if (imperial) {
-    const mi = meters / 1609.344;
-    return `${nf.format(Math.round(mi * 10) / 10)} mi`;
-  }
-  const km = meters / 1000;
-  return `${nf.format(Math.round(km * 10) / 10)} km`;
-}
-
-interface HealthRow {
-  status: "ok" | "warn" | "error" | "unknown";
-  name: string;
-  value: string;
-}
+import { api } from "../api/client";
+import type { Pref } from "../api/types";
 
 /**
- * The media hub (home/landing screen).
+ * Home screen (Task 5.2) — a faithful visual + structural reproduction of the
+ * legacy Flask settings / device-status dashboard (`index.html`), the page
+ * captured as the parity baseline at `docs/tasks/parity-baseline/media-hub/`.
  *
- * Read-only by construction — it consumes only webd's catalog read API
- * (`/api/analytics`, `/api/days`, `/api/clips`, `/api/settings`) and issues no
- * mutations. It reuses the legacy parity components (device-status card,
- * settings-section, the System-Health rows grid, the metric-tile grid, and the
- * media-pill nav tiles) so it matches the captured baseline's visual language.
+ * Read-only by construction. webd's catalog API does not expose the legacy
+ * system services (`/api/system/health`, `/api/system/metrics`,
+ * `/api/storage/health`) nor any mutation route, so the device-status, System
+ * Health, Live Metrics and Storage Health sections render the legacy template's
+ * **degraded / loading / unknown** initial state verbatim — never calling the
+ * absent endpoints (which would 404 and break the zero-console UAT gate). This
+ * is the parity the integrator endorsed: "a catalog-only webd organically
+ * reproduces that [degraded] look — that IS parity". The one live read the
+ * screen performs is `GET /api/settings`, used to populate the config-form
+ * fields where prefs keys map. Real CPU/MEM live metrics require a future
+ * system-metrics endpoint (tracked gap) — the tiles show the "—" zero-state
+ * rather than fabricated numbers.
+ *
+ * The config forms (Mapping & Indexing, Network File Sharing) are reproduced
+ * for structural parity but are inert: buttons are `type="button"` and the
+ * forms `preventDefault`, so the screen can never issue a mutation.
  */
+
+function pref(prefs: Pref[] | null, key: string, dflt = ""): string {
+  const p = prefs?.find((x) => x.key === key);
+  return p ? p.value : dflt;
+}
+
+function prefBool(prefs: Pref[] | null, key: string): boolean {
+  const v = pref(prefs, key).toLowerCase();
+  return v === "1" || v === "true" || v === "on" || v === "yes";
+}
+
+const METRIC_TILES = [
+  { id: "metric-load", label: "Load (1m / 5m / 15m)" },
+  { id: "metric-cpu", label: "CPU" },
+  { id: "metric-mem", label: "Memory" },
+  { id: "metric-swap", label: "Swap" },
+  { id: "metric-sd", label: "SD Card I/O" },
+  { id: "metric-usb", label: "USB I/O (nbd0)" },
+];
+
+const TIMEZONES = [
+  "UTC",
+  "America/Los_Angeles",
+  "America/Denver",
+  "America/Chicago",
+  "America/New_York",
+  "Europe/London",
+  "Europe/Berlin",
+];
+
 export function MediaHub() {
-  const [data, setData] = useState<HubData | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [prefs, setPrefs] = useState<Pref[] | null>(null);
 
   useEffect(() => {
     const ctrl = new AbortController();
-    (async () => {
-      try {
-        const [analytics, days, clipsPage, settings] = await Promise.all([
-          api.analytics(ctrl.signal),
-          api.days(ctrl.signal),
-          api.clips({ limit: 500 }, ctrl.signal),
-          api.settings(ctrl.signal),
-        ]);
-        const unit = settings.find((p) => p.key === "speed_unit")?.value ?? "";
-        setData({
-          analytics,
-          days,
-          clipCount: clipsPage.items.length,
-          clipsHasMore: clipsPage.next_cursor !== null,
-          imperial: /mph|mi/i.test(unit),
-        });
-      } catch (err) {
-        if (ctrl.signal.aborted) return;
-        const msg =
-          err instanceof ApiError
-            ? `${err.code}: ${err.message}`
-            : (err as Error).message;
-        setError(msg);
-      }
-    })();
+    api
+      .settings(ctrl.signal)
+      .then(setPrefs)
+      .catch(() => {
+        // Read-only degrade: fall back to template defaults without logging,
+        // so an absent/empty prefs store never trips the zero-console gate.
+      });
     return () => ctrl.abort();
   }, []);
 
   return (
-    <Shell active="media">
-      <div class="container" data-screen="media-hub">
-        {/* Device status card — verbatim parity element. */}
+    <Shell active="settings">
+      <div class="container" data-screen="settings-dashboard">
+        {/* Device Status — degraded "unknown" variant (exact baseline). */}
         <div class="device-status-card device-status-unknown">
           <div class="device-status-header">
             <span class="status-dot status-unknown" />
             <div class="device-status-info">
-              <strong>TeslaUSB</strong>
-              <p>Read-only catalog browser — your drive&apos;s trips, events and clips.</p>
+              <strong>Status Unknown</strong>
+              <p>Unable to determine current device status.</p>
             </div>
           </div>
         </div>
 
-        {error && (
-          <div class="settings-section" id="hub-error-section">
-            <div class="section-content">
-              <p class="hub-error" role="alert" data-testid="hub-error">
-                Could not load the catalog: {error}
+        {/* System Health — loading skeleton (the live probe is not part of the
+            read-only catalog API; tracked gap). */}
+        <details class="settings-section" id="system-health-section" open>
+          <summary>System Health</summary>
+          <div class="section-content">
+            <div
+              id="system-health-card"
+              style="display:flex; flex-direction:column; gap:6px;"
+            >
+              <p
+                id="system-health-overall"
+                style="margin:0 0 6px; padding:8px 12px; border-radius:8px; font-size:0.95rem; display:flex; align-items:center; gap:8px; background:var(--bg-secondary); border:1px solid var(--border-color);"
+              >
+                <span
+                  class="health-dot health-dot-unknown"
+                  aria-hidden="true"
+                  style="width:10px; height:10px; border-radius:50%; display:inline-block; flex-shrink:0; background:var(--text-secondary);"
+                />
+                <span id="system-health-overall-text">Loading…</span>
+              </p>
+              <div
+                id="system-health-rows"
+                style="display:grid; grid-template-columns:auto auto 1fr; gap:6px 12px; align-items:center; font-size:0.9rem;"
+              />
+            </div>
+          </div>
+        </details>
+
+        {/* Live Metrics — zero-state tiles (system-metrics endpoint is a tracked
+            gap; we do not fabricate CPU/MEM numbers). */}
+        <details class="settings-section" id="live-metrics-section" open>
+          <summary>Live Metrics</summary>
+          <div class="section-content">
+            <div
+              id="live-metrics-card"
+              style="display:flex; flex-direction:column; gap:8px;"
+            >
+              <div
+                id="live-metrics-grid"
+                style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:10px;"
+              >
+                {METRIC_TILES.map((t) => (
+                  <div class="metric-tile" id={t.id} key={t.id}>
+                    <div class="metric-label">{t.label}</div>
+                    <div class="metric-value">—</div>
+                    <div class="metric-detail">&nbsp;</div>
+                  </div>
+                ))}
+              </div>
+              <p
+                id="live-metrics-foot"
+                style="margin:0; font-size:0.78rem; color:var(--text-secondary);"
+              >
+                Updated <span id="live-metrics-updated">—</span> ·{" "}
+                <span id="live-metrics-uptime">—</span>
               </p>
             </div>
           </div>
-        )}
+        </details>
 
-        {data && (
-          <>
-            <HealthSection data={data} />
-            <MetricsSection data={data} />
-            <RecentDaysSection days={data.days} imperial={data.imperial} />
-          </>
-        )}
+        {/* WiFi Networks — collapsed; inert (no live nmcli probe). */}
+        <details class="settings-section">
+          <summary>WiFi Networks</summary>
+          <div class="section-content">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+              <p style="font-size:0.85em;color:var(--text-secondary);margin:0">
+                Networks higher in the list are preferred when multiple are in
+                range.
+              </p>
+              <button
+                type="button"
+                class="edit-btn"
+                id="btnWifiScan"
+                style="padding:4px 10px;font-size:0.85em;white-space:nowrap"
+                disabled
+              >
+                Scan
+              </button>
+            </div>
+            <div id="savedNetworksList">
+              <div style="text-align:center;padding:12px;color:var(--text-secondary)">
+                Wi-Fi management is not available in the read-only catalog build.
+              </div>
+            </div>
+          </div>
+        </details>
 
-        <BrowseSection />
+        {/* Access Point — degraded (no Wi-Fi tooling), matching the baseline. */}
+        <details class="settings-section">
+          <summary>Access Point</summary>
+          <div class="section-content">
+            <div style="color: var(--error-text);">
+              AP status unavailable (Wi-Fi tooling is not part of the read-only
+              catalog build).
+            </div>
+          </div>
+        </details>
+
+        {/* Storage &amp; Auto-Cleanup — link card (parity). */}
+        <details class="settings-section">
+          <summary>Storage &amp; Auto-Cleanup</summary>
+          <div class="section-content">
+            <a
+              href="/storage"
+              class="action-card"
+              style="display:flex; align-items:center; gap:12px; padding:14px; text-decoration:none; color:inherit; border:1px solid var(--border-color); border-radius:8px; min-height:44px;"
+            >
+              <svg class="inline-icon" width="24" height="24" aria-hidden="true">
+                <use href="/static/icons/lucide-sprite.svg#icon-hard-drive" />
+              </svg>
+              <div style="flex:1">
+                <strong>Storage Settings</strong>
+                <p style="margin:4px 0 0; font-size:0.85rem; color:var(--text-secondary)">
+                  Adjust USB drive sizes and tier-aware auto-cleanup for
+                  TeslaCam.
+                </p>
+              </div>
+              <svg
+                class="inline-icon"
+                width="20"
+                height="20"
+                aria-hidden="true"
+                style="color:var(--text-secondary)"
+              >
+                <use href="/static/icons/lucide-sprite.svg#icon-chevron-right" />
+              </svg>
+            </a>
+          </div>
+        </details>
+
+        {/* Mapping & Indexing — config form, inert; bound to /api/settings. */}
+        <details class="settings-section">
+          <summary>Mapping &amp; Indexing</summary>
+          <div class="section-content">
+            <form onSubmit={(e) => e.preventDefault()}>
+              <p style="font-size:0.85rem; color:var(--text-secondary); margin:0 0 16px">
+                Tesla embeds GPS coordinates and telemetry data (speed, braking,
+                steering) inside each dashcam video. The indexer extracts this
+                data and builds a database of trips, routes, and driving events.
+              </p>
+              <div class="settings-form-grid">
+                <div class="form-group">
+                  <label style="font-size:0.85rem">
+                    <strong>Trip gap (minutes)</strong>
+                  </label>
+                  <input
+                    type="number"
+                    name="trip_gap_minutes"
+                    value={pref(prefs, "trip_gap_minutes", "10")}
+                    min="1"
+                    max="60"
+                    class="settings-form-input"
+                  />
+                </div>
+                <div class="form-group">
+                  <label for="mapping-speed-limit" style="font-size:0.85rem">
+                    <strong>Speed alert (mph)</strong>
+                  </label>
+                  <input
+                    id="mapping-speed-limit"
+                    type="number"
+                    name="speed_limit_mph"
+                    value={pref(prefs, "speed_limit_mph", "85")}
+                    min="0"
+                    max="200"
+                    step="5"
+                    class="settings-form-input"
+                  />
+                </div>
+                <div class="form-group">
+                  <label for="mapping-speed-units" style="font-size:0.85rem">
+                    <strong>Map speed display units</strong>
+                  </label>
+                  <select
+                    id="mapping-speed-units"
+                    name="speed_units"
+                    class="settings-form-input"
+                    value={pref(prefs, "speed_units", "mph")}
+                  >
+                    <option value="mph">mph</option>
+                    <option value="kph">kph</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label
+                    for="mapping-display-timezone"
+                    style="font-size:0.85rem"
+                  >
+                    <strong>Map day timezone</strong>
+                  </label>
+                  <select
+                    id="mapping-display-timezone"
+                    name="display_timezone"
+                    class="settings-form-input"
+                    value={pref(prefs, "display_timezone")}
+                  >
+                    <option value="">Auto (use this device's timezone)</option>
+                    {TIMEZONES.map((tz) => (
+                      <option value={tz} key={tz}>
+                        {tz}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <button
+                type="button"
+                class="btn btn-primary"
+                style="width:100%"
+                disabled
+              >
+                Save Mapping Settings
+              </button>
+            </form>
+          </div>
+        </details>
+
+        {/* Network File Sharing — config form, inert; bound to /api/settings. */}
+        <details class="settings-section" id="network-file-sharing">
+          <summary>Network File Sharing</summary>
+          <div class="section-content">
+            <form onSubmit={(e) => e.preventDefault()}>
+              <p style="font-size:0.85rem; color:var(--text-secondary); margin:0 0 12px">
+                Enable Samba (SMB) network sharing so you can browse the TeslaCam
+                and media partitions from your computer over WiFi.
+              </p>
+              <div
+                class="form-group"
+                style="margin-bottom:12px; padding:12px; background-color:var(--bg-info); border:1px solid var(--border-color); border-radius:var(--radius-md,8px)"
+              >
+                <label style="display:flex; align-items:center; gap:12px; font-size:0.95rem; min-height:44px; cursor:pointer; margin:0">
+                  <input
+                    type="checkbox"
+                    name="samba_enabled"
+                    id="samba_enabled"
+                    value="on"
+                    checked={prefBool(prefs, "samba_enabled")}
+                    style="width:22px; height:22px; flex:0 0 22px"
+                  />
+                  <span>
+                    <strong>Enable network file sharing (SMB)</strong>
+                  </span>
+                </label>
+              </div>
+              <div class="form-group" style="margin-bottom:12px">
+                <label style="font-size:0.85rem">Samba Password</label>
+                <div style="display:flex; gap:8px">
+                  <input
+                    type="password"
+                    name="samba_password"
+                    id="samba_password"
+                    value=""
+                    placeholder="Set a password before clients can connect"
+                    class="settings-form-input"
+                    style="flex:1"
+                    autocomplete="new-password"
+                  />
+                </div>
+                <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
+                  Username: <code>pi</code>
+                </p>
+              </div>
+              <button
+                type="button"
+                class="btn btn-primary"
+                style="width:100%"
+                disabled
+              >
+                Save Network Settings
+              </button>
+            </form>
+          </div>
+        </details>
+
+        {/* Storage Health — static "checking / —" skeleton (the live probe is
+            not part of the read-only catalog API; tracked gap). */}
+        <details class="settings-section" id="storage-health-section">
+          <summary>Storage Health</summary>
+          <div class="section-content" id="storage-health-card">
+            <div class="storage-health-header">
+              <span
+                class="status-dot health-dot health-dot-unknown"
+                id="storage-health-dot"
+                aria-label="Storage health severity"
+              />
+              <strong id="storage-health-summary">Checking…</strong>
+            </div>
+            <dl class="storage-health-grid" id="storage-health-grid">
+              <dt>Device</dt>
+              <dd>—</dd>
+              <dt>Filesystem</dt>
+              <dd>—</dd>
+              <dt>Mount</dt>
+              <dd>—</dd>
+              <dt>Filesystem errors</dt>
+              <dd>—</dd>
+              <dt>I/O errors (24 h)</dt>
+              <dd>—</dd>
+              <dt>TRIM</dt>
+              <dd>—</dd>
+            </dl>
+            <p class="storage-health-footer">
+              SD cards expose no wear telemetry (no SMART, no per-block
+              checksums). Plan to replace the card every 12 months and keep cloud
+              archive enabled so a card failure never costs you data.
+            </p>
+          </div>
+        </details>
+
+        {/* System — host facts are an on-device concern; rendered as unknown in
+            the read-only catalog build rather than fabricated. */}
+        <details class="settings-section">
+          <summary>System</summary>
+          <div class="section-content">
+            <div style="display:grid; grid-template-columns:auto 1fr; gap:6px 16px; font-size:0.9rem;">
+              <span style="color:var(--text-secondary)">Hostname</span>
+              <strong>—</strong>
+              <span style="color:var(--text-secondary)">IP Address</span>
+              <span>—</span>
+              <span style="color:var(--text-secondary)">Uptime</span>
+              <span>—</span>
+              <span style="color:var(--text-secondary)">Platform</span>
+              <span>—</span>
+              <span style="color:var(--text-secondary)">Memory</span>
+              <span>—</span>
+              <span style="color:var(--text-secondary)">Version</span>
+              <code style="font-size:0.8rem">B-1</code>
+            </div>
+          </div>
+        </details>
       </div>
     </Shell>
-  );
-}
-
-function HealthSection({ data }: { data: HubData }) {
-  const { analytics, days, clipCount, clipsHasMore } = data;
-  const rows: HealthRow[] = [
-    {
-      status: "ok",
-      name: "Video Indexer",
-      value: `${nf.format(clipCount)}${clipsHasMore ? "+" : ""} clips indexed`,
-    },
-    { status: "ok", name: "Trips", value: `${plur(analytics.total_trips, "trip")} catalogued` },
-    { status: "ok", name: "Events", value: plur(analytics.total_events, "event") },
-    { status: "ok", name: "Driving Days", value: `${plur(days.length, "day")} with trips` },
-    { status: "ok", name: "Catalog", value: "Online — read-only (webd)" },
-  ];
-  return (
-    <details class="settings-section" id="system-health-section" open>
-      <summary>System Health</summary>
-      <div class="section-content">
-        <div id="system-health-card" data-testid="system-health-card">
-          <p class="health-overall" data-testid="health-overall">
-            <span class="health-dot-cell ok" aria-hidden="true" />
-            <span>Catalog online — read-only</span>
-          </p>
-          <div class="health-rows">
-            {rows.map((r) => (
-              <>
-                <span class={`health-dot-cell ${r.status}`} aria-label={r.status} />
-                <div class="health-name">{r.name}</div>
-                <div class="health-value">{r.value}</div>
-              </>
-            ))}
-          </div>
-        </div>
-      </div>
-    </details>
-  );
-}
-
-function MetricsSection({ data }: { data: HubData }) {
-  const { analytics, days, clipCount, clipsHasMore, imperial } = data;
-  const tiles = [
-    { label: "Trips", value: nf.format(analytics.total_trips), detail: plur(days.length, "driving day") },
-    { label: "Distance", value: formatDistance(analytics.total_distance_m, imperial), detail: "total catalogued" },
-    { label: "Events", value: nf.format(analytics.total_events), detail: plur(analytics.events_by_type.length, "type") },
-    { label: "Clips", value: `${nf.format(clipCount)}${clipsHasMore ? "+" : ""}`, detail: "camera clips" },
-    { label: "Days", value: nf.format(days.length), detail: "with driving" },
-  ];
-  return (
-    <details class="settings-section" id="catalog-metrics-section" open>
-      <summary>Catalog</summary>
-      <div class="section-content">
-        <div class="metric-grid" data-testid="catalog-metrics">
-          {tiles.map((t) => (
-            <div class="metric-tile" data-metric={t.label.toLowerCase()}>
-              <div class="metric-label">{t.label}</div>
-              <div class="metric-value">{t.value}</div>
-              <div class="metric-detail">{t.detail}</div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </details>
-  );
-}
-
-function RecentDaysSection({
-  days,
-  imperial,
-}: {
-  days: DaySummary[];
-  imperial: boolean;
-}) {
-  const recent = days.slice(0, 7);
-  return (
-    <details class="settings-section" id="recent-days-section" open>
-      <summary>Recent driving days</summary>
-      <div class="section-content">
-        {recent.length === 0 ? (
-          <p class="health-value">No driving days catalogued yet.</p>
-        ) : (
-          <div class="health-rows" data-testid="recent-days">
-            {recent.map((d) => (
-              <>
-                <span class="health-dot-cell ok" aria-hidden="true" />
-                <div class="health-name">{d.day}</div>
-                <div class="health-value">
-                  {plur(d.trip_count, "trip")} · {plur(d.event_count, "event")} ·{" "}
-                  {formatDistance(d.distance_m, imperial)}
-                </div>
-              </>
-            ))}
-          </div>
-        )}
-      </div>
-    </details>
-  );
-}
-
-interface Tile {
-  href: string;
-  icon: string;
-  label: string;
-}
-
-const BROWSE_TILES: Tile[] = [
-  { href: "/", icon: "map-pin", label: "Map" },
-  { href: "/analytics", icon: "bar-chart-2", label: "Analytics" },
-  { href: "/events", icon: "alert-triangle", label: "Events" },
-  { href: "/media", icon: "image", label: "Clips" },
-  { href: "/cloud", icon: "cloud", label: "Cloud" },
-];
-
-function BrowseSection() {
-  return (
-    <details class="settings-section" id="browse-section" open>
-      <summary>Browse</summary>
-      <div class="section-content">
-        <div class="media-pills" data-testid="browse-tiles">
-          {BROWSE_TILES.map((t) => (
-            <a href={t.href} class="media-pill">
-              <Icon name={t.icon} />
-              {t.label}
-            </a>
-          ))}
-        </div>
-      </div>
-    </details>
   );
 }

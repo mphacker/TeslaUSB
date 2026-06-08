@@ -181,6 +181,11 @@ export function Shell({
       <main class="main-content" role="main">
         {children}
       </main>
+
+      {/* Toast region — parity with base.html. No toasts are raised by the
+          read-only catalog UI, but the live region is kept for structural
+          parity and future use. */}
+      <div class="toast-container" id="toast-container" aria-live="polite" />
     </>
   );
 }

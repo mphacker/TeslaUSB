@@ -264,8 +264,19 @@ for (const [id, trip, clip, type, sev, th, lat, lon, off, frame, desc] of EVENTS
 }
 
 const insPref = db.prepare("INSERT INTO prefs (key, value) VALUES (?, ?)");
+// Generic prefs.
 insPref.run("speed_unit", "mph");
 insPref.run("map_provider", "osm");
+// Config-section bindings consumed by the settings dashboard (/api/settings):
+// the Mapping & Indexing and Network File Sharing forms read these keys. Values
+// are deliberately chosen to DIFFER from the screen's template defaults
+// (mph / 85 / 10 / "" / false) so the UAT can prove the fields are bound to the
+// /api/settings response and not just showing hard-coded fallbacks.
+insPref.run("speed_units", "kph");
+insPref.run("speed_limit_mph", "75");
+insPref.run("trip_gap_minutes", "15");
+insPref.run("display_timezone", "America/Los_Angeles");
+insPref.run("samba_enabled", "true");
 
 // --- Verification: fail loudly rather than emit a subtly-broken catalog ------
 function one(sql) {

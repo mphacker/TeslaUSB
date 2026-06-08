@@ -1,14 +1,10 @@
-/* Media-hub-specific styles layered on top of the carried-over legacy
-   style.css. The `.metric-tile` rules are ported verbatim from the legacy
-   baseline (where they lived inline in index.html's Live Metrics block) so the
-   catalog metric grid matches the parity target exactly. */
+/* Parity styles for the settings-dashboard reproduction, layered on top of the
+   carried-over legacy style.css. These rules cover the few selectors the legacy
+   page defined inline in index.html (the Live Metrics tiles) and in the storage
+   health include (which lived outside style.css), so the dashboard matches the
+   captured baseline. */
 
-.metric-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 10px;
-}
-
+/* Live Metrics tiles — ported verbatim from index.html's inline <style>. */
 .metric-tile {
   background: var(--bg-secondary);
   border: 1px solid var(--border-color);
@@ -40,61 +36,34 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* System Health rows grid — mirrors the baseline's inline grid. */
-.health-rows {
-  display: grid;
-  grid-template-columns: auto auto 1fr;
-  gap: 6px 12px;
-  align-items: center;
-  font-size: 0.9rem;
-}
-
-.health-overall {
-  margin: 0 0 6px;
-  padding: 8px 12px;
-  border-radius: 8px;
-  font-size: 0.95rem;
+/* Storage Health — ported from the legacy _storage_health_section.html include. */
+.storage-health-header {
   display: flex;
   align-items: center;
   gap: 8px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-color);
+  margin-bottom: 12px;
 }
 
-.health-dot-cell {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  display: inline-block;
-  flex-shrink: 0;
-}
-
-.health-dot-cell.ok {
-  background: var(--accent-success, #4caf50);
-}
-.health-dot-cell.warn {
-  background: var(--ds-accent-warning, #ff9800);
-}
-.health-dot-cell.error {
-  background: var(--accent-error, #f44336);
-}
-.health-dot-cell.unknown {
-  background: var(--text-secondary, #888);
-}
-
-.health-name {
-  color: var(--text-primary);
-}
-.health-value {
-  color: var(--text-secondary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* Inline error / empty state for catalog fetch failures. */
-.hub-error {
+.storage-health-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 16px;
+  margin: 0;
   font-size: 0.9rem;
-  color: var(--msg-error-text, #b00020);
-  padding: 8px 12px;
+}
+
+.storage-health-grid dt {
+  color: var(--text-secondary);
+}
+
+.storage-health-grid dd {
+  margin: 0;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.storage-health-footer {
+  margin: 12px 0 0;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
 }

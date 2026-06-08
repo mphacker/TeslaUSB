@@ -14,26 +14,35 @@ import { resolve } from "node:path";
 // Each test drives the REAL bundle served by webd against a seeded read-only
 // catalog (global-setup). Fresh context per test ⇒ cold cache, no bleed.
 //
-// PARITY NOTE: the captured baseline at docs/tasks/parity-baseline/media-hub/
-// is the legacy *settings dashboard* (route /settings/), driven by
-// /api/system/health|metrics|wifi — none of which webd's read-only catalog API
-// exposes, and whose config panels are mutation forms (forbidden here). This
-// media hub is therefore a READ-ONLY reinterpretation that reuses the baseline's
-// exact visual primitives (device-status card, settings-section, system-health
-// rows grid, metric-tile grid, media-pill nav). We assert structural + visual
-// parity of those primitives and capture screenshots as artifacts; we do NOT
-// pixel-diff against the settings-dashboard PNG (that mismatch is by design and
-// documented in spa/README.md). Flagged to the integrator.
+// PARITY: the home screen is a faithful reproduction of the legacy Flask
+// settings/device-status dashboard captured at
+// docs/tasks/parity-baseline/media-hub/. webd's read-only catalog API does NOT
+// serve the legacy system services (/api/system/health|metrics, /api/storage/
+// health) or any mutation route, so the device-status, System Health, Live
+// Metrics and Storage Health sections render the legacy template's DEGRADED /
+// LOADING / UNKNOWN initial state — the parity the integrator endorsed ("a
+// catalog-only webd organically reproduces that look — that IS parity"). We
+// assert that degraded-state structure + copy and capture screenshots as
+// artifacts; we do NOT pixel-diff the PNG (the captured PNG shows the populated
+// dev-box probe data, which a read-only build cannot and must not fabricate).
 
-/** Settle: bundle executed, catalog data painted. */
-async function gotoHub(page: Page) {
+const SECTION_ORDER = [
+  "System Health",
+  "Live Metrics",
+  "WiFi Networks",
+  "Access Point",
+  "Storage & Auto-Cleanup",
+  "Mapping & Indexing",
+  "Network File Sharing",
+  "Storage Health",
+  "System",
+];
+
+/** Settle: bundle executed, dashboard structure painted. */
+async function gotoDashboard(page: Page) {
   await page.goto("/", { waitUntil: "load" });
-  await expect(page.locator("[data-testid=catalog-metrics]")).toBeVisible();
-  await expect(page.locator("[data-testid=recent-days]")).toContainText("2024-06-01");
-}
-
-function metric(page: Page, name: string) {
-  return page.locator(`.metric-tile[data-metric=${name}]`);
+  await expect(page.locator("[data-screen=settings-dashboard]")).toBeVisible();
+  await expect(page.locator(".device-status-card")).toContainText("Status Unknown");
 }
 
 function assertCleanConsole(probe: Probe) {
@@ -48,85 +57,97 @@ function assertCleanConsole(probe: Probe) {
   ).toEqual([]);
 }
 
-test.describe("media hub UAT", () => {
-  // ── Gate 1: functional parity ──────────────────────────────────────────
-  test("functional parity — landing, nav, health, metrics, days, media tiles", async ({
+test.describe("settings dashboard UAT", () => {
+  // ── Gate 1: functional + structural parity ─────────────────────────────
+  test("functional parity — shell, degraded device/health/metrics, section order", async ({
     page,
     probe,
   }, testInfo) => {
-    await gotoHub(page);
+    await gotoDashboard(page);
 
-    // App shell (base.html parity): brand present.
+    // App shell (base.html parity): brand + toast region.
     await expect(page.locator(".top-bar .top-bar-title")).toHaveText("TeslaUSB");
+    await expect(page.locator("#toast-container")).toHaveCount(1);
 
-    // Active nav — assert against the nav that is ACTUALLY visible at this
-    // breakpoint (rail >=1024px, bottom-tabs <1024px). Checking the hidden one
-    // would let a wrong mobile active-tab slip through.
+    // Active nav is Settings (the captured page is /settings/). Assert against
+    // the nav actually visible at this breakpoint (rail >=1024px else tabs).
     const isMobile = testInfo.project.name.includes("375");
     const activeNav = page.locator(
       isMobile ? ".bottom-tabs .tab-item.active" : ".sidebar-rail .nav-item.active",
     );
     await expect(activeNav).toBeVisible();
     await expect(activeNav).toHaveAttribute("aria-current", "page");
-    await expect(activeNav).toContainText("Media");
+    await expect(activeNav).toContainText("Settings");
 
-    // Landing device-status card.
-    const card = page.locator(".device-status-card");
+    // Device status — degraded "unknown" banner (exact baseline copy).
+    const card = page.locator(".device-status-card.device-status-unknown");
     await expect(card).toBeVisible();
-    await expect(card).toContainText("TeslaUSB");
-    await expect(card).toContainText("Read-only catalog browser");
+    await expect(card).toContainText("Status Unknown");
+    await expect(card).toContainText("Unable to determine current device status.");
 
-    // System Health — overall + all five rows populated from seeded catalog.
-    const health = page.locator("[data-testid=system-health-card]");
-    await expect(health.locator("[data-testid=health-overall]")).toContainText(
-      "Catalog online — read-only",
-    );
-    for (const text of [
-      "6 clips indexed", // 6 seeded, page not full (no "+")
-      "3 trips catalogued",
-      "3 events",
-      "1 day with trips",
-      "Online — read-only (webd)",
-    ]) {
-      await expect(health).toContainText(text);
+    // System Health — open, loading skeleton (no live probe in read-only build).
+    const sh = page.locator("#system-health-section");
+    await expect(sh).toHaveAttribute("open", "");
+    await expect(page.locator("#system-health-overall-text")).toHaveText("Loading…");
+    await expect(sh.locator(".health-dot.health-dot-unknown")).toBeVisible();
+    // The rows grid must stay EMPTY — a regression that silently starts fetching
+    // /api/system/health and populates rows would fail here.
+    await expect(page.locator("#system-health-rows > *")).toHaveCount(0);
+
+    // Live Metrics — open, six zero-state tiles, "—" footer (no fabricated nums).
+    const lm = page.locator("#live-metrics-section");
+    await expect(lm).toHaveAttribute("open", "");
+    const tiles = page.locator("#live-metrics-grid .metric-tile");
+    await expect(tiles).toHaveCount(6);
+    for (let i = 0; i < 6; i++) {
+      await expect(tiles.nth(i).locator(".metric-value")).toHaveText("—");
     }
+    await expect(page.locator("#live-metrics-foot")).toContainText("Updated");
+    await expect(page.locator("#live-metrics-updated")).toHaveText("—");
+    await expect(page.locator("#live-metrics-uptime")).toHaveText("—");
 
-    // Catalog metric tiles (5) — every tile's value AND detail vs seeded data.
-    await expect(page.locator("[data-testid=catalog-metrics] .metric-tile")).toHaveCount(5);
-    await expect(metric(page, "trips").locator(".metric-value")).toHaveText("3");
-    await expect(metric(page, "trips").locator(".metric-detail")).toHaveText("1 driving day");
-    await expect(metric(page, "distance").locator(".metric-value")).toHaveText("19 mi");
-    await expect(metric(page, "distance").locator(".metric-detail")).toHaveText(
-      "total catalogued",
+    // WiFi + Access Point — degraded read-only copy (no nmcli/AP tooling).
+    await expect(page.locator("#savedNetworksList")).toContainText(
+      "Wi-Fi management is not available in the read-only catalog build.",
     );
-    await expect(metric(page, "events").locator(".metric-value")).toHaveText("3");
-    await expect(metric(page, "events").locator(".metric-detail")).toHaveText("3 types");
-    await expect(metric(page, "clips").locator(".metric-value")).toHaveText("6");
-    await expect(metric(page, "clips").locator(".metric-detail")).toHaveText("camera clips");
-    await expect(metric(page, "days").locator(".metric-value")).toHaveText("1");
-    await expect(metric(page, "days").locator(".metric-detail")).toHaveText("with driving");
+    const ap = page.locator("details.settings-section", {
+      has: page.locator("summary", { hasText: "Access Point" }),
+    });
+    await expect(ap).toContainText("AP status unavailable");
 
-    // Recent driving days — EXACTLY one seeded day, with its trip/event/distance.
-    const days = page.locator("[data-testid=recent-days]");
-    await expect(days.locator(".health-name")).toHaveCount(1);
-    await expect(days.locator(".health-name")).toHaveText("2024-06-01");
-    // trip-linked events only (the trip-less sentry event is excluded by webd).
-    await expect(days.locator(".health-value")).toHaveText("3 trips · 2 events · 19 mi");
+    // Storage Health — static "checking" skeleton; ALL six rows are "—" (none
+    // may be fabricated from a live probe webd does not serve).
+    await expect(page.locator("#storage-health-summary")).toHaveText("Checking…");
+    await expect(page.locator("#storage-health-grid dd")).toHaveText([
+      "—", "—", "—", "—", "—", "—",
+    ]);
 
-    // Media tiles (browse pills) — 5 entries, right labels AND hrefs.
-    const pills = page.locator("[data-testid=browse-tiles] .media-pill");
-    await expect(pills).toHaveCount(5);
-    const expectedPills = [
-      { label: "Map", href: "/" },
-      { label: "Analytics", href: "/analytics" },
-      { label: "Events", href: "/events" },
-      { label: "Clips", href: "/media" },
-      { label: "Cloud", href: "/cloud" },
-    ];
-    for (let i = 0; i < expectedPills.length; i++) {
-      await expect(pills.nth(i)).toContainText(expectedPills[i].label);
-      await expect(pills.nth(i)).toHaveAttribute("href", expectedPills[i].href);
-    }
+    // System — host facts are unknown in the read-only build (not fabricated);
+    // only the static B-1 version string is shown.
+    const sys = page.locator("details.settings-section", {
+      has: page.locator("summary", { hasText: "System" }),
+    });
+    await expect(sys.locator("strong")).toHaveText("—"); // Hostname value
+    await expect(sys.locator("code")).toHaveText("B-1");
+
+    // /api/settings binding proof — these fields are populated from the live
+    // settings response and the seed sets them to NON-DEFAULT values, so each
+    // assertion holds ONLY if the screen actually bound the response (a screen
+    // that ignored /api/settings would show the template defaults mph/85/10/""/
+    // unchecked). Elements live in collapsed <details>; value/checked are still
+    // readable without expanding.
+    await expect(page.locator("input[name=trip_gap_minutes]")).toHaveValue("15");
+    await expect(page.locator("#mapping-speed-limit")).toHaveValue("75");
+    await expect(page.locator("#mapping-speed-units")).toHaveValue("kph");
+    await expect(page.locator("#mapping-display-timezone")).toHaveValue(
+      "America/Los_Angeles",
+    );
+    await expect(page.locator("#samba_enabled")).toBeChecked();
+
+    // Section order + count — exact parity with the captured dashboard.
+    const summaries = page.locator("details.settings-section > summary");
+    await expect(summaries).toHaveCount(SECTION_ORDER.length);
+    await expect(summaries).toHaveText(SECTION_ORDER);
 
     assertCleanConsole(probe);
   });
@@ -136,7 +157,7 @@ test.describe("media hub UAT", () => {
     page,
   }) => {
     const state = loadState();
-    await gotoHub(page);
+    await gotoDashboard(page);
 
     // (a) The build id baked into the on-disk bundle equals the one the live
     //     page exposes ⇒ the executed JS IS the freshly-built bundle.
@@ -172,43 +193,70 @@ test.describe("media hub UAT", () => {
     expect(legacyCss.headers()["content-type"] ?? "").toMatch(/css/);
   });
 
-  // ── Gate 3 (read-only): no mutations; only allowed catalog reads ────────
-  test("read-only — mutations impossible, required catalog GETs all made", async ({
+  // ── Gate 3 (read-only): no mutations; config forms are inert ────────────
+  test("read-only — no mutating requests, config forms cannot submit", async ({
     page,
     probe,
   }) => {
     const origin = new URL(loadState().baseURL).origin;
-    await gotoHub(page);
+    await gotoDashboard(page);
     await page.waitForLoadState("networkidle");
 
-    // No mutating HTTP method, ever.
+    // Every request is same-origin (no third-party calls / exfiltration), and
+    // every /api/ call is a GET to a whitelisted path. Factored so we can re-run
+    // it AFTER actively exercising the forms (a mutation could be a stray GET to
+    // a non-whitelisted path, which a method-only filter would miss).
+    function assertOnlyWhitelistedApi(): Map<string, string> {
+      const seen = new Map<string, string>(); // pathname -> search
+      for (const req of probe.requests) {
+        const u = new URL(req.url);
+        expect(u.origin, `off-origin request to ${req.url}`).toBe(origin);
+        if (!u.pathname.startsWith("/api/")) continue;
+        expect(req.method.toUpperCase(), `${req.method} ${u.pathname}`).toBe("GET");
+        expect(ALLOWED_API.has(u.pathname), `unexpected API path ${u.pathname}`).toBe(true);
+        seen.set(u.pathname, u.search);
+      }
+      return seen;
+    }
+    const apiSeen = assertOnlyWhitelistedApi();
+    // The config bindings prove the catalog API is actually wired in.
+    expect(apiSeen.has("/api/settings"), "/api/settings was never requested").toBe(true);
+
+    // ACTIVELY exercise the mutation surface: expand every section, then prove
+    // each config <form> swallows its submit (onSubmit preventDefault) and that
+    // pressing Enter in a field issues no request and does not navigate.
+    await page.locator("details.settings-section").evaluateAll((els) =>
+      els.forEach((d) => d.setAttribute("open", "")),
+    );
+    const allPrevented = await page.locator("form").evaluateAll((forms) =>
+      forms.map((f) => {
+        const ev = new Event("submit", { cancelable: true, bubbles: true });
+        f.dispatchEvent(ev);
+        return ev.defaultPrevented;
+      }),
+    );
+    expect(allPrevented.length, "dashboard should have config forms").toBeGreaterThan(0);
+    expect(allPrevented.every(Boolean), "every form must preventDefault on submit").toBe(true);
+
+    const urlBefore = page.url();
+    await page.locator("#mapping-speed-limit").press("Enter");
+    await page.locator("#samba_password").press("Enter");
+    // Settle: let any (errant) delayed/debounced submit fetch reach the wire
+    // before we assert the read-only invariant.
+    await page.waitForLoadState("networkidle");
+    await page.waitForTimeout(500);
+    expect(page.url(), "pressing Enter in a field must not navigate").toBe(urlBefore);
+
+    // Re-assert the FULL whitelist after the exercise — catches a stray GET to a
+    // non-whitelisted path as well as any mutating method.
+    assertOnlyWhitelistedApi();
     const mutating = probe.requests.filter((r) =>
       ["POST", "PUT", "PATCH", "DELETE"].includes(r.method.toUpperCase()),
     );
     expect(mutating, `mutating request(s): ${JSON.stringify(mutating)}`).toEqual([]);
 
-    // Every request is same-origin (no third-party calls / exfiltration), and
-    // every /api/ call is a GET to a whitelisted path.
-    const apiSeen = new Map<string, string>(); // pathname -> search
-    for (const req of probe.requests) {
-      const u = new URL(req.url);
-      expect(u.origin, `off-origin request to ${req.url}`).toBe(origin);
-      if (!u.pathname.startsWith("/api/")) continue;
-      expect(req.method.toUpperCase(), `${req.method} ${u.pathname}`).toBe("GET");
-      expect(ALLOWED_API.has(u.pathname), `unexpected API path ${u.pathname}`).toBe(true);
-      apiSeen.set(u.pathname, u.search);
-    }
-
-    // The data the screen shows must actually come from the catalog API — assert
-    // each required endpoint was hit (defends against hardcoded/partial wiring).
-    for (const p of ["/api/analytics", "/api/days", "/api/clips", "/api/settings"]) {
-      expect(apiSeen.has(p), `required endpoint ${p} was never requested`).toBe(true);
-    }
-    expect(apiSeen.get("/api/clips")).toContain("limit=500");
-
-    // No mutation surface in the DOM at all (read-only screen has no <form>).
-    await expect(page.locator("form")).toHaveCount(0);
-    await expect(page.locator("button[type=submit]")).toHaveCount(0);
+    // The Save buttons are disabled (cannot be the source of a mutation).
+    await expect(page.locator("form button[disabled]")).toHaveCount(2);
   });
 
   // ── Gate 3 (console + network): zero warnings/errors/pageerror, no failures ─
@@ -217,8 +265,12 @@ test.describe("media hub UAT", () => {
     probe,
   }) => {
     const origin = new URL(loadState().baseURL).origin;
-    await gotoHub(page);
+    await gotoDashboard(page);
     await page.waitForLoadState("networkidle");
+    // Bounded post-load window: a regression that introduces a delayed poller
+    // (e.g. a timer that fetches the absent /api/system/health) would log a
+    // console error / produce a non-2xx here rather than escaping the gate.
+    await page.waitForTimeout(750);
 
     assertCleanConsole(probe);
 
@@ -241,11 +293,11 @@ test.describe("media hub UAT", () => {
   }, testInfo) => {
     const navStart = Date.now();
     await page.goto("/", { waitUntil: "load" });
-    await expect(page.locator("[data-testid=catalog-metrics]")).toBeVisible();
-    // Catalog data painted, measured in-page against the navigation time origin
-    // (independent of the runner's clock). This is a "metrics visible" proxy,
-    // not a formal TTI — labelled as such in the report.
-    const catalogMetricsVisibleMs = await page.evaluate(() => performance.now());
+    await expect(page.locator("[data-screen=settings-dashboard]")).toBeVisible();
+    // Dashboard structure painted, measured in-page against the navigation time
+    // origin (independent of the runner's clock). This is a "content visible"
+    // proxy, not a formal TTI — labelled as such in the report.
+    const contentVisibleMs = await page.evaluate(() => performance.now());
 
     const timings = await page.evaluate(() => {
       const nav = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming;
@@ -296,7 +348,7 @@ test.describe("media hub UAT", () => {
       domInteractiveMs: timings.domInteractiveMs,
       loadMs: timings.loadMs,
       fcpMs: timings.fcpMs,
-      catalogMetricsVisibleMs: Math.round(catalogMetricsVisibleMs),
+      contentVisibleMs: Math.round(contentVisibleMs),
       themeToggleResponseMs: themeToggleMs,
       wallClockNavMs: Date.now() - navStart,
       slowestRequests: timings.slowestRequests,
@@ -314,18 +366,18 @@ test.describe("media hub UAT", () => {
     // the on-device target. (FCP/interactive on a debug webd + cold cache.)
     expect(report.fcpMs, "FCP should be present").not.toBeNull();
     expect(report.fcpMs!).toBeLessThan(5000);
-    expect(report.catalogMetricsVisibleMs).toBeLessThan(5000);
+    expect(report.contentVisibleMs).toBeLessThan(5000);
   });
 
   // ── Gate 4: responsive — render + screenshot at this project's viewport ─
   test("responsive — renders at viewport and screenshot captured", async ({
     page,
   }, testInfo) => {
-    await gotoHub(page);
+    await gotoDashboard(page);
 
     // Content present regardless of breakpoint.
     await expect(page.locator(".device-status-card")).toBeVisible();
-    await expect(page.locator("[data-testid=browse-tiles]")).toBeVisible();
+    await expect(page.locator("#live-metrics-grid")).toBeVisible();
 
     // Breakpoint-specific chrome: desktop shows the rail, mobile the bottom tabs.
     const isMobile = testInfo.project.name.includes("375");
@@ -339,9 +391,9 @@ test.describe("media hub UAT", () => {
       await expect(tabs).toBeHidden();
     }
 
-    const shot = resolve(ARTIFACTS, `hub-${testInfo.project.name}.png`);
+    const shot = resolve(ARTIFACTS, `dashboard-${testInfo.project.name}.png`);
     await page.screenshot({ path: shot, fullPage: true });
-    await testInfo.attach(`hub-${testInfo.project.name}.png`, {
+    await testInfo.attach(`dashboard-${testInfo.project.name}.png`, {
       path: shot,
       contentType: "image/png",
     });

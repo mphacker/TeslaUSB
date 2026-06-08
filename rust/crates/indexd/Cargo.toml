@@ -1,0 +1,32 @@
+# indexd — R2 trips/events/clips derivation → SQLite (docs/specs/indexd.md,
+# contract D1). Consumes scannerd output and derives the rebuildable
+# side-state the web app reads, persisted in SQLite (WAL) on the Pi-side
+# ext4 filesystem — NEVER inside the car's disk.img / Tesla volume. The
+# derivation logic is pure and host-testable; the SQLite I/O lives behind
+# a thin store layer.
+[package]
+name = "indexd"
+description = "TeslaUSB B-1 trips/events/clips derivation into SQLite, consuming scannerd output."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "indexd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "indexd"
+path = "src/main.rs"
+
+[dependencies]
+teslausb-core = { path = "../teslausb-core" }
+scannerd = { path = "../scannerd" }
+rusqlite = { version = "0.32", features = ["bundled"] }
+thiserror = "1"
+
+[lints]
+workspace = true

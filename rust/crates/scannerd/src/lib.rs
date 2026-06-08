@@ -33,6 +33,7 @@ pub mod mbr;
 pub mod mp4probe;
 pub mod reader;
 pub mod seiscan;
+pub mod seiwalk;
 pub mod stability;
 pub mod volume;
 pub mod walk;

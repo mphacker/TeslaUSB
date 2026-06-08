@@ -1,0 +1,740 @@
+//! Idempotent ingest of scanned clips + derived trips/events.
+//!
+//! The scan pipeline calls these entry points as the **sole writer**
+//! (contract D1 §1). All upserts are idempotent via `ON CONFLICT` so a
+//! re-scan of unchanged media produces no row churn. The split mirrors the
+//! v1 worker:
+//!
+//!   * **Derived state** (`clips`, `angles`, `clip_waypoints`, `trips`,
+//!     `trip_points`, `events`) is owned by the scan and is fully
+//!     rebuildable from the media.
+//!   * **Durable control state** (`archive_items`, `eviction_tombstones`,
+//!     `leases`, `prefs`, and the `pinned` / `durable` / `delete_state`
+//!     columns) is NEVER touched here — a rebuild must preserve it (D1
+//!     §5/§6). Pruning a vanished clip therefore only `SET NULL`s the
+//!     `archive_items.clip_id` back-reference (via the schema FK), never
+//!     deletes the archive row.
+//!
+//! Prune semantics mirror `mapping_index_prune.py`: rows for clips whose
+//! `canonical_key` is no longer present on the media are removed, and only
+//! after a *complete* successful scan (the caller passes the full present
+//! key set).
+
+use std::collections::HashSet;
+
+use rusqlite::{Connection, params};
+use teslausb_core::sei::tesla::{AutopilotState, Gear};
+
+use crate::db::{DbError, now_epoch_s};
+use crate::derive::{DeriveConfig, derive};
+use crate::model::{Derivation, DeriveClip, DeriveWaypoint, DerivedTrip, FolderClass};
+
+/// Identity + classification facts for one clip (a group of camera
+/// angles). `started_at` is the resolved recording instant (mvhd-first,
+/// filename fallback) in UTC epoch seconds.
+#[derive(Debug, Clone)]
+pub struct ClipFacts {
+    /// Dedup key: clip directory + timestamp prefix (camera suffix
+    /// stripped), mirroring v1 `mapping_service.canonical_key`.
+    pub canonical_key: String,
+    /// Resolved recording instant, UTC epoch seconds.
+    pub started_at: i64,
+    /// Resolved end instant, if known.
+    pub ended_at: Option<i64>,
+    /// Source partition label (exFAT slot identity).
+    pub partition: String,
+    /// Source-folder classification.
+    pub folder_class: FolderClass,
+    /// Clip duration in seconds, if probed.
+    pub duration_s: Option<f64>,
+}
+
+/// One camera angle (file) belonging to a clip.
+#[derive(Debug, Clone)]
+pub struct AngleFacts {
+    /// Tesla camera label (`front`, `back`, `left_repeater`, …).
+    pub camera: String,
+    /// Opaque reference the reader can resolve back to the file
+    /// (path within the volume).
+    pub file_ref: String,
+    /// `live` / `ro` / `archive` provenance (D1 `angles.view_kind`).
+    pub view_kind: String,
+    /// Millisecond offset of this angle relative to the clip start.
+    pub offset_ms: i64,
+    /// Angle duration in seconds, if probed.
+    pub duration_s: Option<f64>,
+    /// File size in bytes, if known.
+    pub size_bytes: Option<i64>,
+}
+
+/// Upsert a clip by `canonical_key`, returning its DB id. `created_at` is
+/// preserved across updates (only set on first insert).
+///
+/// # Errors
+///
+/// Returns [`DbError`] if the statement fails.
+pub fn upsert_clip(conn: &Connection, facts: &ClipFacts) -> Result<i64, DbError> {
+    let now = now_epoch_s();
+    let id: i64 = conn.query_row(
+        "INSERT INTO clips
+             (canonical_key, started_at, ended_at, partition, folder_class,
+              is_sentry, duration_s, availability, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'present', ?8, ?8)
+         ON CONFLICT(canonical_key) DO UPDATE SET
+             started_at   = excluded.started_at,
+             ended_at     = excluded.ended_at,
+             partition    = excluded.partition,
+             folder_class = excluded.folder_class,
+             is_sentry    = excluded.is_sentry,
+             duration_s   = excluded.duration_s,
+             availability = excluded.availability,
+             updated_at   = excluded.updated_at
+         RETURNING id",
+        params![
+            facts.canonical_key,
+            facts.started_at,
+            facts.ended_at,
+            facts.partition,
+            facts.folder_class.as_db_str(),
+            i64::from(facts.folder_class.is_sentry()),
+            facts.duration_s,
+            now,
+        ],
+        |r| r.get(0),
+    )?;
+    Ok(id)
+}
+
+/// Ensure a clip row exists WITHOUT overwriting its recording instant.
+///
+/// Used for non-front angles, whose Tesla-filename timestamp is a weaker
+/// recording instant than the front clip's `mvhd`/GPS-derived one. On a
+/// fresh row this seeds `started_at`/`folder_class` from the filename
+/// facts; on an existing row it touches only `updated_at`, so a
+/// previously front-resolved `started_at` is never downgraded. Returns
+/// the clip id.
+///
+/// # Errors
+///
+/// Returns [`DbError`] if the statement fails.
+pub fn ensure_clip(conn: &Connection, facts: &ClipFacts) -> Result<i64, DbError> {
+    let now = now_epoch_s();
+    let id: i64 = conn.query_row(
+        "INSERT INTO clips
+             (canonical_key, started_at, ended_at, partition, folder_class,
+              is_sentry, duration_s, availability, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'present', ?8, ?8)
+         ON CONFLICT(canonical_key) DO UPDATE SET
+             availability = 'present',
+             updated_at   = excluded.updated_at
+         RETURNING id",
+        params![
+            facts.canonical_key,
+            facts.started_at,
+            facts.ended_at,
+            facts.partition,
+            facts.folder_class.as_db_str(),
+            i64::from(facts.folder_class.is_sentry()),
+            facts.duration_s,
+            now,
+        ],
+        |r| r.get(0),
+    )?;
+    Ok(id)
+}
+
+/// Upsert one camera angle, keyed `UNIQUE(clip_id, camera)`.
+///
+/// # Errors
+///
+/// Returns [`DbError`] if the statement fails.
+pub fn upsert_angle(conn: &Connection, clip_id: i64, angle: &AngleFacts) -> Result<(), DbError> {
+    conn.execute(
+        "INSERT INTO angles
+             (clip_id, camera, file_ref, view_kind, offset_ms, duration_s, size_bytes)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(clip_id, camera) DO UPDATE SET
+             file_ref   = excluded.file_ref,
+             view_kind  = excluded.view_kind,
+             offset_ms  = excluded.offset_ms,
+             duration_s = excluded.duration_s,
+             size_bytes = excluded.size_bytes",
+        params![
+            clip_id,
+            angle.camera,
+            angle.file_ref,
+            angle.view_kind,
+            angle.offset_ms,
+            angle.duration_s,
+            angle.size_bytes,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Replace the cached SEI telemetry for a clip (full delete + reinsert).
+/// This is pure derived state; the rows carry no control flags.
+///
+/// # Errors
+///
+/// Returns [`DbError`] if a statement fails.
+pub fn replace_clip_waypoints(
+    conn: &Connection,
+    clip_id: i64,
+    waypoints: &[DeriveWaypoint],
+) -> Result<(), DbError> {
+    conn.execute(
+        "DELETE FROM clip_waypoints WHERE clip_id = ?1",
+        params![clip_id],
+    )?;
+    let mut stmt = conn.prepare(
+        "INSERT INTO clip_waypoints
+             (clip_id, seq, frame_index, offset_ms, t, lat, lon, speed, heading,
+              accel_x, accel_y, accel_z, autopilot, gear, has_gps_fix)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+    )?;
+    for (seq, wp) in waypoints.iter().enumerate() {
+        let seq = i64::try_from(seq).unwrap_or(i64::MAX);
+        stmt.execute(params![
+            clip_id,
+            seq,
+            wp.frame_index,
+            wp.offset_ms,
+            wp.absolute_utc,
+            wp.lat,
+            wp.lon,
+            wp.speed,
+            wp.heading,
+            wp.accel_x,
+            wp.accel_y,
+            wp.accel_z,
+            wp.autopilot_state.as_db_str(),
+            wp.gear.as_db_str(),
+            i64::from(wp.has_gps_fix),
+        ])?;
+    }
+    Ok(())
+}
+
+/// Remove derived rows for clips whose `canonical_key` is absent from
+/// `present_keys`. Returns the number of clips pruned. Durable
+/// `archive_items` are preserved (their `clip_id` back-reference is
+/// `SET NULL` by the schema FK). Mirrors `mapping_index_prune.py`.
+///
+/// # Errors
+///
+/// Returns [`DbError`] if a statement fails.
+pub fn prune_missing_clips<S: std::hash::BuildHasher>(
+    conn: &Connection,
+    present_keys: &HashSet<String, S>,
+) -> Result<usize, DbError> {
+    let stale: Vec<i64> = {
+        let mut stmt = conn.prepare("SELECT id, canonical_key FROM clips")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        let mut stale = Vec::new();
+        for row in rows {
+            let (id, key) = row?;
+            if !present_keys.contains(&key) {
+                stale.push(id);
+            }
+        }
+        stale
+    };
+    for id in &stale {
+        conn.execute("DELETE FROM clips WHERE id = ?1", params![id])?;
+    }
+    Ok(stale.len())
+}
+
+/// Load the front-camera clips with cached waypoints, ready for
+/// derivation. A clip qualifies iff it has `clip_waypoints` rows (only
+/// front clips are walked). Ordered `(started_at, id)` to match the
+/// materializer's `ORDER BY` so clustering is deterministic.
+///
+/// # Errors
+///
+/// Returns [`DbError`] if a query fails.
+pub fn load_derive_clips(conn: &Connection) -> Result<Vec<DeriveClip>, DbError> {
+    let clip_rows: Vec<(i64, i64, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT c.id, c.started_at, c.folder_class
+               FROM clips c
+              WHERE EXISTS (SELECT 1 FROM clip_waypoints w WHERE w.clip_id = c.id)
+              ORDER BY c.started_at ASC, c.id ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        out
+    };
+
+    let mut clips = Vec::with_capacity(clip_rows.len());
+    for (clip_id, started_at, folder_class) in clip_rows {
+        let waypoints = load_waypoints(conn, clip_id)?;
+        let gps_waypoint_count = waypoints.iter().filter(|w| w.has_gps_fix).count();
+        clips.push(DeriveClip {
+            clip_id,
+            clip_started_utc: started_at,
+            folder_class: FolderClass::from_db_str(&folder_class),
+            gps_waypoint_count: i64::try_from(gps_waypoint_count).unwrap_or(i64::MAX),
+            waypoints,
+        });
+    }
+    Ok(clips)
+}
+
+/// Load one clip's cached waypoints in `seq` order.
+fn load_waypoints(conn: &Connection, clip_id: i64) -> Result<Vec<DeriveWaypoint>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT frame_index, offset_ms, t, lat, lon, speed, heading,
+                accel_x, accel_y, accel_z, autopilot, gear, has_gps_fix
+           FROM clip_waypoints
+          WHERE clip_id = ?1
+          ORDER BY seq ASC",
+    )?;
+    let rows = stmt.query_map(params![clip_id], |r| {
+        Ok(DeriveWaypoint {
+            frame_index: r.get(0)?,
+            offset_ms: r.get(1)?,
+            absolute_utc: r.get(2)?,
+            lat: r.get(3)?,
+            lon: r.get(4)?,
+            speed: r.get::<_, Option<f64>>(5)?.unwrap_or(0.0),
+            heading: r.get::<_, Option<f64>>(6)?.unwrap_or(0.0),
+            accel_x: r.get(7)?,
+            accel_y: r.get(8)?,
+            accel_z: r.get(9)?,
+            autopilot_state: autopilot_from_db_str(r.get::<_, Option<String>>(10)?.as_deref()),
+            gear: gear_from_db_str(r.get::<_, Option<String>>(11)?.as_deref()),
+            has_gps_fix: r.get::<_, i64>(12)? != 0,
+        })
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+/// Map the persisted `autopilot` string back to a state. Unknown / NULL
+/// values decode to [`AutopilotState::None`] (never an engaged state, so
+/// event parity is preserved).
+fn autopilot_from_db_str(s: Option<&str>) -> AutopilotState {
+    match s {
+        Some("SELF_DRIVING") => AutopilotState::SelfDriving,
+        Some("AUTOSTEER") => AutopilotState::Autosteer,
+        Some("TACC") => AutopilotState::Tacc,
+        _ => AutopilotState::None,
+    }
+}
+
+/// Map the persisted `gear` string back to a gear. Unknown / NULL decode
+/// to [`Gear::Park`] (the proto3 default).
+fn gear_from_db_str(s: Option<&str>) -> Gear {
+    match s {
+        Some("DRIVE") => Gear::Drive,
+        Some("REVERSE") => Gear::Reverse,
+        Some("NEUTRAL") => Gear::Neutral,
+        _ => Gear::Park,
+    }
+}
+
+/// Replace ALL derived trips/events with `derivation`. Deletes in
+/// FK-safe order (events first — they only `SET NULL` on trip delete and
+/// would otherwise survive), then reinserts. Caller supplies the
+/// transaction.
+///
+/// # Errors
+///
+/// Returns [`DbError`] if a statement fails.
+pub fn rebuild_derived(conn: &Connection, derivation: &Derivation) -> Result<(), DbError> {
+    conn.execute("DELETE FROM events", [])?;
+    conn.execute("DELETE FROM trip_points", [])?;
+    conn.execute("DELETE FROM trips", [])?;
+
+    for trip in &derivation.trips {
+        let trip_id = insert_trip(conn, trip)?;
+        insert_trip_points(conn, trip_id, trip)?;
+        for event in &trip.events {
+            insert_event(conn, Some(trip_id), event)?;
+        }
+    }
+    for event in &derivation.sentry_events {
+        insert_event(conn, None, event)?;
+    }
+    Ok(())
+}
+
+/// Insert one trip, returning its DB id.
+fn insert_trip(conn: &Connection, trip: &DerivedTrip) -> Result<i64, DbError> {
+    let now = now_epoch_s();
+    let point_count = i64::try_from(trip.points.len()).unwrap_or(i64::MAX);
+    conn.execute(
+        "INSERT INTO trips
+             (day, started_at, ended_at, bbox_min_lat, bbox_min_lon,
+              bbox_max_lat, bbox_max_lon, distance_m, point_count, polyline,
+              created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)",
+        params![
+            trip.day,
+            trip.started_at,
+            trip.ended_at,
+            trip.bbox_min_lat,
+            trip.bbox_min_lon,
+            trip.bbox_max_lat,
+            trip.bbox_max_lon,
+            trip.distance_m,
+            point_count,
+            trip.polyline,
+            now,
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Insert a trip's durable polyline points.
+fn insert_trip_points(conn: &Connection, trip_id: i64, trip: &DerivedTrip) -> Result<(), DbError> {
+    let mut stmt = conn.prepare(
+        "INSERT INTO trip_points (trip_id, seq, t, lat, lon, speed, heading)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+    )?;
+    for (seq, p) in trip.points.iter().enumerate() {
+        let seq = i64::try_from(seq).unwrap_or(i64::MAX);
+        stmt.execute(params![trip_id, seq, p.t, p.lat, p.lon, p.speed, p.heading])?;
+    }
+    Ok(())
+}
+
+/// Insert one derived event under an optional trip.
+fn insert_event(
+    conn: &Connection,
+    trip_id: Option<i64>,
+    event: &crate::model::DerivedEvent,
+) -> Result<(), DbError> {
+    let now = now_epoch_s();
+    conn.execute(
+        "INSERT INTO events
+             (trip_id, clip_id, type, severity, t, lat, lon,
+              front_frame_offset, front_frame_index, description, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            trip_id,
+            event.clip_id,
+            event.event_type.as_db_str(),
+            event.severity().ordinal(),
+            event.t,
+            event.lat,
+            event.lon,
+            event.front_frame_offset_ms,
+            event.front_frame_index,
+            event.description,
+            now,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Re-derive all trips/events from the cached waypoints and replace the
+/// derived tables, atomically. The reusable rebuild entry point for the
+/// scan pipeline and for later on-demand rebuilds (retentiond / webd).
+///
+/// # Errors
+///
+/// Returns [`DbError`] if loading, deriving, or writing fails.
+pub fn rebuild_all_from_db(
+    conn: &mut Connection,
+    config: DeriveConfig,
+) -> Result<Derivation, DbError> {
+    let clips = load_derive_clips(conn)?;
+    let derivation = derive(&clips, config);
+    let tx = conn.transaction()?;
+    rebuild_derived(&tx, &derivation)?;
+    tx.commit()?;
+    Ok(derivation)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::float_cmp,
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation
+    )]
+
+    use std::collections::HashSet;
+
+    use teslausb_core::sei::tesla::{AutopilotState, Gear};
+
+    use super::{
+        AngleFacts, ClipFacts, load_derive_clips, prune_missing_clips, rebuild_all_from_db,
+        replace_clip_waypoints, upsert_angle, upsert_clip,
+    };
+    use crate::db::open_in_memory;
+    use crate::derive::DeriveConfig;
+    use crate::model::{DeriveWaypoint, FolderClass};
+
+    fn clip_facts(key: &str, started: i64, class: FolderClass) -> ClipFacts {
+        ClipFacts {
+            canonical_key: key.to_owned(),
+            started_at: started,
+            ended_at: Some(started + 60),
+            partition: "p1".to_owned(),
+            folder_class: class,
+            duration_s: Some(60.0),
+        }
+    }
+
+    fn wp(frame: i64, offset_ms: f64, lat: f64, lon: f64, speed: f64) -> DeriveWaypoint {
+        DeriveWaypoint {
+            frame_index: frame,
+            offset_ms,
+            absolute_utc: Some(1_700_000_000 + (offset_ms / 1000.0) as i64),
+            lat,
+            lon,
+            speed,
+            heading: 90.0,
+            accel_x: Some(0.0),
+            accel_y: Some(0.0),
+            accel_z: Some(0.0),
+            autopilot_state: AutopilotState::None,
+            gear: Gear::Drive,
+            has_gps_fix: !(lat == 0.0 && lon == 0.0),
+        }
+    }
+
+    #[test]
+    fn upsert_clip_is_idempotent_by_canonical_key() {
+        let conn = open_in_memory().unwrap();
+        let id1 = upsert_clip(&conn, &clip_facts("k1", 1000, FolderClass::SavedClips)).unwrap();
+        // Re-upsert with changed facts -> same row, updated fields.
+        let mut f = clip_facts("k1", 2000, FolderClass::SavedClips);
+        f.duration_s = Some(120.0);
+        let id2 = upsert_clip(&conn, &f).unwrap();
+        assert_eq!(id1, id2);
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM clips", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        let started: i64 = conn
+            .query_row("SELECT started_at FROM clips WHERE id = ?1", [id1], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(started, 2000);
+    }
+
+    #[test]
+    fn upsert_angle_unique_per_camera() {
+        let conn = open_in_memory().unwrap();
+        let id = upsert_clip(&conn, &clip_facts("k1", 1000, FolderClass::SavedClips)).unwrap();
+        let angle = AngleFacts {
+            camera: "front".to_owned(),
+            file_ref: "a.mp4".to_owned(),
+            view_kind: "archive".to_owned(),
+            offset_ms: 0,
+            duration_s: Some(60.0),
+            size_bytes: Some(100),
+        };
+        upsert_angle(&conn, id, &angle).unwrap();
+        let mut a2 = angle.clone();
+        a2.file_ref = "b.mp4".to_owned();
+        upsert_angle(&conn, id, &a2).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM angles", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        let file_ref: String = conn
+            .query_row("SELECT file_ref FROM angles", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(file_ref, "b.mp4");
+    }
+
+    #[test]
+    fn replace_waypoints_overwrites() {
+        let conn = open_in_memory().unwrap();
+        let id = upsert_clip(&conn, &clip_facts("k1", 1000, FolderClass::SavedClips)).unwrap();
+        replace_clip_waypoints(
+            &conn,
+            id,
+            &[wp(0, 0.0, 1.0, 2.0, 5.0), wp(1, 33.0, 1.1, 2.1, 6.0)],
+        )
+        .unwrap();
+        replace_clip_waypoints(&conn, id, &[wp(0, 0.0, 1.0, 2.0, 5.0)]).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM clip_waypoints WHERE clip_id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn prune_removes_vanished_and_preserves_archive_items() {
+        let conn = open_in_memory().unwrap();
+        let keep = upsert_clip(&conn, &clip_facts("keep", 1000, FolderClass::SavedClips)).unwrap();
+        let gone = upsert_clip(&conn, &clip_facts("gone", 2000, FolderClass::SavedClips)).unwrap();
+        // A durable archive_item referencing the clip that will vanish.
+        conn.execute(
+            "INSERT INTO archive_items (folder_class, path, clip_id, archived_at, created_at, updated_at)
+             VALUES ('SavedClips', '/arch/gone', ?1, 0, 0, 0)",
+            [gone],
+        )
+        .unwrap();
+
+        let mut present = HashSet::new();
+        present.insert("keep".to_owned());
+        let pruned = prune_missing_clips(&conn, &present).unwrap();
+        assert_eq!(pruned, 1);
+
+        let clips: i64 = conn
+            .query_row("SELECT COUNT(*) FROM clips", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(clips, 1);
+        let _ = keep;
+        // Archive item survives; its clip_id is SET NULL.
+        let (arch_count, clip_id): (i64, Option<i64>) = conn
+            .query_row(
+                "SELECT COUNT(*), MAX(clip_id) FROM archive_items WHERE path = '/arch/gone'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(arch_count, 1);
+        assert_eq!(clip_id, None);
+    }
+
+    #[test]
+    fn rebuild_derives_a_moving_trip_and_is_replaceable() {
+        let mut conn = open_in_memory().unwrap();
+        let id = upsert_clip(
+            &conn,
+            &clip_facts("k1", 1_700_000_000, FolderClass::SavedClips),
+        )
+        .unwrap();
+        // ~0.5 km of movement so the min-distance gate passes.
+        let waypoints: Vec<DeriveWaypoint> = (0..6_i64)
+            .map(|i| {
+                let f = i as f64;
+                wp(i, f * 1000.0, 1.0 + f * 0.001, 2.0, 10.0)
+            })
+            .collect();
+        replace_clip_waypoints(&conn, id, &waypoints).unwrap();
+
+        let clips = load_derive_clips(&conn).unwrap();
+        assert_eq!(clips.len(), 1);
+        assert_eq!(clips[0].clip_id, id);
+        assert_eq!(clips[0].waypoints.len(), 6);
+
+        let d1 = rebuild_all_from_db(&mut conn, DeriveConfig::default()).unwrap();
+        assert_eq!(d1.trips.len(), 1);
+        let trips1: i64 = conn
+            .query_row("SELECT COUNT(*) FROM trips", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(trips1, 1);
+        let points1: i64 = conn
+            .query_row("SELECT COUNT(*) FROM trip_points", [], |r| r.get(0))
+            .unwrap();
+        assert!(points1 >= 2);
+
+        // Rebuild again -> no duplication (derived tables fully replaced).
+        let _ = rebuild_all_from_db(&mut conn, DeriveConfig::default()).unwrap();
+        let trips2: i64 = conn
+            .query_row("SELECT COUNT(*) FROM trips", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(trips2, 1);
+    }
+
+    #[test]
+    fn cleared_waypoints_remove_prior_trip() {
+        // Finding-2 regression: when a previously-indexed front clip is
+        // re-walked but yields no telemetry, scan.rs clears its cached
+        // waypoints. The next rebuild MUST NOT retain a phantom trip from
+        // the stale cache.
+        let mut conn = open_in_memory().unwrap();
+        let id = upsert_clip(
+            &conn,
+            &clip_facts("k1", 1_700_000_000, FolderClass::SavedClips),
+        )
+        .unwrap();
+        let waypoints: Vec<DeriveWaypoint> = (0..6_i64)
+            .map(|i| {
+                let f = i as f64;
+                wp(i, f * 1000.0, 1.0 + f * 0.001, 2.0, 10.0)
+            })
+            .collect();
+        replace_clip_waypoints(&conn, id, &waypoints).unwrap();
+        let d1 = rebuild_all_from_db(&mut conn, DeriveConfig::default()).unwrap();
+        assert_eq!(d1.trips.len(), 1);
+
+        // Re-walk yields nothing -> cache cleared.
+        replace_clip_waypoints(&conn, id, &[]).unwrap();
+        let d2 = rebuild_all_from_db(&mut conn, DeriveConfig::default()).unwrap();
+        assert_eq!(d2.trips.len(), 0);
+        let trips: i64 = conn
+            .query_row("SELECT COUNT(*) FROM trips", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(trips, 0);
+        let points: i64 = conn
+            .query_row("SELECT COUNT(*) FROM trip_points", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(points, 0);
+    }
+
+    #[test]
+    fn prune_cascades_waypoints_and_derived_events_parity() {
+        // Parity with `test_mapping_index_prune.py`
+        // (`test_prune_deleted_clips_removes_clip_and_cascaded_rows`):
+        // pruning a vanished clip removes the clip, its waypoints
+        // (FK CASCADE), and — after the rebuild — its derived events.
+        let mut conn = open_in_memory().unwrap();
+        let id = upsert_clip(
+            &conn,
+            &clip_facts("gone", 1_700_000_000, FolderClass::SentryClips),
+        )
+        .unwrap();
+        // A stationary sentry clip: one no-GPS-fix waypoint -> a sentry
+        // event (sentry emits only when gps_waypoint_count == 0).
+        replace_clip_waypoints(&conn, id, &[wp(0, 0.0, 0.0, 0.0, 0.0)]).unwrap();
+        let d1 = rebuild_all_from_db(&mut conn, DeriveConfig::default()).unwrap();
+        assert_eq!(d1.sentry_events.len(), 1);
+        let events1: i64 = conn
+            .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(events1, 1);
+
+        // Clip vanished from the media -> not in the present set.
+        let present: HashSet<String> = HashSet::new();
+        let pruned = prune_missing_clips(&conn, &present).unwrap();
+        assert_eq!(pruned, 1);
+
+        // Clip + waypoints gone immediately (CASCADE).
+        let clips: i64 = conn
+            .query_row("SELECT COUNT(*) FROM clips", [], |r| r.get(0))
+            .unwrap();
+        let wps: i64 = conn
+            .query_row("SELECT COUNT(*) FROM clip_waypoints", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(clips, 0);
+        assert_eq!(wps, 0);
+
+        // Derived events disappear on the next rebuild (no source clip).
+        let d2 = rebuild_all_from_db(&mut conn, DeriveConfig::default()).unwrap();
+        assert_eq!(d2.sentry_events.len(), 0);
+        let events2: i64 = conn
+            .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(events2, 0);
+    }
+}

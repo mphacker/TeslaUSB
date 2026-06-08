@@ -17,6 +17,7 @@ members = [
     "crates/teslausb-core",
     "crates/gadgetd",
     "crates/scannerd",
+    "crates/indexd",
 ]
 
 # Shared package metadata. Each crate inherits via `field.workspace = true`

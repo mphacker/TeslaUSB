@@ -85,14 +85,25 @@ test.describe("settings dashboard UAT", () => {
     await expect(card).toContainText("Status Unknown");
     await expect(card).toContainText("Unable to determine current device status.");
 
-    // System Health — open, loading skeleton (no live probe in read-only build).
+    // System Health — open. The legacy /api/system/health probe is not in the
+    // read-only catalog API, so the overall stays the legacy degraded default
+    // and every subsystem row degrades to the legacy "—" state, EXCEPT Video
+    // Indexer, which is populated from real catalog data (seed = 6 clips).
     const sh = page.locator("#system-health-section");
     await expect(sh).toHaveAttribute("open", "");
-    await expect(page.locator("#system-health-overall-text")).toHaveText("Loading…");
-    await expect(sh.locator(".health-dot.health-dot-unknown")).toBeVisible();
-    // The rows grid must stay EMPTY — a regression that silently starts fetching
-    // /api/system/health and populates rows would fail here.
-    await expect(page.locator("#system-health-rows > *")).toHaveCount(0);
+    await expect(page.locator("#system-health-overall-text")).toHaveText("Unknown");
+    await expect(
+      sh.locator("#system-health-overall .health-dot.health-dot-unknown"),
+    ).toBeVisible();
+    // 10 legacy subsystem rows × 3 grid cells = 30 direct children.
+    await expect(page.locator("#system-health-rows > div")).toHaveCount(30);
+    const shText = await page.locator("#system-health-rows").innerText();
+    expect(shText).toContain("USB Gadget"); // a system-probe label is present
+    expect(shText).toContain("Video Indexer");
+    // Video Indexer carries REAL catalog data in the baseline's exact phrasing.
+    expect(shText).toMatch(/6 clips indexed; newest is \d+ d old/);
+    // Every other (non-catalog) subsystem degrades to "—" — none is fabricated.
+    expect((shText.match(/—/g) ?? []).length).toBe(9);
 
     // Live Metrics — open, six zero-state tiles, "—" footer (no fabricated nums).
     const lm = page.locator("#live-metrics-section");
@@ -219,8 +230,10 @@ test.describe("settings dashboard UAT", () => {
       return seen;
     }
     const apiSeen = assertOnlyWhitelistedApi();
-    // The config bindings prove the catalog API is actually wired in.
+    // The config bindings + the Video Indexer enrichment prove the catalog API
+    // is actually wired in (settings → forms, clips → System Health row).
     expect(apiSeen.has("/api/settings"), "/api/settings was never requested").toBe(true);
+    expect(apiSeen.has("/api/clips"), "/api/clips was never requested").toBe(true);
 
     // ACTIVELY exercise the mutation surface: expand every section, then prove
     // each config <form> swallows its submit (onSubmit preventDefault) and that

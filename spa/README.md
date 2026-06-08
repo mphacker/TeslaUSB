@@ -35,7 +35,12 @@ verbatim — never calling the absent endpoints (a 404 fetch would break the
 zero-console gate):
 
 - **Device Status** → the exact baseline degraded banner ("Status Unknown").
-- **System Health** → the template's loading skeleton (grey dot + "Loading…").
+- **System Health** → reproduces the legacy probe grid exactly. The
+  `/api/system/health` probe is not in the read-only catalog API, so the
+  overall line and every system-probe row degrade to the legacy "Unknown / —"
+  state — **except Video Indexer**, the one row that is catalog-derived: it
+  shows `"N clips indexed; newest is M d old"` computed from `GET /api/clips`
+  (the baseline's exact phrasing). No system metrics are fabricated.
 - **Live Metrics** → the six zero-state tiles ("—") and "Updated — · —" footer.
   Real CPU/MEM need a future **system-metrics** endpoint (a tracked gap flagged
   to the integrator); we do **not** fabricate numbers.
@@ -43,9 +48,10 @@ zero-console gate):
 - **Access Point** → the degraded "AP status unavailable" variant.
 - **System** → host facts shown as "—" (an on-device concern; not fabricated).
 
-The one live read the screen performs is `GET /api/settings`, used to populate
+The screen performs two read-only catalog reads: `GET /api/settings` populates
 the **Mapping & Indexing** and **Network File Sharing** form fields where prefs
-keys map. Those forms are reproduced for structural parity but are **inert**
+keys map, and `GET /api/clips` drives the **Video Indexer** System-Health row.
+The config forms are reproduced for structural parity but are **inert**
 (`type="button"` + `onSubmit preventDefault`), so the screen can never mutate.
 
 This is the parity the integrator endorsed ("a catalog-only webd organically
@@ -162,7 +168,8 @@ Gates asserted (all required):
 5. **Wiring + read-only proof** — the build id baked into the on-disk bundle
    equals `window.__TESLAUSB_BUILD__` in the live page (the executed JS *is* the
    freshly-built bundle); the served HTML references the hashed `/assets/*.js`
-   (not `/src/main.tsx`); only the whitelisted `GET /api/settings` is made; and
+   (not `/src/main.tsx`); only the whitelisted catalog GETs (`/api/settings`,
+   `/api/clips`) are made; and
    the config forms are *actively* exercised (dispatch submit + Enter) to prove
    they cannot mutate — no POST/PUT/PATCH/DELETE ever leaves the page.
 

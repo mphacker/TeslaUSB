@@ -1,4 +1,5 @@
 import { useEffect, useState } from "preact/hooks";
+import { Fragment } from "preact";
 import { Shell } from "../components/Shell";
 import { api } from "../api/client";
 import type { Pref } from "../api/types";
@@ -55,8 +56,40 @@ const TIMEZONES = [
   "Europe/Berlin",
 ];
 
+// System Health subsystems + severity colors — transcribed verbatim from the
+// legacy index.html card (Phase 4.2). The legacy JS renders any subsystem key
+// absent from the probe payload as a grey "unknown" dot + "—" message; we feed
+// a payload where ONLY `indexer` (Video Indexer) is populated, derived from the
+// read-only catalog, so every other (system-probe) row degrades to that legacy
+// "—" state rather than a fabricated value.
+const SUBSYSTEMS = [
+  { key: "gadget", label: "USB Gadget" },
+  { key: "teslafat_0", label: "TeslaCam (exFAT)" },
+  { key: "teslafat_1", label: "Media (exFAT)" },
+  { key: "worker", label: "Background Worker" },
+  { key: "indexer", label: "Video Indexer" },
+  { key: "disk", label: "SD Card" },
+  { key: "storage_writable", label: "Storage Roots" },
+  { key: "network", label: "WiFi" },
+  { key: "samba", label: "Network Share" },
+  { key: "journal", label: "Recent Errors" },
+];
+
+const SEV_COLORS: Record<string, string> = {
+  ok: "var(--accent-success, #4caf50)",
+  warn: "var(--accent-warning, #ff9800)",
+  error: "var(--accent-error,   #f44336)",
+  unknown: "var(--text-secondary, #888)",
+};
+
+interface HealthBlock {
+  severity: string;
+  message: string;
+}
+
 export function MediaHub() {
   const [prefs, setPrefs] = useState<Pref[] | null>(null);
+  const [indexer, setIndexer] = useState<HealthBlock | null>(null);
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -66,6 +99,28 @@ export function MediaHub() {
       .catch(() => {
         // Read-only degrade: fall back to template defaults without logging,
         // so an absent/empty prefs store never trips the zero-console gate.
+      });
+    // Video Indexer status is the one System Health row that IS catalog data:
+    // clip count + newest-clip age, derived from the read-only catalog. Every
+    // other subsystem stays in the legacy "—" unknown state (not fabricated).
+    api
+      .clips({ limit: 500 }, ctrl.signal)
+      .then((page) => {
+        const clips = page.items;
+        const count = clips.length;
+        if (count === 0) {
+          setIndexer({ severity: "unknown", message: "0 clips indexed" });
+          return;
+        }
+        const newest = Math.max(...clips.map((c) => c.started_at));
+        const daysOld = Math.floor((Date.now() / 1000 - newest) / 86400);
+        setIndexer({
+          severity: "ok",
+          message: `${count} clips indexed; newest is ${daysOld} d old`,
+        });
+      })
+      .catch(() => {
+        // Degrade: the Video Indexer row stays "—"/unknown like the others.
       });
     return () => ctrl.abort();
   }, []);
@@ -84,8 +139,12 @@ export function MediaHub() {
           </div>
         </div>
 
-        {/* System Health — loading skeleton (the live probe is not part of the
-            read-only catalog API; tracked gap). */}
+        {/* System Health — the legacy probe (/api/system/health) is NOT part of
+            the read-only catalog API, so each subsystem row degrades to the
+            legacy "unknown / —" state EXCEPT Video Indexer, which is derived
+            from the read-only catalog (clip count + newest age) — exactly the
+            baseline's "N clips indexed; newest is M d old". No system metric is
+            fabricated; the overall stays the legacy degraded default. */}
         <details class="settings-section" id="system-health-section" open>
           <summary>System Health</summary>
           <div class="section-content">
@@ -100,14 +159,34 @@ export function MediaHub() {
                 <span
                   class="health-dot health-dot-unknown"
                   aria-hidden="true"
-                  style="width:10px; height:10px; border-radius:50%; display:inline-block; flex-shrink:0; background:var(--text-secondary);"
+                  style="width:10px; height:10px; border-radius:50%; display:inline-block; flex-shrink:0; background:var(--text-secondary, #888);"
                 />
-                <span id="system-health-overall-text">Loading…</span>
+                <span id="system-health-overall-text">Unknown</span>
               </p>
               <div
                 id="system-health-rows"
                 style="display:grid; grid-template-columns:auto auto 1fr; gap:6px 12px; align-items:center; font-size:0.9rem;"
-              />
+              >
+                {SUBSYSTEMS.map((sub) => {
+                  const block = sub.key === "indexer" ? indexer : null;
+                  const sev = block?.severity ?? "unknown";
+                  const msg = block?.message ?? "—";
+                  return (
+                    <Fragment key={sub.key}>
+                      <div>
+                        <span
+                          aria-label={sev}
+                          style={`width:10px; height:10px; border-radius:50%; display:inline-block; flex-shrink:0; background:${SEV_COLORS[sev] ?? SEV_COLORS.unknown};`}
+                        />
+                      </div>
+                      <div style="color:var(--text-primary)">{sub.label}</div>
+                      <div style="color:var(--text-secondary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
+                        {msg}
+                      </div>
+                    </Fragment>
+                  );
+                })}
+              </div>
             </div>
           </div>
         </details>

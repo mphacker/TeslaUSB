@@ -75,4 +75,4 @@ export { expect };
  *  read-only; anything outside this set (or any non-GET) is a hard failure.
  *  The dashboard's only live read is /api/settings (config-form bindings); the
  *  full catalog client is exercised separately by api-client.spec.ts. */
-export const ALLOWED_API = new Set(["/api/settings"]);
+export const ALLOWED_API = new Set(["/api/settings", "/api/clips"]);

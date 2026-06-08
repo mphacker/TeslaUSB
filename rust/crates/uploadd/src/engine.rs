@@ -24,7 +24,7 @@
 
 use crate::config::UploaddConfig;
 use crate::durability::DurabilityClient;
-use crate::error::{EngineError, SourceError, TransferError};
+use crate::error::{EngineError, IndexError, SourceError, TransferError};
 use crate::lease::{LeaseClient, LeaseGen, LeaseGrant, LeaseId, LeaseKind, RenewResult};
 use crate::queue::{QueueItem, QueueStore};
 use crate::source::{ArchiveItemId, ArchiveRoot, ArchiveSource, ContentHash};
@@ -86,6 +86,15 @@ pub enum StepOutcome {
     },
     /// The lease was denied (the item is being deleted by `retentiond`); no
     /// transfer was attempted and the item state is unchanged.
+    ///
+    /// The item's queue state is intentionally left untouched: a denial means
+    /// `retentiond` has claimed the item for deletion, so `indexd` will drop the
+    /// row and the next [`QueueStore::load`] hydrate reaps it. The live scheduler
+    /// must therefore treat this outcome as "skip and back off" rather than
+    /// immediately reselecting the same item (which would otherwise head-of-line
+    /// block lower-priority work until the next hydrate).
+    ///
+    /// [`QueueStore::load`]: crate::queue::QueueStore::load
     SkippedLeaseDenied {
         /// The item.
         item: ArchiveItemId,
@@ -116,6 +125,19 @@ enum TransferStop {
     Recoverable(String),
     /// The lease was lost (`Stale` renew) — stop and re-acquire later.
     LeaseLost(String),
+    /// The throttle paused uploads mid-transfer. The checkpoint is already
+    /// persisted, so the item resumes when uploads resume. This is **not** a
+    /// failure — no upload attempt is charged.
+    Paused {
+        /// How to yield (drain / checkpoint / abort).
+        action: PauseAction,
+        /// Which plane paused, and why.
+        reason: GateReason,
+    },
+    /// A durable queue-store RPC failed mid-transfer. Surfaced as an
+    /// infrastructure error (not a transfer failure) so a flaky `indexd` RPC
+    /// never consumes an upload attempt or parks a healthy item.
+    Infra(IndexError),
 }
 
 impl UploadEngine<'_> {
@@ -149,9 +171,14 @@ impl UploadEngine<'_> {
         };
 
         // Mark in-flight and persist *before* sending so a crash leaves a
-        // resumable InProgress row, never a lost item.
+        // resumable InProgress row, never a lost item. If this persist fails,
+        // release the just-acquired lease before surfacing the error so a failed
+        // persist never leaks a lease that would block eviction until its TTL.
         item.begin();
-        self.queue_store.persist(item)?;
+        if let Err(e) = self.queue_store.persist(item) {
+            let _ = self.lease.release(held.lease_id, held.gen_token);
+            return Err(EngineError::Index(e));
+        }
 
         let result = self.run_transfer(item, &held, max_tx, max_chunk);
 
@@ -198,33 +225,52 @@ impl UploadEngine<'_> {
             Err(TransferStop::Recoverable(reason) | TransferStop::LeaseLost(reason)) => {
                 self.fail_item(item, &reason, false)
             }
+            // A mid-transfer pause is not a failure: the item stays InProgress
+            // with its checkpoint and resumes when uploads are allowed again.
+            Err(TransferStop::Paused { action, reason }) => {
+                Ok(StepOutcome::Paused { reason, action })
+            }
+            // An infra (queue-store RPC) failure surfaces as an error so the live
+            // loop backs off, without charging the item an upload attempt.
+            Err(TransferStop::Infra(e)) => Err(EngineError::Index(e)),
         }
     }
 
     /// The chunked, paced, lease-renewing transfer loop. On success returns the
     /// remote-computed digest from `finalize`.
+    ///
+    /// Each iteration re-reads the throttle (so a mid-transfer pause or a lowered
+    /// cap is honored immediately, never run on a stale cap), then renews the
+    /// lease *before* the potentially long pace wait / send when the cadence is
+    /// due, so the lease deadline always covers the upcoming chunk.
     fn transfer(
         &self,
         item: &mut QueueItem,
         held: &HeldLease,
-        max_tx: u64,
-        max_chunk: u32,
+        initial_max_tx: u64,
+        initial_max_chunk: u32,
     ) -> Result<ContentHash, TransferStop> {
         let path = self
             .archive_root
             .resolve(&item.source_rel)
             .map_err(|e| stop_from_source(&e))?;
 
-        // Pacer capacity is one second of cap, but never smaller than a single
-        // chunk (else a chunk could never fit and the loop would stall).
-        let capacity = max_tx.max(u64::from(max_chunk));
-        let mut pacer = Pacer::new(max_tx, capacity, self.clock.mono_now().0);
+        let mut max_tx = initial_max_tx;
+        let mut max_chunk = initial_max_chunk;
+        // Capacity is one second of the cap (a bounded burst). A single paced
+        // write is separately clamped to the cap (see `chunk_len`), so the burst
+        // can never exceed the published per-second ceiling even when the
+        // per-write ceiling is larger.
+        let mut pacer = Pacer::new(max_tx, max_tx.max(1), self.clock.mono_now().0);
         let mut last_renew = self.clock.mono_now();
 
         let mut offset = item.bytes_uploaded;
         let total = item.total_bytes;
         while offset < total {
-            let chunk_len = chunk_len(total - offset, max_chunk);
+            self.apply_throttle(&mut pacer, &mut max_tx, &mut max_chunk)?;
+            self.maybe_renew(held, &mut last_renew)?;
+
+            let chunk_len = chunk_len(total - offset, max_chunk, max_tx);
             self.pace(&mut pacer, chunk_len);
 
             let want = usize::try_from(chunk_len).unwrap_or(usize::MAX);
@@ -233,7 +279,12 @@ impl UploadEngine<'_> {
                 .read_chunk(&path, offset, want)
                 .map_err(|e| stop_from_source(&e))?;
             if data.is_empty() {
-                break; // defensive: unexpected EOF — treat remaining as done
+                // Unexpected EOF before the declared total: a truncated or
+                // replaced source. Treat as a recoverable read error (retry),
+                // never as silent completion.
+                return Err(TransferStop::Recoverable(format!(
+                    "source ended early at offset {offset} of {total} bytes"
+                )));
             }
 
             self.uploader
@@ -245,14 +296,37 @@ impl UploadEngine<'_> {
             item.checkpoint(offset);
             self.queue_store
                 .persist(item)
-                .map_err(|e| TransferStop::Recoverable(e.to_string()))?;
-
-            self.maybe_renew(held, &mut last_renew)?;
+                .map_err(TransferStop::Infra)?;
         }
 
         self.uploader
             .finalize(&item.remote_key, total)
             .map_err(|e| stop_from_transfer(&e))
+    }
+
+    /// Re-read the throttle. On a fresh `Pause`, stop the transfer at the current
+    /// (persisted) checkpoint; on `Run`, apply any cap change to the pacer so a
+    /// mid-transfer `NearDeadlock` backoff (or recovery) takes effect at once.
+    fn apply_throttle(
+        &self,
+        pacer: &mut Pacer,
+        max_tx: &mut u64,
+        max_chunk: &mut u32,
+    ) -> Result<(), TransferStop> {
+        match self.throttle.current().gate() {
+            UploadGate::Pause { action, reason } => Err(TransferStop::Paused { action, reason }),
+            UploadGate::Run {
+                max_tx_bytes_per_s,
+                max_chunk_bytes,
+            } => {
+                if max_tx_bytes_per_s != *max_tx || max_chunk_bytes != *max_chunk {
+                    *max_tx = max_tx_bytes_per_s;
+                    *max_chunk = max_chunk_bytes;
+                    pacer.set_rate(max_tx_bytes_per_s, max_tx_bytes_per_s.max(1));
+                }
+                Ok(())
+            }
+        }
     }
 
     /// Block (via the [`Waiter`]) until `bytes` of TX allowance are available.
@@ -335,10 +409,13 @@ impl UploadEngine<'_> {
     }
 }
 
-/// The largest chunk to read/send next: the smaller of the remaining bytes and
-/// the published per-write ceiling (never zero while bytes remain).
-fn chunk_len(remaining: u64, max_chunk: u32) -> u64 {
-    remaining.min(u64::from(max_chunk).max(1))
+/// The largest chunk to read/send next: the smaller of the remaining bytes, the
+/// published per-write ceiling, and one second of the TX cap (so a single paced
+/// write can never burst past the per-second cap). Never zero while bytes remain
+/// (the cap is `> 0` whenever the gate says `Run`).
+fn chunk_len(remaining: u64, max_chunk: u32, max_tx: u64) -> u64 {
+    let per_write = u64::from(max_chunk).max(1).min(max_tx.max(1));
+    remaining.min(per_write)
 }
 
 /// Map a source read error into a transfer stop. An archive-root rejection is
@@ -426,6 +503,7 @@ mod tests {
         data: Vec<u8>,
         read_paths: RefCell<Vec<String>>,
         fail_at: Option<u64>,
+        eof_at: Option<u64>,
     }
     impl MockSource {
         fn new(data: Vec<u8>) -> Self {
@@ -433,6 +511,7 @@ mod tests {
                 data,
                 read_paths: RefCell::new(Vec::new()),
                 fail_at: None,
+                eof_at: None,
             }
         }
     }
@@ -450,6 +529,11 @@ mod tests {
             if let Some(f) = self.fail_at {
                 if offset >= f {
                     return Err(SourceError::Io("injected read failure".to_owned()));
+                }
+            }
+            if let Some(e) = self.eof_at {
+                if offset >= e {
+                    return Ok(Vec::new()); // simulate a truncated/replaced source
                 }
             }
             let start = usize::try_from(offset)
@@ -597,15 +681,25 @@ mod tests {
         }
     }
 
-    /// Mock durable queue store (records every persisted snapshot).
+    /// Mock durable queue store (records every persisted snapshot). Can be told
+    /// to fail a specific persist call (1-indexed) to exercise infra-error paths.
     struct MockQueueStore {
         persisted: RefCell<Vec<QueueItem>>,
+        calls: Cell<u32>,
+        fail_on_call: Option<u32>,
     }
     impl MockQueueStore {
         fn new() -> Self {
             Self {
                 persisted: RefCell::new(Vec::new()),
+                calls: Cell::new(0),
+                fail_on_call: None,
             }
+        }
+        fn failing_on(call: u32) -> Self {
+            let mut s = Self::new();
+            s.fail_on_call = Some(call);
+            s
         }
     }
     impl QueueStore for MockQueueStore {
@@ -613,6 +707,11 @@ mod tests {
             Ok(self.persisted.borrow().clone())
         }
         fn persist(&self, item: &QueueItem) -> Result<(), IndexError> {
+            let n = self.calls.get() + 1;
+            self.calls.set(n);
+            if self.fail_on_call == Some(n) {
+                return Err(IndexError::new("persist", "injected persist failure"));
+            }
             let mut p = self.persisted.borrow_mut();
             if let Some(slot) = p.iter_mut().find(|i| i.id == item.id) {
                 *slot = item.clone();
@@ -630,6 +729,33 @@ mod tests {
     impl ThrottleSource for FixedThrottle {
         fn current(&self) -> ThrottleSnapshot {
             self.snap
+        }
+    }
+
+    /// Throttle that returns `first` for the first `switch_after` reads, then
+    /// `second` — to drive a mid-transfer pause or cap change.
+    struct SwitchingThrottle {
+        calls: Cell<u32>,
+        switch_after: u32,
+        first: ThrottleSnapshot,
+        second: ThrottleSnapshot,
+    }
+    impl ThrottleSource for SwitchingThrottle {
+        fn current(&self) -> ThrottleSnapshot {
+            let n = self.calls.get() + 1;
+            self.calls.set(n);
+            if n <= self.switch_after {
+                self.first
+            } else {
+                self.second
+            }
+        }
+    }
+
+    fn paused_snapshot() -> ThrottleSnapshot {
+        ThrottleSnapshot {
+            wifi: WifiThrottle::closed(),
+            storage: StoragePressure::open(),
         }
     }
 
@@ -1016,5 +1142,180 @@ mod tests {
         assert_eq!(uploader.received_bytes(), 0, "no bytes left the box");
         assert!(source.read_paths.borrow().is_empty(), "no read was issued");
         assert!(durability.marked.borrow().is_empty());
+    }
+
+    #[test]
+    fn throttle_pause_mid_transfer_checkpoints_and_releases() {
+        // First two throttle reads (process gate + first loop iteration) allow
+        // uploads; the third pauses, after one chunk has been sent + checkpointed.
+        let data: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
+        let cfg = UploaddConfig::default();
+        let root = root();
+        let source = MockSource::new(data.clone());
+        let uploader = MockUploader::new();
+        let lease = MockLease::granting();
+        let durability = MockDurability::new();
+        let store = MockQueueStore::new();
+        let throttle = SwitchingThrottle {
+            calls: Cell::new(0),
+            switch_after: 2,
+            first: running(1_000_000, 200),
+            second: paused_snapshot(),
+        };
+        let timeline = Timeline::new();
+        let engine = UploadEngine {
+            cfg: &cfg,
+            archive_root: &root,
+            source: &source,
+            uploader: &uploader,
+            lease: &lease,
+            durability: &durability,
+            queue_store: &store,
+            throttle: &throttle,
+            clock: &timeline,
+            waiter: &timeline,
+        };
+        let mut item = test_item(data.len() as u64, digest(&data));
+
+        let outcome = engine.process(&mut item).expect("no infra error");
+        assert!(matches!(outcome, StepOutcome::Paused { .. }));
+        assert_eq!(item.state, crate::queue::UploadState::InProgress);
+        assert_eq!(
+            item.bytes_uploaded, 200,
+            "checkpoint persisted before pause"
+        );
+        assert_eq!(item.attempts, 0, "a pause is not a failed attempt");
+        assert_eq!(uploader.received_bytes(), 200, "exactly one chunk sent");
+        assert!(durability.marked.borrow().is_empty());
+        assert_eq!(lease.release_calls.get(), 1, "lease released on pause");
+    }
+
+    #[test]
+    fn lease_released_when_initial_persist_fails() {
+        let cfg = UploaddConfig::default();
+        let root = root();
+        let source = MockSource::new(vec![1, 2, 3]);
+        let uploader = MockUploader::new();
+        let lease = MockLease::granting();
+        let durability = MockDurability::new();
+        let store = MockQueueStore::failing_on(1); // the begin() persist fails
+        let throttle = FixedThrottle {
+            snap: running(1_000_000, 4096),
+        };
+        let timeline = Timeline::new();
+        let engine = UploadEngine {
+            cfg: &cfg,
+            archive_root: &root,
+            source: &source,
+            uploader: &uploader,
+            lease: &lease,
+            durability: &durability,
+            queue_store: &store,
+            throttle: &throttle,
+            clock: &timeline,
+            waiter: &timeline,
+        };
+        let mut item = test_item(3, digest(&[1, 2, 3]));
+
+        let result = engine.process(&mut item);
+        assert!(result.is_err(), "initial persist failure is an infra error");
+        assert_eq!(lease.acquire_calls.get(), 1);
+        assert_eq!(
+            lease.release_calls.get(),
+            1,
+            "the acquired lease must be released even when the first persist fails"
+        );
+        assert_eq!(uploader.received_bytes(), 0);
+    }
+
+    #[test]
+    fn midloop_persist_failure_is_infra_not_a_charged_attempt() {
+        // The begin() persist (call 1) succeeds; the post-chunk checkpoint persist
+        // (call 2) fails. That is an infrastructure error — it must not increment
+        // the item's upload attempts or park it as Failed.
+        let data: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
+        let cfg = UploaddConfig::default();
+        let root = root();
+        let source = MockSource::new(data.clone());
+        let uploader = MockUploader::new();
+        let lease = MockLease::granting();
+        let durability = MockDurability::new();
+        let store = MockQueueStore::failing_on(2);
+        let throttle = FixedThrottle {
+            snap: running(1_000_000, 200),
+        };
+        let timeline = Timeline::new();
+        let engine = UploadEngine {
+            cfg: &cfg,
+            archive_root: &root,
+            source: &source,
+            uploader: &uploader,
+            lease: &lease,
+            durability: &durability,
+            queue_store: &store,
+            throttle: &throttle,
+            clock: &timeline,
+            waiter: &timeline,
+        };
+        let mut item = test_item(data.len() as u64, digest(&data));
+
+        let result = engine.process(&mut item);
+        assert!(
+            result.is_err(),
+            "checkpoint persist failure surfaces as error"
+        );
+        assert_eq!(item.attempts, 0, "infra error must not charge an attempt");
+        assert_eq!(item.state, crate::queue::UploadState::InProgress);
+        assert!(durability.marked.borrow().is_empty());
+        assert_eq!(
+            lease.release_calls.get(),
+            1,
+            "lease released on infra error"
+        );
+    }
+
+    #[test]
+    fn early_eof_before_total_is_a_recoverable_retry() {
+        // The source reports 1000 bytes but returns EOF at 400 (truncated/replaced
+        // file). The engine must not finalize a short upload silently.
+        let data: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
+        let cfg = UploaddConfig::default();
+        let root = root();
+        let mut source = MockSource::new(data.clone());
+        source.eof_at = Some(400);
+        let uploader = MockUploader::new();
+        let lease = MockLease::granting();
+        let durability = MockDurability::new();
+        let store = MockQueueStore::new();
+        let throttle = FixedThrottle {
+            snap: running(1_000_000, 200),
+        };
+        let timeline = Timeline::new();
+        let engine = UploadEngine {
+            cfg: &cfg,
+            archive_root: &root,
+            source: &source,
+            uploader: &uploader,
+            lease: &lease,
+            durability: &durability,
+            queue_store: &store,
+            throttle: &throttle,
+            clock: &timeline,
+            waiter: &timeline,
+        };
+        let mut item = test_item(data.len() as u64, digest(&data));
+
+        let outcome = engine.process(&mut item).expect("no infra error");
+        assert!(matches!(outcome, StepOutcome::Retry { .. }));
+        assert_eq!(item.state, crate::queue::UploadState::Failed);
+        assert_eq!(
+            uploader.received_bytes(),
+            400,
+            "only pre-EOF bytes were sent"
+        );
+        assert!(
+            durability.marked.borrow().is_empty(),
+            "short upload not durable"
+        );
     }
 }

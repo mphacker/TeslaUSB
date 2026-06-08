@@ -69,9 +69,9 @@ fn seed(path: &std::path::Path) {
             (1, 'clip-1', 1000, 1200, 'p1', 'SavedClips', 0, 60.0, 'present', 0, 0),
             (2, 'clip-2', 2000, 2100, 'p1', 'SentryClips', 1, 30.0, 'present', 0, 0);
          INSERT INTO angles (id, clip_id, camera, file_ref, view_kind, offset_ms, duration_s, size_bytes) VALUES
-            (1, 1, 'front', 'p1/clip-1/front.mp4', 'live', 0, 60.0, 1111),
-            (2, 1, 'back',  'p1/clip-1/back.mp4',  'live', 0, 60.0, 2222),
-            (3, 2, 'front', 'p1/clip-2/front.mp4', 'live', 0, 30.0, 3333);
+            (1, 1, 'front', 'p1/clip-1/front.mp4', 'ro_usb', 0, 60.0, 1111),
+            (2, 1, 'back',  'p1/clip-1/back.mp4',  'ro_usb', 0, 60.0, 2222),
+            (3, 2, 'front', 'p1/clip-2/front.mp4', 'ro_usb', 0, 30.0, 3333);
          INSERT INTO prefs (key, value) VALUES
             ('speed_unit', 'mph'),
             ('map_provider', 'osm');",
@@ -266,8 +266,9 @@ async fn clips_list_with_angles_and_pagination() {
     // Ordered by camera ASC: back, front.
     assert_eq!(angles[0]["camera"], "back");
     assert_eq!(angles[1]["camera"], "front");
-    // view_kind passed through opaquely (code writes "live").
-    assert_eq!(angles[0]["view_kind"], "live");
+    // view_kind passed through opaquely; indexd emits 'ro_usb' for live
+    // car-volume clips (D1; indexd commit 6bd5ced) and 'archive' for Pi-side.
+    assert_eq!(angles[0]["view_kind"], "ro_usb");
 
     let clip2 = &items[1];
     assert_eq!(clip2["is_sentry"], true);

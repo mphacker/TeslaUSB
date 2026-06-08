@@ -57,7 +57,7 @@ pub struct AngleFacts {
     /// Opaque reference the reader can resolve back to the file
     /// (path within the volume).
     pub file_ref: String,
-    /// `live` / `ro` / `archive` provenance (D1 `angles.view_kind`).
+    /// `ro_usb` / `archive` provenance (D1 `angles.view_kind`).
     pub view_kind: String,
     /// Millisecond offset of this angle relative to the clip start.
     pub offset_ms: i64,

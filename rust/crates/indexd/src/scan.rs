@@ -162,14 +162,16 @@ fn clip_identity(record: &FileRecord) -> Option<ClipIdent> {
 }
 
 /// D1 `view_kind` for a freshly scanned car-volume clip. These are the
-/// car's own live recordings read read-only through the raw reader;
-/// `ArchivedClips` are Pi-side archive copies. (FLAG: provisional
-/// mapping — `live`/`ro` distinction may be refined by retentiond/webd.)
+/// car's own live recordings read read-only through the raw reader, so they
+/// carry D1's `'ro_usb'` view (the live read-only USB view, which Tesla may
+/// rotate at any time — never retention-leasable / never an upload source per
+/// `indexd-schema.md` §3.1 + `uploadd.md` §3). `ArchivedClips` are Pi-side
+/// archive copies and carry `'archive'` (the durable/playable source).
 fn view_kind_for(folder_class: FolderClass) -> &'static str {
     if matches!(folder_class, FolderClass::ArchivedClips) {
         "archive"
     } else {
-        "live"
+        "ro_usb"
     }
 }
 
@@ -480,10 +482,10 @@ mod tests {
     }
 
     #[test]
-    fn view_kind_maps_archive_vs_live() {
+    fn view_kind_maps_archive_vs_ro_usb() {
         assert_eq!(view_kind_for(FolderClass::ArchivedClips), "archive");
-        assert_eq!(view_kind_for(FolderClass::SavedClips), "live");
-        assert_eq!(view_kind_for(FolderClass::RecentClips), "live");
+        assert_eq!(view_kind_for(FolderClass::SavedClips), "ro_usb");
+        assert_eq!(view_kind_for(FolderClass::RecentClips), "ro_usb");
     }
 
     #[test]

@@ -1,0 +1,26 @@
+[package]
+name = "uploadd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Durable, resumable, throttled cloud-upload daemon. Sources ONLY from the Pi-side archive (never the live car LUN), holds TTL upload leases while transferring, self-paces under the wifid TX cap, uploads in user-priority order, and on a remotely-verified upload flags UPLOADED_VERIFIED via indexd (never deletes Pi-side files; retentiond is the sole deleter). Queue/resume/priority/lease/throttle core is host-unit-tested behind traits; the real transfer backend, index/queue DB, and wifid socket are gated."
+
+[lints]
+workspace = true
+
+# serde/serde_json frame the status/queue snapshot reported to webd and the
+# typed lease/queue/throttle shapes shared (via indexd/wifid IPC) with the rest
+# of the workspace. thiserror gives typed error boundaries per SPEC.md §7. The
+# host-tested core has no I/O dependency; the real backend/DB/socket clients live
+# in the gated binary.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[[bin]]
+name = "uploadd"
+path = "src/main.rs"

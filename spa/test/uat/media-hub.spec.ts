@@ -40,7 +40,7 @@ const SECTION_ORDER = [
 
 /** Settle: bundle executed, dashboard structure painted. */
 async function gotoDashboard(page: Page) {
-  await page.goto("/media", { waitUntil: "load" });
+  await page.goto("/settings", { waitUntil: "load" });
   await expect(page.locator("[data-screen=settings-dashboard]")).toBeVisible();
   await expect(page.locator(".device-status-card")).toContainText("Status Unknown");
 }
@@ -69,18 +69,15 @@ test.describe("settings dashboard UAT", () => {
     await expect(page.locator(".top-bar .top-bar-title")).toHaveText("TeslaUSB");
     await expect(page.locator("#toast-container")).toHaveCount(1);
 
-    // Active nav is Media: the 5.3 router relocated this screen to `/media`
-    // (Shell active="media"), so the Media nav entry is highlighted. (The legacy
-    // baseline was captured at /settings/, but under the router the active nav
-    // follows the route the screen now lives at.) Assert against the nav actually
-    // visible at this breakpoint (rail >=1024px else tabs).
+    // Active nav is Settings (the captured page is /settings/). Assert against
+    // the nav actually visible at this breakpoint (rail >=1024px else tabs).
     const isMobile = testInfo.project.name.includes("375");
     const activeNav = page.locator(
       isMobile ? ".bottom-tabs .tab-item.active" : ".sidebar-rail .nav-item.active",
     );
     await expect(activeNav).toBeVisible();
     await expect(activeNav).toHaveAttribute("aria-current", "page");
-    await expect(activeNav).toContainText("Media");
+    await expect(activeNav).toContainText("Settings");
 
     // Device status — degraded "unknown" banner (exact baseline copy).
     const card = page.locator(".device-status-card.device-status-unknown");
@@ -308,7 +305,7 @@ test.describe("settings dashboard UAT", () => {
     page,
   }, testInfo) => {
     const navStart = Date.now();
-    await page.goto("/media", { waitUntil: "load" });
+    await page.goto("/settings", { waitUntil: "load" });
     await expect(page.locator("[data-screen=settings-dashboard]")).toBeVisible();
     // Dashboard structure painted, measured in-page against the navigation time
     // origin (independent of the runner's clock). This is a "content visible"

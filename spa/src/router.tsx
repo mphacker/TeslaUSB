@@ -24,18 +24,25 @@ export interface Route {
 }
 
 // ── The route registry ─────────────────────────────────────────────────────
-// Home/media reconciliation (OP-4, reversible default): the legacy HOME (`/`)
-// is the trip MAP, and the 5.2 "media hub" is a read-only catalog dashboard
-// that logically lives at `/media`. Screens not yet built (analytics, cloud,
-// settings, events) resolve to a shared ComingSoon placeholder so in-app links
-// never dead-end or full-reload. Adding a real screen = swap its row's `screen`.
+// Home/media/settings reconciliation (OP-4, reversible default):
+//  · `/`        → the trip MAP (the legacy HOME screen).
+//  · `/settings`→ the Path-A device/settings DASHBOARD (Task 5.2's screen — it
+//                 self-describes as a settings dashboard, captured at the legacy
+//                 `/settings/`, and its UAT asserts the Settings nav active, so
+//                 it lives here rather than under Media). Imported as `MediaHub`
+//                 for filename continuity with the frozen 5.2 lane.
+//  · `/media`   → a ComingSoon placeholder for the real Media-section landing
+//                 (spa.md §3, not yet built).
+// Other unbuilt screens (analytics, cloud, events) resolve to a shared
+// ComingSoon placeholder so in-app links never dead-end or full-reload. Adding a
+// real screen = swap its row's `screen`.
 export const ROUTES: Route[] = [
   { path: "/", active: "map", screen: TripMap, title: "Map" },
-  { path: "/media", active: "media", screen: MediaHub, title: "Clips" },
+  { path: "/media", active: "media", screen: comingSoon("Media", "media"), title: "Media" },
   { path: "/analytics", active: "analytics", screen: comingSoon("Analytics", "analytics"), title: "Analytics" },
   { path: "/events", active: "map", screen: comingSoon("Events", "map"), title: "Events" },
   { path: "/cloud", active: "cloud", screen: comingSoon("Cloud", "cloud"), title: "Cloud" },
-  { path: "/settings", active: "settings", screen: comingSoon("Settings", "settings"), title: "Settings" },
+  { path: "/settings", active: "settings", screen: MediaHub, title: "Settings" },
 ];
 
 /** Build a titled ComingSoon screen bound to a nav key (placeholder routes). */

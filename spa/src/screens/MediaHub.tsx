@@ -126,9 +126,10 @@ export function MediaHub() {
 
   return (
     // Bare screen content — the router hoists a single shared <Shell> and
-    // supplies the active nav key (`/media` → "media"), so this screen no
-    // longer wraps itself in Shell (was <Shell active="settings"> in the
-    // standalone 5.2 build before the 5.3 router landed).
+    // supplies the active nav key (this Path-A dashboard is routed at
+    // `/settings` → "settings"), so this screen no longer wraps itself in Shell
+    // (was <Shell active="settings"> in the standalone 5.2 build before the 5.3
+    // router landed).
     <div class="container" data-screen="settings-dashboard">
         {/* Device Status — degraded "unknown" variant (exact baseline). */}
         <div class="device-status-card device-status-unknown">

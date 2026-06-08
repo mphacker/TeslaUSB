@@ -13,6 +13,7 @@
     "test:report": "playwright show-report"
   },
   "dependencies": {
+    "chart.js": "4.4.6",
     "leaflet": "^1.9.4",
     "leaflet.markercluster": "^1.5.3",
     "preact": "^10.24.3"

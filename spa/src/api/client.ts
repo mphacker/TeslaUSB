@@ -107,6 +107,17 @@ export const api = {
     getJson<Analytics>("/api/analytics", signal),
 
   settings: (signal?: AbortSignal) => getJson<Pref[]>("/api/settings", signal),
+
+  // Media URL builders (webd 5.1b). These return same-origin URLs assigned to
+  // a native `<video src>` / download anchor; the browser does the byte-range
+  // streaming. They are NOT fetched through getJson (the bytes aren't JSON).
+  streamUrl: (id: number, camera?: string) =>
+    `/api/clips/${id}/stream${qs({ camera })}`,
+
+  exportUrl: (id: number) => `/api/clips/${id}/export`,
+
+  downloadUrl: (id: number, camera: string) =>
+    `/api/clips/${id}/angles/${encodeURIComponent(camera)}/download`,
 };
 
 export type Api = typeof api;

@@ -1,0 +1,664 @@
+import {
+  test,
+  expect,
+  loadState,
+  ARTIFACTS,
+  type Probe,
+} from "./helpers";
+import type { Page } from "@playwright/test";
+import { writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+
+// ── Task 5.3 UAT gate (spa.md §5/§40-42, .github/copilot-instructions.md) ──
+// Each test drives the REAL bundle served by webd against a seeded read-only
+// catalog with materialised archive MP4 fixtures (global-setup). Fresh context
+// per test ⇒ cold cache, no bleed.
+//
+// PARITY: the event-player screen reproduces the legacy Flask event_player.html
+// (fullscreen native <video> over webd's byte-range /stream, plus the Tesla
+// telemetry HUD overlay). webd is read-only; delete/archive mutations are
+// DEFERRED to webd 5.1c and render inert here, exactly as the media-hub did for
+// its deferred mutation forms.
+//
+// FALSE-GREEN GUARDS (the substantive part — "tests pass / 200 OK" is NOT
+// enough). Hardened after an adversarial review of this very spec:
+//  - STREAMING is proven against the <video> ELEMENT's OWN request (resourceType
+//    'media'): it must come back 206 + Accept-Ranges: bytes + a valid
+//    Content-Range — NOT merely the test's own probe fetch, and NOT a 200 full
+//    download. A supplementary explicit Range: bytes=0-0 fetch corroborates it.
+//  - DECODE is proven by playing the muted video and asserting readyState>=2
+//    with a real duration>0 AND videoWidth>0 (the bytes actually decoded into a
+//    frame), gated by a canPlayType preflight.
+//  - HUD RENDER is proven across MULTIPLE telemetry buckets (so a controller
+//    that hard-codes one state cannot pass): we seek to several times, recompute
+//    the expected HUD from the ACTUAL currentTime (robust to seek drift), and
+//    assert the LIVE controller handle (window.__TESLAUSB_HUD__.getState()) AND
+//    the mutated HUD DOM match — and that the observed speeds actually VARY.
+//    We also assert the HUD is GEOMETRICALLY visible over the video (computed
+//    style + bounding-box intersection + elementFromPoint hit-test).
+//  - WIRING is proven by window.__TESLAUSB_BUILD__ === the on-disk bundle id and
+//    the served HTML referencing the hashed /assets/index-*.js.
+//
+// KNOWN COVERAGE GAP (flagged to the integrator, NOT silently shaved): the
+// production SEI path (dashcam-mp4.ts parsing real Tesla SEI out of the streamed
+// MP4) is NOT exercised here — the SMPTE fixtures carry no Tesla SEI and no real
+// archive footage exists yet (the archiver is unbuilt). The HUD is driven from
+// the seeded fixture (window.__TESLAUSB_HUD_FIXTURE__), the integrator-endorsed
+// precedent. The SEI decoder is a faithful port of the legacy parser; a live SEI
+// fixture is owed once real archive clips exist.
+
+// Seeded telemetry track (the SMPTE fixtures carry no embedded Tesla SEI, so the
+// UAT injects samples — integrator-endorsed precedent, NOT fabrication). Uses
+// ONLY the real legacy SEI fields. Time-bucketed with DISTINCT, sentinel-unique
+// states so a hard-coded HUD cannot accidentally match across buckets:
+//   [0,0.5)   → 0mph,  gear P, brake on,            no AP
+//   [0.5,1.5) → 30mph, gear D, LEFT blinker,        Self-Driving
+//   [1.5,2.5) → 50mph, gear D, RIGHT blinker,       Self-Driving
+//   [2.5,3]   → 20mph, gear D, brake on,            no AP
+const HUD_FIXTURE = [
+  { time: 0, speedMps: 0, gear: 0, steeringAngle: 0, blinkerLeft: false, blinkerRight: false, brakeApplied: true, acceleratorPedalPosition: 0, autopilotState: 0 },
+  { time: 0.5, speedMps: 13.4, gear: 1, steeringAngle: -30, blinkerLeft: true, blinkerRight: false, brakeApplied: false, acceleratorPedalPosition: 0.35, autopilotState: 1 },
+  { time: 1.5, speedMps: 22.4, gear: 1, steeringAngle: 45, blinkerLeft: false, blinkerRight: true, brakeApplied: false, acceleratorPedalPosition: 0.6, autopilotState: 1 },
+  { time: 2.5, speedMps: 8.9, gear: 1, steeringAngle: 10, blinkerLeft: false, blinkerRight: false, brakeApplied: true, acceleratorPedalPosition: 0, autopilotState: 0 },
+];
+
+const KNOWN_CAMERAS = new Set(["front", "back", "left_repeater", "right_repeater"]);
+const MPS_TO_MPH = 2.23694;
+
+interface ExpectedHud {
+  speed: number;
+  gear: string;
+  blinkerLeft: boolean;
+  blinkerRight: boolean;
+  autopilotActive: boolean;
+}
+
+/** Independent oracle: the HUD state expected at playback time `t`, derived
+ *  directly from HUD_FIXTURE (last sample whose time <= t). A reimplementation
+ *  of sampleAt+sampleToHud on purpose — it must agree with the controller. */
+function expectedHud(t: number): ExpectedHud {
+  let s: (typeof HUD_FIXTURE)[number] | null = null;
+  for (const x of HUD_FIXTURE) {
+    if (x.time <= t) s = x;
+    else break;
+  }
+  if (!s) return { speed: 0, gear: "P", blinkerLeft: false, blinkerRight: false, autopilotActive: false };
+  return {
+    speed: Math.round(Math.abs(s.speedMps) * MPS_TO_MPH),
+    gear: ["P", "D", "R", "N"][s.gear] ?? "P",
+    blinkerLeft: s.blinkerLeft === true,
+    blinkerRight: s.blinkerRight === true,
+    autopilotActive: s.autopilotState !== 0,
+  };
+}
+
+// Read APIs the event-player is permitted to call, with the allowed query keys
+// per path. webd is read-only; anything outside this set (or any non-GET/HEAD,
+// any unexpected query key/value) is a hard failure. A 206 to /stream is a
+// SUCCESS (range request), not an error.
+const ALLOWED_API: { re: RegExp; params: (sp: URLSearchParams) => boolean }[] = [
+  { re: /^\/api\/events$/, params: (sp) => [...sp.keys()].every((k) => ["after", "limit", "trip"].includes(k)) },
+  { re: /^\/api\/clips$/, params: (sp) => [...sp.keys()].every((k) => ["after", "limit", "folder_class"].includes(k)) },
+  { re: /^\/api\/clips\/\d+$/, params: (sp) => [...sp.keys()].length === 0 },
+  {
+    re: /^\/api\/clips\/\d+\/stream$/,
+    params: (sp) =>
+      [...sp.keys()].every((k) => k === "camera") &&
+      (!sp.has("camera") || KNOWN_CAMERAS.has(sp.get("camera")!)),
+  },
+];
+
+function assertCleanConsole(probe: Probe) {
+  expect(probe.pageErrors, `pageerror(s): ${JSON.stringify(probe.pageErrors)}`).toEqual([]);
+  expect(probe.consoleErrors, `console error(s): ${JSON.stringify(probe.consoleErrors)}`).toEqual([]);
+  expect(probe.consoleWarnings, `console warning(s): ${JSON.stringify(probe.consoleWarnings)}`).toEqual([]);
+}
+
+interface StreamObservation {
+  url: string;
+  status: number;
+  resourceType: string;
+  acceptRanges: string | null;
+  contentRange: string | null;
+  camera: string;
+}
+
+/** Attach listeners (BEFORE navigation) that capture the byte-range /stream
+ *  traffic the <video> element itself issues — separately from any probe fetch,
+ *  so the streaming proof binds to the real media element, not the test's own
+ *  corroborating fetch. */
+function trackStreams(page: Page): { responses: StreamObservation[] } {
+  const responses: StreamObservation[] = [];
+  page.on("response", (r) => {
+    try {
+      const u = new URL(r.url());
+      if (!/^\/api\/clips\/\d+\/stream$/.test(u.pathname)) return;
+      responses.push({
+        url: r.url(),
+        status: r.status(),
+        resourceType: r.request().resourceType(),
+        acceptRanges: r.headers()["accept-ranges"] ?? null,
+        contentRange: r.headers()["content-range"] ?? null,
+        camera: u.searchParams.get("camera") ?? "front",
+      });
+    } catch {
+      /* ignore non-URL */
+    }
+  });
+  return { responses };
+}
+
+/** Navigate to /events with the HUD overlay ENABLED and seeded telemetry
+ *  injected (must run before any page script ⇒ addInitScript before goto). */
+async function gotoPlayerHudOn(page: Page) {
+  await page.addInitScript((fixture) => {
+    try {
+      localStorage.setItem("seiOverlayEnabled", "true");
+    } catch {
+      /* ignore */
+    }
+    (window as unknown as { __TESLAUSB_HUD_FIXTURE__?: unknown }).__TESLAUSB_HUD_FIXTURE__ = fixture;
+  }, HUD_FIXTURE);
+  await page.goto("/events", { waitUntil: "load" });
+  await expect(page.locator("[data-screen=event-player]")).toBeVisible();
+  await expect(page.locator("#mainVideo")).toHaveAttribute("src", /\/api\/clips\/\d+\/stream/);
+}
+
+/** Navigate to /events with the HUD overlay in its DEFAULT (hidden) state —
+ *  the event-player parity baseline (no telemetry, no localStorage). */
+async function gotoPlayerHudOff(page: Page) {
+  await page.goto("/events", { waitUntil: "load" });
+  await expect(page.locator("[data-screen=event-player]")).toBeVisible();
+  await expect(page.locator("#mainVideo")).toHaveAttribute("src", /\/api\/clips\/\d+\/stream/);
+}
+
+interface DecodeEvidence {
+  readyState: number;
+  duration: number;
+  videoWidth: number;
+  videoHeight: number;
+  currentTime: number;
+}
+
+/** Play the muted video until it has genuinely DECODED a frame (readyState>=2,
+ *  duration>0, videoWidth>0 ⇒ bytes decoded, not merely downloaded). Returns
+ *  the decode evidence. Pauses afterwards so callers can seek deterministically. */
+async function decodeVideo(page: Page): Promise<DecodeEvidence> {
+  const video = page.locator("#mainVideo");
+  const canPlay = await video.evaluate((el: HTMLVideoElement) =>
+    el.canPlayType('video/mp4; codecs="avc1.42E01E"'),
+  );
+  expect(canPlay, "H.264 baseline must be playable in this browser").not.toBe("");
+
+  await video.evaluate(async (el: HTMLVideoElement) => {
+    el.muted = true;
+    try {
+      await el.play();
+    } catch {
+      /* muted autoplay should be allowed; ignore */
+    }
+  });
+  await page.waitForFunction(
+    () => {
+      const el = document.getElementById("mainVideo") as HTMLVideoElement | null;
+      return !!el && el.readyState >= 2 && el.duration > 0 && el.videoWidth > 0;
+    },
+    undefined,
+    { timeout: 15_000 },
+  );
+  const decode = await video.evaluate((el: HTMLVideoElement) => ({
+    readyState: el.readyState,
+    duration: el.duration,
+    videoWidth: el.videoWidth,
+    videoHeight: el.videoHeight,
+    currentTime: el.currentTime,
+  }));
+  await video.evaluate((el: HTMLVideoElement) => el.pause());
+  return decode;
+}
+
+/** Seek the (paused) video to ~t, then prove the HUD is telemetry-driven at the
+ *  ACTUAL resting time: recompute the expected state from the real currentTime
+ *  (robust to any seek drift), wait for the live controller to converge, and
+ *  assert both the controller handle and the mutated DOM. Returns the observed
+ *  speed so the caller can prove the HUD actually VARIED across buckets. */
+async function seekAndAssertHud(page: Page, t: number): Promise<number> {
+  const video = page.locator("#mainVideo");
+  await video.evaluate((el: HTMLVideoElement, target: number) => {
+    el.pause();
+    el.currentTime = target;
+  }, t);
+  // Wait for the seek to actually land (the 'seeked' event has fired and the
+  // clock is at/near the target) before reading telemetry-derived state.
+  await page.waitForFunction(
+    (target) => {
+      const el = document.getElementById("mainVideo") as HTMLVideoElement | null;
+      return !!el && el.paused && !el.seeking && Math.abs(el.currentTime - (target as number)) < 0.4;
+    },
+    t,
+    { timeout: 10_000 },
+  );
+  const ct = await video.evaluate((el: HTMLVideoElement) => el.currentTime);
+  const exp = expectedHud(ct);
+
+  // The live controller must converge on the expected state for THIS time.
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => {
+          const h = (window as unknown as { __TESLAUSB_HUD__?: { getState(): { speed: number } } })
+            .__TESLAUSB_HUD__;
+          return h ? h.getState().speed : -1;
+        }),
+      { timeout: 5000, message: `HUD speed should converge to ${exp.speed} at t=${ct}` },
+    )
+    .toBe(exp.speed);
+
+  const state = await page.evaluate(() => {
+    const h = (
+      window as unknown as {
+        __TESLAUSB_HUD__?: { source: string; frames: number; getState(): Record<string, unknown> };
+      }
+    ).__TESLAUSB_HUD__;
+    return h ? { source: h.source, frames: h.frames, state: h.getState() } : null;
+  });
+  expect(state, "controller handle must exist").not.toBeNull();
+  expect(state!.frames, "rAF HUD loop must have applied frames").toBeGreaterThan(0);
+  expect(state!.state.gear, `t=${ct} gear`).toBe(exp.gear);
+  expect(state!.state.blinkerLeft, `t=${ct} blinkerLeft`).toBe(exp.blinkerLeft);
+  expect(state!.state.blinkerRight, `t=${ct} blinkerRight`).toBe(exp.blinkerRight);
+  expect(state!.state.autopilotActive, `t=${ct} autopilotActive`).toBe(exp.autopilotActive);
+
+  // The mutated HUD DOM reflects the same state (the overlay the user sees).
+  await expect(page.locator("#hudSpeed")).toHaveText(String(exp.speed));
+  await expect(page.locator("#hudGear")).toHaveText(exp.gear);
+  await expect(page.locator("#blinkerLeft")).toHaveClass(exp.blinkerLeft ? /active/ : /^((?!active).)*$/);
+  await expect(page.locator("#blinkerRight")).toHaveClass(exp.blinkerRight ? /active/ : /^((?!active).)*$/);
+  if (exp.autopilotActive) {
+    await expect(page.locator("#autopilotIndicator")).toHaveClass(/active/);
+  } else {
+    await expect(page.locator("#autopilotIndicator")).not.toHaveClass(/active/);
+  }
+  return exp.speed;
+}
+
+test.describe("event-player UAT", () => {
+  // ── Blanket read-only + network-status invariant across EVERY exercised
+  //    state (camera switches, screenshots, perf playback). Cheap checks that
+  //    cannot legitimately fail in a read-only screen; console/failed-request
+  //    gates live in their dedicated tests (media aborts on deliberate src
+  //    changes are legitimate and handled there). ──
+  test.afterEach(async ({ probe }) => {
+    const origin = new URL(loadState().baseURL).origin;
+    for (const req of probe.requests) {
+      expect(new URL(req.url).origin, `off-origin request to ${req.url}`).toBe(origin);
+    }
+    const mutating = probe.requests.filter((r) =>
+      ["POST", "PUT", "PATCH", "DELETE"].includes(r.method.toUpperCase()),
+    );
+    expect(mutating, `mutating request(s): ${JSON.stringify(mutating)}`).toEqual([]);
+    const bad = probe.responses.filter(
+      (r) => new URL(r.url).origin === origin && r.status >= 400,
+    );
+    expect(bad, `non-2xx same-origin response(s): ${JSON.stringify(bad)}`).toEqual([]);
+  });
+
+  // ── Gate 1: streaming + decode + HUD render (the substantive false-green guard) ─
+  test("streaming + decode + telemetry-driven HUD over the live video", async ({
+    page,
+    probe,
+  }) => {
+    const streams = trackStreams(page);
+    await gotoPlayerHudOn(page);
+
+    // (a) DECODE — play the muted video; it must reach readyState>=2 with a real
+    //     duration AND a decoded frame (videoWidth>0): the bytes truly decoded.
+    const decode = await decodeVideo(page);
+    expect(decode.readyState, "video must have decoded current data").toBeGreaterThanOrEqual(2);
+    expect(decode.duration, "video must have a real duration").toBeGreaterThan(0);
+    expect(decode.videoWidth, "decoded frame must have pixel dimensions").toBeGreaterThan(0);
+
+    // (b) STREAMING — the <video> ELEMENT's OWN request (resourceType 'media')
+    //     must be a 206 range response with Accept-Ranges + a valid Content-Range.
+    //     This binds to the real media element, NOT the corroborating fetch below.
+    const mediaResp = streams.responses.filter((r) => r.resourceType === "media");
+    expect(mediaResp.length, "the <video> element must have issued a media request").toBeGreaterThan(0);
+    const partial = mediaResp.filter((r) => r.status === 206);
+    expect(
+      partial.length,
+      `the <video> media request must be served 206 (got ${JSON.stringify(mediaResp)})`,
+    ).toBeGreaterThan(0);
+    expect(partial[0].acceptRanges).toBe("bytes");
+    expect(partial[0].contentRange, `content-range=${partial[0].contentRange}`).toMatch(
+      /^bytes \d+-\d+\/\d+$/,
+    );
+
+    // (c) Corroborate deterministically with an explicit Range: bytes=0-0 fetch.
+    const src = await page.locator("#mainVideo").getAttribute("src");
+    const range = await page.evaluate(async (url: string) => {
+      const r = await fetch(url, { headers: { Range: "bytes=0-0" } });
+      return {
+        status: r.status,
+        acceptRanges: r.headers.get("accept-ranges"),
+        contentRange: r.headers.get("content-range"),
+        contentType: r.headers.get("content-type"),
+      };
+    }, src!);
+    expect(range.status, "explicit Range request must be 206").toBe(206);
+    expect(range.acceptRanges).toBe("bytes");
+    expect(range.contentRange, `content-range=${range.contentRange}`).toMatch(/^bytes 0-0\/\d+$/);
+    expect(range.contentType ?? "").toMatch(/video\/mp4/);
+
+    // (d) HUD RENDER — must be GEOMETRICALLY visible over the video (not merely
+    //     present in the DOM): on-screen, opaque, intersecting the video, and the
+    //     top element at the HUD centre is the HUD (drawn ABOVE the video).
+    await seekAndAssertHud(page, 2.0); // settle into a non-default bucket first
+    await expect(page.locator("#teslaHud")).not.toHaveClass(/hidden/);
+    await expect(page.locator("#seiToggle")).toBeChecked();
+    const geo = await page.evaluate(() => {
+      const hud = document.getElementById("teslaHud")!;
+      const vid = document.getElementById("mainVideo")!;
+      const hb = hud.getBoundingClientRect();
+      const vb = vid.getBoundingClientRect();
+      const cs = getComputedStyle(hud);
+      // The overlay is intentionally pointer-events:none (click-through to the
+      // video controls — matching the legacy player), so elementFromPoint would
+      // normally pass straight through it. Temporarily enable hit-testing on the
+      // HUD subtree to probe PAINT ORDER (is it drawn above the video at its
+      // centre?), then restore so we never leave the overlay interactive.
+      const prevPE = hud.style.pointerEvents;
+      hud.style.pointerEvents = "auto";
+      const cx = hb.left + hb.width / 2;
+      const cy = hb.top + hb.height / 2;
+      const hit = document.elementFromPoint(cx, cy);
+      const hitIsHud = !!hit && (hit === hud || hud.contains(hit));
+      hud.style.pointerEvents = prevPE;
+      return {
+        display: cs.display,
+        visibility: cs.visibility,
+        opacity: Number(cs.opacity),
+        pointerEvents: cs.pointerEvents,
+        area: hb.width * hb.height,
+        intersects: hb.left < vb.right && hb.right > vb.left && hb.top < vb.bottom && hb.bottom > vb.top,
+        hitIsHud,
+      };
+    });
+    expect(geo.display, "HUD must not be display:none").not.toBe("none");
+    expect(geo.visibility, "HUD must not be visibility:hidden").not.toBe("hidden");
+    expect(geo.opacity, "HUD must be opaque").toBeGreaterThan(0);
+    expect(geo.area, "HUD must have a real box").toBeGreaterThan(0);
+    expect(geo.intersects, "HUD must overlap the video").toBe(true);
+    // Intentional click-through overlay (parity with legacy): non-interactive…
+    expect(geo.pointerEvents, "HUD overlay must be click-through").toBe("none");
+    // …yet painted ABOVE the video at its centre (raised stacking layer).
+    expect(geo.hitIsHud, "HUD must paint above the video at its centre").toBe(true);
+
+    // (e) The HUD is genuinely TELEMETRY-driven: across multiple buckets it must
+    //     show DISTINCT states (a hard-coded HUD cannot match all of them). We
+    //     recompute the expected state from the real resting time inside
+    //     seekAndAssertHud, so this is robust to seek drift.
+    const speeds = new Set<number>();
+    speeds.add(await seekAndAssertHud(page, 1.0)); // → 30 mph bucket
+    speeds.add(await seekAndAssertHud(page, 2.0)); // → 50 mph bucket
+    speeds.add(await seekAndAssertHud(page, 2.8)); // → 20 mph bucket
+    expect(
+      [...speeds].sort((a, b) => a - b),
+      `HUD must vary with telemetry across buckets (saw ${[...speeds]})`,
+    ).toEqual([20, 30, 50]);
+
+    const handle = await page.evaluate(() => {
+      const h = (window as unknown as { __TESLAUSB_HUD__?: { source: string; sampleCount: number } })
+        .__TESLAUSB_HUD__;
+      return h ? { source: h.source, sampleCount: h.sampleCount } : null;
+    });
+    expect(handle!.source, "telemetry source is the seeded fixture").toBe("fixture");
+    expect(handle!.sampleCount).toBe(HUD_FIXTURE.length);
+
+    assertCleanConsole(probe);
+  });
+
+  // ── Gate 2: wiring proof (the freshly-built bundle is what executed) ─────
+  test("wiring proof — served HTML loads the hashed bundle that actually ran", async ({
+    page,
+  }) => {
+    const state = loadState();
+    await gotoPlayerHudOff(page);
+
+    const winBuild = await page.evaluate(
+      () => (window as unknown as { __TESLAUSB_BUILD__?: string }).__TESLAUSB_BUILD__,
+    );
+    expect(winBuild, "window.__TESLAUSB_BUILD__ must be defined").toBeTruthy();
+    expect(winBuild).not.toBe("dev");
+    expect(winBuild).toBe(state.buildId);
+
+    const html = await (await page.request.get("/events")).text();
+    expect(html).toContain(state.jsAsset);
+    expect(html).not.toContain("/src/main.tsx");
+    expect(html).toMatch(/\/assets\/index-[\w-]+\.js/);
+    if (state.cssAsset) expect(html).toContain(state.cssAsset);
+
+    const jsResp = await page.request.get(state.jsAsset);
+    expect(jsResp.status()).toBe(200);
+    expect(jsResp.headers()["content-type"] ?? "").toMatch(/javascript/);
+
+    if (state.cssAsset) {
+      const bundleCss = await page.request.get(state.cssAsset);
+      expect(bundleCss.status()).toBe(200);
+      expect(bundleCss.headers()["content-type"] ?? "").toMatch(/css/);
+    }
+  });
+
+  // ── Gate 3 (read-only): only whitelisted GET; switched camera streams; the
+  //    deferred mutation controls are inert ────────────────────────────────
+  test("read-only — only whitelisted GET, switched camera decodes, deferred actions inert", async ({
+    page,
+    probe,
+  }) => {
+    const streams = trackStreams(page);
+    await gotoPlayerHudOff(page);
+    await expect(page.locator(".camera-option[data-camera=front]")).toHaveClass(/active/);
+    await decodeVideo(page); // front camera decodes
+
+    function assertOnlyWhitelistedApi(): Set<string> {
+      const seen = new Set<string>();
+      for (const req of probe.requests) {
+        const u = new URL(req.url);
+        if (!u.pathname.startsWith("/api/")) continue;
+        expect(["GET", "HEAD"].includes(req.method.toUpperCase()), `${req.method} ${u.pathname}`).toBe(true);
+        const rule = ALLOWED_API.find((r) => r.re.test(u.pathname));
+        expect(rule, `unexpected API path ${u.pathname}`).toBeTruthy();
+        expect(rule!.params(u.searchParams), `bad query on ${u.pathname}${u.search}`).toBe(true);
+        seen.add(u.pathname);
+      }
+      return seen;
+    }
+    const apiSeen = assertOnlyWhitelistedApi();
+    expect([...apiSeen].some((p) => p === "/api/events"), "/api/events was never requested").toBe(true);
+    expect(
+      [...apiSeen].some((p) => /\/api\/clips\/\d+\/stream/.test(p)),
+      "the byte-range /stream was never requested",
+    ).toBe(true);
+
+    // Switch camera (a READ): a new GET /stream?camera=back must be issued, come
+    // back 206, AND decode (proving the switched stream actually works).
+    await page.locator(".camera-option[data-camera=back]").click();
+    await expect(page.locator(".camera-option[data-camera=back]")).toHaveClass(/active/);
+    await expect(page.locator("#mainVideo")).toHaveAttribute("src", /camera=back/);
+    await expect
+      .poll(() => streams.responses.filter((r) => r.camera === "back" && r.status === 206).length, {
+        timeout: 8000,
+        message: "switched (back) camera must produce a 206 range response",
+      })
+      .toBeGreaterThan(0);
+    const backDecode = await decodeVideo(page);
+    expect(backDecode.readyState, "switched camera must decode").toBeGreaterThanOrEqual(2);
+    expect(backDecode.videoWidth).toBeGreaterThan(0);
+
+    // Deferred actions render disabled and inert (no navigation, no request).
+    await expect(page.locator("#archiveButton")).toHaveClass(/disabled/);
+    await expect(page.locator("#deleteButton")).toHaveClass(/disabled/);
+    await expect(page.locator("#archiveButton")).toHaveAttribute("aria-disabled", "true");
+    await expect(page.locator("#deleteButton")).toHaveAttribute("aria-disabled", "true");
+    const urlBefore = page.url();
+    await page.locator("#deleteButton").click();
+    await page.locator("#archiveButton").click();
+    await page.waitForTimeout(300);
+    expect(page.url(), "inert actions must not navigate").toBe(urlBefore);
+
+    // Re-assert the FULL whitelist after the exercise + zero mutating methods.
+    assertOnlyWhitelistedApi();
+    const mutating = probe.requests.filter((r) =>
+      ["POST", "PUT", "PATCH", "DELETE"].includes(r.method.toUpperCase()),
+    );
+    expect(mutating, `mutating request(s): ${JSON.stringify(mutating)}`).toEqual([]);
+  });
+
+  // ── Gate 4 (console + network): zero warnings/errors, no failed/non-2xx ──
+  test("clean — zero console warnings/errors/pageerror and no failed/non-2xx requests", async ({
+    page,
+    probe,
+  }) => {
+    const origin = new URL(loadState().baseURL).origin;
+    await gotoPlayerHudOn(page);
+    // Real media path: decode + drive the HUD across buckets, so a media/decoder
+    // error or a delayed failed request would surface here.
+    await decodeVideo(page);
+    await seekAndAssertHud(page, 2.0);
+    await page.waitForLoadState("networkidle");
+    await page.waitForTimeout(750);
+
+    assertCleanConsole(probe);
+
+    // This gate does NOT switch camera / re-navigate, so there is no legitimate
+    // media abort — any failed request is a real fault.
+    expect(
+      probe.failedRequests,
+      `failed request(s): ${JSON.stringify(probe.failedRequests)}`,
+    ).toEqual([]);
+
+    const bad = probe.responses.filter(
+      (r) => new URL(r.url).origin === origin && r.status >= 400,
+    );
+    expect(bad, `non-2xx response(s): ${JSON.stringify(bad)}`).toEqual([]);
+  });
+
+  // ── Gate 5: performance — capture + report (incl. video first-frame) ────
+  test("perf — capture TTFB/DCL/FCP + video first-frame + slowest requests", async ({
+    page,
+  }, testInfo) => {
+    const navStart = Date.now();
+    await page.goto("/events", { waitUntil: "load" });
+    await expect(page.locator("[data-screen=event-player]")).toBeVisible();
+    await expect(page.locator("#mainVideo")).toHaveAttribute("src", /\/api\/clips\/\d+\/stream/);
+    const contentVisibleMs = await page.evaluate(() => performance.now());
+
+    const firstFrameStart = Date.now();
+    await page.locator("#mainVideo").evaluate(async (el: HTMLVideoElement) => {
+      el.muted = true;
+      try {
+        await el.play();
+      } catch {
+        /* ignore */
+      }
+    });
+    await page.waitForFunction(
+      () => {
+        const el = document.getElementById("mainVideo") as HTMLVideoElement | null;
+        return !!el && el.readyState >= 2 && el.videoWidth > 0;
+      },
+      undefined,
+      { timeout: 15_000 },
+    );
+    const videoFirstFrameMs = Date.now() - firstFrameStart;
+
+    const timings = await page.evaluate(() => {
+      const nav = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming;
+      const fcp = performance.getEntriesByType("paint").find((p) => p.name === "first-contentful-paint");
+      const resources = (performance.getEntriesByType("resource") as PerformanceResourceTiming[])
+        .map((r) => ({ url: r.name, ms: Math.round(r.duration * 10) / 10, type: r.initiatorType }))
+        .sort((a, b) => b.ms - a.ms)
+        .slice(0, 10);
+      return {
+        ttfbMs: Math.round(nav.responseStart - nav.requestStart),
+        domContentLoadedMs: Math.round(nav.domContentLoadedEventEnd),
+        domInteractiveMs: Math.round(nav.domInteractive),
+        loadMs: Math.round(nav.loadEventEnd),
+        fcpMs: fcp ? Math.round(fcp.startTime) : null,
+        slowestRequests: resources,
+      };
+    });
+
+    const report = {
+      environment:
+        "dev webd (cargo debug build) on Windows host; Chromium via Playwright; " +
+        "fresh context per test (cold cache). NOTE: spa.md's <~2s 'interactive' " +
+        "target is the ON-DEVICE (Raspberry Pi) profile — these are dev-box " +
+        "numbers and are reported, not asserted, against that bar.",
+      viewport: testInfo.project.name,
+      ttfbMs: timings.ttfbMs,
+      domContentLoadedMs: timings.domContentLoadedMs,
+      domInteractiveMs: timings.domInteractiveMs,
+      loadMs: timings.loadMs,
+      fcpMs: timings.fcpMs,
+      contentVisibleMs: Math.round(contentVisibleMs),
+      videoFirstFrameMs,
+      wallClockNavMs: Date.now() - navStart,
+      slowestRequests: timings.slowestRequests,
+    };
+
+    const out = resolve(ARTIFACTS, `perf-event-player-${testInfo.project.name}.json`);
+    writeFileSync(out, JSON.stringify(report, null, 2));
+    await testInfo.attach(`perf-event-player-${testInfo.project.name}.json`, {
+      body: JSON.stringify(report, null, 2),
+      contentType: "application/json",
+    });
+    console.log(`[uat][perf:event-player:${testInfo.project.name}]`, JSON.stringify(report, null, 2));
+
+    expect(report.fcpMs, "FCP should be present").not.toBeNull();
+    expect(report.fcpMs!).toBeLessThan(5000);
+    expect(report.contentVisibleMs).toBeLessThan(5000);
+  });
+
+  // ── Gate 6: responsive — render + screenshots at this viewport ──────────
+  test("responsive — renders at viewport; parity + HUD screenshots captured", async ({
+    page,
+  }, testInfo) => {
+    const viewport = testInfo.project.name;
+
+    // (a) Parity baseline capture: default (HUD hidden) state.
+    await gotoPlayerHudOff(page);
+    await expect(page.locator(".event-player-container")).toBeVisible();
+    await expect(page.locator(".camera-selector")).toBeVisible();
+    await expect(page.locator(".main-video")).toBeVisible();
+    await expect(page.locator("#teslaHud")).toHaveClass(/hidden/);
+    await decodeVideo(page);
+    await page.locator("#mainVideo").evaluate((el: HTMLVideoElement) => {
+      el.pause();
+      el.currentTime = 0.2;
+    });
+    const parityShot = resolve(ARTIFACTS, `event-player-${viewport}.png`);
+    await page.screenshot({ path: parityShot, fullPage: true });
+    await testInfo.attach(`event-player-${viewport}.png`, { path: parityShot, contentType: "image/png" });
+    console.log(`[uat][screenshot:event-player:${viewport}] ${parityShot}`);
+
+    // (b) HUD-overlay baseline capture: overlay enabled + seeded telemetry.
+    await page.addInitScript((fixture) => {
+      try {
+        localStorage.setItem("seiOverlayEnabled", "true");
+      } catch {
+        /* ignore */
+      }
+      (window as unknown as { __TESLAUSB_HUD_FIXTURE__?: unknown }).__TESLAUSB_HUD_FIXTURE__ = fixture;
+    }, HUD_FIXTURE);
+    await page.goto("/events", { waitUntil: "load" });
+    await expect(page.locator("[data-screen=event-player]")).toBeVisible();
+    await expect(page.locator("#mainVideo")).toHaveAttribute("src", /\/api\/clips\/\d+\/stream/);
+    await decodeVideo(page);
+    await seekAndAssertHud(page, 2.0);
+    await expect(page.locator("#teslaHud")).not.toHaveClass(/hidden/);
+    const hudShot = resolve(ARTIFACTS, `event-player-hud-${viewport}.png`);
+    await page.screenshot({ path: hudShot, fullPage: true });
+    await testInfo.attach(`event-player-hud-${viewport}.png`, { path: hudShot, contentType: "image/png" });
+    console.log(`[uat][screenshot:event-player-hud:${viewport}] ${hudShot}`);
+  });
+});

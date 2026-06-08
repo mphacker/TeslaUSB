@@ -80,6 +80,9 @@ archive_lost_dismissed.json
 *.wav
 *.mp3
 *.mp4
+# …except the committed SMPTE test-pattern MP4 the SPA event-player UAT streams
+# (webd /stream needs a real archive file on disk — see spa/test/uat/global-setup.ts).
+!spa/test/fixtures/*.mp4
 
 # Crypto material / secrets
 tesla_salt.bin

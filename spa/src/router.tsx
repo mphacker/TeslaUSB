@@ -4,6 +4,7 @@ import { Shell, type NavKey } from "./components/Shell";
 import { MediaHub } from "./screens/MediaHub";
 import { TripMap } from "./screens/TripMap";
 import { Analytics } from "./screens/Analytics";
+import { EventPlayer } from "./screens/EventPlayer";
 import { ComingSoon } from "./screens/ComingSoon";
 
 /**
@@ -41,7 +42,7 @@ export const ROUTES: Route[] = [
   { path: "/", active: "map", screen: TripMap, title: "Map" },
   { path: "/media", active: "media", screen: comingSoon("Media", "media"), title: "Media" },
   { path: "/analytics", active: "analytics", screen: Analytics, title: "Analytics" },
-  { path: "/events", active: "map", screen: comingSoon("Events", "map"), title: "Events" },
+  { path: "/events", active: "map", screen: EventPlayer, title: "Events" },
   { path: "/cloud", active: "cloud", screen: comingSoon("Cloud", "cloud"), title: "Cloud" },
   { path: "/settings", active: "settings", screen: MediaHub, title: "Settings" },
 ];

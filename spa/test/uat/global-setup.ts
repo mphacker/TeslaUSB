@@ -6,6 +6,7 @@ import {
   readdirSync,
   existsSync,
   openSync,
+  copyFileSync,
 } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +19,24 @@ const ART = resolve(HERE, "artifacts");
 const STATE = resolve(ART, "uat-state.json");
 const SEED_DB = resolve(ART, "catalog.db");
 const DIST = resolve(SPA, "dist");
+// webd 5.1b serves `/stream` + `/export` from a jailed archive root, resolving
+// each `view_kind='archive'` angle by its on-disk `file_ref`. The seed points
+// every angle at `p1/<canonical_key>/<camera>.mp4`; we materialise those files
+// here (a copy of the committed SMPTE fixture) under a temp archive root and
+// hand webd `WEBD_ARCHIVE_ROOT` + a `WEBD_CACHE_DIR` (which `/export` needs).
+const ARCHIVE_ROOT = resolve(ART, "archive");
+const CACHE_DIR = resolve(ART, "cache");
+const FIXTURE_MP4 = resolve(SPA, "test", "fixtures", "clip.mp4");
+// Mirrors build-db.mjs CLIPS canonical_key list + ANGLES camera list (6×4=24).
+const ARCHIVE_KEYS = [
+  "2024-06-01_07-15-00",
+  "2024-06-01_08-02-00",
+  "2024-06-01_12-30-00",
+  "2024-06-01_14-10-00",
+  "2024-06-01_18-45-00",
+  "2024-06-01_21-05-00",
+];
+const ARCHIVE_CAMERAS = ["front", "back", "left_repeater", "right_repeater"];
 const WEBD = resolve(
   REPO,
   "rust",
@@ -80,6 +99,30 @@ function readBundleIdentity(): { buildId: string; jsAsset: string; cssAsset: str
   return { buildId: m[1], jsAsset: `/assets/${js}`, cssAsset: css ? `/assets/${css}` : "" };
 }
 
+/**
+ * Materialise the archive fixtures webd's `/stream` + `/export` resolve. Writes
+ * a copy of the committed SMPTE mp4 to `<ARCHIVE_ROOT>/p1/<key>/<cam>.mp4` for
+ * every seeded angle, and ensures the cache dir exists. Idempotent, and run on
+ * BOTH the full and UAT_FAST paths (so fast reuse still has live media files).
+ * MUST run before webd spawns: MediaConfig canonicalises the archive root
+ * eagerly, so the directory has to exist first or every resolve 404s.
+ */
+function populateArchive() {
+  if (!existsSync(FIXTURE_MP4)) {
+    throw new Error(
+      `archive fixture missing at ${FIXTURE_MP4} — commit test/fixtures/clip.mp4`,
+    );
+  }
+  mkdirSync(CACHE_DIR, { recursive: true });
+  for (const key of ARCHIVE_KEYS) {
+    const dir = resolve(ARCHIVE_ROOT, "p1", key);
+    mkdirSync(dir, { recursive: true });
+    for (const cam of ARCHIVE_CAMERAS) {
+      copyFileSync(FIXTURE_MP4, resolve(dir, `${cam}.mp4`));
+    }
+  }
+}
+
 export default async function globalSetup() {
   mkdirSync(ART, { recursive: true });
 
@@ -91,6 +134,9 @@ export default async function globalSetup() {
     // 3. Ensure the webd binary is current.
     run("cargo", ["build", "-p", "webd"], resolve(REPO, "rust"));
   }
+
+  // Archive media must exist before webd spawns (see populateArchive docs).
+  populateArchive();
 
   for (const [label, p] of [
     ["seed DB", SEED_DB],
@@ -127,6 +173,8 @@ export default async function globalSetup() {
       WEBD_DB: SEED_DB,
       WEBD_STATIC: DIST,
       WEBD_BIND: `${HOST}:${PORT}`,
+      WEBD_ARCHIVE_ROOT: ARCHIVE_ROOT,
+      WEBD_CACHE_DIR: CACHE_DIR,
       RUST_LOG: process.env.RUST_LOG ?? "warn",
     },
     stdio: ["ignore", logFd, logFd],

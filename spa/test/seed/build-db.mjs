@@ -300,7 +300,7 @@ const insClip = db.prepare(
   "INSERT INTO clips (id, canonical_key, started_at, ended_at, partition, folder_class, is_sentry, duration_s, availability, created_at, updated_at) VALUES (?, ?, ?, ?, 'p1', ?, ?, ?, 'present', 0, 0)",
 );
 const insAngle = db.prepare(
-  "INSERT INTO angles (clip_id, camera, file_ref, view_kind, offset_ms, duration_s, size_bytes) VALUES (?, ?, ?, 'ro_usb', 0, ?, ?)",
+  "INSERT INTO angles (clip_id, camera, file_ref, view_kind, offset_ms, duration_s, size_bytes) VALUES (?, ?, ?, 'archive', 0, ?, ?)",
 );
 for (const [id, key, sh, eh, fc, sentry, dur] of CLIPS) {
   insClip.run(id, key, T(Math.floor(sh), (sh % 1) * 60), T(Math.floor(eh), (eh % 1) * 60), fc, sentry, dur);

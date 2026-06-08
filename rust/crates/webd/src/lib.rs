@@ -1,17 +1,20 @@
 //! `webd` — the disposable axum/tokio web backend (contract **D2**,
 //! [`docs/specs/webd.md`]).
 //!
-//! This crate is the **Task 5.1a** slice: a **read-only** REST API over the
-//! `indexd` `SQLite` catalog plus the static-SPA host plumbing (a placeholder
-//! bundle; the real bundle arrives in Task 5.2).
+//! This crate began as the **Task 5.1a** read-only slice and now also carries
+//! the **Task 5.1b** archive-clip streaming + export endpoints (range-request
+//! mp4 streaming, single-file download, and zip export). The static-SPA host is
+//! still a placeholder bundle (the real bundle arrives in Task 5.2).
 //!
 //! ## Boundaries (SPEC.md §2, §7; webd.md §4)
 //!
 //! * The catalog is opened **read-only** (`SQLITE_OPEN_READ_ONLY`). `indexd`
 //!   is the sole `SQLite` writer; `webd` never writes.
 //! * `webd` **never parses video / SEI** — every datum comes from the catalog.
-//! * No mutations, no streaming/range/export, no leases, no auth, and no SSE
-//!   live in this slice (later 5.1b/5.1c slices).
+//! * Streaming/export serve **`archive`-view angles only** (Pi-side ext4
+//!   files), jailed under the configured archive root. The retentiond playback
+//!   lease, `ro_usb` live streaming, auth, mutations, and SSE are **not** in
+//!   this slice (see `media.rs` for the deferred-lease seam).
 //! * The HTTP listener must bind the **LAN/AP interface only** (the binary
 //!   takes the bind address from configuration; never the public internet).
 //!
@@ -29,25 +32,36 @@
 mod catalog;
 mod dto;
 mod error;
+mod media;
 mod polyline;
 mod query;
+mod range;
 mod route;
 
 #[cfg(test)]
 mod tests;
 
 pub use catalog::{Catalog, CatalogError};
+pub use media::MediaConfig;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use axum::Router;
+use tokio::sync::Semaphore;
 
-/// Shared handler state: the read-only catalog handle. Cheap to clone (an
-/// `Arc`-backed path), so each request can open its own short-lived read-only
-/// connection inside a blocking task.
+/// Maximum number of clip-zip exports built concurrently. Bounds blocking-pool
+/// and cache-filesystem pressure from a burst of `GET /api/clips/{id}/export`.
+const MAX_CONCURRENT_EXPORTS: usize = 2;
+
+/// Shared handler state: the read-only catalog handle plus the media config and
+/// export concurrency limiter. Cheap to clone (`Arc`-backed), so each request
+/// can open its own short-lived read-only connection inside a blocking task.
 #[derive(Clone)]
 struct AppState {
     catalog: Catalog,
+    media: MediaConfig,
+    export_sem: Arc<Semaphore>,
 }
 
 /// Build the full `webd` application router: the `/api/*` read endpoints plus
@@ -56,8 +70,13 @@ struct AppState {
 /// `static_dir` is the directory holding the SPA bundle (an `index.html` plus
 /// hashed assets). Any non-API path that does not match a file falls back to
 /// `index.html` so client-side routes resolve. Unknown `/api/*` paths return
-/// the JSON error envelope (never the SPA shell).
-pub fn build_router(catalog: Catalog, static_dir: PathBuf) -> Router {
-    let state = AppState { catalog };
+/// the JSON error envelope (never the SPA shell). `media` supplies the archive
+/// root (the jail for streamed/exported files) and the zip-export cache dir.
+pub fn build_router(catalog: Catalog, static_dir: PathBuf, media: MediaConfig) -> Router {
+    let state = AppState {
+        catalog,
+        media,
+        export_sem: Arc::new(Semaphore::new(MAX_CONCURRENT_EXPORTS)),
+    };
     route::router(state, static_dir)
 }

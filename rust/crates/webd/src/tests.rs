@@ -16,13 +16,14 @@
 
 use axum::Router;
 use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::{Method, Request, StatusCode};
+use http_body_util::BodyExt;
 use rusqlite::{Connection, params};
 use serde_json::Value;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
-use crate::{Catalog, build_router};
+use crate::{Catalog, MediaConfig, build_router};
 
 /// A live fixture: a seeded catalog + its router. `_dir` keeps the temp files
 /// alive for the duration of the test (handlers open the DB per request).
@@ -48,7 +49,12 @@ fn fixture() -> Fixture {
     .unwrap();
 
     let catalog = Catalog::open(&db_path).unwrap();
-    let app = build_router(catalog, static_dir);
+    let archive_dir = dir.path().join("archive");
+    let cache_dir = dir.path().join("cache");
+    std::fs::create_dir_all(&archive_dir).unwrap();
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    let media = MediaConfig::new(archive_dir, cache_dir);
+    let app = build_router(catalog, static_dir, media);
     Fixture { _dir: dir, app }
 }
 
@@ -371,4 +377,590 @@ fn catalog_rejects_newer_schema() {
     }
     let err = Catalog::open(&path).unwrap_err();
     assert!(matches!(err, crate::CatalogError::SchemaTooNew { .. }));
+}
+
+// ─── Task 5.1b: archive streaming + export ───────────────────────────────
+
+/// A live media fixture: a seeded catalog wired to a real on-disk archive root,
+/// plus a router. `_dir` keeps the temp tree (catalog + archive + cache + a
+/// secret file outside the jail) alive for the test.
+struct MediaFixture {
+    _dir: TempDir,
+    app: Router,
+}
+
+/// Deterministic byte pattern so range slices can be asserted exactly.
+fn pattern(len: usize) -> Vec<u8> {
+    (0..len).map(|i| u8::try_from(i % 256).unwrap()).collect()
+}
+
+/// Build the media fixture: a 100-byte `front` + small `back` archive angle on
+/// clip 10, a `ro_usb` angle (must 404), a `..`-traversal and an absolute-path
+/// reinjection angle (both must 404), and a ~1 MiB clip for the streamed proof.
+fn media_fixture() -> MediaFixture {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("catalog.db");
+    let archive = dir.path().join("archive");
+    let cache = dir.path().join("cache");
+    std::fs::create_dir_all(archive.join("p1/clip-10")).unwrap();
+    std::fs::create_dir_all(archive.join("p1/clip-13")).unwrap();
+    std::fs::create_dir_all(archive.join("p1/clip-17")).unwrap();
+    std::fs::create_dir_all(archive.join("p1/clip-18")).unwrap();
+    std::fs::create_dir_all(&cache).unwrap();
+
+    // Real archive files.
+    std::fs::write(archive.join("p1/clip-10/front.mp4"), pattern(100)).unwrap();
+    std::fs::write(archive.join("p1/clip-10/back.mp4"), pattern(40)).unwrap();
+    // The ro_usb angle's file exists too, proving its 404 is about view_kind.
+    std::fs::write(archive.join("p1/clip-10/left.mp4"), pattern(10)).unwrap();
+    let big = 1024 * 1024 + 7; // > 4 * 256 KiB chunks, not a chunk multiple.
+    std::fs::write(archive.join("p1/clip-13/front.mp4"), pattern(big)).unwrap();
+    // Hostile camera name maps to a real file (zip-entry sanitization test).
+    std::fs::write(archive.join("p1/clip-17/cam.mp4"), pattern(20)).unwrap();
+    // A 0-byte archive file (empty-file range handling).
+    std::fs::write(archive.join("p1/clip-18/empty.mp4"), pattern(0)).unwrap();
+    // clip 16's archive file is intentionally NOT created (missing-on-disk).
+
+    // A secret file OUTSIDE the archive root, targeted by the escape angles.
+    let secret = dir.path().join("secret.mp4");
+    std::fs::write(&secret, b"top secret").unwrap();
+    let secret_abs = std::fs::canonicalize(&secret).unwrap();
+
+    // A symlink INSIDE the archive root pointing OUTSIDE it: proves the
+    // canonicalize + starts_with branch (not just syntactic `..` rejection).
+    #[cfg(unix)]
+    {
+        std::fs::create_dir_all(archive.join("p1/clip-19")).unwrap();
+        std::os::unix::fs::symlink(&secret, archive.join("p1/clip-19/evil.mp4")).unwrap();
+    }
+
+    let static_dir = dir.path().join("static");
+    std::fs::create_dir_all(&static_dir).unwrap();
+    std::fs::write(static_dir.join("index.html"), "<!doctype html>shell").unwrap();
+
+    seed_media(&db_path, big, secret_abs.to_str().unwrap());
+
+    let catalog = Catalog::open(&db_path).unwrap();
+    let media = MediaConfig::new(archive, cache);
+    let app = build_router(catalog, static_dir, media);
+    MediaFixture { _dir: dir, app }
+}
+
+fn seed_media(path: &std::path::Path, big: usize, secret_abs: &str) {
+    let mut conn = Connection::open(path).unwrap();
+    conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+    indexd::db::apply_migrations(&mut conn).unwrap();
+
+    // All clips first (FK parents), then all angles.
+    conn.execute_batch(
+        "INSERT INTO clips (id, canonical_key, started_at, ended_at, partition, folder_class, is_sentry, duration_s, availability, created_at, updated_at) VALUES
+            (10, 'clip-10', 1000, 1200, 'p1', 'SavedClips', 0, 60.0, 'present', 0, 0),
+            (11, 'clip-11', 1000, 1200, 'p1', 'SavedClips', 0, 60.0, 'present', 0, 0),
+            (12, 'clip-12', 1000, 1200, 'p1', 'SavedClips', 0, 60.0, 'present', 0, 0),
+            (13, 'clip-13', 1000, 1200, 'p1', 'SavedClips', 0, 60.0, 'present', 0, 0),
+            (15, 'clip-15', 1000, 1200, 'p1', 'SavedClips', 0, 60.0, 'present', 0, 0),
+            (16, 'clip-16', 1000, 1200, 'p1', 'SavedClips', 0, 60.0, 'present', 0, 0),
+            (17, 'clip-17', 1000, 1200, 'p1', 'SavedClips', 0, 60.0, 'present', 0, 0),
+            (18, 'clip-18', 1000, 1200, 'p1', 'SavedClips', 0, 60.0, 'present', 0, 0),
+            (19, 'clip-19', 1000, 1200, 'p1', 'SavedClips', 0, 60.0, 'present', 0, 0);
+         INSERT INTO angles (id, clip_id, camera, file_ref, view_kind, offset_ms, duration_s, size_bytes) VALUES
+            (10, 10, 'front', 'p1/clip-10/front.mp4', 'archive', 0, 60.0, 100),
+            (11, 10, 'back',  'p1/clip-10/back.mp4',  'archive', 0, 60.0, 40),
+            (12, 10, 'left_repeater', 'p1/clip-10/left.mp4', 'ro_usb', 0, 60.0, 10),
+            (13, 11, 'front', '../secret.mp4', 'archive', 0, 60.0, 10),
+            (15, 13, 'front', 'p1/clip-13/front.mp4', 'archive', 0, 60.0, 0),
+            (16, 15, 'left_repeater', 'p1/clip-10/left.mp4', 'ro_usb', 0, 60.0, 10),
+            (17, 16, 'front', 'p1/clip-16/missing.mp4', 'archive', 0, 60.0, 10),
+            (19, 18, 'front', 'p1/clip-18/empty.mp4', 'archive', 0, 0.0, 999),
+            (20, 19, 'front', 'p1/clip-19/evil.mp4', 'archive', 0, 60.0, 10);",
+    )
+    .unwrap();
+    // Absolute-path reinjection angle (path is platform-specific).
+    conn.execute(
+        "INSERT INTO angles (id, clip_id, camera, file_ref, view_kind, offset_ms, duration_s, size_bytes)
+         VALUES (14, 12, 'front', ?1, 'archive', 0, 60.0, 10)",
+        params![secret_abs],
+    )
+    .unwrap();
+    // Hostile camera name on a real archive file (zip-entry sanitization).
+    conn.execute(
+        "INSERT INTO angles (id, clip_id, camera, file_ref, view_kind, offset_ms, duration_s, size_bytes)
+         VALUES (18, 17, ?1, 'p1/clip-17/cam.mp4', 'archive', 0, 60.0, 20)",
+        params!["../bad\"\r\nname"],
+    )
+    .unwrap();
+    // size_bytes on clips 13/18 is deliberately stale; the handler must stat the
+    // real file instead of trusting the column.
+    let _ = big;
+}
+
+/// Drive a request and return `(status, headers, body-bytes)`.
+async fn request(
+    app: &Router,
+    method: Method,
+    uri: &str,
+    range: Option<&str>,
+) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+    let mut builder = Request::builder().method(method).uri(uri);
+    if let Some(range) = range {
+        builder = builder.header("range", range);
+    }
+    let resp = app
+        .clone()
+        .oneshot(builder.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap()
+        .to_vec();
+    (status, headers, bytes)
+}
+
+fn header<'a>(headers: &'a axum::http::HeaderMap, name: &str) -> Option<&'a str> {
+    headers.get(name).and_then(|v| v.to_str().ok())
+}
+
+#[tokio::test]
+async fn stream_full_body_sets_accept_ranges_and_length() {
+    let fx = media_fixture();
+    let (status, headers, body) = request(&fx.app, Method::GET, "/api/clips/10/stream", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(header(&headers, "accept-ranges"), Some("bytes"));
+    assert_eq!(header(&headers, "content-type"), Some("video/mp4"));
+    assert_eq!(header(&headers, "content-length"), Some("100"));
+    assert!(headers.get("content-range").is_none());
+    assert_eq!(body, pattern(100));
+}
+
+#[tokio::test]
+async fn stream_defaults_to_front_camera() {
+    let fx = media_fixture();
+    // No ?camera= → front; same bytes as the explicit front angle.
+    let (status, _, body) = request(&fx.app, Method::GET, "/api/clips/10/stream", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.len(), 100);
+}
+
+#[tokio::test]
+async fn stream_open_ended_range_is_206() {
+    let fx = media_fixture();
+    let (status, headers, body) = request(
+        &fx.app,
+        Method::GET,
+        "/api/clips/10/stream",
+        Some("bytes=0-"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(header(&headers, "content-range"), Some("bytes 0-99/100"));
+    assert_eq!(header(&headers, "content-length"), Some("100"));
+    assert_eq!(header(&headers, "accept-ranges"), Some("bytes"));
+    assert_eq!(body, pattern(100));
+}
+
+#[tokio::test]
+async fn stream_mid_range_returns_exact_slice() {
+    let fx = media_fixture();
+    let (status, headers, body) = request(
+        &fx.app,
+        Method::GET,
+        "/api/clips/10/stream?camera=front",
+        Some("bytes=10-19"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(header(&headers, "content-range"), Some("bytes 10-19/100"));
+    assert_eq!(header(&headers, "content-length"), Some("10"));
+    assert_eq!(body, pattern(100)[10..20]);
+}
+
+#[tokio::test]
+async fn stream_suffix_and_open_start_ranges() {
+    let fx = media_fixture();
+    let (status, headers, body) = request(
+        &fx.app,
+        Method::GET,
+        "/api/clips/10/stream",
+        Some("bytes=-10"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(header(&headers, "content-range"), Some("bytes 90-99/100"));
+    assert_eq!(body, pattern(100)[90..100]);
+
+    let (status, headers, body) = request(
+        &fx.app,
+        Method::GET,
+        "/api/clips/10/stream",
+        Some("bytes=50-"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(header(&headers, "content-range"), Some("bytes 50-99/100"));
+    assert_eq!(body, pattern(100)[50..100]);
+}
+
+#[tokio::test]
+async fn stream_unsatisfiable_range_is_416() {
+    let fx = media_fixture();
+    let (status, headers, _) = request(
+        &fx.app,
+        Method::GET,
+        "/api/clips/10/stream",
+        Some("bytes=200-300"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(header(&headers, "content-range"), Some("bytes */100"));
+}
+
+#[tokio::test]
+async fn stream_head_has_headers_no_body() {
+    let fx = media_fixture();
+    let (status, headers, body) =
+        request(&fx.app, Method::HEAD, "/api/clips/10/stream", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(header(&headers, "content-length"), Some("100"));
+    assert!(body.is_empty());
+
+    let (status, headers, body) = request(
+        &fx.app,
+        Method::HEAD,
+        "/api/clips/10/stream",
+        Some("bytes=10-19"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(header(&headers, "content-range"), Some("bytes 10-19/100"));
+    assert!(body.is_empty());
+}
+
+#[tokio::test]
+async fn stream_404s_for_missing_clip_camera_and_ro_usb() {
+    let fx = media_fixture();
+    // Missing clip.
+    let (status, _, _) = request(&fx.app, Method::GET, "/api/clips/999/stream", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    // Missing camera on an existing clip.
+    let (status, _, _) = request(
+        &fx.app,
+        Method::GET,
+        "/api/clips/10/stream?camera=nonexistent",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    // ro_usb angle is never streamable from the archive endpoint.
+    let (status, _, _) = request(
+        &fx.app,
+        Method::GET,
+        "/api/clips/10/stream?camera=left_repeater",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn stream_rejects_path_traversal_and_absolute_reinjection() {
+    let fx = media_fixture();
+    // file_ref = '../secret.mp4' (clip 11) → escapes jail → 404.
+    let (status, _, body) = request(&fx.app, Method::GET, "/api/clips/11/stream", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(
+        !body.windows(3).any(|w| w == b"top"),
+        "must not leak secret"
+    );
+    // file_ref = absolute path to the secret (clip 12) → 404.
+    let (status, _, _) = request(&fx.app, Method::GET, "/api/clips/12/stream", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn stream_large_file_is_chunked_not_buffered() {
+    let fx = media_fixture();
+    let big = 1024 * 1024 + 7;
+    let resp = fx
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/clips/13/stream")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        header(resp.headers(), "content-length"),
+        Some(big.to_string().as_str())
+    );
+
+    // Pull the body frame-by-frame: a buffered body would arrive as one frame.
+    // A streamed body arrives as many bounded (<=256 KiB) chunks.
+    let mut body = resp.into_body();
+    let mut frames = 0usize;
+    let mut total = 0usize;
+    let chunk_cap = 256 * 1024;
+    while let Some(frame) = body.frame().await {
+        let frame = frame.unwrap();
+        if let Some(data) = frame.data_ref() {
+            frames += 1;
+            total += data.len();
+            assert!(
+                data.len() <= chunk_cap,
+                "frame {} exceeds chunk cap",
+                data.len()
+            );
+        }
+    }
+    assert_eq!(total, big);
+    assert!(frames > 1, "expected multiple frames, got {frames}");
+}
+
+#[tokio::test]
+async fn export_streams_zip_of_archive_angles() {
+    let fx = media_fixture();
+    let (status, headers, body) = request(&fx.app, Method::GET, "/api/clips/10/export", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(header(&headers, "content-type"), Some("application/zip"));
+    assert_eq!(
+        header(&headers, "content-disposition"),
+        Some("attachment; filename=\"clip-10.zip\"")
+    );
+
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(body)).unwrap();
+    // Only the two archive angles (front, back) — not the ro_usb left_repeater.
+    let mut names: Vec<String> = (0..zip.len())
+        .map(|i| zip.by_index(i).unwrap().name().to_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["back.mp4".to_owned(), "front.mp4".to_owned()]);
+
+    let mut buf = Vec::new();
+    std::io::Read::read_to_end(&mut zip.by_name("front.mp4").unwrap(), &mut buf).unwrap();
+    assert_eq!(buf, pattern(100));
+}
+
+#[tokio::test]
+async fn export_head_does_not_build_body() {
+    let fx = media_fixture();
+    let (status, headers, body) =
+        request(&fx.app, Method::HEAD, "/api/clips/10/export", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(header(&headers, "content-type"), Some("application/zip"));
+    assert_eq!(
+        header(&headers, "content-disposition"),
+        Some("attachment; filename=\"clip-10.zip\"")
+    );
+    assert!(body.is_empty());
+}
+
+#[tokio::test]
+async fn export_404s_for_clip_without_archive_angles() {
+    let fx = media_fixture();
+    let (status, _, _) = request(&fx.app, Method::GET, "/api/clips/999/export", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn download_single_angle_sets_attachment() {
+    let fx = media_fixture();
+    let (status, headers, body) = request(
+        &fx.app,
+        Method::GET,
+        "/api/clips/10/angles/front/download",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(header(&headers, "content-type"), Some("video/mp4"));
+    assert_eq!(
+        header(&headers, "content-disposition"),
+        Some("attachment; filename=\"clip-10-front.mp4\"")
+    );
+    assert_eq!(body, pattern(100));
+
+    // ro_usb angle is not downloadable from the archive endpoint.
+    let (status, _, _) = request(
+        &fx.app,
+        Method::GET,
+        "/api/clips/10/angles/left_repeater/download",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+// ─── 5.1b second-pass coverage (rubber-duck-driven edge/security cases) ───
+
+#[tokio::test]
+async fn stream_404s_when_archive_file_is_missing_on_disk() {
+    let fx = media_fixture();
+    // clip 16's angle row exists but its file was never written → Resolved::Missing.
+    let (status, _, _) = request(&fx.app, Method::GET, "/api/clips/16/stream", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn export_and_head_404_when_only_archive_file_is_missing() {
+    let fx = media_fixture();
+    // clip 16 has exactly one archive angle and its file is missing → no
+    // resolvable entries → both GET and HEAD must 404 (the HEAD/GET-consistency
+    // guarantee: HEAD must not 200 where GET would 404).
+    let (status, _, _) = request(&fx.app, Method::GET, "/api/clips/16/export", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = request(&fx.app, Method::HEAD, "/api/clips/16/export", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn export_404s_for_ro_usb_only_clip() {
+    let fx = media_fixture();
+    // clip 15 has a single ro_usb angle → no archive angles → 404.
+    let (status, _, _) = request(&fx.app, Method::GET, "/api/clips/15/export", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn export_sanitizes_hostile_camera_in_zip_entry_name() {
+    let fx = media_fixture();
+    // clip 17's angle camera is `../bad"\r\nname` mapped to a real file.
+    let (status, _, body) = request(&fx.app, Method::GET, "/api/clips/17/export", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(body)).unwrap();
+    assert_eq!(zip.len(), 1);
+    let name = zip.by_index(0).unwrap().name().to_owned();
+    assert!(
+        !name.contains('/')
+            && !name.contains('\\')
+            && !name.contains('"')
+            && !name.contains('\r')
+            && !name.contains('\n')
+            && !name.contains(".."),
+        "sanitized zip entry leaked separators/control chars: {name:?}"
+    );
+    assert!(
+        std::path::Path::new(&name)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4")),
+        "entry should keep an .mp4 suffix: {name:?}"
+    );
+}
+
+#[tokio::test]
+async fn export_includes_present_archive_entries_only() {
+    let fx = media_fixture();
+    // clip 10 has two present archive angles plus one ro_usb angle that is
+    // skipped by view_kind → exactly two entries, nothing spurious.
+    let (status, _, body) = request(&fx.app, Method::GET, "/api/clips/10/export", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let zip = zip::ZipArchive::new(std::io::Cursor::new(body)).unwrap();
+    assert_eq!(zip.len(), 2);
+}
+
+#[tokio::test]
+async fn stream_empty_file_full_and_range() {
+    let fx = media_fixture();
+    // 0-byte archive file: no-range GET → 200 with Content-Length 0, empty body.
+    let (status, headers, body) = request(&fx.app, Method::GET, "/api/clips/18/stream", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(header(&headers, "content-length"), Some("0"));
+    assert_eq!(header(&headers, "accept-ranges"), Some("bytes"));
+    assert!(body.is_empty());
+
+    // Any range against a 0-byte file is unsatisfiable → 416 `bytes */0`.
+    let (status, headers, _) = request(
+        &fx.app,
+        Method::GET,
+        "/api/clips/18/stream",
+        Some("bytes=0-0"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(header(&headers, "content-range"), Some("bytes */0"));
+}
+
+#[tokio::test]
+async fn stream_single_byte_range_is_one_byte() {
+    let fx = media_fixture();
+    let (status, headers, body) = request(
+        &fx.app,
+        Method::GET,
+        "/api/clips/10/stream",
+        Some("bytes=0-0"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(header(&headers, "content-range"), Some("bytes 0-0/100"));
+    assert_eq!(header(&headers, "content-length"), Some("1"));
+    assert_eq!(body, pattern(100)[0..1]);
+}
+
+#[tokio::test]
+async fn stream_end_past_eof_clamps_to_last_byte() {
+    let fx = media_fixture();
+    // end (500) past EOF clamps to total-1 (99) → 206, not 416.
+    let (status, headers, body) = request(
+        &fx.app,
+        Method::GET,
+        "/api/clips/10/stream",
+        Some("bytes=90-500"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(header(&headers, "content-range"), Some("bytes 90-99/100"));
+    assert_eq!(header(&headers, "content-length"), Some("10"));
+    assert_eq!(body, pattern(100)[90..100]);
+}
+
+#[tokio::test]
+async fn stream_multiple_range_headers_is_416() {
+    let fx = media_fixture();
+    // Two Range headers (a multi-range / ambiguous request) → unsatisfiable.
+    let resp = fx
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/clips/10/stream")
+                .header("range", "bytes=0-10")
+                .header("range", "bytes=20-30")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(header(resp.headers(), "content-range"), Some("bytes */100"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn stream_rejects_symlink_escape_via_canonicalize() {
+    let fx = media_fixture();
+    // clip 19's file_ref is a symlink INSIDE the root pointing OUTSIDE it.
+    // Syntactic `..` checks would miss this; only canonicalize + starts_with
+    // catches it → 404, no secret bytes leaked.
+    let (status, _, body) = request(&fx.app, Method::GET, "/api/clips/19/stream", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(
+        !body.windows(3).any(|w| w == b"top"),
+        "symlink escape must not leak secret bytes"
+    );
+    // And the same angle must not be downloadable or exportable.
+    let (status, _, _) = request(
+        &fx.app,
+        Method::GET,
+        "/api/clips/19/angles/front/download",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = request(&fx.app, Method::GET, "/api/clips/19/export", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }

@@ -226,6 +226,44 @@ pub(crate) fn list_settings(conn: &Connection) -> Result<Vec<PrefDto>, rusqlite:
     Ok(out)
 }
 
+/// Resolve one camera angle's byte source for the stream/download endpoints.
+///
+/// Returns `(file_ref, view_kind)` for the `(clip_id, camera)` angle, or `None`
+/// when no such angle exists. The path resolution + archive-root jail is done
+/// by the caller; `file_ref` is **never** placed in any browser-facing DTO.
+pub(crate) fn angle_source(
+    conn: &Connection,
+    clip_id: i64,
+    camera: &str,
+) -> Result<Option<(String, String)>, rusqlite::Error> {
+    let mut stmt =
+        conn.prepare("SELECT file_ref, view_kind FROM angles WHERE clip_id = ?1 AND camera = ?2")?;
+    stmt.query_row(params![clip_id, camera], |row| {
+        Ok((row.get(0)?, row.get(1)?))
+    })
+    .optional()
+}
+
+/// List the archive-view angles of a clip for the zip-export endpoint, as
+/// `(camera, file_ref)` pairs ordered by `camera`.
+///
+/// Only `view_kind = 'archive'` angles are returned: those are the durable
+/// Pi-side ext4 files that are safe to read. An empty vec means the clip has no
+/// exportable angles (or does not exist) — the caller answers `404`.
+pub(crate) fn list_archive_angles(
+    conn: &Connection,
+    clip_id: i64,
+) -> Result<Vec<(String, String)>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT camera, file_ref FROM angles \
+         WHERE clip_id = ?1 AND view_kind = 'archive' ORDER BY camera ASC",
+    )?;
+    let out = stmt
+        .query_map(params![clip_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(out)
+}
+
 /// Fetch all angles for a set of clip ids in one query, grouped by clip id and
 /// ordered by `camera` for deterministic output.
 fn angles_for_clips(

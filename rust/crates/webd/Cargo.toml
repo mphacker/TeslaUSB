@@ -24,12 +24,20 @@ path = "src/main.rs"
 
 [dependencies]
 axum = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "io-util", "sync"] }
+tokio-util = { version = "0.7", features = ["io"] }
 tower-http = { version = "0.6", features = ["fs"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
+# STORED-only zip writer for the clip export endpoint (Task 5.1b). mp4 is
+# already H.264-compressed, so no deflate feature is pulled in.
+zip = { version = "7", default-features = false }
+# The export builds its zip into an anonymous on-disk tempfile (the zip
+# writer needs Seek), then streams + auto-unlinks it — never the whole zip
+# in memory. Promoted from a dev-dependency to a runtime dependency.
+tempfile = "3"
 
 [dev-dependencies]
 # Tests build a fixture catalog via indexd's authoritative migration
@@ -37,7 +45,9 @@ thiserror = "1"
 # indexd at runtime — production code is a self-contained read-only layer.
 indexd = { path = "../indexd" }
 tower = { version = "0.5", features = ["util"] }
-tempfile = "3"
+# Frame-by-frame body inspection: proves the stream endpoint emits a large
+# file as multiple bounded chunks rather than one buffered blob.
+http-body-util = "0.1"
 
 [lints]
 workspace = true

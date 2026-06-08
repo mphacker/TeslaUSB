@@ -40,6 +40,12 @@ pub(crate) fn router(state: AppState, static_dir: PathBuf) -> Router {
         .route("/events", get(events))
         .route("/clips", get(clips))
         .route("/clips/{id}", get(clip_detail))
+        .route("/clips/{id}/stream", get(crate::media::stream))
+        .route("/clips/{id}/export", get(crate::media::export))
+        .route(
+            "/clips/{id}/angles/{camera}/download",
+            get(crate::media::download),
+        )
         .route("/analytics", get(analytics))
         .route("/settings", get(settings))
         .fallback(api_not_found)
@@ -51,8 +57,9 @@ pub(crate) fn router(state: AppState, static_dir: PathBuf) -> Router {
 /// Run a read query on a blocking task using a fresh read-only connection.
 ///
 /// Keeps the non-`Send` [`Connection`] entirely off the async runtime: it is
-/// created and dropped inside the blocking closure.
-async fn read<T, F>(catalog: Catalog, query_fn: F) -> Result<T, ApiError>
+/// created and dropped inside the blocking closure. Shared with the `media`
+/// handlers, which resolve angle file paths through the same path.
+pub(crate) async fn read<T, F>(catalog: Catalog, query_fn: F) -> Result<T, ApiError>
 where
     F: FnOnce(&Connection) -> Result<T, rusqlite::Error> + Send + 'static,
     T: Send + 'static,

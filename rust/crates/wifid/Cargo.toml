@@ -1,0 +1,24 @@
+[package]
+name = "wifid"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Disposable WiFi service: STA/AP state machine (never both at once), token-bucket TX cap kept under the BCM43436 SDIO-deadlock threshold, and an SDIO chip-reset watchdog. Recovers a wedged chip via rmmod/modprobe brcmfmac; a Pi reboot is a last resort gated on gadgetd's USB write-heartbeat. Never endangers the car's write path."
+
+[lints]
+workspace = true
+
+# serde/serde_json frame the typed status + throttle contract over the control
+# UDS (mirrors gadgetd/webd). thiserror gives typed boundary errors per
+# SPEC.md §7.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+
+[[bin]]
+name = "wifid"
+path = "src/main.rs"

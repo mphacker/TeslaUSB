@@ -1,0 +1,28 @@
+{
+  "name": "teslausb-spa",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "TeslaUSB B-1 static SPA (parity UI). Task 5.2: scaffold + media hub.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "seed": "node test/seed/build-db.mjs",
+    "test": "playwright test",
+    "test:report": "playwright show-report"
+  },
+  "dependencies": {
+    "preact": "^10.24.3"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.2",
+    "@preact/preset-vite": "^2.9.1",
+    "@types/node": "^22.19.20",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  }
+}

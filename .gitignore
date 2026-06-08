@@ -16,6 +16,12 @@ dist/
 .cache/
 *.tsbuildinfo
 
+# SPA Playwright UAT artifacts (seeded DB, screenshots, perf/console
+# captures, html report, traces) — generated each run, never committed.
+spa/test/uat/artifacts/
+test-results/
+playwright-report/
+
 # ── Editor / OS cruft ───────────────────────────────────────────────
 .vscode/
 .idea/

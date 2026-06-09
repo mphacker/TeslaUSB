@@ -206,3 +206,58 @@ The full task cards (acceptance criteria, verification, files, size) live in
 - Any redesign of the UI's visual language — parity is the goal, not a new look
   ([`spa.md` §7](../specs/spa.md)).
 - Re-introducing Python/Flask, nginx, or NBD in any form.
+
+---
+
+## 11. Website completion backlog — enumerated parity gap (2026-06-09)
+
+> Added after an audit showed the SPA ships **4 of 16 parity screens** and `webd`
+> is a **read-only catalog** (no mutation/config/status surface). `tasks.md` Task
+> 5.1 (slices a–e) and Task 5.3 (per-screen) named this work in prose but never
+> enumerated it, so it was invisible in tracking. IDs below match the session
+> tracker. Every UI card carries the mandatory Playwright UAT gate (spa.md §5/§6).
+
+### 11.1 `webd` backend (contract-first; screens depend on these)
+| ID | Slice | Status |
+|----|-------|--------|
+| (done) | 5.1a Read API (days/trips/events/clips/analytics/settings) | DONE |
+| (done) | 5.1b stream + zip export | DONE (leases pending) |
+| be-leases | 5.1b playback lease (TTL+heartbeat) so governor can't evict mid-read | dep: svc-retentiond |
+| be-status-health | 5.1d /api/system/health, /api/storage, /api/storage/health | ready |
+| be-jobs-sse | 5.1d /api/jobs SSE (index/handoff/upload/job status) | ready |
+| be-mutations-core | 5.1c delete clip → validate → gadgetd handoff → SSE progress | ready |
+| be-media-install | 5.1c install/remove media (toybox write path) | ready |
+| be-toybox-endpoints | boombox/music/lightshows/chimes/plates/wraps GET+POST | dep: be-media-install |
+| be-cloud-config | /api/cloud/* → uploadd | dep: svc-uploadd-decide |
+| be-retention-config | retention policy → retentiond | ready |
+| be-wifi-config | wifi/AP config → wifid | ready |
+| be-captive-portal | 5.1e /portal AP onboarding entry | dep: be-wifi-config |
+
+### 11.2 SPA screens (4 built: trip map, event player+HUD, analytics, settings shell)
+| ID | Screen | Depends on |
+|----|--------|-----------|
+| fe-settings-live | Settings dashboard → live data (kills "Status Unknown / —") | be-status-health |
+| fe-media-hub | Home / media hub landing (today a ComingSoon stub) | — |
+| fe-clip-delete | clip-delete + handoff progress in player | be-mutations-core, be-jobs-sse |
+| fe-boombox / fe-music / fe-lightshows / fe-chimes / fe-plates / fe-wraps | six toybox managers | be-toybox-endpoints |
+| fe-cloud | Cloud archive (today a ComingSoon stub) | be-cloud-config, svc-uploadd |
+| fe-storage-settings | Storage settings | be-status-health, be-retention-config |
+| fe-storage-health | Storage health widgets | be-status-health |
+| fe-failed-jobs | Failed jobs | be-jobs-sse |
+| fe-captive-portal | First-run WiFi onboarding (over AP) | be-captive-portal, svc-wifid-ap |
+| fe-durable-suite | Checked-in Playwright suite (CI gate, spa.md §6) | — |
+
+### 11.3 Supporting services / hardware these depend on
+| ID | Work |
+|----|------|
+| svc-retentiond | enable+validate retentiond (inactive today; card-fill protection) |
+| svc-uploadd-decide | OPEN: rclone vs native-Rust cloud backend (gates cloud) |
+| svc-uploadd | implement+enable uploadd |
+| svc-wifid-hw | real wifid hardware layer (stubs today); seed Trez STA + boot backstop FIRST |
+| svc-wifid-ap | AP mode + connectivity backstop (lockout risk — SSH must survive) |
+| svc-gadgetd-handoff-uat | first live UI→webd→gadgetd write-path exercise |
+| ops-wifi-watchdog | decommission legacy wifi-watchdog.timer (still armed — safety) |
+| hw-2-1-lun | make-or-break LUN-acceptance spike (operator-at-vehicle) |
+| hrd-m5-hardening | non-root User=, CAP_NET_BIND_SERVICE (webd :80), MemoryMax, watchdog |
+| hrd-installer-finalize | Phase 7 installer/verifier/first-boot |
+| ops-push-port80 | commit+push :80 change + 2 held commits (awaiting go) |

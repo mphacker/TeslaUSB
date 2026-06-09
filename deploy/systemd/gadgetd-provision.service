@@ -1,0 +1,33 @@
+# TeslaUSB B-1 — gadgetd-provision: FIRST-RUN backing-image provisioning.
+#
+# §2 of the Phase 7.0 contract (docs/tasks/phase7-0-contract.md). This is the
+# ONLY unit that carries the destructive-on-absent provisioning step. It is
+# installed AND enabled EXCLUSIVELY by `setup.sh install --bootstrap-image`.
+# Non-bootstrap modes (deploy-app/update/repair/rollback) must NEVER enable or
+# start this unit, so a fresh device can never be silently bootstrapped.
+#
+# `gadgetd provision` is idempotent and create-only-if-absent: if the image
+# already exists it is a no-op (the existing car data is left untouched). The
+# image layout itself is owned wholly by the gadgetd binary; this unit only
+# delegates to it.
+#
+# Install: copy to /etc/systemd/system/gadgetd-provision.service, then (bootstrap
+# only) systemctl daemon-reload && systemctl enable gadgetd-provision.service
+[Unit]
+Description=TeslaUSB gadgetd first-run backing-image provisioning (bootstrap only)
+Documentation=https://github.com/mphacker/TeslaUSB
+# configfs is not required to provision an image file, but local filesystems must
+# be available so /data/teslausb exists.
+After=local-fs.target
+# Ordering only: gadgetd.service brings the gadget up AFTER this has completed.
+Before=gadgetd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Delegate ALL image creation/layout to the gadgetd binary (the sole write-path
+# owner). create-only-if-absent: existing data is never disturbed.
+ExecStart=/usr/local/bin/gadgetd provision --image /data/teslausb/disk.img --size-mib 4096 --media-mib 1024
+
+[Install]
+WantedBy=multi-user.target

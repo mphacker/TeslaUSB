@@ -3,14 +3,24 @@
 # unit rebuilds the gadget at boot. It is the guardian of the #1 invariant
 # (SPEC.md §2): the car must always be able to write TeslaCam.
 #
+# §2 contract split: this unit only brings the gadget UP. It NEVER creates,
+# grows, or lays out the backing image — `gadgetd up` on a MISSING image fails
+# loudly and creates nothing. First-run image provisioning lives in the separate
+# gadgetd-provision.service, enabled only by `install --bootstrap-image`.
+#
 # Install: copy to /etc/systemd/system/gadgetd.service, then
 #   systemctl daemon-reload && systemctl enable --now gadgetd.service
 [Unit]
 Description=TeslaUSB gadgetd (kernel USB mass-storage gadget, car-facing write path)
 Documentation=https://github.com/mphacker/TeslaUSB
-# configfs must be mounted before we can build the gadget tree.
+# configfs must be available before we can build the gadget tree.
 Requires=sys-kernel-config.mount
 After=sys-kernel-config.mount local-fs.target
+# Bootstrap ordering: when provisioning is enabled it must finish first. This is
+# an ordering dependency only (no Requires=), so on a normal boot — where the
+# image already exists and gadgetd-provision is not enabled — gadgetd starts
+# directly without waiting on it.
+After=gadgetd-provision.service
 # A UDC must exist (dwc2 peripheral). If absent, the service fails loudly.
 ConditionPathExists=/sys/class/udc
 
@@ -19,7 +29,6 @@ Type=oneshot
 RemainAfterExit=yes
 # The single most important process on the device: never an OOM-kill victim.
 OOMScoreAdjust=-1000
-ExecStartPre=/usr/local/bin/gadgetd provision --image /data/teslausb/disk.img --size-mib 4096 --media-mib 1024
 ExecStart=/usr/local/bin/gadgetd up --image /data/teslausb/disk.img
 ExecStop=/usr/local/bin/gadgetd down --image /data/teslausb/disk.img
 

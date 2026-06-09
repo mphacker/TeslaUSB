@@ -55,10 +55,14 @@ use crate::io::PreadReader;
 /// Default control-socket path (matches the `gadgetd` runtime layout).
 const DEFAULT_SOCKET: &str = "/run/teslausb/scannerd.sock";
 /// Write timeout so a stuck client cannot pin the serve loop forever.
-/// There is deliberately **no read timeout**: between passes the client
-/// legitimately idles (the 30 s cadence is client-owned), and the server
-/// blocks waiting for the next request.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Read timeout for the next request on an established connection. The
+/// legitimate client drives a 30 s cadence, so a gap this much larger than
+/// one cycle (plus apply slack) means the peer is dead or wedged: the read
+/// errors out, the connection is dropped, and the slot is freed for a fresh
+/// connection. This bounds a slowloris / connect-and-never-send client,
+/// which would otherwise block the single sequential accept loop forever.
+const READ_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Parse `scannerd serve <image> [--socket <path>] [--sample-rate <n>]`
 /// and run the daemon.
@@ -154,6 +158,7 @@ fn handle_conn(
     sample_rate: u32,
 ) -> io::Result<()> {
     stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
+    stream.set_read_timeout(Some(READ_TIMEOUT))?;
 
     loop {
         let request = match read_request(&mut stream) {

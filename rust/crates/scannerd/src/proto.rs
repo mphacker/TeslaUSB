@@ -20,12 +20,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::record::ScanBatch;
 
-/// Maximum accepted frame size. A realistic per-pass batch (a handful of
-/// newly-stable clips, or a full resync replay bounded by the
-/// [`crate::record`] caps) is well under this; the ceiling is a
-/// denial-of-service guard so a forged length prefix cannot drive an
+/// Maximum accepted frame size for a [`ScanBatch`] response. A realistic
+/// per-pass batch (a handful of newly-stable clips, or a full resync replay
+/// bounded by the [`crate::record`] caps) is well under this; the ceiling
+/// is a denial-of-service guard so a forged length prefix cannot drive an
 /// unbounded allocation on the 512 MiB Pi.
 pub const MAX_FRAME: u32 = 64 * 1024 * 1024;
+
+/// Maximum accepted frame size for a client→server [`Request`]. A
+/// `Request::Scan` serializes to a few dozen bytes, so the server caps its
+/// inbound frames far tighter than [`MAX_FRAME`]: a peer cannot force a
+/// large allocation before the request even parses.
+pub const MAX_REQUEST_FRAME: u32 = 64 * 1024;
 
 /// A client→server request. `scannerd` only answers scan requests; it
 /// holds no other state the client can mutate.
@@ -87,23 +93,35 @@ pub fn write_request(stream: &mut impl Write, request: &Request) -> io::Result<(
     write_frame(stream, &bytes)
 }
 
-/// Read + decode a [`Request`] (bounded by [`MAX_FRAME`]).
+/// Read + decode a [`Request`] (bounded by [`MAX_REQUEST_FRAME`]).
 ///
 /// # Errors
 ///
 /// Returns an error if the frame is oversize/torn or the JSON is invalid.
 pub fn read_request(stream: &mut impl Read) -> io::Result<Request> {
-    let payload = read_frame(stream, MAX_FRAME)?;
+    let payload = read_frame(stream, MAX_REQUEST_FRAME)?;
     serde_json::from_slice(&payload).map_err(io::Error::other)
 }
 
 /// Encode + frame a [`ScanBatch`].
 ///
+/// The serialized payload is checked against [`MAX_FRAME`] *before* it is
+/// written, so an over-cap batch fails loudly here on the producer side
+/// rather than being sent as a frame the consumer would reject (which would
+/// otherwise spin a reconnect loop).
+///
 /// # Errors
 ///
-/// Returns an error if serialization or the write fails.
+/// Returns an error if serialization fails, the payload exceeds
+/// [`MAX_FRAME`], or the write fails.
 pub fn write_batch(stream: &mut impl Write, batch: &ScanBatch) -> io::Result<()> {
     let bytes = serde_json::to_vec(batch).map_err(io::Error::other)?;
+    if bytes.len() > MAX_FRAME as usize {
+        return Err(io::Error::other(format!(
+            "batch frame too large: {} > {MAX_FRAME}",
+            bytes.len()
+        )));
+    }
     write_frame(stream, &bytes)
 }
 
@@ -176,6 +194,17 @@ mod tests {
                 resync: false
             }
         );
+    }
+
+    #[test]
+    fn read_request_rejects_oversize_request_frame() {
+        use super::MAX_REQUEST_FRAME;
+        let mut buf = Vec::new();
+        // A length prefix just over the request cap must be refused before
+        // any payload is read/allocated.
+        buf.extend_from_slice(&(MAX_REQUEST_FRAME + 1).to_le_bytes());
+        let mut cur = Cursor::new(buf);
+        assert!(read_request(&mut cur).is_err());
     }
 
     #[test]

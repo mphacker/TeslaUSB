@@ -82,12 +82,36 @@ run_mutation() {
     "$@"
 }
 
+# --- destination safety (contract §2 #1 invariant, defense-in-depth) ----------
+# _resolved <path> — canonical absolute path with symlinks resolved when the path
+# (or its leading components) exists; falls back to the literal path otherwise.
+_resolved() { readlink -f -- "$1" 2>/dev/null || printf '%s' "$1"; }
+
+# assert_safe_dest <dst> — guard EVERY system-path mutation. Refuses when:
+#   * <dst> is (or, via a symlink, resolves to) the car-facing disk image — string
+#     equality alone is not enough, since a planted symlink could let install/cp/
+#     chmod write THROUGH it onto disk.img (contract §2 #1 invariant); or
+#   * <dst> is itself an existing symlink — a symlink at a managed system path is
+#     anomalous (tamper/foot-gun); we refuse to write through it rather than mutate
+#     whatever it points at.
+assert_safe_dest() {
+    local dst="$1" rdst rimg
+    rimg="$(_resolved "$TESLAUSB_DISK_IMG")"
+    rdst="$(_resolved "$dst")"
+    if [ "$dst" = "$TESLAUSB_DISK_IMG" ] || [ "$rdst" = "$rimg" ]; then
+        die "$EX_STEP" "refusing to mutate the car-facing disk image (target ${dst})"
+    fi
+    if [ -L "$dst" ]; then
+        die "$EX_STEP" "refusing to write through symlink at managed path: ${dst}"
+    fi
+}
+
 # --- mutation helpers (thin wrappers; all route through run_mutation) ---------
 mut_mkdir() { run_mutation "mkdir -p ${1}" mkdir -p "$1"; }
-mut_rm()    { run_mutation "rm -f ${1}" rm -f "$1"; }
-mut_rmdir_tree() { run_mutation "rm -rf ${1}" rm -rf "$1"; }
-mut_chmod() { run_mutation "chmod ${1} ${2}" chmod "$1" "$2"; }
-mut_chown() { run_mutation "chown ${1} ${2}" chown "$1" "$2"; }
+mut_rm()    { assert_safe_dest "$1"; run_mutation "rm -f ${1}" rm -f "$1"; }
+mut_rmdir_tree() { assert_safe_dest "$1"; run_mutation "rm -rf ${1}" rm -rf "$1"; }
+mut_chmod() { assert_safe_dest "$2"; run_mutation "chmod ${1} ${2}" chmod "$1" "$2"; }
+mut_chown() { assert_safe_dest "$2"; run_mutation "chown ${1} ${2}" chown "$1" "$2"; }
 
 # backup_path <target> — first-touch .b1-backup sidecar before overwriting
 # anything outside our own tree. No-op if absent or already backed up this run.
@@ -103,6 +127,7 @@ backup_path() {
 mut_install_file() {
     local src="$1" dst="$2" mode="${3:-0644}"
     [ -f "$src" ] || die "$EX_STEP" "source file missing: ${src}"
+    assert_safe_dest "$dst"
     backup_path "$dst"
     mut_mkdir "$(dirname "$dst")"
     run_mutation "install ${src} -> ${dst} (mode ${mode})" \
@@ -114,6 +139,7 @@ mut_install_file() {
 mut_install_tree() {
     local src="$1" dst="$2"
     [ -d "$src" ] || die "$EX_STEP" "source tree missing: ${src}"
+    assert_safe_dest "$dst"
     backup_path "$dst"
     mut_rmdir_tree "$dst"
     mut_mkdir "$dst"

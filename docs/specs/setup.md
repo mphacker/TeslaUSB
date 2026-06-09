@@ -133,15 +133,15 @@ Ordered; each idempotent/convergent and dry-run-aware:
    `nbd-*` — see [`SPEC.md` §10 NEVER](./SPEC.md).
 3. **users** — a `teslausb` system user/group and a tight
    `/etc/sudoers.d/teslausb` fragment; service-account model per §10.
-4. **data-roots** — `/srv/teslausb/{archive,media}` (+ the `disk.img` path),
+4. **data-roots** — `/data/teslausb/{archive,media}` (+ the `disk.img` path),
    `/var/lib/teslausb` (SQLite), `/run/teslausb` (tmpfs for sockets), with correct
    ownership/modes ([`SPEC.md` §6.1](./SPEC.md)).
 5. **config** — install an example `/etc/teslausb/config.toml` (schema-versioned)
    + per-service secret files; **secrets `0600` root-owned**, delivered to
    services via systemd `LoadCredential=` (§10). Never committed, logged, in the
    SPA bundle, or on the Tesla volume.
-6. **binaries** — install the verified aarch64 service binaries (e.g.
-   `/usr/local/lib/teslausb/` or `/opt/teslausb/`).
+6. **binaries** — install the verified aarch64 service binaries to
+   `/usr/local/bin` (contract §1; the frozen deployed path).
 7. **spa** — install the verified hashed SPA bundle that `webd` serves.
 8. **units** — install the **7** service units (`gadgetd`, `scannerd`, `indexd`,
    `webd`, `uploadd`, `retentiond`, `wifid`) with cgroup `MemoryMax`,

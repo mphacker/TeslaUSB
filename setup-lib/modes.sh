@@ -55,6 +55,7 @@ install_config_example() {
         log_info "preserving existing ${TESLAUSB_CONFIG_FILE}"
     else
         log_info "seeding ${TESLAUSB_CONFIG_FILE} from example (first install)"
+        assert_safe_dest "$TESLAUSB_CONFIG_FILE"
         run_mutation "install ${example} -> ${TESLAUSB_CONFIG_FILE} (mode 0644)" \
             install -m 0644 "$example" "$TESLAUSB_CONFIG_FILE"
     fi
@@ -147,6 +148,7 @@ rollback_one() {
     [ -d "$dir" ] || return 0
     newest="$(find "$dir" -maxdepth 1 -name "${base}.b1-backup-*" -print 2>/dev/null | sort | tail -n1)"
     [ -n "$newest" ] || return 0
+    assert_safe_dest "$target"
     run_mutation "rollback ${newest} -> ${target}" cp -a "$newest" "$target"
 }
 
@@ -160,6 +162,7 @@ rollback_dir_sidecars() {
         [ -n "$bak" ] || continue
         orig="${bak%.b1-backup-*}"
         [ "$orig" = "$TESLAUSB_DISK_IMG" ] && continue
+        assert_safe_dest "$orig"
         run_mutation "rollback ${bak} -> ${orig}" cp -a "$bak" "$orig"
     done < <(find "$dir" -maxdepth 1 -name '*.b1-backup-*' -print 2>/dev/null | sort)
 }

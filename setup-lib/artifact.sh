@@ -24,15 +24,26 @@ artifact_require_https() {
 # Refuses absolute paths, parent-dir segments, symlinks, and setuid/setgid bits.
 # Extracts into a fresh dir the installer owns; never over live paths.
 extract_tarball_safe() {
-    local tarball="$1" dest="$2" entry
+    local tarball="$1" dest="$2" entry mode
     [ -f "$tarball" ] || die "$EX_PRECOND" "release tarball missing: ${tarball}"
-    # Pre-scan the member list before extracting anything.
+    # Pre-scan the member NAMES before extracting anything (contract §5).
     while IFS= read -r entry; do
         case "$entry" in
             /*)     die "$EX_STEP" "refusing absolute path in tarball: ${entry}" ;;
             *..*)   die "$EX_STEP" "refusing parent-dir segment in tarball: ${entry}" ;;
         esac
     done < <(tar -tzf "$tarball")
+    # Pre-scan member TYPES before extraction: reject symlink ('l') and hardlink
+    # ('h') members up front, so a hostile archive cannot create a link and then
+    # write THROUGH it to escape ${dest} mid-extraction (the post-extract find
+    # below is belt-and-braces). GNU tar -tv encodes the type in column-1 of the
+    # mode string.
+    while IFS= read -r mode _; do
+        case "$mode" in
+            l*) die "$EX_STEP" "refusing symlink member in tarball" ;;
+            h*) die "$EX_STEP" "refusing hardlink member in tarball" ;;
+        esac
+    done < <(tar -tvzf "$tarball" 2>/dev/null)
     mkdir -p "$dest"
     tar -xzf "$tarball" -C "$dest" --no-same-owner
     # Post-extract structural guards.

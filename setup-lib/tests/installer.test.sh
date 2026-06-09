@@ -174,5 +174,69 @@ assert_grep   '^disable webd\.service$' "$SYSTEMCTL_LOG" "uninstall disables app
 assert_nogrep 'stop gadgetd\.service'   "$SYSTEMCTL_LOG" "uninstall leaves gadgetd running (safe default)"
 cleanup_sandbox "$sbx"
 
+# ============================================================================
+# E. Destination-symlink + extraction-link safety (defense-in-depth, §2/§5)
+# ============================================================================
+
+# E1: a destination symlink resolving to disk.img is refused, and disk.img is
+# left byte-for-byte untouched (string-equality guard alone would miss this).
+new_sandbox; sbx="$SANDBOX"
+img="$(make_fake_disk_img)"
+mkdir -p "${TESLAUSB_PREFIX}/usr/local/bin"
+ln -s "$img" "${TESLAUSB_PREFIX}/usr/local/bin/gadgetd"
+before="$(disk_fingerprint "$img")"
+assert_exit 4 "deploy-app refuses to write through a disk.img symlink" -- \
+    run_setup deploy-app --artifact-dir "$GOOD" --yes
+after="$(disk_fingerprint "$img")"
+assert_eq "$after" "$before" "disk.img untouched after refused symlink write"
+cleanup_sandbox "$sbx"
+
+# E2: any pre-existing symlink at a managed system path is refused (not only the
+# disk.img case) — we never write through a planted link.
+new_sandbox; sbx="$SANDBOX"
+mkdir -p "${TESLAUSB_PREFIX}/usr/local/bin" "${sbx}/decoy"
+printf 'x\n' > "${sbx}/decoy/target"
+ln -s "${sbx}/decoy/target" "${TESLAUSB_PREFIX}/usr/local/bin/gadgetd"
+assert_exit 4 "deploy-app refuses a planted symlink at a managed path" -- \
+    run_setup deploy-app --artifact-dir "$GOOD" --yes
+assert_eq "$(cat "${sbx}/decoy/target")" "x" "decoy symlink target left unmodified"
+cleanup_sandbox "$sbx"
+
+# E3: extract_tarball_safe rejects a tarball containing a symlink member BEFORE
+# any extraction (so a link cannot be used to escape the destination). Gated on
+# tar + ln; the remote extraction path is otherwise network-only.
+if command -v tar >/dev/null 2>&1 && command -v ln >/dev/null 2>&1; then
+    new_sandbox; sbx="$SANDBOX"
+    # Set once in the parent; the (..) subshells below inherit it.
+    SETUP_LIB_DIR="${REPO_ROOT}/setup-lib"
+    mdir="${sbx}/payload"; mkdir -p "$mdir"
+    ln -s /etc "${mdir}/escape"
+    printf 'x\n' > "${mdir}/file"
+    tar -czf "${sbx}/evil.tgz" -C "$mdir" .
+    rc=0
+    ( # shellcheck source=setup-lib/common.sh
+      . "${SETUP_LIB_DIR}/common.sh"
+      # shellcheck source=setup-lib/artifact.sh
+      . "${SETUP_LIB_DIR}/artifact.sh"
+      extract_tarball_safe "${sbx}/evil.tgz" "${sbx}/out" ) >/dev/null 2>&1 || rc=$?
+    assert_eq "$rc" 4 "extract_tarball_safe refuses a symlink member (exit 4)"
+    assert_file_absent "${sbx}/out/escape" "no link member was extracted"
+
+    # Positive control: a clean tarball extracts successfully.
+    cdir="${sbx}/clean"; mkdir -p "${cdir}/bin"
+    printf 'x\n' > "${cdir}/bin/app"
+    tar -czf "${sbx}/clean.tgz" -C "$cdir" .
+    rc=0
+    ( # shellcheck source=setup-lib/common.sh
+      . "${SETUP_LIB_DIR}/common.sh"
+      # shellcheck source=setup-lib/artifact.sh
+      . "${SETUP_LIB_DIR}/artifact.sh"
+      extract_tarball_safe "${sbx}/clean.tgz" "${sbx}/cout" ) >/dev/null 2>&1 || rc=$?
+    assert_eq "$rc" 0 "extract_tarball_safe accepts a clean tarball (exit 0)"
+    cleanup_sandbox "$sbx"
+else
+    _skip "extract_tarball_safe link-member tests" "missing tar or ln"
+fi
+
 printf '\n%s passed, %s failed, %s skipped\n' "$TESTS_PASS" "$TESTS_FAIL" "$TESTS_SKIP"
 [ "$TESTS_FAIL" -eq 0 ]

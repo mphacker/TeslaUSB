@@ -1300,3 +1300,285 @@ async fn busy_delete_is_not_recorded_as_failed() {
     assert_eq!(status, StatusCode::OK);
     assert!(body["jobs"].as_array().unwrap().is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Lock-chime media install/remove (`POST /api/chimes`, `DELETE
+// /api/chimes/:id`). The gadgetd socket is mocked; these cover validation,
+// staging + cleanup, the gadgetd request shape (partition 2 / install_file /
+// delete_paths), outcome→HTTP mapping, and job lifecycle. The destructive p2
+// write itself is an operator-gated hardware test.
+// ---------------------------------------------------------------------------
+
+/// Mock gadgetd for the chime path: records the request AND whether the staged
+/// `source_path` existed and was non-empty at the instant of the call (proving
+/// staging happens before the handoff and the file is present for the read).
+struct ChimeMock {
+    reply: Reply,
+    last: Arc<Mutex<Option<Value>>>,
+    source_existed: Arc<Mutex<Option<bool>>>,
+}
+
+impl GadgetClient for ChimeMock {
+    fn call(&self, request: Value) -> Result<Value, TransportError> {
+        if let Some(src) = request["mutation"]["source_path"].as_str() {
+            let ok = std::fs::metadata(src).map(|m| m.len() > 0).unwrap_or(false);
+            *self.source_existed.lock().unwrap() = Some(ok);
+        }
+        *self.last.lock().unwrap() = Some(request);
+        match &self.reply {
+            Reply::Json(v) => Ok(v.clone()),
+            Reply::Unavailable => Err(TransportError::Unavailable("socket down".to_owned())),
+        }
+    }
+}
+
+/// A chime fixture: an empty catalog + a router wired to [`ChimeMock`], with the
+/// staging dir exposed so tests can assert it is empty after each handoff.
+struct ChimeFixture {
+    _dir: TempDir,
+    app: Router,
+    last: Arc<Mutex<Option<Value>>>,
+    source_existed: Arc<Mutex<Option<bool>>>,
+    staging: std::path::PathBuf,
+}
+
+fn chime_fixture(reply: Reply) -> ChimeFixture {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("catalog.db");
+    seed_car_clips(&db_path);
+
+    let static_dir = dir.path().join("static");
+    std::fs::create_dir_all(&static_dir).unwrap();
+    std::fs::write(static_dir.join("index.html"), "<!doctype html>shell").unwrap();
+
+    let catalog = Catalog::open(&db_path).unwrap();
+    let cache_dir = dir.path().join("cache");
+    let media = MediaConfig::new(dir.path().join("archive"), cache_dir.clone());
+    let last = Arc::new(Mutex::new(None));
+    let source_existed = Arc::new(Mutex::new(None));
+    let gadget: Arc<dyn GadgetClient> = Arc::new(ChimeMock {
+        reply,
+        last: Arc::clone(&last),
+        source_existed: Arc::clone(&source_existed),
+    });
+    let app = router_with_gadget(catalog, static_dir, media, gadget);
+    ChimeFixture {
+        _dir: dir,
+        app,
+        last,
+        source_existed,
+        staging: cache_dir.join("media-staging"),
+    }
+}
+
+/// A minimal valid 16-bit PCM mono 44.1 kHz WAV with `data_len` audio bytes.
+fn sample_wav(data_len: usize) -> Vec<u8> {
+    let channels = 1u16;
+    let sample_rate = 44_100u32;
+    let bits = 16u16;
+    let block_align = channels * (bits / 8);
+    let byte_rate = sample_rate * u32::from(block_align);
+    let mut v = Vec::new();
+    v.extend_from_slice(b"RIFF");
+    v.extend_from_slice(&u32::try_from(36 + data_len).unwrap().to_le_bytes());
+    v.extend_from_slice(b"WAVE");
+    v.extend_from_slice(b"fmt ");
+    v.extend_from_slice(&16u32.to_le_bytes());
+    v.extend_from_slice(&1u16.to_le_bytes());
+    v.extend_from_slice(&channels.to_le_bytes());
+    v.extend_from_slice(&sample_rate.to_le_bytes());
+    v.extend_from_slice(&byte_rate.to_le_bytes());
+    v.extend_from_slice(&block_align.to_le_bytes());
+    v.extend_from_slice(&bits.to_le_bytes());
+    v.extend_from_slice(b"data");
+    v.extend_from_slice(&u32::try_from(data_len).unwrap().to_le_bytes());
+    v.extend(std::iter::repeat_n(0u8, data_len));
+    v
+}
+
+const BOUNDARY: &str = "X-TESLAUSB-BOUNDARY";
+
+/// Build a `multipart/form-data` body from `(field-name, content)` parts.
+fn multipart_body(parts: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut body = Vec::new();
+    for (name, content) in parts {
+        body.extend_from_slice(format!("--{BOUNDARY}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!("Content-Disposition: form-data; name=\"{name}\"; filename=\"chime.wav\"\r\n")
+                .as_bytes(),
+        );
+        body.extend_from_slice(b"Content-Type: audio/wav\r\n\r\n");
+        body.extend_from_slice(content);
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
+    body
+}
+
+/// POST a multipart body and return `(status, parsed-json)`.
+async fn post_chime(app: &Router, body: Vec<u8>) -> (StatusCode, Value) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/chimes")
+                .header(
+                    axum::http::header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={BOUNDARY}"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, value)
+}
+
+/// True if the staging dir is absent or contains no entries.
+fn staging_is_empty(dir: &std::path::Path) -> bool {
+    match std::fs::read_dir(dir) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(_) => true,
+    }
+}
+
+#[tokio::test]
+async fn install_chime_happy_path_sends_install_file_and_cleans_up() {
+    let fx = chime_fixture(Reply::Json(
+        json!({ "handoff_id": "h-1", "result": "done" }),
+    ));
+    let (status, body) = post_chime(&fx.app, multipart_body(&[("file", &sample_wav(64))])).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["state"], "done");
+    assert_eq!(body["handoff_id"], "h-1");
+
+    // gadgetd saw ONE install_file mutation on the MEDIA partition at the fixed
+    // root path, with a staged source that existed and was non-empty.
+    let req = fx.last.lock().unwrap().clone().unwrap();
+    assert_eq!(req["cmd"], "request_mutation");
+    assert_eq!(req["partition"], 2);
+    assert_eq!(req["mutation"]["op"], "install_file");
+    assert_eq!(req["mutation"]["rel_path"], "LockChime.wav");
+    assert!(req["mutation"]["source_path"].is_string());
+    assert_eq!(*fx.source_existed.lock().unwrap(), Some(true));
+
+    // Staged file is unlinked after the handoff returns.
+    assert!(staging_is_empty(&fx.staging), "staging dir must be empty");
+
+    // A successful install is not a failure.
+    let (_, failed) = get_json(&fx.app, "/api/jobs/failed").await;
+    assert!(failed["jobs"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn install_chime_transient_refusal_is_409_not_failed() {
+    let fx = chime_fixture(Reply::Json(json!({ "refused": "handoff_active" })));
+    let (status, body) = post_chime(&fx.app, multipart_body(&[("file", &sample_wav(64))])).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"]["code"], "handoff_busy");
+    assert!(staging_is_empty(&fx.staging), "staging dir must be empty");
+
+    let (_, failed) = get_json(&fx.app, "/api/jobs/failed").await;
+    assert!(failed["jobs"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn install_chime_failed_is_502_and_recorded_and_cleaned_up() {
+    let fx = chime_fixture(Reply::Json(
+        json!({ "handoff_id": "h-9", "result": "failed", "detail": "io error" }),
+    ));
+    let (status, _) = post_chime(&fx.app, multipart_body(&[("file", &sample_wav(64))])).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(staging_is_empty(&fx.staging), "staging dir must be empty");
+
+    let (_, body) = get_json(&fx.app, "/api/jobs/failed").await;
+    let jobs = body["jobs"].as_array().unwrap();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0]["kind"], "chime_install");
+    assert_eq!(jobs[0]["state"], "failed");
+    assert_eq!(jobs[0]["detail"], "io error");
+}
+
+#[tokio::test]
+async fn install_chime_oversize_is_422_before_handoff() {
+    let fx = chime_fixture(Reply::Json(
+        json!({ "handoff_id": "h-1", "result": "done" }),
+    ));
+    // 1 MiB + 1 byte: over the logical cap but under the 2 MiB body limit, so the
+    // incremental size guard trips with 422 before any staging/handoff.
+    let oversize = vec![0u8; 1024 * 1024 + 1];
+    let (status, body) = post_chime(&fx.app, multipart_body(&[("file", &oversize)])).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["code"], "chime_too_large");
+    assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");
+    assert!(staging_is_empty(&fx.staging), "no staged file");
+}
+
+#[tokio::test]
+async fn install_chime_non_wav_is_422_before_handoff() {
+    let fx = chime_fixture(Reply::Json(
+        json!({ "handoff_id": "h-1", "result": "done" }),
+    ));
+    let (status, body) = post_chime(&fx.app, multipart_body(&[("file", b"not a wav file")])).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["code"], "invalid_wav");
+    assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");
+    assert!(staging_is_empty(&fx.staging), "no staged file");
+}
+
+#[tokio::test]
+async fn install_chime_missing_file_field_is_400() {
+    let fx = chime_fixture(Reply::Json(
+        json!({ "handoff_id": "h-1", "result": "done" }),
+    ));
+    let (status, body) = post_chime(&fx.app, multipart_body(&[("other", &sample_wav(64))])).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "upload_required");
+    assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");
+}
+
+#[tokio::test]
+async fn install_chime_duplicate_file_field_is_400() {
+    let fx = chime_fixture(Reply::Json(
+        json!({ "handoff_id": "h-1", "result": "done" }),
+    ));
+    let body = multipart_body(&[("file", &sample_wav(64)), ("file", &sample_wav(64))]);
+    let (status, parsed) = post_chime(&fx.app, body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(parsed["error"]["code"], "duplicate_field");
+    assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");
+}
+
+#[tokio::test]
+async fn remove_chime_happy_path_sends_delete_paths() {
+    let fx = chime_fixture(Reply::Json(
+        json!({ "handoff_id": "h-2", "result": "done" }),
+    ));
+    let (status, body) = delete_json(&fx.app, "/api/chimes/LockChime").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["state"], "done");
+    assert_eq!(body["handoff_id"], "h-2");
+
+    let req = fx.last.lock().unwrap().clone().unwrap();
+    assert_eq!(req["partition"], 2);
+    assert_eq!(req["mutation"]["op"], "delete_paths");
+    let paths = req["mutation"]["rel_paths"].as_array().unwrap();
+    assert_eq!(paths.len(), 1);
+    assert_eq!(paths[0], "LockChime.wav");
+}
+
+#[tokio::test]
+async fn remove_chime_unknown_id_is_404() {
+    let fx = chime_fixture(Reply::Json(
+        json!({ "handoff_id": "h-2", "result": "done" }),
+    ));
+    let (status, _) = delete_json(&fx.app, "/api/chimes/Bogus").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");
+}

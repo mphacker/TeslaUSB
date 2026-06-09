@@ -30,6 +30,7 @@
 //!   handler tests.
 
 mod catalog;
+mod chimes;
 mod dto;
 mod error;
 mod gadget;

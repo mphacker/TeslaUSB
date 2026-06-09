@@ -125,6 +125,68 @@ A car-handoff mutation returns `{handoff_id}`; progress is observed via
 representing|done|refused|failed` ([`gadgetd.md §4`](../gadgetd.md)). Mutations are
 **serialized** by `gadgetd` (never two concurrent handoffs).
 
+#### 2.3.1 Realized: media install/remove primitive + lock chimes (BE-media-install lane)
+
+The generic p2-media write path and the first concrete feature (lock chimes) are
+implemented. The shapes below are **as built** and supersede the indicative
+`{filename, bytes_ref}` payload sketch above for chimes.
+
+**Generic primitive.** Any p2-media feature is a thin validate-then-delegate
+handler over two reusable `webd` helpers:
+
+- **install** → `request_mutation(partition=2, {op:"install_file", rel_path:<fixed>, source_path:<staged>})`
+- **remove** → `request_mutation(partition=2, {op:"delete_paths", rel_paths:[<fixed>]})`
+
+`webd` stages the uploaded bytes to a transient `0600` file under
+`<WEBD_CACHE_DIR>/media-staging/`, fsyncs it, passes its absolute path as
+`source_path`, and unlinks it once the handoff returns (success **or** failure).
+The destination `rel_path` is a fixed server-side constant per feature — never the
+client-supplied filename — so an upload can never steer the write out of its slot.
+`gadgetd` copies via temp + atomic rename, so a refused/failed install never leaves
+a partial file on p2. The round-trip is bracketed by `job_status` events
+(`GET /api/jobs` SSE; failures retained in `GET /api/jobs/failed`).
+
+**`POST /api/chimes`** — install the lock chime.
+
+- Request: `multipart/form-data` with a single field **`file`** = a finished WAV
+  (no server-side re-encode). Hard request-body limit **8 MiB**; logical size cap
+  **1 MiB** enforced incrementally while reading (so a 1–8 MiB upload is reported
+  as `422 chime_too_large`, not a generic body-limit rejection).
+- Validation (fail-closed, BEFORE staging/handoff): RIFF/WAVE container sniff; a
+  PCM `fmt ` chunk — `audio_format=1`, channels ∈ {1,2}, sample-rate ∈
+  {44100, 48000}, 16-bit, with `byte_rate`/`block_align` cross-checked; a non-empty
+  `data` chunk (mirrors the v1 `lock_chime_service` rules).
+- Mutation: `install_file` at p2 root **`LockChime.wav`**.
+- Success: `200 {"handoff_id": "<id>", "state": "done"}`.
+
+**`DELETE /api/chimes/:id`** — remove the lock chime (single slot).
+
+- `:id` must equal **`LockChime`** (else `404`).
+- Mutation: `delete_paths` with `["LockChime.wav"]` on p2 (idempotent on an
+  already-absent chime → still `200 {handoff_id, state:"done"}`).
+
+**Status map (shared with car-delete).**
+
+| Outcome | HTTP | `error.code` |
+|---|---|---|
+| handoff accepted, `done` | `200` | — (`{handoff_id, state}`) |
+| transient gadget refusal (`handoff_active`, `save_active`, gadget-not-bound, `hot_handoff_unvalidated`) | `409` | `handoff_busy` |
+| non-transient refusal / not installable | `422` | `refused` |
+| upload too large (logical 1 MiB cap) | `422` | `chime_too_large` |
+| invalid WAV | `422` | `invalid_wav` |
+| missing `file` field | `400` | `upload_required` |
+| duplicate `file` field | `400` | `duplicate_field` |
+| malformed multipart / over 8 MiB body limit | `400` | `invalid_multipart` |
+| gadget `failed` | `502` | `handoff_failed` |
+| gadget `critical_fault` (LUN left ejected) | `500` | `critical_fault` |
+| gadgetd unreachable | `503` | `gadgetd_unavailable` |
+| gadgetd bad protocol | `502` | `gadgetd_protocol` |
+| staging write failed (cache I/O) | `500` | `staging_failed` |
+
+Job `kind`s: `chime_install`, `chime_remove`. The terminal `job_status` event is
+always published from inside the blocking task, so a cancelled HTTP request can
+never strand a job in `running`.
+
 ### 2.4 Config forwards (validate + forward; `webd` does not own the policy)
 
 | Method · Route | Forwards to |

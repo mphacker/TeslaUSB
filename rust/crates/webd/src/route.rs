@@ -11,11 +11,11 @@ use std::time::Duration;
 
 use axum::Json;
 use axum::Router;
-use axum::extract::{Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::Sse;
 use axum::response::sse::{Event, KeepAlive};
-use axum::routing::get;
+use axum::routing::{delete, get, post};
 use rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -28,7 +28,7 @@ use crate::dto::{
     AnalyticsDto, ClipDto, DaySummary, EventDto, Page, PrefDto, TripDetailDto, TripDto,
 };
 use crate::error::ApiError;
-use crate::gadget::{self, DeleteOutcome, DeleteRefusal, TransportError};
+use crate::gadget::{self, DeleteRefusal, MutationOutcome, TransportError};
 use crate::jobs::{JobEvent, JobState, JobStatus};
 use crate::{AppState, Catalog, query};
 
@@ -58,6 +58,12 @@ pub(crate) fn router(state: AppState, static_dir: PathBuf) -> Router {
             get(crate::media::download),
         )
         .route("/handoff/{id}", get(handoff_status))
+        .route(
+            "/chimes",
+            post(crate::chimes::install_chime)
+                .layer(DefaultBodyLimit::max(crate::chimes::CHIME_BODY_LIMIT)),
+        )
+        .route("/chimes/{id}", delete(crate::chimes::remove_chime))
         .route("/jobs", get(jobs_stream))
         .route("/jobs/failed", get(jobs_failed))
         .route("/analytics", get(analytics))
@@ -267,11 +273,16 @@ async fn delete_clip(
         let result = client.call(request);
         match &result {
             Ok(resp) => {
-                jobs.publish_job(job_for_outcome(job_id, &gadget::map_delete_outcome(resp)));
+                jobs.publish_job(job_for_outcome(
+                    job_id,
+                    "clip_delete",
+                    &gadget::map_mutation_outcome(resp),
+                ));
             }
             Err(transport) => {
                 jobs.publish_job(job_failed(
                     job_id,
+                    "clip_delete",
                     format!("gadgetd transport: {transport:?}"),
                 ));
             }
@@ -286,17 +297,184 @@ async fn delete_clip(
         Err(_) => {
             // Join failure (the blocking task panicked): mark the job failed so
             // it does not linger in the active snapshot.
-            state
-                .jobs
-                .publish_job(job_failed(job_id, "blocking task join failed".to_owned()));
+            state.jobs.publish_job(job_failed(
+                job_id,
+                "clip_delete",
+                "blocking task join failed".to_owned(),
+            ));
             return Err(ApiError::Internal);
         }
     };
 
-    outcome_to_response(&gadget::map_delete_outcome(&resp))
+    outcome_to_response(&gadget::map_mutation_outcome(&resp))
 }
 
-/// `GET /api/jobs`: the Server-Sent-Events stream of background-job activity
+/// Stage uploaded `bytes` into a fresh `0600` temp file inside `dir` (created
+/// `0700` if absent), fsynced so `gadgetd` reads a fully-durable source. The
+/// directory is canonicalized so the returned guard's path is absolute (it is
+/// consumed by `gadgetd` in a different process), and symlinks in the ancestry
+/// are resolved. The returned guard unlinks the file when dropped.
+fn stage_upload(dir: &std::path::Path, bytes: &[u8]) -> std::io::Result<tempfile::NamedTempFile> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    // Canonicalize AFTER creation so `source_path` handed to gadgetd is absolute
+    // regardless of `WEBD_CACHE_DIR` being relative.
+    let dir = std::fs::canonicalize(dir)?;
+    let mut tmp = tempfile::Builder::new()
+        .prefix("upload-")
+        .suffix(".partial")
+        .tempfile_in(&dir)?;
+    {
+        use std::io::Write;
+        tmp.as_file_mut().write_all(bytes)?;
+        tmp.as_file_mut().sync_all()?;
+    }
+    Ok(tmp)
+}
+
+/// Generic p2-media install primitive: stage `bytes`, hand the staged path to
+/// `gadgetd` as an `install_file` mutation at the fixed `rel_path`, and bracket
+/// the round-trip with `job_status` events under the given `kind`.
+///
+/// The staged file is created and unlinked entirely inside the blocking task,
+/// so it is present for the whole `gadgetd` read and is always cleaned up — on
+/// success, gadget failure, transport error, or a cancelled HTTP request (a
+/// `spawn_blocking` task runs to completion regardless of its `JoinHandle`).
+///
+/// To add another media feature, validate + read the upload bytes in a thin
+/// handler, then call `run_install` with that feature's `kind`, `partition`,
+/// and fixed `rel_path` — no new gadgetd or job plumbing required.
+pub(crate) async fn run_install(
+    state: AppState,
+    kind: &'static str,
+    partition: u8,
+    rel_path: &'static str,
+    bytes: Vec<u8>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let job_id = state.jobs.next_job_id();
+    state.jobs.publish_job(JobStatus::running(job_id, kind));
+
+    let client = state.gadget.clone();
+    let jobs = state.jobs.clone();
+    let staging = state.media.staging_dir();
+
+    let join = tokio::task::spawn_blocking(move || {
+        let tmp = match stage_upload(&staging, &bytes) {
+            Ok(tmp) => tmp,
+            Err(err) => {
+                let detail = format!("staging failed: {err}");
+                jobs.publish_job(job_failed(job_id, kind, detail.clone()));
+                return Err(detail);
+            }
+        };
+        let Some(source_path) = tmp.path().to_str().map(str::to_owned) else {
+            let detail = "staged path is not valid UTF-8".to_owned();
+            jobs.publish_job(job_failed(job_id, kind, detail.clone()));
+            return Err(detail);
+        };
+        let request = gadget::install_request(partition, rel_path, &source_path);
+        let result = client.call(request);
+        match &result {
+            Ok(resp) => {
+                jobs.publish_job(job_for_outcome(
+                    job_id,
+                    kind,
+                    &gadget::map_mutation_outcome(resp),
+                ));
+            }
+            Err(transport) => {
+                jobs.publish_job(job_failed(
+                    job_id,
+                    kind,
+                    format!("gadgetd transport: {transport:?}"),
+                ));
+            }
+        }
+        // `tmp` drops here, unlinking the staged file on every path.
+        Ok(result)
+    })
+    .await;
+
+    let resp = match join {
+        Ok(Ok(Ok(resp))) => resp,
+        Ok(Ok(Err(transport))) => return Err(transport_to_error(transport)),
+        Ok(Err(detail)) => {
+            return Err(ApiError::status(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "staging_failed",
+                detail,
+            ));
+        }
+        Err(_) => {
+            state.jobs.publish_job(job_failed(
+                job_id,
+                kind,
+                "blocking task join failed".to_owned(),
+            ));
+            return Err(ApiError::Internal);
+        }
+    };
+
+    outcome_to_response(&gadget::map_mutation_outcome(&resp))
+}
+
+/// Generic p2-media remove primitive: hand `gadgetd` a `delete_paths` mutation
+/// for the single fixed `rel_path` (idempotent on an already-absent asset,
+/// file-only) and bracket the round-trip with `job_status` events under `kind`.
+pub(crate) async fn run_remove(
+    state: AppState,
+    kind: &'static str,
+    partition: u8,
+    rel_path: &'static str,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let job_id = state.jobs.next_job_id();
+    state.jobs.publish_job(JobStatus::running(job_id, kind));
+
+    let client = state.gadget.clone();
+    let jobs = state.jobs.clone();
+    let request = gadget::remove_request(partition, rel_path);
+
+    let join = tokio::task::spawn_blocking(move || {
+        let result = client.call(request);
+        match &result {
+            Ok(resp) => {
+                jobs.publish_job(job_for_outcome(
+                    job_id,
+                    kind,
+                    &gadget::map_mutation_outcome(resp),
+                ));
+            }
+            Err(transport) => {
+                jobs.publish_job(job_failed(
+                    job_id,
+                    kind,
+                    format!("gadgetd transport: {transport:?}"),
+                ));
+            }
+        }
+        result
+    })
+    .await;
+
+    let resp = match join {
+        Ok(Ok(resp)) => resp,
+        Ok(Err(transport)) => return Err(transport_to_error(transport)),
+        Err(_) => {
+            state.jobs.publish_job(job_failed(
+                job_id,
+                kind,
+                "blocking task join failed".to_owned(),
+            ));
+            return Err(ApiError::Internal);
+        }
+    };
+
+    outcome_to_response(&gadget::map_mutation_outcome(&resp))
+}
 /// (contract D2 §2.5/§3). A new subscriber first receives a burst of the
 /// currently-running jobs, then live events as they are published.
 async fn jobs_stream(
@@ -336,10 +514,10 @@ fn event_from(ev: &JobEvent) -> Event {
 }
 
 /// A terminal `failed` job carrying an error detail.
-fn job_failed(job_id: u64, detail: String) -> JobStatus {
+fn job_failed(job_id: u64, kind: &str, detail: String) -> JobStatus {
     JobStatus {
         job_id,
-        kind: "clip_delete".to_owned(),
+        kind: kind.to_owned(),
         state: JobState::Failed,
         progress: None,
         detail: Some(detail),
@@ -347,11 +525,11 @@ fn job_failed(job_id: u64, detail: String) -> JobStatus {
     }
 }
 
-/// Map a terminal [`DeleteOutcome`] to its `job_status` update.
-fn job_for_outcome(job_id: u64, outcome: &DeleteOutcome) -> JobStatus {
-    let kind = "clip_delete";
+/// Map a terminal [`MutationOutcome`] to its `job_status` update for a given job
+/// `kind` (e.g. `clip_delete`, `chime_install`, `chime_remove`).
+fn job_for_outcome(job_id: u64, kind: &str, outcome: &MutationOutcome) -> JobStatus {
     match outcome {
-        DeleteOutcome::Done(handoff_id) => JobStatus {
+        MutationOutcome::Done(handoff_id) => JobStatus {
             job_id,
             kind: kind.to_owned(),
             state: JobState::Done,
@@ -359,7 +537,7 @@ fn job_for_outcome(job_id: u64, outcome: &DeleteOutcome) -> JobStatus {
             detail: None,
             handoff_id: Some(handoff_id.clone()),
         },
-        DeleteOutcome::Busy(reason) => JobStatus {
+        MutationOutcome::Busy(reason) => JobStatus {
             job_id,
             kind: kind.to_owned(),
             state: JobState::Busy,
@@ -367,7 +545,7 @@ fn job_for_outcome(job_id: u64, outcome: &DeleteOutcome) -> JobStatus {
             detail: Some(busy_message(reason)),
             handoff_id: None,
         },
-        DeleteOutcome::Refused(reason) => JobStatus {
+        MutationOutcome::Refused(reason) => JobStatus {
             job_id,
             kind: kind.to_owned(),
             state: JobState::Refused,
@@ -375,7 +553,7 @@ fn job_for_outcome(job_id: u64, outcome: &DeleteOutcome) -> JobStatus {
             detail: Some(reason.clone()),
             handoff_id: None,
         },
-        DeleteOutcome::Failed { handoff_id, detail } => JobStatus {
+        MutationOutcome::Failed { handoff_id, detail } => JobStatus {
             job_id,
             kind: kind.to_owned(),
             state: JobState::Failed,
@@ -383,7 +561,7 @@ fn job_for_outcome(job_id: u64, outcome: &DeleteOutcome) -> JobStatus {
             detail: Some(detail.clone()),
             handoff_id: Some(handoff_id.clone()),
         },
-        DeleteOutcome::CriticalFault { handoff_id, detail } => JobStatus {
+        MutationOutcome::CriticalFault { handoff_id, detail } => JobStatus {
             job_id,
             kind: kind.to_owned(),
             state: JobState::Failed,
@@ -391,7 +569,7 @@ fn job_for_outcome(job_id: u64, outcome: &DeleteOutcome) -> JobStatus {
             detail: Some(format!("LUN left ejected: {detail}")),
             handoff_id: Some(handoff_id.clone()),
         },
-        DeleteOutcome::BadResponse(msg) => JobStatus {
+        MutationOutcome::BadResponse(msg) => JobStatus {
             job_id,
             kind: kind.to_owned(),
             state: JobState::Failed,
@@ -449,33 +627,33 @@ fn transport_to_error(err: TransportError) -> ApiError {
 }
 
 /// Map a terminal handoff outcome to an HTTP response.
-fn outcome_to_response(outcome: &DeleteOutcome) -> Result<(StatusCode, Json<Value>), ApiError> {
+fn outcome_to_response(outcome: &MutationOutcome) -> Result<(StatusCode, Json<Value>), ApiError> {
     match outcome {
-        DeleteOutcome::Done(handoff_id) => Ok((
+        MutationOutcome::Done(handoff_id) => Ok((
             StatusCode::OK,
             Json(json!({ "handoff_id": handoff_id, "state": "done" })),
         )),
-        DeleteOutcome::Busy(reason) => Err(ApiError::status(
+        MutationOutcome::Busy(reason) => Err(ApiError::status(
             StatusCode::CONFLICT,
             "handoff_busy",
             busy_message(reason),
         )),
-        DeleteOutcome::Refused(reason) => Err(ApiError::status(
+        MutationOutcome::Refused(reason) => Err(ApiError::status(
             StatusCode::UNPROCESSABLE_ENTITY,
             "refused",
             reason.clone(),
         )),
-        DeleteOutcome::Failed { handoff_id, detail } => Err(ApiError::status(
+        MutationOutcome::Failed { handoff_id, detail } => Err(ApiError::status(
             StatusCode::BAD_GATEWAY,
             "handoff_failed",
             format!("handoff {handoff_id} failed: {detail}"),
         )),
-        DeleteOutcome::CriticalFault { handoff_id, detail } => Err(ApiError::status(
+        MutationOutcome::CriticalFault { handoff_id, detail } => Err(ApiError::status(
             StatusCode::INTERNAL_SERVER_ERROR,
             "critical_fault",
             format!("handoff {handoff_id} left the LUN ejected: {detail}"),
         )),
-        DeleteOutcome::BadResponse(msg) => Err(ApiError::status(
+        MutationOutcome::BadResponse(msg) => Err(ApiError::status(
             StatusCode::BAD_GATEWAY,
             "gadgetd_protocol",
             msg.clone(),

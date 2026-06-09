@@ -23,7 +23,7 @@ name = "webd"
 path = "src/main.rs"
 
 [dependencies]
-axum = "0.8"
+axum = { version = "0.8", features = ["multipart"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "io-util", "sync"] }
 tokio-util = { version = "0.7", features = ["io"] }
 # Bridges a tokio broadcast receiver into a `Stream` for the `GET /api/jobs`

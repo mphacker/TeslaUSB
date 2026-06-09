@@ -108,6 +108,16 @@ impl MediaConfig {
     pub(crate) fn archive_root_path(&self) -> PathBuf {
         self.archive_root.as_ref().clone()
     }
+
+    /// The transient staging directory for media uploads (a subdir of the cache
+    /// dir). `webd` writes an uploaded asset here, fsyncs it, and passes its
+    /// absolute path to `gadgetd` as the install `source_path`; the staged file
+    /// is unlinked once the handoff returns. Both daemons run as root, so
+    /// `gadgetd` can read the `0600` staged file from this root-owned area.
+    #[must_use]
+    pub(crate) fn staging_dir(&self) -> PathBuf {
+        self.cache_dir.join("media-staging")
+    }
 }
 
 /// Query string of `GET /api/clips/{id}/stream`.

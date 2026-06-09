@@ -180,16 +180,47 @@ pub(crate) fn delete_request(plan: &DeletePlan) -> Value {
     })
 }
 
+/// Build the `request_mutation` wire request to install a staged file into a
+/// partition (the generic media-install primitive). `source_path` is the
+/// absolute path of a staged source file on the Pi data area that `gadgetd`
+/// re-opens (`O_NOFOLLOW`, regular-file-only) and copies into `rel_path` under
+/// the mounted partition root via temp + atomic rename. `rel_path` must be a
+/// fixed, validated, partition-root-relative destination — never an
+/// attacker-controlled value.
+pub(crate) fn install_request(partition: u8, rel_path: &str, source_path: &str) -> Value {
+    json!({
+        "cmd": "request_mutation",
+        "partition": partition,
+        "mutation": { "op": "install_file", "rel_path": rel_path, "source_path": source_path },
+    })
+}
+
+/// Build the `request_mutation` wire request to remove a single file from a
+/// partition (the generic media-remove primitive). Uses `gadgetd`'s
+/// regular-file-only, idempotent-on-absent `delete_paths` set form (with a
+/// one-element set) rather than `delete_path`: removing an already-absent
+/// single-slot asset is a success (a retried remove is safe), and a directory
+/// at `rel_path` is refused rather than recursively deleted.
+pub(crate) fn remove_request(partition: u8, rel_path: &str) -> Value {
+    json!({
+        "cmd": "request_mutation",
+        "partition": partition,
+        "mutation": { "op": "delete_paths", "rel_paths": [rel_path] },
+    })
+}
+
 /// Build the `handoff_status` wire request for a prior handoff id.
 pub(crate) fn status_request(handoff_id: &str) -> Value {
     json!({ "cmd": "handoff_status", "handoff_id": handoff_id })
 }
 
-/// The terminal outcome of a car-delete handoff, as interpreted from `gadgetd`'s
-/// JSON response (mapped to an HTTP status in the route layer).
+/// The terminal outcome of a `gadgetd` mutation handoff (clip delete, media
+/// install, or media remove), as interpreted from `gadgetd`'s JSON response
+/// (mapped to an HTTP status in the route layer). The response shape is
+/// identical across mutation ops, so a single interpreter serves all of them.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum DeleteOutcome {
-    /// Files deleted, LUN re-presented → `200`.
+pub(crate) enum MutationOutcome {
+    /// Mutation applied, LUN re-presented → `200`.
     Done(String),
     /// `gadgetd` declined because of a transient device state the caller should
     /// retry (another handoff in flight, car mid-save, gadget not currently
@@ -217,19 +248,20 @@ fn is_retryable_refusal(reason: &str) -> bool {
         || reason.starts_with("hot_handoff_unvalidated")
 }
 
-/// Interpret a `gadgetd` `request_mutation` response into a [`DeleteOutcome`].
-pub(crate) fn map_delete_outcome(resp: &Value) -> DeleteOutcome {
+/// Interpret a `gadgetd` `request_mutation` response into a [`MutationOutcome`].
+/// Op-agnostic: the response shape is identical for delete, install, and remove.
+pub(crate) fn map_mutation_outcome(resp: &Value) -> MutationOutcome {
     let handoff_id = resp.get("handoff_id").and_then(Value::as_str);
 
     if let Some(reason) = resp.get("refused").and_then(Value::as_str) {
         return if is_retryable_refusal(reason) {
-            DeleteOutcome::Busy(reason.to_owned())
+            MutationOutcome::Busy(reason.to_owned())
         } else {
-            DeleteOutcome::Refused(reason.to_owned())
+            MutationOutcome::Refused(reason.to_owned())
         };
     }
     if let Some(err) = resp.get("error").and_then(Value::as_str) {
-        return DeleteOutcome::BadResponse(err.to_owned());
+        return MutationOutcome::BadResponse(err.to_owned());
     }
     let detail = || {
         resp.get("detail")
@@ -239,18 +271,18 @@ pub(crate) fn map_delete_outcome(resp: &Value) -> DeleteOutcome {
     };
     match resp.get("result").and_then(Value::as_str) {
         Some("done") => match handoff_id {
-            Some(id) => DeleteOutcome::Done(id.to_owned()),
-            None => DeleteOutcome::BadResponse("done without a handoff_id".to_owned()),
+            Some(id) => MutationOutcome::Done(id.to_owned()),
+            None => MutationOutcome::BadResponse("done without a handoff_id".to_owned()),
         },
-        Some("failed") => DeleteOutcome::Failed {
+        Some("failed") => MutationOutcome::Failed {
             handoff_id: handoff_id.unwrap_or_default().to_owned(),
             detail: detail(),
         },
-        Some("critical_fault") => DeleteOutcome::CriticalFault {
+        Some("critical_fault") => MutationOutcome::CriticalFault {
             handoff_id: handoff_id.unwrap_or_default().to_owned(),
             detail: detail(),
         },
-        _ => DeleteOutcome::BadResponse(format!("unexpected gadgetd response: {resp}")),
+        _ => MutationOutcome::BadResponse(format!("unexpected gadgetd response: {resp}")),
     }
 }
 
@@ -394,7 +426,10 @@ mod stub_client {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
-    use super::{DeleteOutcome, DeleteRefusal, map_delete_outcome, map_status, plan_car_delete};
+    use super::{
+        DeleteRefusal, MutationOutcome, install_request, map_mutation_outcome, map_status,
+        plan_car_delete, remove_request,
+    };
     use serde_json::json;
 
     const KEY: &str = "0:TeslaCam/SavedClips/2026-06-01_20-10-04/2026-06-01_20-10-04";
@@ -481,8 +516,8 @@ mod tests {
     fn maps_done_outcome() {
         let resp = json!({ "handoff_id": "h-7", "result": "done" });
         assert_eq!(
-            map_delete_outcome(&resp),
-            DeleteOutcome::Done("h-7".to_owned())
+            map_mutation_outcome(&resp),
+            MutationOutcome::Done("h-7".to_owned())
         );
     }
 
@@ -490,8 +525,8 @@ mod tests {
     fn maps_busy_outcome() {
         let resp = json!({ "refused": "handoff_active" });
         assert_eq!(
-            map_delete_outcome(&resp),
-            DeleteOutcome::Busy("handoff_active".to_owned())
+            map_mutation_outcome(&resp),
+            MutationOutcome::Busy("handoff_active".to_owned())
         );
     }
 
@@ -500,8 +535,8 @@ mod tests {
         // Car mid-save is a transient, retryable (409) state, not a 422.
         let resp = json!({ "handoff_id": "h-9", "refused": "save_active" });
         assert_eq!(
-            map_delete_outcome(&resp),
-            DeleteOutcome::Busy("save_active".to_owned())
+            map_mutation_outcome(&resp),
+            MutationOutcome::Busy("save_active".to_owned())
         );
     }
 
@@ -513,7 +548,7 @@ mod tests {
         ] {
             let resp = json!({ "handoff_id": "h-9", "refused": reason });
             assert!(
-                matches!(map_delete_outcome(&resp), DeleteOutcome::Busy(_)),
+                matches!(map_mutation_outcome(&resp), MutationOutcome::Busy(_)),
                 "reason `{reason}` should be retryable"
             );
         }
@@ -578,8 +613,8 @@ mod tests {
     fn maps_other_refusal() {
         let resp = json!({ "refused": "partition must be 1 or 2, got 3" });
         assert!(matches!(
-            map_delete_outcome(&resp),
-            DeleteOutcome::Refused(_)
+            map_mutation_outcome(&resp),
+            MutationOutcome::Refused(_)
         ));
     }
 
@@ -587,13 +622,13 @@ mod tests {
     fn maps_failed_and_critical() {
         let failed = json!({ "handoff_id": "h-1", "result": "failed", "detail": "mount" });
         assert!(matches!(
-            map_delete_outcome(&failed),
-            DeleteOutcome::Failed { .. }
+            map_mutation_outcome(&failed),
+            MutationOutcome::Failed { .. }
         ));
         let crit = json!({ "handoff_id": "h-2", "result": "critical_fault", "detail": "stuck" });
         assert!(matches!(
-            map_delete_outcome(&crit),
-            DeleteOutcome::CriticalFault { .. }
+            map_mutation_outcome(&crit),
+            MutationOutcome::CriticalFault { .. }
         ));
     }
 
@@ -601,8 +636,8 @@ mod tests {
     fn maps_unparseable_response() {
         let resp = json!({ "weird": true });
         assert!(matches!(
-            map_delete_outcome(&resp),
-            DeleteOutcome::BadResponse(_)
+            map_mutation_outcome(&resp),
+            MutationOutcome::BadResponse(_)
         ));
     }
 
@@ -624,5 +659,32 @@ mod tests {
     fn unknown_handoff_status_is_none() {
         let resp = json!({ "error": "unknown handoff_id: h-9" });
         assert!(map_status(&resp).is_none());
+    }
+
+    #[test]
+    fn install_request_carries_install_file_op() {
+        let req = install_request(2, "LockChime.wav", "/data/cache/media-staging/x.wav");
+        assert_eq!(req["cmd"], "request_mutation");
+        assert_eq!(req["partition"], 2);
+        assert_eq!(req["mutation"]["op"], "install_file");
+        assert_eq!(req["mutation"]["rel_path"], "LockChime.wav");
+        assert_eq!(
+            req["mutation"]["source_path"],
+            "/data/cache/media-staging/x.wav"
+        );
+    }
+
+    #[test]
+    fn remove_request_uses_single_element_delete_paths() {
+        // The idempotent, file-only `delete_paths` set form (not `delete_path`),
+        // so removing an absent single-slot asset is a success and a directory
+        // is refused rather than recursively deleted.
+        let req = remove_request(2, "LockChime.wav");
+        assert_eq!(req["cmd"], "request_mutation");
+        assert_eq!(req["partition"], 2);
+        assert_eq!(req["mutation"]["op"], "delete_paths");
+        let paths = req["mutation"]["rel_paths"].as_array().unwrap();
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], "LockChime.wav");
     }
 }

@@ -36,8 +36,9 @@ export interface Route {
 //                 `/settings/`, and its UAT asserts the Settings nav active, so
 //                 it lives here rather than under Media). Imported as `MediaHub`
 //                 for filename continuity with the frozen 5.2 lane.
-//  · `/media`   → the Media-section landing hub (`screens/Media.tsx`): media
-//                 feature tiles + recent clips/events from the read-only catalog.
+//  · `/media`   → the Media section (`screens/Media.tsx`): the v1 Lock Chimes
+//                 page (media pill sub-nav + lock-chime sections), the screen
+//                 the legacy `/media/` redirect actually landed on.
 // Other unbuilt screens (analytics, cloud, events) resolve to a shared
 // ComingSoon placeholder so in-app links never dead-end or full-reload. Adding a
 // real screen = swap its row's `screen`.

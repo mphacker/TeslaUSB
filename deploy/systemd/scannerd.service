@@ -1,0 +1,43 @@
+# TeslaUSB B-1 — scannerd: the raw exFAT/MP4/SEI reader and clip-stability gate.
+# It opens the gadgetd backing image READ-ONLY, parses MBR -> exFAT -> MP4 -> SEI,
+# and reports which clips have become stable (scannerd.md). It never writes the
+# car-facing LUN, owns no DB schema, and derives no trips/events (that is indexd).
+#
+# STAGED — installed but NOT enabled by default (TESLAUSB_STAGED_SERVICES in
+# setup-lib/common.sh). OPEN ARCHITECTURAL QUESTION (flagged for review): the
+# spec target (scannerd.md) is scannerd EMITTING parser output to indexd over IPC,
+# with scannerd as the persistent front-end parser. TODAY that IPC is NOT wired —
+# indexd reads the backing image itself and does scan->derive->persist in-process
+# (indexd.service is the enabled, active scan service). Enabling scannerd.service
+# now would run a SECOND, redundant read-only scan of the same image, so it is
+# shipped as part of the canonical 7-unit set (setup.md §8) but left disabled
+# until the scannerd->indexd IPC lands. (Mirrors how gadgetd-provision.service
+# ships but is enabled only by --bootstrap-image.)
+#
+# The binary's `--watch <interval_secs> <iterations>` runs a FINITE number of
+# passes; Restart=always keeps it continuous if/when enabled.
+#
+# Hardening note: cgroup MemoryMax / sandboxing are device-calibrated in
+# migration M5 / Task 7.4c. The OOM order (SPEC.md §7) is encoded via
+# OOMScoreAdjust.
+#
+# Install: copy to /etc/systemd/system/scannerd.service, then daemon-reload
+#   (enable only once the scannerd->indexd IPC is wired).
+[Unit]
+Description=TeslaUSB scannerd (raw exFAT/MP4/SEI reader + clip-stability gate)
+Documentation=https://github.com/mphacker/TeslaUSB
+RequiresMountsFor=/data/teslausb
+After=local-fs.target gadgetd.service
+Wants=gadgetd.service
+
+[Service]
+Type=simple
+# Re-scan every 30s; large iteration count + Restart=always == continuous.
+ExecStart=/usr/local/bin/scannerd /data/teslausb/disk.img --watch 30 1000000000
+Restart=always
+RestartSec=5s
+OOMScoreAdjust=300
+SyslogIdentifier=scannerd
+
+[Install]
+WantedBy=multi-user.target

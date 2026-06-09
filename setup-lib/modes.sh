@@ -21,6 +21,7 @@ ensure_data_roots() {
     mut_mkdir "$TESLAUSB_DATA_ROOT"
     mut_mkdir "$TESLAUSB_ARCHIVE_DIR"
     mut_mkdir "$TESLAUSB_MEDIA_DIR"
+    mut_mkdir "$TESLAUSB_CACHE_DIR"
     mut_mkdir "$TESLAUSB_STATE_DIR"
     mut_mkdir "$TESLAUSB_CONFIG_DIR"
 }
@@ -124,7 +125,7 @@ mode_repair() {
     ensure_data_roots
     local b
     if [ -d "$TESLAUSB_BIN_DIR" ]; then
-        for b in gadgetd $TESLAUSB_APP_SERVICES; do
+        for b in gadgetd $TESLAUSB_APP_SERVICES $TESLAUSB_STAGED_SERVICES; do
             [ -e "${TESLAUSB_BIN_DIR}/${b}" ] && mut_chmod 0755 "${TESLAUSB_BIN_DIR}/${b}"
         done
     fi

@@ -1,0 +1,38 @@
+# TeslaUSB B-1 — retentiond: per-folder archiving + retention rules + the space
+# governor. It is the SOLE deleter of archived footage (crash-safe rename-then-
+# unlink), honors playback/upload leases, and fails closed on undurable footage
+# (retentiond.md). It never writes the car-facing LUN.
+#
+# STAGED — installed but NOT enabled by default. `retentiond serve`'s live loop
+# (statfs cadence, archive pipeline, governor) is gated on the microSD-contention/
+# governor spike (Task 2.7); until that lands the binary's `serve` exits non-zero
+# by design. So the installer copies this unit FILE but does NOT enable/start it
+# (TESLAUSB_STAGED_SERVICES in setup-lib/common.sh). The unit is already in its
+# target Type=simple shape, so when the live loop lands no unit change is needed —
+# only moving the name into TESLAUSB_APP_SERVICES.
+#
+# Hardening note: cgroup MemoryMax / sandboxing are device-calibrated in
+# migration M5 / Task 7.4c. The OOM order (SPEC.md §7) is encoded via
+# OOMScoreAdjust — retentiond is protected (second-least disposable after
+# indexd) because losing the governor risks the volume filling.
+#
+# Install: copy to /etc/systemd/system/retentiond.service, then daemon-reload
+#   (enable only once the governor live wiring — Task 2.7 — lands).
+[Unit]
+Description=TeslaUSB retentiond (archiving + retention + space governor)
+Documentation=https://github.com/mphacker/TeslaUSB
+# Needs /data (archive + backing image) and the catalog indexd builds.
+RequiresMountsFor=/data/teslausb /var/lib/teslausb
+After=local-fs.target gadgetd.service indexd.service
+Wants=gadgetd.service indexd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/retentiond serve
+Restart=on-failure
+RestartSec=5s
+OOMScoreAdjust=100
+SyslogIdentifier=retentiond
+
+[Install]
+WantedBy=multi-user.target

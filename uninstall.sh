@@ -58,8 +58,10 @@ remove_unit_file() {
 
 uninstall_full() {
     local unit
-    # Remove gadget units last is irrelevant here (gadget already unbound).
-    for unit in $TESLAUSB_APP_SERVICES $TESLAUSB_GADGET_UNITS "$TESLAUSB_PROVISION_UNIT"; do
+    # Remove every unit FILE the installer could have placed (units.sh globs all
+    # units/*.service, so staged units are installed on disk even though they are
+    # never enabled). remove_unit_file stop/disables first, then removes/restores.
+    for unit in $TESLAUSB_APP_SERVICES $TESLAUSB_STAGED_SERVICES $TESLAUSB_GADGET_UNITS "$TESLAUSB_PROVISION_UNIT"; do
         remove_unit_file "$unit"
     done
     systemctl_do daemon-reload

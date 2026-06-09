@@ -46,10 +46,13 @@ restart_app_services() {
     done
 }
 
-# stop_disable_app_services — used by uninstall safe-default.
+# stop_disable_app_services — used by uninstall safe-default. Covers staged
+# services too: their unit FILES are installed (units.sh globs all *.service), so
+# if one was ever enabled (now or by a future build) it must still be torn down.
+# The [ -e ] guard makes this a harmless no-op for units not present.
 stop_disable_app_services() {
     local svc
-    for svc in $TESLAUSB_APP_SERVICES; do
+    for svc in $TESLAUSB_APP_SERVICES $TESLAUSB_STAGED_SERVICES; do
         [ -e "${TESLAUSB_UNIT_DIR}/${svc}.service" ] || continue
         systemctl_do stop "${svc}.service"
         systemctl_do disable "${svc}.service"

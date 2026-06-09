@@ -1,0 +1,42 @@
+# TeslaUSB B-1 — wifid: STA/AP WiFi state machine + SDIO chip-reset watchdog.
+# Manages the BCM43436 radio: joins the operator's WiFi (STA) for uploads and
+# falls back to a WPA2 AP for onboarding, recovers SDIO lockups by resetting the
+# radio (rmmod/modprobe brcmfmac), and only reboots the Pi as a last resort
+# gated on the gadgetd USB-idle heartbeat (wifid.md). It is a long-lived control
+# loop (TICK_INTERVAL=2s).
+#
+# wifid MUST run as root: it drives netlink, configfs, the radio modules, and
+# reads the WiFi credential file directly. The credential file is root-owned
+# 0600 at /data/teslausb/wifi-credentials (wifid's DEFAULT_CRED_PATH). Migrating
+# it to systemd LoadCredential= is a hardening step for if/when wifid drops root
+# (setup.md §10) — not done here because the binary reads the path directly.
+#
+# Hardening note: cgroup MemoryMax and sandboxing are device-calibrated in
+# migration M5 / Task 7.4c and omitted here. The OOM order (SPEC.md §7) is
+# encoded via OOMScoreAdjust (WiFi is convenience — second-most disposable).
+#
+# Install: copy to /etc/systemd/system/wifid.service, then
+#   systemctl daemon-reload && systemctl enable wifid.service
+[Unit]
+Description=TeslaUSB wifid (STA/AP state machine + SDIO chip-reset watchdog)
+Documentation=https://github.com/mphacker/TeslaUSB
+# wifid provides connectivity, so it starts early and does not wait on
+# network-online (it brings the link up itself). Needs /data for the cred file.
+RequiresMountsFor=/data/teslausb
+After=network-pre.target gadgetd.service
+Wants=network-pre.target
+
+[Service]
+Type=simple
+# Default cred path is /data/teslausb/wifi-credentials (root-owned 0600).
+ExecStart=/usr/local/bin/wifid serve
+# Restart=always (not on-failure): on-device a tick/observation error makes the
+# binary exit cleanly (exit 0) rather than spin; a clean exit from `serve` is
+# never a valid steady state, so always bring the radio manager back.
+Restart=always
+RestartSec=5s
+OOMScoreAdjust=700
+SyslogIdentifier=wifid
+
+[Install]
+WantedBy=multi-user.target

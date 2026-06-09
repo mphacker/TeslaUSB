@@ -1,0 +1,37 @@
+# TeslaUSB B-1 — uploadd: durable, resumable cloud upload queue. Uploads archived
+# footage to the configured remote behind the index seam, honoring upload leases
+# and the wifid TX-cap throttle. It NEVER reads the car-facing LUN, deletes, or
+# reboots (uploadd.md). It is the most-disposable service.
+#
+# STAGED — installed but NOT enabled by default. `uploadd serve`'s live loop
+# (queue hydration, wifid subscription, lease handling) is gated on the WiFi
+# TX-cap spike (Task 2.6) + the upload backend decision (rclone vs native); until
+# that lands the binary's `serve` exits non-zero by design. So the installer
+# copies this unit FILE but does NOT enable/start it (TESLAUSB_STAGED_SERVICES in
+# setup-lib/common.sh). When the live loop lands: move the name into
+# TESLAUSB_APP_SERVICES and add the cloud credential via LoadCredential=.
+#
+# Hardening note: cgroup MemoryMax / sandboxing are device-calibrated in
+# migration M5 / Task 7.4c. The OOM order (SPEC.md §7) is encoded via
+# OOMScoreAdjust — uploadd is the FIRST to be OOM-killed (pure convenience).
+#
+# Install: copy to /etc/systemd/system/uploadd.service, then daemon-reload
+#   (enable only once the upload live wiring — Task 2.6 — lands).
+[Unit]
+Description=TeslaUSB uploadd (durable cloud upload queue)
+Documentation=https://github.com/mphacker/TeslaUSB
+# Needs the catalog (queue source) and archive; uploads need the network online.
+RequiresMountsFor=/data/teslausb /var/lib/teslausb
+After=local-fs.target indexd.service wifid.service network-online.target
+Wants=indexd.service wifid.service network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/uploadd serve
+Restart=on-failure
+RestartSec=5s
+OOMScoreAdjust=900
+SyslogIdentifier=uploadd
+
+[Install]
+WantedBy=multi-user.target

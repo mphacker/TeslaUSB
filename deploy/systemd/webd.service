@@ -1,0 +1,51 @@
+# TeslaUSB B-1 — webd: the read-only catalog HTTP API + static SPA host. Serves
+# the web UI (the preserved Python/Flask look-and-feel) and streams/zips clips.
+# It opens the catalog SQLite READ-ONLY and never writes the car-facing LUN;
+# mutations (e.g. delete) are routed through the gadgetd handoff (webd.md).
+#
+# webd is configured entirely by environment (the binary reads WEBD_* vars), so
+# this unit is where webd's deployment config lives until a unified config-schema
+# is implemented.
+#
+# Hardening note: cgroup MemoryMax, a dedicated non-root User=, and
+# ProtectSystem/sandboxing are device-calibrated in migration M5 / Task 7.4c and
+# are intentionally omitted here. The OOM order (SPEC.md §7) is encoded via
+# OOMScoreAdjust.
+#
+# Install: copy to /etc/systemd/system/webd.service, then
+#   systemctl daemon-reload && systemctl enable webd.service
+[Unit]
+Description=TeslaUSB webd (catalog REST/SSE API + static SPA)
+Documentation=https://github.com/mphacker/TeslaUSB
+# Needs the catalog indexd builds and (for exports) the data cache dir. webd
+# binds a wildcard address, so it does NOT wait on network-online.target — it
+# must be up for first-boot AP/captive-portal onboarding even before any STA
+# link is online (webd.md §7). Wants= rather than Requires= on indexd so webd
+# degrades (serves last catalog state) instead of chain-failing if indexd is
+# briefly down.
+RequiresMountsFor=/var/lib/teslausb /data/teslausb
+After=local-fs.target indexd.service
+Wants=indexd.service
+
+[Service]
+Type=simple
+# WEBD_DB MUST match indexd's INDEXD_DB. WEBD_BIND is LAN/AP-only: the device has
+# no internet-routable interface and is never port-forwarded; narrow to the AP
+# gateway address if a stricter bind is wanted (webd.md: never expose the API to
+# the public internet). WEBD_STATIC MUST match the installer's SPA path
+# (TESLAUSB_SPA_DIR in setup-lib/common.sh). WEBD_CACHE_DIR holds zip-export
+# scratch — kept on the data filesystem (created by ensure_data_roots) so large
+# exports don't pressure the 512 MB Pi's RAM-backed /tmp.
+Environment=WEBD_DB=/var/lib/teslausb/index.sqlite3
+Environment=WEBD_STATIC=/usr/local/share/teslausb/spa
+Environment=WEBD_BIND=0.0.0.0:8080
+Environment=WEBD_ARCHIVE_ROOT=/data/teslausb/archive
+Environment=WEBD_CACHE_DIR=/data/teslausb/cache
+ExecStart=/usr/local/bin/webd
+Restart=on-failure
+RestartSec=5s
+OOMScoreAdjust=500
+SyslogIdentifier=webd
+
+[Install]
+WantedBy=multi-user.target

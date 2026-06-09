@@ -1,0 +1,42 @@
+# TeslaUSB B-1 — indexd: derives trips/events/clips from the car footage and
+# persists them into the SQLite catalog that webd/uploadd/retentiond read.
+#
+# indexd opens the gadgetd-provisioned backing image READ-ONLY (it never writes
+# the car-facing LUN — the #1 invariant, SPEC.md §2) and rescans on a fixed
+# cadence (SCAN_INTERVAL_SECS=30 in the binary), so it is a long-lived loop.
+#
+# Hardening note: cgroup MemoryMax, a dedicated non-root User=, and
+# ProtectSystem/sandboxing are intentionally NOT set here. They are device-
+# calibrated in migration M5 / Task 7.4c (MemoryMax per the microSD-contention
+# spike 2.7). The canonical OOM order (SPEC.md §7) IS encoded now via
+# OOMScoreAdjust: indexd is the least-disposable of the non-gadgetd services
+# (it owns the catalog), so it carries the lowest score above gadgetd's -1000.
+#
+# Install: copy to /etc/systemd/system/indexd.service, then
+#   systemctl daemon-reload && systemctl enable indexd.service
+[Unit]
+Description=TeslaUSB indexd (footage catalog: trips/events/clips -> SQLite)
+Documentation=https://github.com/mphacker/TeslaUSB
+# Needs /data (backing image) and /var/lib (catalog DB) mounted, and the
+# disk.img to exist. gadgetd provisions/owns the image, so order after it but
+# do not hard-require the USB gadget to be bound (indexd reads the file, not
+# the gadget) — Wants= keeps indexd resilient if the gadget is briefly down.
+RequiresMountsFor=/data/teslausb /var/lib/teslausb
+After=local-fs.target gadgetd.service
+Wants=gadgetd.service
+
+[Service]
+Type=simple
+# INDEXD_DB = catalog SQLite path (webd's WEBD_DB MUST match this); INDEXD_IMAGE
+# = the gadgetd backing image, read read-only.
+Environment=INDEXD_DB=/var/lib/teslausb/index.sqlite3
+Environment=INDEXD_IMAGE=/data/teslausb/disk.img
+ExecStart=/usr/local/bin/indexd
+Restart=on-failure
+RestartSec=5s
+# Least-disposable non-gadgetd service: survives memory pressure longest.
+OOMScoreAdjust=-100
+SyslogIdentifier=indexd
+
+[Install]
+WantedBy=multi-user.target

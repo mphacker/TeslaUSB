@@ -40,6 +40,9 @@ TESLAUSB_DATA_ROOT="${TESLAUSB_PREFIX}/data/teslausb"
 TESLAUSB_DISK_IMG="${TESLAUSB_DATA_ROOT}/disk.img"
 TESLAUSB_ARCHIVE_DIR="${TESLAUSB_DATA_ROOT}/archive"
 TESLAUSB_MEDIA_DIR="${TESLAUSB_DATA_ROOT}/media"
+# webd zip-export scratch (WEBD_CACHE_DIR). On the data FS, not RAM-backed /tmp,
+# so large exports never pressure the 512 MB Pi's memory.
+TESLAUSB_CACHE_DIR="${TESLAUSB_DATA_ROOT}/cache"
 TESLAUSB_BIN_DIR="${TESLAUSB_PREFIX}/usr/local/bin"
 TESLAUSB_SPA_DIR="${TESLAUSB_PREFIX}/usr/local/share/teslausb/spa"
 TESLAUSB_UNIT_DIR="${TESLAUSB_PREFIX}/etc/systemd/system"
@@ -49,8 +52,18 @@ TESLAUSB_SECRETS_DIR="${TESLAUSB_CONFIG_DIR}/secrets"
 TESLAUSB_STATE_DIR="${TESLAUSB_PREFIX}/var/lib/teslausb"
 
 # --- service / unit sets -----------------------------------------------------
-# App services (restartable in any mode); canonical OOM order is uploadd first.
-TESLAUSB_APP_SERVICES="scannerd indexd webd uploadd retentiond wifid"
+# App services: ENABLED + restarted by the install/deploy/update modes because
+# their live loops are wired today. (Per-service OOM kill order is set in each
+# unit's OOMScoreAdjust, not by this list order — SPEC.md §7.)
+TESLAUSB_APP_SERVICES="indexd webd wifid"
+# Staged services: their unit FILES are installed (install_unit_files globs
+# units/*.service), but they are NOT enabled/started because their live wiring
+# is not yet landed:
+#   scannerd  — needs the scannerd->indexd IPC; today indexd scans in-process.
+#   uploadd   — `serve` is gated on Task 2.6 (WiFi TX-cap); exits non-zero until wired.
+#   retentiond — `serve` is gated on Task 2.7 (governor calibration); exits non-zero.
+# When a service's loop lands, move its name from STAGED into APP_SERVICES.
+TESLAUSB_STAGED_SERVICES="scannerd uploadd retentiond"
 # Gadget units: NEVER restarted by non-bootstrap modes (a restart re-enumerates
 # USB and interrupts the car's recording — contract §2).
 TESLAUSB_GADGET_UNITS="gadgetd gadgetd-control"

@@ -169,7 +169,7 @@ fn recover_interrupted_handoff(cfg: &GadgetConfig, image: &Path, runtime_root: &
             if cleanup.is_ok() {
                 match lun.represent() {
                     Ok(()) => {
-                        println!("gadgetd serve: recovered interrupted handoff (re-presented LUN)")
+                        println!("gadgetd serve: recovered interrupted handoff (re-presented LUN)");
                     }
                     Err(e) => eprintln!("gadgetd serve: CRITICAL recovery re-present failed: {e}"),
                 }

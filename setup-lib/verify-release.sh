@@ -34,6 +34,14 @@ VR_EX_VERIFY=4
 # Required manifest.env keys (exact names, contract §3.2).
 VR_REQUIRED_KEYS='RELEASE_VERSION GIT_COMMIT TARGET_TRIPLE UNIT_SET_VERSION CONFIG_SCHEMA_VERSION SPA_BUNDLE_SHA256'
 
+# Installable subdirectories the artifact may carry (contract §3.1). Every file
+# under these — and only these — is hashed into SHA256SUMS by the generator and
+# installed from the tree by setup.sh. The completeness check (below) rejects any
+# file present under one of these dirs that is NOT listed in SHA256SUMS, so an
+# unlisted/unverified payload can never ride along and get installed. Must stay
+# in sync with the generator's SCAN_DIRS (release/generate-manifest.sh).
+VR_INSTALLABLE_DIRS='bin spa units config'
+
 # Expected target triple (contract §3.2). Override with EXPECT_TRIPLE=... if a
 # future board needs a different one.
 : "${EXPECT_TRIPLE:=aarch64-unknown-linux-gnu}"
@@ -116,6 +124,51 @@ vr__no_listed_symlinks() {
     return 0
 }
 
+# vr__no_unlisted_files <dir> <SHA256SUMS> — reject installable files present on
+# disk but NOT listed in SHA256SUMS (contract §3.1/§6). sha256sum -c only checks
+# the files it is GIVEN, so an extra unlisted payload (e.g. a rogue units/*.service)
+# would pass integrity verification and then be installed by setup.sh, which globs
+# the tree. This closes that gap by enforcing the listing is COMPLETE: every file
+# under the installable dirs must appear in SHA256SUMS. Fail-closed: a find
+# traversal error (e.g. an unreadable subdir), an mktemp failure, or any unlisted
+# entry all return VR_EX_VERIFY. Enumeration is NUL-delimited (find -print0 /
+# read -d '') so filenames containing newlines cannot fragment past the check.
+# Root metadata (SHA256SUMS, manifest.*) is naturally excluded because only the
+# installable subdirs are scanned.
+vr__no_unlisted_files() {
+    local dir="$1" sums="$2" line path d tmp rc=0
+    declare -A listed=()
+    while IFS= read -r line || [ -n "$line" ]; do
+        [ -z "$line" ] && continue
+        [[ "$line" =~ ^[0-9a-f]{64}\ \ (.+)$ ]] || continue
+        listed["${BASH_REMATCH[1]}"]=1
+    done < "$sums"
+
+    local -a scan=()
+    for d in $VR_INSTALLABLE_DIRS; do
+        [ -d "${dir}/${d}" ] && scan+=("$d")
+    done
+    [ "${#scan[@]}" -eq 0 ] && return 0
+
+    tmp="$(mktemp)" || { vr__log "mktemp failed during completeness check"; return "$VR_EX_VERIFY"; }
+    # Capture find's exit status: a traversal error (unreadable subtree) must fail
+    # closed, not silently hide files. The subshell's status is find's status.
+    if ! ( cd "$dir" && find "${scan[@]}" \! -type d -print0 ) > "$tmp" 2>/dev/null; then
+        vr__log "find failed enumerating installable dirs (fail-closed)"
+        rm -f "$tmp"
+        return "$VR_EX_VERIFY"
+    fi
+    while IFS= read -r -d '' path; do
+        if [ -z "${listed[$path]:-}" ]; then
+            vr__log "unlisted installable file (not in SHA256SUMS): ${path}"
+            rc="$VR_EX_VERIFY"
+            break
+        fi
+    done < "$tmp"
+    rm -f "$tmp"
+    return "$rc"
+}
+
 # vr__recompute_spa_digest <SHA256SUMS> — recompute SPA_BUNDLE_SHA256 from the
 # verified per-file hashes (contract §3.3): the spa/ lines, C-sorted, hashed.
 vr__recompute_spa_digest() {
@@ -151,6 +204,11 @@ verify_release_dir() {
         vr__log "sha256sum -c failed (hash mismatch or missing file)"
         return "$VR_EX_VERIFY"
     fi
+
+    # 2b) Completeness: every installable file on disk must be listed (contract
+    # §3.1/§6). sha256sum -c above only proves the LISTED files are intact; this
+    # rejects EXTRA unlisted payloads the globbing installer would otherwise pick up.
+    vr__no_unlisted_files "$dir" "$sums" || return "$VR_EX_VERIFY"
 
     # 3) Required metadata present + well-formed (safe parse, no sourcing).
     local key val

@@ -57,6 +57,20 @@ d="$(mk)"; printf '%s\n' "deadbeef  /etc/passwd" >> "$d/SHA256SUMS"
 assert_code 4 "absolute-path entry rejected" -- bash "$VR" "$d"; rm -rf "$d"
 d="$(mk)"; : > "$d/SHA256SUMS"
 assert_code 4 "empty SHA256SUMS rejected" -- bash "$VR" "$d"; rm -rf "$d"
+# 6b) Completeness: extra UNLISTED installable files are rejected (contract §3.1/§6).
+d="$(mk)"; printf 'rogue\n' > "$d/units/rogue.service"
+assert_code 4 "unlisted units file rejected" -- bash "$VR" "$d"; rm -rf "$d"
+d="$(mk)"; printf 'x\n' > "$d/bin/rogued"
+assert_code 4 "unlisted bin file rejected" -- bash "$VR" "$d"; rm -rf "$d"
+d="$(mk)"; printf 'x\n' > "$d/spa/assets/rogue.js"
+assert_code 4 "unlisted nested spa file rejected" -- bash "$VR" "$d"; rm -rf "$d"
+# Newline-in-filename must fail closed (NUL-safe enumeration must not fragment past it).
+d="$(mk)"; touch "$d/units/ev"$'\n'"il.service"
+assert_code 4 "unlisted newline-name file rejected" -- bash "$VR" "$d"; rm -rf "$d"
+# Control: a stray file OUTSIDE the installable dirs is harmless (installer never
+# globs it), so it must NOT fail verification — only installable extras are rejected.
+d="$(mk)"; printf 'note\n' > "$d/EXTRA.txt"
+assert_code 0 "unlisted root file ignored" -- bash "$VR" "$d"; rm -rf "$d"
 # 7) Signature seam: required but absent -> fail closed.
 assert_code 4 "require-signature, none present" -- bash "$VR" "${FIX}/good" --require-signature
 

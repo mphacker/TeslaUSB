@@ -1,0 +1,207 @@
+/*
+ * Captive Portal / Wi-Fi setup screen — ported verbatim from the legacy
+ * `captive_portal.html` inline <style>. The `captive-*` class names are unique
+ * to this screen, so the rules stay scoped without further nesting. All values
+ * resolve to design tokens already shipped in the carried-over style.css.
+ */
+
+.captive-page,
+.captive-hero,
+.captive-grid,
+.captive-card,
+.captive-list,
+.captive-status-list,
+.captive-form,
+.captive-network-list,
+.captive-empty {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.captive-page {
+  gap: var(--space-6);
+}
+
+.captive-hero,
+.captive-card {
+  padding: var(--space-6);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+}
+
+.captive-hero-top,
+.captive-card-head,
+.captive-stat-row,
+.captive-network-head,
+.captive-network-meta,
+.captive-network-actions,
+.captive-form-actions,
+.captive-saved-actions,
+.captive-banner,
+.captive-badge,
+.captive-status-chip {
+  display: flex;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.captive-hero-top,
+.captive-card-head,
+.captive-stat-row,
+.captive-network-head,
+.captive-network-actions,
+.captive-form-actions,
+.captive-saved-actions,
+.captive-banner {
+  justify-content: space-between;
+  align-items: flex-start;
+}
+
+.captive-title,
+.captive-card-title,
+.captive-network-name,
+.captive-empty-title {
+  margin: 0;
+  color: var(--text-primary);
+}
+
+.captive-title {
+  font-size: var(--text-3xl);
+}
+
+.captive-copy,
+.captive-card-copy,
+.captive-status-copy,
+.captive-network-copy,
+.captive-empty-copy,
+.captive-field-help,
+.captive-form-label {
+  margin: 0;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.captive-grid {
+  align-items: start;
+}
+
+@media (min-width: 72rem) {
+  .captive-grid {
+    grid-template-columns: 1.2fr 0.8fr;
+  }
+}
+
+.captive-banner {
+  padding: var(--space-4);
+  border: 1px solid var(--border-input);
+  border-radius: var(--radius-md);
+  background: var(--form-input-bg);
+}
+
+.captive-banner.is-warning {
+  border-color: var(--warning-border);
+  background: var(--msg-warning-bg);
+}
+
+.captive-banner.is-warning .captive-copy,
+.captive-banner.is-warning .captive-field-help {
+  color: var(--msg-warning-text);
+}
+
+.captive-icon,
+.captive-inline-icon {
+  width: 1.25rem;
+  height: 1.25rem;
+  flex: 0 0 auto;
+}
+
+.captive-status-chip,
+.captive-badge {
+  min-height: 44px;
+  align-items: center;
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-input);
+  background: var(--form-label-bg);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.captive-status-chip.is-online {
+  background: var(--msg-success-bg);
+  color: var(--msg-success-text);
+}
+
+.captive-status-chip.is-offline {
+  background: var(--msg-warning-bg);
+  color: var(--msg-warning-text);
+}
+
+.captive-list,
+.captive-network-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.captive-network-item,
+.captive-saved-item,
+.captive-stat-card {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--border-input);
+  border-radius: var(--radius-md);
+  background: var(--form-input-bg);
+}
+
+.captive-form {
+  padding: var(--space-4);
+  border: 1px solid var(--border-input);
+  border-radius: var(--radius-md);
+  background: var(--form-input-bg);
+}
+
+.captive-form-row {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.captive-form input {
+  min-height: 44px;
+  width: 100%;
+}
+
+.captive-button-row {
+  display: flex;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.captive-button-row .btn,
+.captive-network-actions .btn,
+.captive-saved-actions .btn {
+  min-height: 44px;
+}
+
+.captive-network-actions {
+  align-items: center;
+}
+
+.captive-empty {
+  justify-items: center;
+  text-align: center;
+  padding: var(--space-6);
+  border: 1px dashed var(--border-input);
+  border-radius: var(--radius-lg);
+  background: var(--form-input-bg);
+}
+
+/* Read-only adaptation: inert controls read as disabled, not interactive. */
+.captive-page .btn:disabled,
+.captive-page input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}

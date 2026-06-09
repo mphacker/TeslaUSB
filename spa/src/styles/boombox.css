@@ -1,0 +1,165 @@
+/*
+ * Boombox screen styles — ported verbatim from the legacy
+ * `boombox.html` inline <style> so the page renders pixel-faithfully against
+ * the carried-over design tokens (`--ios-warning-*`, `--bg-info`,
+ * `--border-input`, …) already defined in `static/css/style.css`.
+ *
+ * The `boombox-*` class names are unique to this screen (no global collision).
+ * The drop zone is rendered in its inert `.is-disabled` state only — B-1 has
+ * no toybox upload endpoint and media mutations are operator-gated.
+ */
+
+.boombox-nhtsa-warning {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  background-color: var(--ios-warning-bg);
+  border-left: 4px solid var(--ios-warning-border);
+  padding: 14px 16px;
+  border-radius: 5px;
+  margin: 16px 0 20px 0;
+  transition: background-color 0.3s ease, border-color 0.3s ease;
+}
+
+.boombox-nhtsa-warning .nhtsa-icon {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  color: var(--ios-warning-text);
+  margin-top: 2px;
+}
+
+.boombox-nhtsa-warning .nhtsa-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.boombox-nhtsa-warning p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--ios-warning-text);
+}
+
+.boombox-nhtsa-warning p + p {
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.boombox-nhtsa-warning strong {
+  font-weight: 600;
+}
+
+.boombox-requirements {
+  background-color: var(--bg-info);
+  color: var(--text-info);
+  padding: 14px 16px;
+  border-radius: 5px;
+  margin-bottom: 20px;
+}
+
+.boombox-requirements ul {
+  margin: 8px 0 0 20px;
+  padding: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.boombox-requirements li {
+  margin-bottom: 2px;
+}
+
+.boombox-count-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: var(--bg-info);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  border: 1px solid var(--border-color);
+}
+
+.boombox-drop-zone {
+  display: block;
+  border: 2px dashed var(--border-input);
+  border-radius: 8px;
+  padding: 32px 20px;
+  text-align: center;
+  background: var(--form-input-bg);
+  transition: border-color 0.2s ease, background-color 0.2s ease;
+  margin-bottom: 20px;
+}
+
+.boombox-drop-zone .drop-icon {
+  display: block;
+  width: 40px;
+  height: 40px;
+  color: var(--btn-primary-bg);
+  margin: 0 auto 10px;
+}
+
+.boombox-drop-zone .drop-title {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 4px;
+  color: var(--text-primary);
+}
+
+.boombox-drop-zone .drop-hint {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.boombox-drop-zone.is-disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.boombox-empty {
+  text-align: center;
+  padding: 40px 20px;
+  color: var(--text-secondary);
+  background: var(--bg-container);
+  border: 1px dashed var(--border-color);
+  border-radius: 8px;
+}
+
+.boombox-empty .empty-icon {
+  width: 48px;
+  height: 48px;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+}
+
+.boombox-empty p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.boombox-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 24px 0 12px 0;
+}
+
+.boombox-section-header h3 {
+  margin: 0;
+  font-size: 18px;
+}
+
+@media (max-width: 480px) {
+  .boombox-drop-zone {
+    padding: 22px 14px;
+  }
+  .boombox-section-header {
+    gap: 6px;
+  }
+}

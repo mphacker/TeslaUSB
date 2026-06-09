@@ -1,0 +1,24 @@
+/*
+ * Cloud Archive screen. The page reuses shared component classes already in the
+ * carried-over style.css (`device-status-card`, `settings-section`, `info-box`,
+ * `edit-btn`, `status-dot`, `nav-icon`, `video-table`) plus inline styles ported
+ * from the legacy `cloud_archive.html`. Only the small read-only adaptations
+ * live here.
+ */
+
+.container[data-screen="cloud-archive"] .device-status-card {
+  margin-bottom: var(--space-4);
+}
+
+/* Read-only adaptation: inert controls read as disabled, not interactive. */
+.container[data-screen="cloud-archive"] button:disabled,
+.container[data-screen="cloud-archive"] select:disabled,
+.container[data-screen="cloud-archive"] input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.container[data-screen="cloud-archive"] .cloud-empty {
+  display: grid;
+  justify-items: center;
+}

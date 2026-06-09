@@ -1,0 +1,193 @@
+/*
+ * Wraps screen styles — ported from the legacy `wraps.html` inline styles and
+ * scoped with `wraps-*` class names so the v1 look does not leak globally.
+ * Tokens used here already exist in `static/css/style.css`.
+ *
+ * The drop zone only renders in its inert `.is-disabled` state — B-1 has no
+ * toybox upload endpoint and media mutations are operator-gated.
+ */
+
+.wraps-description {
+  margin: 4px 0 0 0;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.wraps-info-box {
+  margin: 28px 0 20px 0;
+  padding: 24px;
+  border-left: 4px solid var(--text-link);
+  border-radius: 5px;
+  background-color: var(--bg-info);
+  color: var(--text-info);
+}
+
+.wraps-info-box p {
+  margin: 0;
+}
+
+.wraps-info-box ul {
+  margin: 20px 0 0 20px;
+  padding: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.wraps-info-box li {
+  margin-bottom: 8px;
+}
+
+.wraps-info-box code {
+  color: var(--text-primary);
+}
+
+.wraps-usage {
+  margin-top: 18px !important;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.wraps-usage a {
+  color: var(--text-link);
+}
+
+.wraps-folder-controls {
+  margin-bottom: 20px;
+}
+
+.wraps-drop-zone {
+  display: block;
+  border: 3px dashed var(--border-input);
+  border-radius: 8px;
+  padding: 40px;
+  text-align: center;
+  background: var(--form-input-bg);
+  transition: border-color 0.3s ease, background-color 0.3s ease;
+  margin-bottom: 20px;
+}
+
+.wraps-drop-zone.is-disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.wraps-drop-inner {
+  pointer-events: none;
+}
+
+.wraps-drop-icon {
+  display: block;
+  width: 48px;
+  height: 48px;
+  color: var(--btn-purple-bg);
+  margin: 0 auto 15px;
+}
+
+.wraps-drop-title {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0 0 8px 0;
+  color: var(--text-primary);
+}
+
+.wraps-drop-hint {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+.wraps-drop-note {
+  max-width: 680px;
+  margin: 10px auto 0 auto;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.wraps-table-container {
+  margin-top: 44px;
+  overflow-x: auto;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-container);
+}
+
+.wraps-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.wraps-table th {
+  padding: 18px;
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.wraps-table td {
+  padding: 20px;
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.wraps-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.wraps-preview-col {
+  width: 18%;
+}
+
+.wraps-filename-col {
+  width: 27%;
+}
+
+.wraps-dimensions-col {
+  width: 15%;
+}
+
+.wraps-size-col {
+  width: 12%;
+}
+
+.wraps-actions-col {
+  width: 28%;
+}
+
+.wraps-empty {
+  text-align: center;
+  padding: 28px 20px;
+  color: var(--text-secondary);
+}
+
+.wraps-empty-icon {
+  width: 48px;
+  height: 48px;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+}
+
+.wraps-empty p {
+  max-width: 620px;
+  margin: 0 auto;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+@media (max-width: 480px) {
+  .wraps-info-box {
+    padding: 18px;
+  }
+
+  .wraps-drop-zone {
+    padding: 28px 16px;
+  }
+
+  .wraps-table th,
+  .wraps-table td {
+    padding: 14px;
+  }
+}

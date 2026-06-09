@@ -73,8 +73,8 @@ test.describe("media (lock chimes) UAT", () => {
     await expect(activeNav).toHaveAttribute("aria-current", "page");
     await expect(activeNav).toContainText("Media");
 
-    // (a) Media pill sub-nav — all six, in v1 order; "chimes" is the active
-    //     link, the rest are inert "Soon" pills (not links to dead routes).
+    // (a) Media pill sub-nav — all six, in v1 order; every pill is a real
+    //     in-app link to its v1 route, with "chimes" the active page.
     const pills = page.locator(".media-pills .media-pill");
     await expect(pills).toHaveCount(EXPECT_PILLS.length);
     for (let i = 0; i < EXPECT_PILLS.length; i++) {
@@ -83,9 +83,15 @@ test.describe("media (lock chimes) UAT", () => {
     const chimes = page.locator(".media-pill[data-pill=chimes]");
     await expect(chimes).toHaveClass(/\bactive\b/);
     await expect(chimes).toHaveAttribute("href", "/media");
-    // The five unbuilt features are disabled spans, not anchors.
-    await expect(page.locator(".media-pill.media-pill-disabled")).toHaveCount(5);
-    await expect(page.locator("a.media-pill")).toHaveCount(1);
+    // All six pills are real anchors now (v1 parity — no dead/disabled pills).
+    await expect(page.locator("a.media-pill")).toHaveCount(6);
+    await expect(page.locator(".media-pill.media-pill-disabled")).toHaveCount(0);
+    // The other five link to their v1 routes.
+    await expect(page.locator(".media-pill[data-pill=music]")).toHaveAttribute("href", "/music");
+    await expect(page.locator(".media-pill[data-pill=boombox]")).toHaveAttribute("href", "/boombox");
+    await expect(page.locator(".media-pill[data-pill=shows]")).toHaveAttribute("href", "/light_shows");
+    await expect(page.locator(".media-pill[data-pill=wraps]")).toHaveAttribute("href", "/wraps");
+    await expect(page.locator(".media-pill[data-pill=plates]")).toHaveAttribute("href", "/license_plates");
 
     // (b) Lock Chimes heading + the v1 section set (each present and honest).
     await expect(

@@ -1,0 +1,169 @@
+/*
+ * Light Shows screen styles — scoped port of the legacy `light_shows.html`
+ * inline layout (drag/drop zone + light-show library table) onto existing
+ * carried-over design tokens. The drop zone only renders in `.is-disabled`:
+ * B-1 has no light-show media mutation surface in webd.
+ */
+
+.light-shows-intro {
+  margin: 4px 0 16px 0;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.light-shows-requirements {
+  background-color: var(--bg-info);
+  color: var(--text-info);
+  padding: 14px 16px;
+  border-radius: 5px;
+  margin-bottom: 20px;
+}
+
+.light-shows-requirements-title {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.light-shows-requirements .requirements-icon {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+.light-shows-requirements ul {
+  margin: 8px 0 0 20px;
+  padding: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.light-shows-requirements li {
+  margin-bottom: 2px;
+}
+
+.light-shows-folder-controls {
+  margin-bottom: 20px;
+}
+
+.light-shows-drop-zone {
+  border: 3px dashed var(--border-input);
+  border-radius: 8px;
+  padding: 40px;
+  text-align: center;
+  background: var(--form-input-bg);
+  transition: border-color 0.3s ease, background-color 0.3s ease;
+  margin-bottom: 20px;
+}
+
+.light-shows-drop-zone-content {
+  pointer-events: none;
+}
+
+.light-shows-drop-zone .drop-icon {
+  display: block;
+  width: 48px;
+  height: 48px;
+  color: var(--btn-purple-bg);
+  margin: 0 auto 15px;
+}
+
+.light-shows-drop-zone .drop-title {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0 0 8px 0;
+  color: var(--text-primary);
+}
+
+.light-shows-drop-zone .drop-hint,
+.light-shows-drop-zone .drop-formats {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+.light-shows-drop-zone .drop-formats {
+  margin-top: 8px;
+}
+
+.light-shows-drop-zone.is-disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.light-shows-video-table-container {
+  border: 1px solid var(--border-table);
+  border-radius: 4px;
+  margin: 20px 0;
+  overflow-x: auto;
+  transition: border-color 0.3s ease;
+}
+
+.light-shows-video-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.light-shows-video-table th {
+  background-color: var(--bg-table-header);
+  color: var(--text-table-header);
+  font-weight: 600;
+  padding: 12px;
+  text-align: left;
+  border-bottom: 2px solid var(--border-table);
+  transition: background-color 0.3s ease, color 0.3s ease,
+    border-color 0.3s ease;
+}
+
+.light-shows-video-table td {
+  padding: 12px;
+  border-bottom: 1px solid var(--border-table);
+  transition: border-color 0.3s ease;
+}
+
+.light-shows-video-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.light-shows-video-table .show-name-column {
+  width: 25%;
+}
+
+.light-shows-video-table .show-files-column {
+  width: 45%;
+}
+
+.light-shows-video-table .show-actions-column {
+  width: 30%;
+}
+
+.light-shows-empty {
+  text-align: center;
+  padding: 40px 20px;
+  color: var(--text-secondary);
+}
+
+.light-shows-empty .empty-icon {
+  width: 48px;
+  height: 48px;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+}
+
+.light-shows-empty p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+@media (max-width: 480px) {
+  .light-shows-drop-zone {
+    padding: 24px 14px;
+  }
+
+  .light-shows-video-table {
+    min-width: 560px;
+  }
+}

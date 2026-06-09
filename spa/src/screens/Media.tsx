@@ -1,5 +1,5 @@
 import { useEffect } from "preact/hooks";
-import { Icon } from "../components/Icon";
+import { MediaPills } from "../components/MediaPills";
 import "../styles/media.css";
 
 /**
@@ -31,27 +31,6 @@ import "../styles/media.css";
  * The screen therefore makes NO API calls and is strictly read-only.
  */
 
-interface Pill {
-  key: string;
-  icon: string;
-  label: string;
-  /** The one media screen that exists today (the current page). */
-  active?: boolean;
-}
-
-// Mirrors the v1 `media_hub_nav.html` pill order. Only "chimes" is a built
-// media screen in B-1; the rest are not yet implemented, so they render as
-// disabled "Soon" pills rather than links to dead routes (which would resolve
-// to the router's generic "Not found" and make the nav look broken).
-const PILLS: Pill[] = [
-  { key: "chimes", icon: "bell", label: "Chimes", active: true },
-  { key: "music", icon: "music", label: "Music" },
-  { key: "boombox", icon: "megaphone", label: "Boombox" },
-  { key: "shows", icon: "sparkles", label: "Shows" },
-  { key: "wraps", icon: "palette", label: "Wraps" },
-  { key: "plates", icon: "image", label: "Plates" },
-];
-
 function buildId(): string {
   return (
     (window as unknown as { __TESLAUSB_BUILD__?: string }).__TESLAUSB_BUILD__ ??
@@ -73,34 +52,7 @@ export function Media() {
   return (
     <div class="container media-page" data-page="media" data-screen="media">
       {/* ── Media pill sub-nav (v1 media_hub_nav.html parity) ── */}
-      <div class="media-pills" data-testid="media-pills">
-        {PILLS.map((p) =>
-          p.active ? (
-            <a
-              key={p.key}
-              href="/media"
-              class="media-pill active"
-              data-pill={p.key}
-              aria-current="page"
-            >
-              <Icon name={p.icon} />
-              {p.label}
-            </a>
-          ) : (
-            <span
-              key={p.key}
-              class="media-pill media-pill-disabled"
-              data-pill={p.key}
-              aria-disabled="true"
-              title={`${p.label} — coming soon`}
-            >
-              <Icon name={p.icon} />
-              {p.label}
-              <span class="media-pill-soon">Soon</span>
-            </span>
-          ),
-        )}
-      </div>
+      <MediaPills active="chimes" />
 
       <h2>Lock Chimes</h2>
 

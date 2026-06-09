@@ -1,0 +1,176 @@
+/*
+ * Custom License Plates screen styles — ported from the legacy
+ * `license_plates.html` inline styles into screen-scoped class names. The page
+ * keeps the v1 media-pill / requirements / drop-zone / table look while the
+ * drop zone is rendered only in its inert `.is-disabled` read-only state.
+ */
+
+.license-plates-info {
+  background-color: var(--bg-info);
+  color: var(--text-info);
+  padding: 15px;
+  border-radius: 5px;
+  border-left: 4px solid var(--text-link);
+  margin: 20px 0;
+  font-size: 14px;
+  transition: background-color 0.3s ease, color 0.3s ease,
+    border-color 0.3s ease;
+}
+
+.license-plates-info p {
+  margin: 0;
+}
+
+.license-plates-inline-icon {
+  width: 16px;
+  height: 16px;
+  vertical-align: -2px;
+  margin-right: 6px;
+}
+
+.license-plates-info ul {
+  margin: 10px 0 0 20px;
+  padding: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.license-plates-info li {
+  margin-bottom: 2px;
+}
+
+.license-plates-info code {
+  background: var(--bg-code);
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+.license-plates-info a {
+  color: var(--text-link);
+}
+
+.license-plates-info-note {
+  margin-top: 10px !important;
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+
+.license-plates-drop-zone {
+  border: 3px dashed var(--border-input);
+  border-radius: 8px;
+  padding: 40px;
+  text-align: center;
+  background: var(--form-input-bg);
+  transition: border-color 0.3s ease, background-color 0.3s ease,
+    opacity 0.2s ease;
+  margin-bottom: 20px;
+  min-height: 44px;
+}
+
+.license-plates-drop-zone.is-disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.license-plates-drop-content {
+  pointer-events: none;
+}
+
+.license-plates-drop-icon {
+  width: 48px;
+  height: 48px;
+  color: var(--text-link);
+  display: block;
+  margin: 0 auto 15px;
+}
+
+.license-plates-drop-title {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0 0 8px 0;
+  color: var(--text-primary);
+}
+
+.license-plates-drop-hint {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin: 0;
+  line-height: 1.5;
+}
+
+.license-plates-table-container {
+  border: 1px solid var(--border-table);
+  border-radius: 4px;
+  margin: 80px 0 20px;
+  transition: border-color 0.3s ease;
+  overflow: hidden;
+}
+
+.license-plates-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.license-plates-table th {
+  background-color: var(--bg-table-header);
+  color: var(--text-table-header);
+  font-weight: 600;
+  padding: 12px;
+  text-align: left;
+  border-bottom: 2px solid var(--border-table);
+  transition: background-color 0.3s ease, color 0.3s ease,
+    border-color 0.3s ease;
+}
+
+.license-plates-table td {
+  padding: 12px;
+  border-bottom: 1px solid var(--border-table);
+  transition: border-color 0.3s ease;
+}
+
+.license-plates-table tbody tr:hover {
+  background-color: var(--bg-table-hover);
+  transition: background-color 0.15s ease;
+}
+
+.license-plates-empty {
+  text-align: center;
+  padding: 28px 20px;
+  color: var(--text-secondary);
+  background: var(--bg-container);
+}
+
+.license-plates-empty-icon {
+  width: 48px;
+  height: 48px;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+}
+
+.license-plates-empty p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+@media (max-width: 768px) {
+  .license-plates-table-container {
+    margin-top: 40px;
+    overflow-x: auto;
+  }
+
+  .license-plates-table {
+    min-width: 620px;
+  }
+}
+
+@media (max-width: 480px) {
+  .license-plates-info {
+    padding: 14px;
+  }
+
+  .license-plates-drop-zone {
+    padding: 28px 14px;
+  }
+}

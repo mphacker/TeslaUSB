@@ -3,11 +3,18 @@ import type { ComponentType } from "preact";
 import { Shell, type NavKey } from "./components/Shell";
 import { MediaHub } from "./screens/MediaHub";
 import { Media } from "./screens/Media";
+import { Boombox } from "./screens/Boombox";
+import { Music } from "./screens/Music";
+import { LightShows } from "./screens/LightShows";
+import { Wraps } from "./screens/Wraps";
+import { LicensePlates } from "./screens/LicensePlates";
 import { TripMap } from "./screens/TripMap";
 import { Analytics } from "./screens/Analytics";
 import { EventPlayer } from "./screens/EventPlayer";
 import { StorageHealth } from "./screens/StorageHealth";
 import { FailedJobs } from "./screens/FailedJobs";
+import { CloudArchive } from "./screens/CloudArchive";
+import { CaptivePortal } from "./screens/CaptivePortal";
 import { ComingSoon } from "./screens/ComingSoon";
 
 /**
@@ -39,24 +46,25 @@ export interface Route {
 //  · `/media`   → the Media section (`screens/Media.tsx`): the v1 Lock Chimes
 //                 page (media pill sub-nav + lock-chime sections), the screen
 //                 the legacy `/media/` redirect actually landed on.
-// Other unbuilt screens (analytics, cloud, events) resolve to a shared
-// ComingSoon placeholder so in-app links never dead-end or full-reload. Adding a
-// real screen = swap its row's `screen`.
+// Every primary screen is now a real parity port; the generic ComingSoon screen
+// survives only as the client-side fallback for an unknown in-app path (see
+// matchRoute) so links never dead-end or trigger a full reload.
 export const ROUTES: Route[] = [
   { path: "/", active: "map", screen: TripMap, title: "Map" },
   { path: "/media", active: "media", screen: Media, title: "Media" },
+  { path: "/music", active: "media", screen: Music, title: "Music" },
+  { path: "/boombox", active: "media", screen: Boombox, title: "Boombox" },
+  { path: "/light_shows", active: "media", screen: LightShows, title: "Light Shows" },
+  { path: "/wraps", active: "media", screen: Wraps, title: "Wraps" },
+  { path: "/license_plates", active: "media", screen: LicensePlates, title: "License Plates" },
   { path: "/analytics", active: "analytics", screen: Analytics, title: "Analytics" },
   { path: "/events", active: "map", screen: EventPlayer, title: "Events" },
-  { path: "/cloud", active: "cloud", screen: comingSoon("Cloud", "cloud"), title: "Cloud" },
+  { path: "/cloud", active: "cloud", screen: CloudArchive, title: "Cloud" },
+  { path: "/captive-portal", active: "settings", screen: CaptivePortal, title: "Wi-Fi setup" },
   { path: "/settings", active: "settings", screen: MediaHub, title: "Settings" },
   { path: "/storage", active: "settings", screen: StorageHealth, title: "Storage" },
   { path: "/failed-jobs", active: "settings", screen: FailedJobs, title: "Failed jobs" },
 ];
-
-/** Build a titled ComingSoon screen bound to a nav key (placeholder routes). */
-function comingSoon(title: string, _active: NavKey): ComponentType {
-  return () => <ComingSoon title={title} />;
-}
 
 /** Strip a trailing slash (except for root) so `/media/` matches `/media`. */
 function normalizePath(pathname: string): string {

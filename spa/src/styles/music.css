@@ -1,0 +1,243 @@
+/*
+ * Music screen styles — ported from the legacy `music.html` inline <style> so
+ * the page renders pixel-faithfully against the carried-over design tokens
+ * already defined in `static/css/style.css`.
+ *
+ * The `music-*` class names are unique to this screen (no global collision).
+ * The upload drop zone is rendered in its inert `.is-disabled` state only — B-1
+ * has no music endpoint and media mutations are operator-gated.
+ */
+
+.music-layout {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 20px;
+  align-items: start;
+}
+
+.music-panel {
+  background: var(--bg-container);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 20px;
+  box-shadow: 0 2px 10px var(--shadow);
+  transition: background-color 0.3s ease, box-shadow 0.3s ease,
+    border-color 0.3s ease;
+}
+
+.music-info-box {
+  background-color: var(--bg-info);
+  color: var(--text-info);
+  padding: 15px;
+  border-radius: 5px;
+  border-left: 4px solid var(--text-link);
+  margin: 20px 0;
+  font-size: 14px;
+  transition: background-color 0.3s ease, color 0.3s ease,
+    border-color 0.3s ease;
+}
+
+.music-info-box p {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.music-info-box code {
+  background: var(--bg-code);
+  padding: 2px 5px;
+  border-radius: 3px;
+}
+
+.music-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  margin: 15px 0;
+}
+
+.music-summary .stat-item {
+  text-align: center;
+}
+
+.music-summary .stat-label {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+
+.music-summary .stat-value {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.music-meter {
+  width: 100%;
+  height: 10px;
+  background: var(--border-light);
+  border-radius: 999px;
+  overflow: hidden;
+  margin: 8px 0 16px 0;
+  transition: background-color 0.3s ease;
+}
+
+.music-meter span {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: linear-gradient(90deg, var(--btn-primary-bg), var(--btn-info-bg));
+}
+
+.music-breadcrumb {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin: 12px 0;
+  color: var(--text-secondary);
+  font-size: 0.95rem;
+}
+
+.music-breadcrumb span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.music-breadcrumb .breadcrumb-icon {
+  width: 18px;
+  height: 18px;
+  color: var(--text-link);
+}
+
+.music-files-heading {
+  margin-top: 10px;
+}
+
+.music-empty {
+  text-align: center;
+  padding: 40px 20px;
+  color: var(--text-secondary);
+  background: var(--bg-container);
+  border: 1px dashed var(--border-color);
+  border-radius: 8px;
+  margin-top: 20px;
+}
+
+.music-empty .empty-icon {
+  width: 48px;
+  height: 48px;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+}
+
+.music-empty p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.music-panel-title {
+  margin-top: 0;
+}
+
+.music-upload-intro {
+  margin: 0 0 15px 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.music-upload-intro strong {
+  color: var(--text-primary);
+}
+
+.music-drop-zone {
+  border: 3px dashed var(--border-input);
+  border-radius: 8px;
+  padding: 30px 20px;
+  text-align: center;
+  background: var(--form-input-bg);
+  transition: border-color 0.3s ease, background-color 0.3s ease;
+  margin-bottom: 15px;
+}
+
+.music-drop-zone .drop-icon {
+  display: block;
+  width: 48px;
+  height: 48px;
+  color: var(--btn-primary-bg);
+  margin: 0 auto 10px;
+}
+
+.music-drop-zone .drop-label {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.music-drop-zone .drop-hint {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.music-drop-zone .drop-note {
+  max-width: 360px;
+  margin: 8px auto 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.music-drop-zone.is-disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.music-readonly-note {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+  background: var(--bg-info);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+@media (max-width: 960px) {
+  .music-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 768px) {
+  .music-summary {
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+  }
+
+  .music-summary .stat-value {
+    font-size: 15px;
+  }
+
+  .music-drop-zone {
+    padding: 20px 15px;
+  }
+
+  .music-drop-zone .drop-icon {
+    width: 36px;
+    height: 36px;
+  }
+
+  .music-drop-zone .drop-label {
+    font-size: 14px;
+  }
+
+  .music-breadcrumb {
+    font-size: 0.85rem;
+  }
+}

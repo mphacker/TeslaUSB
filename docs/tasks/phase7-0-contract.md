@@ -23,7 +23,7 @@ new ones.
 | Service binaries | `/usr/local/bin/<name>` | `deploy/systemd/gadgetd.service` (`/usr/local/bin/gadgetd`) |
 | Backing image + data root | `/data/teslausb/` (image `/data/teslausb/disk.img`) | `gadgetd` `DEFAULT_IMAGE`, the unit's `--image` |
 | Archive / media roots | `/data/teslausb/{archive,media}` | follows the data-root above |
-| Config | `/etc/teslausb/config.toml` + `/etc/teslausb/secrets/` | `setup.md` §5/§10 |
+| Secrets | `/etc/teslausb/secrets/` (`0700`) | `setup.md` §5/§10 |
 | Secrets delivery | systemd `LoadCredential=` (files `0600` root-owned) | `setup.md` §10 |
 | systemd units | `/etc/systemd/system/<name>.service` | `deploy/systemd/*` |
 | Runtime sockets / tmpfs | `/run/teslausb/` | `gadgetd` `DEFAULT_SOCKET` |
@@ -63,7 +63,7 @@ unit on a fresh device, `ExecStartPre` will `fallocate` a 4 GiB image + partitio
 **FROZEN mode rules:**
 
 - `deploy-app` / `update` / `repair` / `rollback`: install/refresh unit **files**
-  and app binaries/SPA/config only. They **must not** enable or start
+  and app binaries/SPA only. They **must not** enable or start
   `gadgetd-provision.service`, and **must not restart a healthy `gadgetd`/
   `gadgetd-control`** (a gadget restart re-enumerates USB and interrupts the car's
   recording). `daemon-reload` is fine; (re)starting only the app services
@@ -84,7 +84,6 @@ teslausb-<version>-<triple>/
     gadgetd scannerd indexd webd uploadd retentiond wifid
   spa/                       # built SPA bundle (vite dist/), hashed as a tree
   units/                     # the *.service files installed by step 8
-  config/config.example.toml
   SHA256SUMS                 # coreutils format: "<64-hex>␠␠<relpath>" per line
   manifest.env              # flat KEY=value metadata (bash-safe, NO code)
   manifest.json             # OPTIONAL rich metadata for host tooling only
@@ -97,8 +96,8 @@ parses JSON in bash. `manifest.json` exists purely for host/CI tooling and is
 **not** trusted by the Pi-side path.
 
 ### 3.1 `SHA256SUMS`
-- One line per shipped file (every `bin/*`, every `spa/**` file, every `units/*`,
-  `config/config.example.toml`). Format exactly `"<64 lowercase hex>  <relpath>"`
+- One line per shipped file (every `bin/*`, every `spa/**` file, every `units/*`).
+  Format exactly `"<64 lowercase hex>  <relpath>"`
   (two spaces, coreutils default).
 - Relative paths only; **no** leading `/`, **no** `..` segment, **no** absolute or
   symlink escape. The verifier rejects any such entry (path-traversal guard).
@@ -111,7 +110,6 @@ RELEASE_VERSION=<semver or tag>
 GIT_COMMIT=<full 40-hex sha>
 TARGET_TRIPLE=aarch64-unknown-linux-gnu
 UNIT_SET_VERSION=<integer>
-CONFIG_SCHEMA_VERSION=<integer>
 SPA_BUNDLE_SHA256=<64 hex>          # sha256 of the canonical spa tree digest (§3.3)
 ```
 - Keys match `^[A-Z][A-Z0-9_]*$`; values are a single line, no command
@@ -195,7 +193,7 @@ Before trusting a downloaded/handed tarball, the installer must:
   safe `uninstall` in `--dry-run` and (sandbox) real mode, assert all four
   attributes unchanged.
 - **Negative tests:** `deploy-app` ignores/refuses `--bootstrap-image`; `update`
-  preserves `disk.img`/config/secrets/archive/index; `rollback` never restores
+  preserves `disk.img`/secrets/archive/index; `rollback` never restores
   over `disk.img`; `uninstall` refuses while the gadget is bound and preserves the
   LUN by default; a tampered binary fails without `--allow-unverified`; a malformed
   `manifest.env`/`SHA256SUMS` fails closed.

@@ -37,7 +37,6 @@ assert_eq "$rc" 0 "deploy-app(good) succeeds"
 assert_file_exists "${TESLAUSB_PREFIX}/usr/local/bin/gadgetd"        "deploy-app installs gadgetd binary"
 assert_file_exists "${TESLAUSB_PREFIX}/usr/local/bin/webd"           "deploy-app installs webd binary"
 assert_file_exists "${TESLAUSB_PREFIX}/etc/systemd/system/gadgetd.service" "deploy-app installs gadgetd.service"
-assert_file_exists "${TESLAUSB_PREFIX}/etc/teslausb/config.toml"     "deploy-app seeds config.toml"
 assert_grep   'daemon-reload'              "$SYSTEMCTL_LOG" "deploy-app daemon-reloads"
 assert_grep   '^restart webd\.service$'    "$SYSTEMCTL_LOG" "deploy-app restarts app service webd"
 assert_grep   '^enable gadgetd\.service$'  "$SYSTEMCTL_LOG" "deploy-app enables gadgetd (persist only)"
@@ -145,13 +144,11 @@ grep -v '^GIT_COMMIT=' "${bad}/manifest.env" > "${bad}/m" && mv "${bad}/m" "${ba
 assert_exit 4 "malformed manifest fails closed" -- run_setup deploy-app --artifact-dir "$bad" --yes
 cleanup_sandbox "$sbx"
 
-# D6: update preserves an existing config.toml + secrets.
+# D6: update preserves existing secrets (and never manages a central config.toml).
 new_sandbox; sbx="$SANDBOX"
 mkdir -p "${TESLAUSB_PREFIX}/etc/teslausb/secrets"
-printf 'LIVE_CONFIG_SENTINEL\n' > "${TESLAUSB_PREFIX}/etc/teslausb/config.toml"
 printf 'SECRET_TOKEN\n'        > "${TESLAUSB_PREFIX}/etc/teslausb/secrets/token"
 run_setup update --artifact-dir "$GOOD" --yes >/dev/null 2>&1 || true
-assert_eq "$(cat "${TESLAUSB_PREFIX}/etc/teslausb/config.toml")" "LIVE_CONFIG_SENTINEL" "update preserves live config.toml"
 assert_eq "$(cat "${TESLAUSB_PREFIX}/etc/teslausb/secrets/token")" "SECRET_TOKEN" "update preserves secrets"
 cleanup_sandbox "$sbx"
 

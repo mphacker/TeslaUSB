@@ -42,24 +42,16 @@ install_spa() {
     mut_install_tree "${rel}/spa" "$TESLAUSB_SPA_DIR"
 }
 
-# install_config_example — install the example config + ensure the secrets dir.
-# The LIVE config.toml is seeded only on first install and PRESERVED thereafter
-# (update/deploy-app never overwrite it; contract negative test).
-install_config_example() {
-    local rel="$1"
-    local example="${rel}/config/config.example.toml"
-    [ -f "$example" ] || die "$EX_PRECOND" "release has no config/config.example.toml"
-    mut_install_file "$example" "${TESLAUSB_CONFIG_DIR}/config.example.toml" 0644
+# ensure_secrets_dir — create the root-only secrets dir (the systemd
+# LoadCredential= source, setup.md §10), 0700. Per-service secret FILES are
+# delivered out of band; nothing secret is shipped in the release artifact.
+# NOTE: there is deliberately no central /etc/teslausb/config.toml — every daemon
+# is configured via its unit's Environment= lines today. A unified config file is
+# deferred until a daemon actually consumes one (see docs/tasks/tasks.md).
+ensure_secrets_dir() {
+    mut_mkdir "$TESLAUSB_CONFIG_DIR"
     mut_mkdir "$TESLAUSB_SECRETS_DIR"
     mut_chmod 0700 "$TESLAUSB_SECRETS_DIR"
-    if [ -e "$TESLAUSB_CONFIG_FILE" ]; then
-        log_info "preserving existing ${TESLAUSB_CONFIG_FILE}"
-    else
-        log_info "seeding ${TESLAUSB_CONFIG_FILE} from example (first install)"
-        assert_safe_dest "$TESLAUSB_CONFIG_FILE"
-        run_mutation "install ${example} -> ${TESLAUSB_CONFIG_FILE} (mode 0644)" \
-            install -m 0644 "$example" "$TESLAUSB_CONFIG_FILE"
-    fi
 }
 
 # --- modes -------------------------------------------------------------------
@@ -71,7 +63,7 @@ mode_install() {
     ensure_data_roots
     install_binaries "$rel"
     install_spa "$rel"
-    install_config_example "$rel"
+    ensure_secrets_dir
     install_unit_files "$rel"
     enable_app_services
     if [ "${BOOTSTRAP_IMAGE:-0}" = "1" ]; then
@@ -96,7 +88,7 @@ mode_deploy_app() {
     ensure_data_roots
     install_binaries "$rel"
     install_spa "$rel"
-    install_config_example "$rel"
+    ensure_secrets_dir
     install_unit_files "$rel"
     enable_app_services
     enable_gadget_units
@@ -112,12 +104,12 @@ mode_update() {
     local rel="$RESOLVED_RELEASE_DIR"
     install_binaries "$rel"
     install_spa "$rel"
-    install_config_example "$rel"
+    ensure_secrets_dir
     install_unit_files "$rel"
     enable_app_services
     enable_gadget_units
     restart_app_services
-    log_info "update complete (disk.img / config / secrets / archive / index preserved)"
+    log_info "update complete (disk.img / secrets / archive / index preserved)"
 }
 
 mode_repair() {
@@ -173,7 +165,6 @@ mode_rollback() {
     rollback_dir_sidecars "$TESLAUSB_BIN_DIR"
     rollback_dir_sidecars "$TESLAUSB_UNIT_DIR"
     rollback_one "$TESLAUSB_SPA_DIR"
-    rollback_one "$TESLAUSB_CONFIG_FILE"
     systemctl_do daemon-reload
     enable_app_services
     restart_app_services

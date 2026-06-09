@@ -16,7 +16,6 @@ root="$(cd "${here}/../.." && pwd)"
 BR="${root}/release/build-release.sh"
 VR="${root}/setup-lib/verify-release.sh"
 FIXGOOD="${root}/release/fixtures/good"
-CFG="${FIXGOOD}/config/config.example.toml"
 VERSION='9.9.9-test'
 COMMIT='0123456789abcdef0123456789abcdef01234567'
 
@@ -39,7 +38,7 @@ OUT="$(mktemp -d)"
 assert_code 0 "build succeeds (stand-in inputs, skip-arch)" -- \
     bash "$BR" --version "$VERSION" --commit "$COMMIT" \
         --bin-dir "${FIXGOOD}/bin" --spa-dir "${FIXGOOD}/spa" \
-        --units-dir "${FIXGOOD}/units" --config-file "$CFG" \
+        --units-dir "${FIXGOOD}/units" \
         --out "$OUT" --skip-arch-check
 
 TARBALL="${OUT}/teslausb-${VERSION}-aarch64-unknown-linux-gnu.tar.gz"
@@ -62,25 +61,22 @@ OUT2="$(mktemp -d)"
 assert_code 4 "non-aarch64 binary rejected (arch check on)" -- \
     bash "$BR" --version "$VERSION" --commit "$COMMIT" \
         --bin-dir "${FIXGOOD}/bin" --spa-dir "${FIXGOOD}/spa" \
-        --units-dir "${FIXGOOD}/units" --config-file "$CFG" --out "$OUT2"
+        --units-dir "${FIXGOOD}/units" --out "$OUT2"
 rm -rf "$OUT2"
 
 # ---------------------------------------------------------------------------
 # 5) Usage / missing-input fail-closed.
 OUT3="$(mktemp -d)"
 assert_code 2 "no binary source is usage error" -- \
-    bash "$BR" --version "$VERSION" --spa-dir "${FIXGOOD}/spa" --config-file "$CFG" --out "$OUT3"
+    bash "$BR" --version "$VERSION" --spa-dir "${FIXGOOD}/spa" --out "$OUT3"
 assert_code 2 "no spa source is usage error" -- \
-    bash "$BR" --version "$VERSION" --bin-dir "${FIXGOOD}/bin" --config-file "$CFG" --out "$OUT3"
+    bash "$BR" --version "$VERSION" --bin-dir "${FIXGOOD}/bin" --out "$OUT3"
 assert_code 2 "both binary sources is usage error" -- \
     bash "$BR" --version "$VERSION" --bin-dir "${FIXGOOD}/bin" --cross-podman \
-        --spa-dir "${FIXGOOD}/spa" --config-file "$CFG" --out "$OUT3"
-assert_code 3 "missing config-file fails closed" -- \
-    bash "$BR" --version "$VERSION" --bin-dir "${FIXGOOD}/bin" --spa-dir "${FIXGOOD}/spa" \
-        --config-file "${OUT3}/nope.toml" --skip-arch-check --out "$OUT3"
+        --spa-dir "${FIXGOOD}/spa" --out "$OUT3"
 assert_code 3 "missing a binary fails closed" -- \
     bash "$BR" --version "$VERSION" --commit "$COMMIT" --bin-dir "${OUT3}" --spa-dir "${FIXGOOD}/spa" \
-        --units-dir "${FIXGOOD}/units" --config-file "$CFG" --skip-arch-check --out "$OUT3"
+        --units-dir "${FIXGOOD}/units" --skip-arch-check --out "$OUT3"
 rm -rf "$OUT3"
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"

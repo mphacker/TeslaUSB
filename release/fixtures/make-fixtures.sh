@@ -16,7 +16,7 @@ tampered="${here}/tampered"
 
 build_good() {
     rm -rf "$good"
-    mkdir -p "$good/bin" "$good/spa/assets" "$good/units" "$good/config"
+    mkdir -p "$good/bin" "$good/spa/assets" "$good/units"
 
     # Stand-in service binaries (real releases ship aarch64 ELF; fixtures only
     # exercise hashing/verification, so fixed text bytes are sufficient).
@@ -30,13 +30,12 @@ build_good() {
     printf 'console.log("teslausb spa fixture");\n'    > "${good}/spa/assets/app.js"
     printf 'body{font-family:Inter}\n'                 > "${good}/spa/assets/app.css"
 
-    # Representative units + example config.
+    # Representative units.
     printf '[Unit]\nDescription=fixture gadgetd\n' > "${good}/units/gadgetd.service"
     printf '[Unit]\nDescription=fixture webd\n'    > "${good}/units/webd.service"
-    printf '# example config (fixture)\n[teslausb]\nschema = 1\n' > "${good}/config/config.example.toml"
 
     # SHA256SUMS over every shipped file (sorted, stable), relative to $good.
-    ( cd "$good" && find bin spa units config -type f | LC_ALL=C sort \
+    ( cd "$good" && find bin spa units -type f | LC_ALL=C sort \
         | xargs sha256sum > SHA256SUMS )
 
     # SPA bundle digest per contract §3.3: the spa/ lines, C-sorted, hashed.
@@ -49,7 +48,6 @@ RELEASE_VERSION=0.0.0-fixture
 GIT_COMMIT=0000000000000000000000000000000000000000
 TARGET_TRIPLE=aarch64-unknown-linux-gnu
 UNIT_SET_VERSION=1
-CONFIG_SCHEMA_VERSION=1
 SPA_BUNDLE_SHA256=${spa_digest}
 EOF
 }

@@ -119,7 +119,7 @@ The full task cards (acceptance criteria, verification, files, size) live in
 
 ### Checkpoint: after Phase 7 (complete)
 - [ ] `setup.sh install --dry-run` clean on a supported Pi; `install` brings all 7 services healthy and the **car records**.
-- [ ] `update` converges without destroying `disk.img`/config/secrets/archive/index.
+- [ ] `update` converges without destroying `disk.img`/secrets/archive/index.
 - [ ] M5 hardening in place (RO-root+overlay, watchdog, MemoryMax, OOM order); soak passed; old paths decommissioned.
 
 ## 6. Working method (binding for every phase)

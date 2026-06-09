@@ -2,19 +2,19 @@
 #
 # TeslaUSB B-1 — release BUILDER (Task 7.2, Phase 7.0 contract §3/§7).
 #
-# Produces a release artifact for the 7 service daemons + SPA + units + config:
+# Produces a release artifact for the 7 service daemons + SPA + units:
 #   1. resolve the aarch64 service binaries (cross-compile via podman, or take a
 #      prebuilt --bin-dir);
 #   2. assert each binary is a real aarch64 ELF (wrong-arch guard — a host-arch
 #      binary must NEVER enter SHA256SUMS as aarch64);
-#   3. stage bin/ spa/ units/ config/ into teslausb-<version>-<triple>/;
+#   3. stage bin/ spa/ units/ into teslausb-<version>-<triple>/;
 #   4. run generate-manifest.sh (SHA256SUMS + manifest.env + manifest.json);
 #   5. SELF-VERIFY the staged tree with the canonical setup-lib/verify-release.sh
 #      (must exit 0) BEFORE packaging;
 #   6. package a deterministic-ish gzip tarball.
 #
 # Honest-input policy (contract §7): every shipped input must be supplied
-# explicitly. The builder NEVER fabricates a SPA bundle, unit, or config to get
+# explicitly. The builder NEVER fabricates a SPA bundle or unit to get
 # green; a missing required input is a fail-closed error. Stand-in inputs (e.g.
 # the labelled release/fixtures stand-ins) may be passed deliberately for a
 # pipeline smoke test, but the binaries themselves are arch-checked for real
@@ -48,8 +48,7 @@ br__die() { local code="$1"; shift; br__log "ERROR: $*"; exit "$code"; }
 br__usage() {
     cat >&2 <<'EOF'
 usage: build-release.sh --version VER (--bin-dir DIR | --cross-podman)
-                        (--spa-dir DIR | --spa-project DIR)
-                        --config-file FILE [options]
+                        (--spa-dir DIR | --spa-project DIR) [options]
 
 binary source (exactly one):
   --bin-dir DIR             use prebuilt aarch64 binaries from DIR/<service>
@@ -61,14 +60,12 @@ spa source (exactly one):
 
 required:
   --version VER             RELEASE_VERSION (semver or tag)
-  --config-file FILE        example config staged as config/config.example.toml
 
 options:
   --commit SHA40            GIT_COMMIT (default: git rev-parse HEAD)
   --triple TRIPLE           default aarch64-unknown-linux-gnu
   --units-dir DIR           units source dir (*.service) (default deploy/systemd)
   --unit-set-version N      default 1
-  --config-schema-version N default 1
   --out DIR                 output dir (default release/.build/dist)
   --build-host HOST         recorded in manifest.json
   --skip-arch-check         skip the aarch64 ELF assertion (stand-in inputs only)
@@ -136,8 +133,8 @@ done'
 main() {
     local version='' commit='' triple="$DEFAULT_TRIPLE"
     local bin_dir='' cross_podman=0 spa_dir='' spa_project=''
-    local units_dir="${ROOT}/deploy/systemd" config_file=''
-    local unit_ver='1' cfg_ver='1' out_dir="${ROOT}/release/.build/dist"
+    local units_dir="${ROOT}/deploy/systemd"
+    local unit_ver='1' out_dir="${ROOT}/release/.build/dist"
     local build_host='' skip_arch=0 keep_stage=0
 
     while [ "$#" -gt 0 ]; do
@@ -150,9 +147,7 @@ main() {
             --spa-dir) spa_dir="${2:?}"; shift 2 ;;
             --spa-project) spa_project="${2:?}"; shift 2 ;;
             --units-dir) units_dir="${2:?}"; shift 2 ;;
-            --config-file) config_file="${2:?}"; shift 2 ;;
             --unit-set-version) unit_ver="${2:?}"; shift 2 ;;
-            --config-schema-version) cfg_ver="${2:?}"; shift 2 ;;
             --out) out_dir="${2:?}"; shift 2 ;;
             --build-host) build_host="${2:?}"; shift 2 ;;
             --skip-arch-check) skip_arch=1; shift ;;
@@ -163,8 +158,6 @@ main() {
     done
 
     [ -n "$version" ] || { br__usage; br__die "$BR_EX_USAGE" "--version is required"; }
-    [ -n "$config_file" ] || { br__usage; br__die "$BR_EX_USAGE" "--config-file is required"; }
-    [ -f "$config_file" ] || br__die "$BR_EX_MISSING" "config file not found: $config_file"
     if [ -n "$bin_dir" ] && [ "$cross_podman" -eq 1 ]; then
         br__die "$BR_EX_USAGE" "--bin-dir and --cross-podman are mutually exclusive"
     fi
@@ -197,7 +190,7 @@ main() {
     local stage="${out_dir}/${name}"
     br__log "staging into ${stage}"
     rm -rf "$stage"
-    mkdir -p "$stage/bin" "$stage/spa" "$stage/units" "$stage/config"
+    mkdir -p "$stage/bin" "$stage/spa" "$stage/units"
 
     # --- 1) binaries ----------------------------------------------------------
     if [ "$cross_podman" -eq 1 ]; then
@@ -238,13 +231,9 @@ main() {
     [ "$nunits" -gt 0 ] || br__die "$BR_EX_MISSING" "no *.service files in $units_dir"
     br__log "staged ${nunits} unit file(s) from ${units_dir}"
 
-    # --- 3c) config -----------------------------------------------------------
-    install -m0644 "$config_file" "${stage}/config/config.example.toml"
-
     # --- 4) generate manifest -------------------------------------------------
     bash "$GENERATOR" --dir "$stage" --version "$version" --commit "$commit" \
         --triple "$triple" --unit-set-version "$unit_ver" \
-        --config-schema-version "$cfg_ver" \
         ${build_host:+--build-host "$build_host"} \
         --built-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         || br__die "$BR_EX_FAIL" "manifest generation failed"

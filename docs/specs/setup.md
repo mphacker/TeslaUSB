@@ -21,7 +21,7 @@ Two supported provisioning modes (these are distinct and must not silently drift
   the O1 "no-reflash" constraint, which governs converting an **existing in-car**
   device.
 - **deploy-app (operator migration).** Used by [`migration.md`](./migration.md)
-  M4 to deploy binaries + SPA + units + config onto a device whose LUN was already
+  M4 to deploy binaries + SPA + units onto a device whose LUN was already
   provisioned and **proven** by `gadgetd` in M3. **Non-destructive** — it never
   touches `disk.img`, partitions, or boot config.
 
@@ -46,9 +46,9 @@ Two supported provisioning modes (these are distinct and must not silently drift
 
 | Subcommand | Destructive? | What it does |
 |---|---|---|
-| `install` | only with `--bootstrap-image` | Full fresh-install (preflight → packages → users → dirs → config → artifacts → units → network → memory → [bootstrap image+gadget+boot via `gadgetd`] → activate). |
-| `deploy-app` | no | Binaries + SPA + units + config only. **Never** touches `disk.img`/boot/partitions. Migration M4 uses this. |
-| `update` | no (data-preserving) | Converge to a release's versions (new binaries/SPA/units + safe config migrations). Preserves `disk.img`, config, secrets, archive, index. |
+| `install` | only with `--bootstrap-image` | Full fresh-install (preflight → packages → users → dirs → secrets → artifacts → units → network → memory → [bootstrap image+gadget+boot via `gadgetd`] → activate). |
+| `deploy-app` | no | Binaries + SPA + units only. **Never** touches `disk.img`/boot/partitions. Migration M4 uses this. |
+| `update` | no (data-preserving) | Converge to a release's versions (new binaries/SPA/units). Preserves `disk.img`, secrets, archive, index. |
 | `repair` | no | Re-assert desired state (perms, unit enablement, ownership) without changing data. |
 | `rollback` | no | Restore the previous release's artifacts + `.b1-backup-<ts>` sidecars. |
 | `uninstall` | guarded | See §9 — car-disconnected, safe-by-default. |
@@ -94,8 +94,7 @@ installs **prebuilt** artifacts:
   assembled into a release tarball.
 - A **release manifest** accompanies the artifacts: release version, **git
   commit**, target triple, **per-binary `sha256`** (+ optional signature), **SPA
-  bundle hash**, the systemd **unit-set version**, and the **config-schema
-  version**.
+  bundle hash**, and the systemd **unit-set version**.
 - `setup.sh` obtains artifacts from `--artifact-dir`, a `--release` GitHub
   Release, or `--manifest-url`, and **verifies every hash against the manifest**.
   It **refuses** a mismatch unless `--allow-unverified` is given explicitly. This
@@ -116,7 +115,7 @@ and copying to the Pi is supported; building **on** the Pi is not.
   current state/version and **converges** to the desired state. Re-running an
   unchanged `install` is a no-op, but `update` **applies safe migrations**.
   **Destructive changes** (repartition/reformat/`disk.img` resize) never happen
-  without an explicit flag; `disk.img`, config, secrets, archive, and index are
+  without an explicit flag; `disk.img`, secrets, archive, and index are
   **preserved by default**.
 
 ## 7. Step list (new architecture — no nbd / nginx / python)
@@ -136,10 +135,15 @@ Ordered; each idempotent/convergent and dry-run-aware:
 4. **data-roots** — `/data/teslausb/{archive,media}` (+ the `disk.img` path),
    `/var/lib/teslausb` (SQLite), `/run/teslausb` (tmpfs for sockets), with correct
    ownership/modes ([`SPEC.md` §6.1](./SPEC.md)).
-5. **config** — install an example `/etc/teslausb/config.toml` (schema-versioned)
-   + per-service secret files; **secrets `0600` root-owned**, delivered to
-   services via systemd `LoadCredential=` (§10). Never committed, logged, in the
-   SPA bundle, or on the Tesla volume.
+5. **secrets** — create `/etc/teslausb/` and a `0700` `secrets/` dir, then install
+   per-service secret files; **secrets `0600` root-owned**, delivered to services
+   via systemd `LoadCredential=` (§10). Never committed, logged, in the SPA
+   bundle, or on the Tesla volume. There is **no central `config.toml`** today —
+   every daemon is configured by its own systemd `Environment=` (fixed infra
+   paths) with no operator-tunable settings, so a unified config file would be
+   unconsumed scaffolding. A schema-versioned `/etc/teslausb/config.toml` is
+   deferred until a real tunable needs an operator-editable home (tracked in
+   `docs/tasks/tasks.md`).
 6. **binaries** — install the verified aarch64 service binaries to
    `/usr/local/bin` (contract §1; the frozen deployed path).
 7. **spa** — install the verified hashed SPA bundle that `webd` serves.
@@ -223,7 +227,7 @@ A headless installer must leave the device reachable:
 - [ ] `install` brings all **7** services healthy, `webd` reachable, and the **car
       recognizes the drive and records** (final acceptance, §8).
 - [ ] Re-running `install` is a no-op; `update` converges to a new release
-      **without** destroying `disk.img`/config/secrets/archive/index.
+      **without** destroying `disk.img`/secrets/archive/index.
 - [ ] No `nginx`/`python`/`nbd` installed; artifacts **verified against the
       manifest** (or explicitly `--allow-unverified`).
 - [ ] Secrets `0600` root-owned, delivered via `LoadCredential`; none in the

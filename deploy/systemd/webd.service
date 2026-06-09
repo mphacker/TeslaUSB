@@ -4,8 +4,8 @@
 # mutations (e.g. delete) are routed through the gadgetd handoff (webd.md).
 #
 # webd is configured entirely by environment (the binary reads WEBD_* vars), so
-# this unit is where webd's deployment config lives until a unified config-schema
-# is implemented.
+# this unit's Environment= lines are webd's deployment config. There is no central
+# config file; each daemon owns its own config surface via its unit.
 #
 # Hardening note: cgroup MemoryMax, a dedicated non-root User=, and
 # ProtectSystem/sandboxing are device-calibrated in migration M5 / Task 7.4c and

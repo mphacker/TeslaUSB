@@ -10,7 +10,6 @@
     "git_commit",
     "target_triple",
     "unit_set_version",
-    "config_schema_version",
     "spa_bundle_sha256",
     "binaries"
   ],
@@ -34,11 +33,6 @@
       "type": "integer",
       "minimum": 0,
       "description": "Version of the installed systemd unit set."
-    },
-    "config_schema_version": {
-      "type": "integer",
-      "minimum": 0,
-      "description": "Version of the config.toml schema the binaries expect."
     },
     "spa_bundle_sha256": {
       "type": "string",

@@ -116,16 +116,15 @@ disk_fingerprint() {
 }
 
 # make_release_dir <dir> [extra-unit...] — assemble a minimal, UNVERIFIED release
-# tree (bin/spa/units/config) for gating tests that bypass verification. Copies
+# tree (bin/spa/units) for gating tests that bypass verification. Copies
 # the named extra unit files from deploy/systemd into units/.
 make_release_dir() {
     local dir="$1"; shift
-    mkdir -p "${dir}/bin" "${dir}/spa/assets" "${dir}/units" "${dir}/config"
+    mkdir -p "${dir}/bin" "${dir}/spa/assets" "${dir}/units"
     printf '#!/bin/true\n' > "${dir}/bin/gadgetd"
     printf '#!/bin/true\n' > "${dir}/bin/webd"
     printf 'x\n' > "${dir}/spa/index.html"
     printf 'x\n' > "${dir}/spa/assets/app.js"
-    printf 'k=v\n' > "${dir}/config/config.example.toml"
     cp "${REPO_ROOT}/deploy/systemd/gadgetd.service" "${dir}/units/gadgetd.service"
     local u
     for u in "$@"; do

@@ -503,7 +503,7 @@ step-file slices; do not attempt as one task.**
 ### Task 7.2: Release/artifact pipeline + manifest
 **Description:** Host cross-compile aarch64 release binaries + hashed SPA bundle;
 assemble a release tarball + **manifest** (version, git commit, triple, per-binary
-sha256, SPA hash, unit-set version, config-schema version). **Acceptance:** `setup.sh`
+sha256, SPA hash, unit-set version). **Acceptance:** `setup.sh`
 verifies every hash against the manifest and refuses mismatch unless
 `--allow-unverified`. **Verification:** build artifacts on host; manifest verify
 passes; tampered artifact refused. **Dependencies:** Phases 3–6. **Files:** CI/build
@@ -547,7 +547,7 @@ verified; reboot-recovery clean; OOM order demonstrated. **Dependencies:** 7.3.
 acceptance demands but that 7.1/7.3 don't exercise: a **fresh
 `install --bootstrap-image`** (on a **spare card / clean Pi** — destructive, never
 the live dev Pi without the rails), `update` convergence (no destruction of
-`disk.img`/config/secrets/archive/index), `repair`, `rollback` to the previous
+`disk.img`/secrets/archive/index), `repair`, `rollback` to the previous
 release, and **`uninstall` refusal while the gadget is bound** + safe-default keeps
 the LUN alive. Can run in parallel after 7.2.
 **Acceptance:** every mode behaves per `setup.md` §3/§12; manifest mismatch refused;
@@ -579,4 +579,19 @@ Phases 3–6 → 7.1, 7.2 → 7.3 → 7.4;  7.2 → 7.5 (installer-mode validati
 > Cross-cutting **lease** contract: `webd` holds playback leases (5.1b), `uploadd`
 > holds upload leases (6.3); `retentiond`'s governor (6.1e) must honor both before
 > evicting — keep the lease store/shape consistent across these three.
+
+---
+
+## Deferred / backlog (build only when a real consumer exists)
+
+- **Central config (`/etc/teslausb/config.toml`, schema-versioned).** Deliberately
+  **not** built. Every daemon is configured today by its own systemd
+  `Environment=` lines (fixed infrastructure paths — image/db/static/bind/archive/
+  cache), with **no operator-tunable settings**. A unified config file with a
+  schema version and a release/installer artifact was prototyped and **removed** as
+  unconsumed scaffolding (YAGNI; no daemon ever read it). Re-introduce it **only**
+  alongside the first real operator-tunable setting — and only then, wired to an
+  actual daemon consumer plus a migration path — rather than as an empty seam. Until
+  then `setup.sh` creates `/etc/teslausb/secrets/` (mode `0700`) for
+  `LoadCredential=`-delivered secrets and nothing more (`setup.md` §5/§10).
 

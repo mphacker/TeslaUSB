@@ -45,10 +45,10 @@ usage: setup.sh <mode> [flags]
 Modes:
   install         Full fresh-install. Destructive image bootstrap only with
                   --bootstrap-image (delegated to gadgetd).
-  deploy-app      Non-destructive: binaries + SPA + units + config only.
+  deploy-app      Non-destructive: binaries + SPA + units only.
                   Never touches disk.img/boot/partitions. (migration M4)
   update          Data-preserving converge to a release. Preserves disk.img,
-                  config, secrets, archive, index.
+                  secrets, archive, index.
   repair          Re-assert perms / unit enablement; no data change.
   rollback        Restore the previous release's .b1-backup sidecars.
 

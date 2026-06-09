@@ -15,7 +15,6 @@ A gzip tarball that extracts to `teslausb-<version>-<triple>/` containing:
 | `bin/<svc>` | aarch64 service binaries (7) | yes — hashed in `SHA256SUMS` |
 | `spa/**` | built Vite/Preact SPA bundle | yes — hashed in `SHA256SUMS` |
 | `units/*.service` | systemd units installed by step 8 | yes — hashed |
-| `config/config.example.toml` | example config | yes — hashed |
 | `SHA256SUMS` | `sha256sum`-format line per shipped file | the integrity input |
 | `manifest.env` | flat `KEY=value` metadata (bash-safe) | yes — safe line-parse |
 | `manifest.json` | rich metadata for host/CI tooling | **no** — host-only |
@@ -28,8 +27,8 @@ Verified Pi-side with `sha256sum -c --strict`.
 
 ### `manifest.env` (contract §3.2) — required keys
 `RELEASE_VERSION`, `GIT_COMMIT` (40-hex), `TARGET_TRIPLE`
-(`aarch64-unknown-linux-gnu`), `UNIT_SET_VERSION` (int), `CONFIG_SCHEMA_VERSION`
-(int), `SPA_BUNDLE_SHA256` (64-hex; the C-sorted `spa/` lines of `SHA256SUMS`,
+(`aarch64-unknown-linux-gnu`), `UNIT_SET_VERSION` (int),
+`SPA_BUNDLE_SHA256` (64-hex; the C-sorted `spa/` lines of `SHA256SUMS`,
 hashed — contract §3.3). **Never `source`d** by the verifier; parsed with a
 strict allow-list.
 

@@ -32,7 +32,7 @@ VR_EX_MISSING=3
 VR_EX_VERIFY=4
 
 # Required manifest.env keys (exact names, contract §3.2).
-VR_REQUIRED_KEYS='RELEASE_VERSION GIT_COMMIT TARGET_TRIPLE UNIT_SET_VERSION CONFIG_SCHEMA_VERSION SPA_BUNDLE_SHA256'
+VR_REQUIRED_KEYS='RELEASE_VERSION GIT_COMMIT TARGET_TRIPLE UNIT_SET_VERSION SPA_BUNDLE_SHA256'
 
 # Installable subdirectories the artifact may carry (contract §3.1). Every file
 # under these — and only these — is hashed into SHA256SUMS by the generator and
@@ -40,7 +40,7 @@ VR_REQUIRED_KEYS='RELEASE_VERSION GIT_COMMIT TARGET_TRIPLE UNIT_SET_VERSION CONF
 # file present under one of these dirs that is NOT listed in SHA256SUMS, so an
 # unlisted/unverified payload can never ride along and get installed. Must stay
 # in sync with the generator's SCAN_DIRS (release/generate-manifest.sh).
-VR_INSTALLABLE_DIRS='bin spa units config'
+VR_INSTALLABLE_DIRS='bin spa units'
 
 # Expected target triple (contract §3.2). Override with EXPECT_TRIPLE=... if a
 # future board needs a different one.
@@ -218,17 +218,15 @@ verify_release_dir() {
             return "$VR_EX_VERIFY"
         fi
     done
-    local git_commit target_triple unit_ver cfg_ver spa_expect release_version
+    local git_commit target_triple unit_ver spa_expect release_version
     release_version="$(vr__safe_get_env "$env" RELEASE_VERSION)"
     git_commit="$(vr__safe_get_env "$env" GIT_COMMIT)"
     target_triple="$(vr__safe_get_env "$env" TARGET_TRIPLE)"
     unit_ver="$(vr__safe_get_env "$env" UNIT_SET_VERSION)"
-    cfg_ver="$(vr__safe_get_env "$env" CONFIG_SCHEMA_VERSION)"
     spa_expect="$(vr__safe_get_env "$env" SPA_BUNDLE_SHA256)"
 
     [[ "$git_commit" =~ ^[0-9a-f]{40}$ ]] || { vr__log "GIT_COMMIT not a 40-hex sha: ${git_commit}"; return "$VR_EX_VERIFY"; }
     [[ "$unit_ver"  =~ ^[0-9]+$ ]]        || { vr__log "UNIT_SET_VERSION not an integer: ${unit_ver}"; return "$VR_EX_VERIFY"; }
-    [[ "$cfg_ver"   =~ ^[0-9]+$ ]]        || { vr__log "CONFIG_SCHEMA_VERSION not an integer: ${cfg_ver}"; return "$VR_EX_VERIFY"; }
     [[ "$spa_expect" =~ ^[0-9a-f]{64}$ ]] || { vr__log "SPA_BUNDLE_SHA256 not a 64-hex sha: ${spa_expect}"; return "$VR_EX_VERIFY"; }
     if [ "$target_triple" != "$EXPECT_TRIPLE" ]; then
         vr__log "TARGET_TRIPLE ${target_triple} != expected ${EXPECT_TRIPLE}"

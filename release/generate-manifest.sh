@@ -2,7 +2,7 @@
 #
 # TeslaUSB B-1 — release manifest GENERATOR (Task 7.2, Phase 7.0 contract §3).
 #
-# Given a STAGED release tree (bin/ spa/ units/ config/), emit the three
+# Given a STAGED release tree (bin/ spa/ units/), emit the three
 # metadata files the contract freezes:
 #   * SHA256SUMS    — coreutils "<64-hex>␠␠<relpath>" per shipped file (§3.1).
 #   * manifest.env  — flat KEY=value with the exact §3.2 keys, in order.
@@ -33,7 +33,7 @@ GM_EX_INVALID=4
 DEFAULT_TRIPLE='aarch64-unknown-linux-gnu'
 # Subdirs hashed into SHA256SUMS, in a stable order (§3.1). Root-level
 # metadata (SHA256SUMS, manifest.*) is excluded by only scanning these.
-SCAN_DIRS='bin spa units config'
+SCAN_DIRS='bin spa units'
 # The 7 service binaries that a complete release ships (schema enum, §3).
 EXPECTED_BINS='gadgetd scannerd indexd webd uploadd retentiond wifid'
 
@@ -45,25 +45,24 @@ gm__usage() {
 usage: generate-manifest.sh --dir DIR --version VER --commit SHA40 [options]
 
 required:
-  --dir DIR                 staged release tree (contains bin/ spa/ units/ config/)
+  --dir DIR                 staged release tree (contains bin/ spa/ units/)
   --version VER             RELEASE_VERSION (semver or tag; single line)
   --commit SHA40            GIT_COMMIT (full 40-hex sha)
 
 options:
   --triple TRIPLE           TARGET_TRIPLE (default: aarch64-unknown-linux-gnu)
   --unit-set-version N      UNIT_SET_VERSION integer (default: 1)
-  --config-schema-version N CONFIG_SCHEMA_VERSION integer (default: 1)
   --build-host HOST         optional manifest.json build_host
   --built-at ISO            optional manifest.json built_at (ISO-8601)
   --require-json            fail (exit 3) if python3 is unavailable for manifest.json
-  --allow-missing-inputs    permit absent units/ or config/ (binaries+spa still required)
+  --allow-missing-inputs    permit absent units/ (binaries+spa still required)
   -h, --help                this help
 EOF
 }
 
 main() {
     local dir='' version='' commit='' triple="$DEFAULT_TRIPLE"
-    local unit_ver='1' cfg_ver='1' build_host='' built_at=''
+    local unit_ver='1' build_host='' built_at=''
     local require_json=0 allow_missing=0
 
     while [ "$#" -gt 0 ]; do
@@ -73,7 +72,6 @@ main() {
             --commit) commit="${2:?--commit needs a value}"; shift 2 ;;
             --triple) triple="${2:?--triple needs a value}"; shift 2 ;;
             --unit-set-version) unit_ver="${2:?}"; shift 2 ;;
-            --config-schema-version) cfg_ver="${2:?}"; shift 2 ;;
             --build-host) build_host="${2:?}"; shift 2 ;;
             --built-at) built_at="${2:?}"; shift 2 ;;
             --require-json) require_json=1; shift ;;
@@ -97,7 +95,6 @@ main() {
     esac
     [[ "$commit"   =~ ^[0-9a-f]{40}$ ]] || gm__die "$GM_EX_INVALID" "GIT_COMMIT must be 40 lowercase hex: $commit"
     [[ "$unit_ver" =~ ^[0-9]+$ ]]       || gm__die "$GM_EX_INVALID" "UNIT_SET_VERSION must be an integer: $unit_ver"
-    [[ "$cfg_ver"  =~ ^[0-9]+$ ]]       || gm__die "$GM_EX_INVALID" "CONFIG_SCHEMA_VERSION must be an integer: $cfg_ver"
     if [ "$triple" != "$DEFAULT_TRIPLE" ]; then
         gm__log "WARNING: TARGET_TRIPLE '$triple' != frozen '$DEFAULT_TRIPLE'; the verifier will reject it unless EXPECT_TRIPLE is overridden"
     fi
@@ -141,14 +138,13 @@ RELEASE_VERSION=${version}
 GIT_COMMIT=${commit}
 TARGET_TRIPLE=${triple}
 UNIT_SET_VERSION=${unit_ver}
-CONFIG_SCHEMA_VERSION=${cfg_ver}
 SPA_BUNDLE_SHA256=${spa_digest}
 EOF
 
     # --- manifest.json (host-only; python3 for guaranteed-valid JSON) ----------
     if command -v python3 >/dev/null 2>&1; then
         gm__emit_json "$dir" "$sums" "$version" "$commit" "$triple" \
-            "$unit_ver" "$cfg_ver" "$spa_digest" "$build_host" "$built_at"
+            "$unit_ver" "$spa_digest" "$build_host" "$built_at"
     elif [ "$require_json" -eq 1 ]; then
         gm__die "$GM_EX_MISSING" "python3 unavailable but --require-json was given"
     else
@@ -159,12 +155,12 @@ EOF
     exit "$GM_EX_OK"
 }
 
-# gm__emit_json <dir> <sums> <version> <commit> <triple> <unit_ver> <cfg_ver>
+# gm__emit_json <dir> <sums> <version> <commit> <triple> <unit_ver>
 #               <spa_digest> <build_host> <built_at>
 # Build manifest.json from the verified bin/ hashes. python only assembles JSON.
 gm__emit_json() {
     GM_DIR="$1" GM_SUMS="$2" GM_VERSION="$3" GM_COMMIT="$4" GM_TRIPLE="$5" \
-    GM_UNIT_VER="$6" GM_CFG_VER="$7" GM_SPA="$8" GM_BUILD_HOST="$9" GM_BUILT_AT="${10}" \
+    GM_UNIT_VER="$6" GM_SPA="$7" GM_BUILD_HOST="$8" GM_BUILT_AT="$9" \
     GM_EXPECTED_BINS="$EXPECTED_BINS" \
     python3 - <<'PY'
 import json, os, re, sys
@@ -200,7 +196,6 @@ manifest = {
     "git_commit": os.environ["GM_COMMIT"],
     "target_triple": os.environ["GM_TRIPLE"],
     "unit_set_version": int(os.environ["GM_UNIT_VER"]),
-    "config_schema_version": int(os.environ["GM_CFG_VER"]),
     "spa_bundle_sha256": os.environ["GM_SPA"],
     "binaries": binaries,
 }

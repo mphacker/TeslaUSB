@@ -5,7 +5,7 @@
 # release.sh) and fails closed under mutation — the §8 fail-closed property,
 # proven end-to-end through generate -> verify rather than re-implementing it.
 #
-# Reuses release/fixtures/good/{bin,spa,units,config} as a realistic staged
+# Reuses release/fixtures/good/{bin,spa,units} as a realistic staged
 # tree (contract §7: Lane B reuses the fixtures + verifier, does not fork them).
 # Plain bash; needs coreutils + python3 (jsonschema) like the host release env.
 # Exits 0 iff every case passes.
@@ -42,7 +42,7 @@ assert_code() {
 stage() {
     local d="$1"
     mkdir -p "$d"
-    cp -a "${FIXGOOD}/bin" "${FIXGOOD}/spa" "${FIXGOOD}/units" "${FIXGOOD}/config" "$d/"
+    cp -a "${FIXGOOD}/bin" "${FIXGOOD}/spa" "${FIXGOOD}/units" "$d/"
 }
 
 # ---------------------------------------------------------------------------
@@ -62,7 +62,7 @@ else ok "SHA256SUMS excludes metadata + itself"; fi
 
 # 3) manifest.env keys match §3.2 EXACTLY (names + order).
 got_keys="$(sed -n 's/=.*//p' "$S/manifest.env" | paste -sd, -)"
-want_keys='RELEASE_VERSION,GIT_COMMIT,TARGET_TRIPLE,UNIT_SET_VERSION,CONFIG_SCHEMA_VERSION,SPA_BUNDLE_SHA256'
+want_keys='RELEASE_VERSION,GIT_COMMIT,TARGET_TRIPLE,UNIT_SET_VERSION,SPA_BUNDLE_SHA256'
 if [ "$got_keys" = "$want_keys" ]; then ok "manifest.env keys exact (§3.2)"
 else bad "manifest.env keys exact" "got [$got_keys]"; fi
 

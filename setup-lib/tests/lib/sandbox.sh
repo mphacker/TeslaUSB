@@ -9,6 +9,11 @@
 # Tool gating: callers check `command -v` and skip-with-loud-note when a required
 # tool is missing — never silent-pass.
 
+# This harness defines constants/state (SETUP_SH, FIXTURES_DIR, SANDBOX, ...)
+# consumed by the *.test.sh files that source it; SC2034 is a false positive
+# when linting this file standalone. Suppress file-wide.
+# shellcheck disable=SC2034
+
 # Resolve repo root from this file's location.
 TEST_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${TEST_LIB_DIR}/../../.." && pwd)"

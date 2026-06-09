@@ -16,6 +16,14 @@
 # production and a temp tree in the host tests, so tests never touch real
 # /data or /usr/local.
 
+# This is a library of constants/helpers consumed by the files that source it
+# (setup.sh, uninstall.sh, modes.sh, units.sh, ...). shellcheck cannot see that
+# cross-file usage when linting this file standalone, so SC2034 ("appears
+# unused") is a false positive for every path/service constant below. Suppress
+# it file-wide so the file lints clean both standalone and via `-x` from the
+# entry points.
+# shellcheck disable=SC2034
+
 # --- exit codes (mirror setup.md §3) -----------------------------------------
 EX_OK=0
 EX_USAGE=2

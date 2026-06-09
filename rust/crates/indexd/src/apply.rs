@@ -135,6 +135,13 @@ fn angle_facts(record: &ClipAngleRecord, folder_class: FolderClass) -> AngleFact
 /// the front angle; non-front angles only ensure the clip exists (never
 /// downgrading a front-resolved instant) and upsert the angle. Returns the
 /// number of waypoints written (front only; `0` otherwise).
+///
+/// Errors are surfaced to the caller, which counts the record and moves on.
+/// There is **no per-record savepoint**: any earlier write for a record
+/// that fails partway (e.g. a front `upsert_clip` + `replace_clip_waypoints`
+/// that succeed before `upsert_angle` fails) remains in the open
+/// transaction and commits with the rest — faithfully reproducing the
+/// legacy in-process pass's partial-write-then-continue behavior.
 fn apply_record(
     conn: &Connection,
     record: &ClipAngleRecord,

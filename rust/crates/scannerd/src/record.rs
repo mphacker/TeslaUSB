@@ -95,9 +95,13 @@ impl Bucket {
     }
 }
 
-/// Encode an [`AutopilotState`] as its proto integer for the wire
-/// (round-trips losslessly through `AutopilotState::from(u32)`, including
-/// the forward-compat `Unknown(n)` case).
+/// Encode an [`AutopilotState`] as its proto integer for the wire.
+/// Round-trips losslessly through `AutopilotState::from(u32)` for every
+/// value a real SEI decode can produce: the decoder only yields
+/// `Unknown(n)` for `n` **outside** the known range `0..=3`, so the
+/// integer encoding never aliases a known variant in practice. (A
+/// hand-built `Unknown(2)` would decode back as `Autosteer`, but such a
+/// value is unconstructible from decoding.)
 #[must_use]
 pub fn autopilot_to_u32(state: AutopilotState) -> u32 {
     match state {
@@ -109,8 +113,10 @@ pub fn autopilot_to_u32(state: AutopilotState) -> u32 {
     }
 }
 
-/// Encode a [`Gear`] as its proto integer for the wire (round-trips
-/// losslessly through `Gear::from(u32)`).
+/// Encode a [`Gear`] as its proto integer for the wire. Round-trips
+/// losslessly through `Gear::from(u32)` for every value a real SEI decode
+/// can produce (`Unknown(n)` only ever carries `n` outside the known range
+/// `0..=3`).
 #[must_use]
 pub fn gear_to_u32(gear: Gear) -> u32 {
     match gear {
@@ -286,12 +292,6 @@ pub enum BatchError {
         /// The cap.
         cap: usize,
     },
-    /// A coordinate / numeric field was non-finite (NaN/inf).
-    #[error("non-finite numeric field: {what}")]
-    NonFinite {
-        /// Which field.
-        what: &'static str,
-    },
     /// A non-front record carried SEI waypoints (only the front angle
     /// has telemetry; a non-front record with waypoints is malformed).
     #[error("non-front record `{key}` carries {count} waypoint(s)")]
@@ -332,10 +332,19 @@ impl ScanBatch {
 }
 
 impl ClipAngleRecord {
-    /// Validate one record's caps, string lengths, numeric finiteness, and
-    /// the front/waypoint invariant. The consumer calls this **per record**
-    /// inside its apply loop and skips (counting an error) on failure, so a
-    /// single malformed record never aborts the batch.
+    /// Validate one record's caps, string lengths, and the front/waypoint
+    /// invariant. The consumer calls this **per record** inside its apply
+    /// loop and skips (counting an error) on failure, so a single malformed
+    /// record never aborts the batch.
+    ///
+    /// These are the **structural** bounds that are no-ops on the producer's
+    /// own output (so the in-process path keeps exact parity) but defend the
+    /// DB-owning consumer against a forged wire peer: total/per-field size
+    /// caps (anti-OOM) and the rule that only the front angle carries SEI
+    /// telemetry. Numeric *values* are deliberately **not** range-checked —
+    /// the legacy in-process pass ingested whatever the SEI decoded, so the
+    /// consumer must too (any value-level guard lives in derivation, shared
+    /// by both paths).
     ///
     /// # Errors
     ///
@@ -352,37 +361,6 @@ impl ClipAngleRecord {
                 count: self.waypoints.len(),
             });
         }
-        finite("duration_s", self.duration_s)?;
-        finite("angle.duration_s", self.angle.duration_s)?;
-        for wp in &self.waypoints {
-            wp.validate()?;
-        }
-        Ok(())
-    }
-}
-
-impl WireWaypoint {
-    /// Reject non-finite geo/motion fields (a corrupt SEI decode could
-    /// surface NaN/inf, which would poison distance/derivation math).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`BatchError::NonFinite`] for the first bad field.
-    pub fn validate(&self) -> Result<(), BatchError> {
-        for (what, v) in [
-            ("offset_ms", self.offset_ms),
-            ("lat", self.lat),
-            ("lon", self.lon),
-            ("speed", self.speed),
-            ("heading", self.heading),
-        ] {
-            if !v.is_finite() {
-                return Err(BatchError::NonFinite { what });
-            }
-        }
-        finite("accel_x", self.accel_x)?;
-        finite("accel_y", self.accel_y)?;
-        finite("accel_z", self.accel_z)?;
         Ok(())
     }
 }
@@ -404,13 +382,6 @@ fn string_len(what: &'static str, s: &str) -> Result<(), BatchError> {
         })
     } else {
         Ok(())
-    }
-}
-
-fn finite(what: &'static str, v: Option<f64>) -> Result<(), BatchError> {
-    match v {
-        Some(x) if !x.is_finite() => Err(BatchError::NonFinite { what }),
-        _ => Ok(()),
     }
 }
 
@@ -572,13 +543,16 @@ mod tests {
     }
 
     #[test]
-    fn record_validate_rejects_non_finite_waypoint() {
+    fn record_validate_accepts_non_finite_waypoint_for_parity() {
+        // The legacy in-process pass ingested whatever the SEI decoded,
+        // including a NaN/inf coordinate from a corrupt-but-parseable frame.
+        // The consumer must NOT drop such a record (that would diverge from
+        // the golden in-process behavior); value-level guards live in
+        // derivation, shared by both paths.
         let mut batch = sample_batch();
         batch.records[0].waypoints[0].lat = f64::NAN;
-        assert!(matches!(
-            batch.records[0].validate(),
-            Err(super::BatchError::NonFinite { .. })
-        ));
+        batch.records[0].waypoints[0].speed = f64::INFINITY;
+        assert!(batch.records[0].validate().is_ok());
     }
 
     #[test]

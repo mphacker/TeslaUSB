@@ -99,3 +99,6 @@ credentials.*
 # Operator config that may carry secrets / timestamped backups
 config.local.*
 config.yaml.bak.*
+
+# Task 7.2 release build output (binaries, staged trees, tarballs)
+release/.build/

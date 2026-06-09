@@ -1,41 +1,61 @@
 # TeslaUSB B-1 — scannerd: the raw exFAT/MP4/SEI reader and clip-stability gate.
 # It opens the gadgetd backing image READ-ONLY, parses MBR -> exFAT -> MP4 -> SEI,
-# and reports which clips have become stable (scannerd.md). It never writes the
-# car-facing LUN, owns no DB schema, and derives no trips/events (that is indexd).
+# stability-gates clips, and EMITS the resulting facts to indexd over a local
+# Unix socket (scannerd.md §2.5). It never writes the car-facing LUN, owns no DB
+# schema, and derives no trips/events (that is indexd).
 #
-# STAGED — installed but NOT enabled by default (TESLAUSB_STAGED_SERVICES in
-# setup-lib/common.sh). OPEN ARCHITECTURAL QUESTION (flagged for review): the
-# spec target (scannerd.md) is scannerd EMITTING parser output to indexd over IPC,
-# with scannerd as the persistent front-end parser. TODAY that IPC is NOT wired —
-# indexd reads the backing image itself and does scan->derive->persist in-process
-# (indexd.service is the enabled, active scan service). Enabling scannerd.service
-# now would run a SECOND, redundant read-only scan of the same image, so it is
-# shipped as part of the canonical 7-unit set (setup.md §8) but left disabled
-# until the scannerd->indexd IPC lands. (Mirrors how gadgetd-provision.service
-# ships but is enabled only by --bootstrap-image.)
+# ENABLED — scannerd is now the producer half of the scannerd->indexd IPC seam
+# (ADR 0001). indexd no longer reads the backing image itself; it consumes
+# scannerd's facts over /run/teslausb/scannerd.sock and is the sole DB writer.
+# scannerd is therefore the least-privilege process that touches the untrusted,
+# car-written bytes: a weaponized clip can at worst crash/OOM this disposable
+# daemon (Restart=always brings it back), and can never reach the DB-owning
+# indexd process. (Previously STAGED while the IPC was unwired; that wiring has
+# landed, so scannerd moves from TESLAUSB_STAGED_SERVICES to
+# TESLAUSB_APP_SERVICES in setup-lib/common.sh.)
 #
-# The binary's `--watch <interval_secs> <iterations>` runs a FINITE number of
-# passes; Restart=always keeps it continuous if/when enabled.
+# `serve` binds the control socket and answers one scan request per indexd pass
+# from a persistent connection; the stability tracker lives for the process
+# lifetime so the quiescence window accumulates across passes. The reader is
+# opened READ-ONLY and never mounts, so serving can never disturb the car's
+# write path (the #1 invariant, SPEC.md §2).
 #
-# Hardening note: cgroup MemoryMax / sandboxing are device-calibrated in
-# migration M5 / Task 7.4c. The OOM order (SPEC.md §7) is encoded via
-# OOMScoreAdjust.
+# Hardening note: a dedicated non-root User=, cgroup MemoryMax, and
+# ProtectSystem/sandboxing are intentionally NOT set here. They are device-
+# calibrated in migration M5 / Task 7.4c (MemoryMax per the microSD-contention
+# spike 2.7), matching indexd.service. The canonical OOM order (SPEC.md §7) IS
+# encoded now via OOMScoreAdjust: scannerd holds only disposable in-memory
+# state, so it is more disposable than the catalog-owning indexd.
 #
-# Install: copy to /etc/systemd/system/scannerd.service, then daemon-reload
-#   (enable only once the scannerd->indexd IPC is wired).
+# Install: copy to /etc/systemd/system/scannerd.service, then
+#   systemctl daemon-reload && systemctl enable scannerd.service
 [Unit]
-Description=TeslaUSB scannerd (raw exFAT/MP4/SEI reader + clip-stability gate)
+Description=TeslaUSB scannerd (raw exFAT/MP4/SEI reader + clip-stability gate; IPC producer)
 Documentation=https://github.com/mphacker/TeslaUSB
+# Needs /data (backing image) mounted and the disk.img to exist. gadgetd
+# provisions/owns the image, so order after it but do not hard-require the USB
+# gadget to be bound (scannerd reads the file, not the gadget).
 RequiresMountsFor=/data/teslausb
 After=local-fs.target gadgetd.service
 Wants=gadgetd.service
 
 [Service]
 Type=simple
-# Re-scan every 30s; large iteration count + Restart=always == continuous.
-ExecStart=/usr/local/bin/scannerd /data/teslausb/disk.img --watch 30 1000000000
+# /run/teslausb holds the control socket; RuntimeDirectory creates and tears it
+# down with the service. scannerd serve tightens it to 0o750 and the socket to
+# 0o660 (filesystem-permission authz; ADR 0001).
+RuntimeDirectory=teslausb
+RuntimeDirectoryMode=0750
+# Serve the IPC socket; persistent tracker + per-pass produce. The backing
+# image is opened read-only.
+ExecStart=/usr/local/bin/scannerd serve /data/teslausb/disk.img --socket /run/teslausb/scannerd.sock
 Restart=always
 RestartSec=5s
+# Idle I/O priority so the car's writes to the backing image always win (the
+# #1 invariant): scannerd only reads, and only when the disk is otherwise idle.
+# (This is not device-calibrated hardening — it can only ever slow the scan,
+# never the car — so it is set now rather than deferred to M5.)
+IOSchedulingClass=idle
 OOMScoreAdjust=300
 SyslogIdentifier=scannerd
 

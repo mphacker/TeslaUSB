@@ -54,15 +54,18 @@ TESLAUSB_STATE_DIR="${TESLAUSB_PREFIX}/var/lib/teslausb"
 # App services: ENABLED + restarted by the install/deploy/update modes because
 # their live loops are wired today. (Per-service OOM kill order is set in each
 # unit's OOMScoreAdjust, not by this list order — SPEC.md §7.)
-TESLAUSB_APP_SERVICES="indexd webd wifid"
+# scannerd is listed before indexd so restart_app_services brings the IPC
+# producer up before its consumer (systemd's After=/Requires= also enforces
+# this, but the list order keeps the restart sequence intuitive).
+TESLAUSB_APP_SERVICES="scannerd indexd webd wifid"
 # Staged services: their unit FILES are installed (install_unit_files globs
 # units/*.service), but they are NOT enabled/started because their live wiring
 # is not yet landed:
-#   scannerd  — needs the scannerd->indexd IPC; today indexd scans in-process.
 #   uploadd   — `serve` is gated on Task 2.6 (WiFi TX-cap); exits non-zero until wired.
 #   retentiond — `serve` is gated on Task 2.7 (governor calibration); exits non-zero.
 # When a service's loop lands, move its name from STAGED into APP_SERVICES.
-TESLAUSB_STAGED_SERVICES="scannerd uploadd retentiond"
+# (scannerd graduated here once the scannerd->indexd IPC landed — ADR 0001.)
+TESLAUSB_STAGED_SERVICES="uploadd retentiond"
 # Gadget units: NEVER restarted by non-bootstrap modes (a restart re-enumerates
 # USB and interrupts the car's recording — contract §2).
 TESLAUSB_GADGET_UNITS="gadgetd gadgetd-control"

@@ -1,9 +1,14 @@
 # TeslaUSB B-1 — indexd: derives trips/events/clips from the car footage and
 # persists them into the SQLite catalog that webd/uploadd/retentiond read.
 #
-# indexd opens the gadgetd-provisioned backing image READ-ONLY (it never writes
-# the car-facing LUN — the #1 invariant, SPEC.md §2) and rescans on a fixed
-# cadence (SCAN_INTERVAL_SECS=30 in the binary), so it is a long-lived loop.
+# indexd is the sole DB writer and a pure CONSUMER of scannerd's facts (ADR
+# 0001): it NEVER opens the backing image and never parses car-written bytes.
+# It connects to scannerd's control socket (/run/teslausb/scannerd.sock),
+# drives the 30 s scan cadence, receives a validated batch of facts per pass,
+# and applies it to the catalog. This keeps the untrusted-byte parsing in the
+# disposable scannerd process and out of the DB-owning one (the
+# privilege/fault-isolation seam). It never writes the car-facing LUN (the #1
+# invariant, SPEC.md §2).
 #
 # Hardening note: cgroup MemoryMax, a dedicated non-root User=, and
 # ProtectSystem/sandboxing are intentionally NOT set here. They are device-
@@ -15,22 +20,22 @@
 # Install: copy to /etc/systemd/system/indexd.service, then
 #   systemctl daemon-reload && systemctl enable indexd.service
 [Unit]
-Description=TeslaUSB indexd (footage catalog: trips/events/clips -> SQLite)
+Description=TeslaUSB indexd (footage catalog: trips/events/clips -> SQLite; IPC consumer)
 Documentation=https://github.com/mphacker/TeslaUSB
-# Needs /data (backing image) and /var/lib (catalog DB) mounted, and the
-# disk.img to exist. gadgetd provisions/owns the image, so order after it but
-# do not hard-require the USB gadget to be bound (indexd reads the file, not
-# the gadget) — Wants= keeps indexd resilient if the gadget is briefly down.
-RequiresMountsFor=/data/teslausb /var/lib/teslausb
-After=local-fs.target gadgetd.service
-Wants=gadgetd.service
+# Needs /var/lib (catalog DB) mounted and the scannerd producer running:
+# indexd no longer reads /data itself, so it depends on scannerd (which owns
+# the read-only image fd) rather than on the backing image directly.
+RequiresMountsFor=/var/lib/teslausb
+After=local-fs.target scannerd.service
+Requires=scannerd.service
 
 [Service]
 Type=simple
-# INDEXD_DB = catalog SQLite path (webd's WEBD_DB MUST match this); INDEXD_IMAGE
-# = the gadgetd backing image, read read-only.
+# INDEXD_DB = catalog SQLite path (webd's WEBD_DB MUST match this).
+# INDEXD_SCANNERD_SOCKET = the scannerd control socket indexd consumes facts
+# from. INDEXD_IMAGE is GONE: indexd never opens the backing image (ADR 0001).
 Environment=INDEXD_DB=/var/lib/teslausb/index.sqlite3
-Environment=INDEXD_IMAGE=/data/teslausb/disk.img
+Environment=INDEXD_SCANNERD_SOCKET=/run/teslausb/scannerd.sock
 ExecStart=/usr/local/bin/indexd
 Restart=on-failure
 RestartSec=5s

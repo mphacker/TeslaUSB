@@ -32,6 +32,7 @@ pub mod error;
 pub mod mbr;
 pub mod mp4probe;
 pub mod reader;
+pub mod record;
 pub mod seiscan;
 pub mod seiwalk;
 pub mod stability;

@@ -2,6 +2,7 @@ import { useEffect, useState } from "preact/hooks";
 import type { ComponentType } from "preact";
 import { Shell, type NavKey } from "./components/Shell";
 import { MediaHub } from "./screens/MediaHub";
+import { Media } from "./screens/Media";
 import { TripMap } from "./screens/TripMap";
 import { Analytics } from "./screens/Analytics";
 import { EventPlayer } from "./screens/EventPlayer";
@@ -33,14 +34,14 @@ export interface Route {
 //                 `/settings/`, and its UAT asserts the Settings nav active, so
 //                 it lives here rather than under Media). Imported as `MediaHub`
 //                 for filename continuity with the frozen 5.2 lane.
-//  · `/media`   → a ComingSoon placeholder for the real Media-section landing
-//                 (spa.md §3, not yet built).
+//  · `/media`   → the Media-section landing hub (`screens/Media.tsx`): media
+//                 feature tiles + recent clips/events from the read-only catalog.
 // Other unbuilt screens (analytics, cloud, events) resolve to a shared
 // ComingSoon placeholder so in-app links never dead-end or full-reload. Adding a
 // real screen = swap its row's `screen`.
 export const ROUTES: Route[] = [
   { path: "/", active: "map", screen: TripMap, title: "Map" },
-  { path: "/media", active: "media", screen: comingSoon("Media", "media"), title: "Media" },
+  { path: "/media", active: "media", screen: Media, title: "Media" },
   { path: "/analytics", active: "analytics", screen: Analytics, title: "Analytics" },
   { path: "/events", active: "map", screen: EventPlayer, title: "Events" },
   { path: "/cloud", active: "cloud", screen: comingSoon("Cloud", "cloud"), title: "Cloud" },

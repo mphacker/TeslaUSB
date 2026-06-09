@@ -151,7 +151,7 @@ representing|done|refused|failed` ([`gadgetd.md §4`](../gadgetd.md)). Mutations
 | `index_progress` | `{active_file, queue_depth, last_outcome}` | `indexd` status |
 | `handoff_status` | `{handoff_id, state, detail}` where state ∈ queued/ejecting/mounted/applying/representing/done/refused/failed ([`gadgetd.md §4`](../gadgetd.md)) | `gadgetd` |
 | `upload_queue` | `{queued, in_progress, done, failed, current?}` | `uploadd` |
-| `job_status` | `{job_id, kind, state, progress}` | `webd` jobs |
+| `job_status` | `{job_id, kind, state, progress}` — **realized** (`webd`): `state ∈ running/done/failed/refused/busy`; `progress` is `number|null` (always present; `1.0` on success, else `null` for start/end-granular jobs); plus optional `detail` (string, on failure/refusal) and `handoff_id` (string, when the job drove a `gadgetd` handoff). `job_id` is process-monotonic. | `webd` jobs |
 
 > The index banner truth rule (`active_file != null`, not queue depth) is a v1
 > lesson preserved in `.github/copilot-instructions.md`; `index_progress` carries

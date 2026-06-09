@@ -1225,3 +1225,78 @@ async fn handoff_status_unknown_id_is_404() {
     let (status, _) = get_json(&fx.app, "/api/handoff/h-x").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn jobs_stream_is_an_event_stream() {
+    let fx = delete_fixture(Reply::Json(
+        json!({ "handoff_id": "h-1", "result": "done" }),
+    ));
+    let resp = fx
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/jobs")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ct = resp
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        ct.starts_with("text/event-stream"),
+        "unexpected content-type: {ct}"
+    );
+}
+
+#[tokio::test]
+async fn failed_delete_is_recorded_in_failed_jobs_snapshot() {
+    // A failed car-delete (gadgetd `result: failed`) returns 502 and is retained
+    // in the failed-jobs ring served by GET /api/jobs/failed. The two requests
+    // share one router → one AppState → one JobHub.
+    let fx = delete_fixture(Reply::Json(
+        json!({ "handoff_id": "h-9", "result": "failed", "detail": "io error" }),
+    ));
+    let (status, _) = delete_json(&fx.app, "/api/clips/10?target=car").await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+
+    let (status, body) = get_json(&fx.app, "/api/jobs/failed").await;
+    assert_eq!(status, StatusCode::OK);
+    let jobs = body["jobs"].as_array().unwrap();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0]["kind"], "clip_delete");
+    assert_eq!(jobs[0]["state"], "failed");
+    assert_eq!(jobs[0]["detail"], "io error");
+    assert_eq!(jobs[0]["handoff_id"], "h-9");
+}
+
+#[tokio::test]
+async fn successful_delete_is_not_in_failed_jobs_snapshot() {
+    let fx = delete_fixture(Reply::Json(
+        json!({ "handoff_id": "h-1", "result": "done" }),
+    ));
+    let (status, _) = delete_json(&fx.app, "/api/clips/10?target=car").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = get_json(&fx.app, "/api/jobs/failed").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["jobs"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn busy_delete_is_not_recorded_as_failed() {
+    // A transient 409 refusal is terminal for the job but is NOT a failure the
+    // operator must triage, so it stays out of the failed-jobs ring.
+    let fx = delete_fixture(Reply::Json(json!({ "refused": "handoff_active" })));
+    let (status, _) = delete_json(&fx.app, "/api/clips/10?target=car").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    let (status, body) = get_json(&fx.app, "/api/jobs/failed").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["jobs"].as_array().unwrap().is_empty());
+}

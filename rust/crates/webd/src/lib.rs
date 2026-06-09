@@ -34,6 +34,7 @@ mod dto;
 mod error;
 mod gadget;
 mod health;
+mod jobs;
 mod media;
 mod polyline;
 mod query;
@@ -69,6 +70,7 @@ struct AppState {
     export_sem: Arc<Semaphore>,
     sys: SysHandle,
     gadget: Arc<dyn gadget::GadgetClient>,
+    jobs: jobs::JobHub,
 }
 
 /// The read-only system-probe handle carried in [`AppState`] for the
@@ -138,6 +140,7 @@ fn router_with_gadget(
         export_sem: Arc::new(Semaphore::new(MAX_CONCURRENT_EXPORTS)),
         sys,
         gadget,
+        jobs: jobs::JobHub::new(),
     };
     route::router(state, static_dir)
 }

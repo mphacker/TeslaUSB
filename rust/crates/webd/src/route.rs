@@ -5,16 +5,23 @@
 //! runtime threads stay free. The `/api` sub-router carries its own JSON `404`
 //! fallback so unknown API paths never fall through to the SPA shell.
 
+use std::convert::Infallible;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use axum::Json;
 use axum::Router;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use axum::response::Sse;
+use axum::response::sse::{Event, KeepAlive};
 use axum::routing::get;
 use rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
+use tokio_stream::{Stream, StreamExt};
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::dto::{
@@ -22,6 +29,7 @@ use crate::dto::{
 };
 use crate::error::ApiError;
 use crate::gadget::{self, DeleteOutcome, DeleteRefusal, TransportError};
+use crate::jobs::{JobEvent, JobState, JobStatus};
 use crate::{AppState, Catalog, query};
 
 /// Default page size when `limit` is omitted.
@@ -50,6 +58,8 @@ pub(crate) fn router(state: AppState, static_dir: PathBuf) -> Router {
             get(crate::media::download),
         )
         .route("/handoff/{id}", get(handoff_status))
+        .route("/jobs", get(jobs_stream))
+        .route("/jobs/failed", get(jobs_failed))
         .route("/analytics", get(analytics))
         .route("/settings", get(settings))
         .merge(crate::health::routes())
@@ -237,15 +247,159 @@ async fn delete_clip(
     )
     .map_err(refusal_to_error)?;
 
-    // Blocking socket round-trip to gadgetd, off the async runtime.
+    // Blocking socket round-trip to gadgetd, off the async runtime. Bracket it
+    // with job_status events so the SPA can show the delete in flight and learn
+    // its terminal state over `GET /api/jobs`.
+    let job_id = state.jobs.next_job_id();
+    state
+        .jobs
+        .publish_job(JobStatus::running(job_id, "clip_delete"));
+
     let client = state.gadget.clone();
+    let jobs = state.jobs.clone();
     let request = gadget::delete_request(&plan);
-    let resp = tokio::task::spawn_blocking(move || client.call(request))
-        .await
-        .map_err(|_| ApiError::Internal)?
-        .map_err(transport_to_error)?;
+    // Publish the terminal job state from INSIDE the blocking task so the job
+    // lifecycle always completes — even if the HTTP request is cancelled (client
+    // disconnect) before this `.await` resolves. `spawn_blocking` tasks run to
+    // completion regardless of whether their `JoinHandle` is awaited, so a
+    // dropped request can never strand a job in `running`.
+    let join = tokio::task::spawn_blocking(move || {
+        let result = client.call(request);
+        match &result {
+            Ok(resp) => {
+                jobs.publish_job(job_for_outcome(job_id, &gadget::map_delete_outcome(resp)));
+            }
+            Err(transport) => {
+                jobs.publish_job(job_failed(
+                    job_id,
+                    format!("gadgetd transport: {transport:?}"),
+                ));
+            }
+        }
+        result
+    })
+    .await;
+
+    let resp = match join {
+        Ok(Ok(resp)) => resp,
+        Ok(Err(transport)) => return Err(transport_to_error(transport)),
+        Err(_) => {
+            // Join failure (the blocking task panicked): mark the job failed so
+            // it does not linger in the active snapshot.
+            state
+                .jobs
+                .publish_job(job_failed(job_id, "blocking task join failed".to_owned()));
+            return Err(ApiError::Internal);
+        }
+    };
 
     outcome_to_response(&gadget::map_delete_outcome(&resp))
+}
+
+/// `GET /api/jobs`: the Server-Sent-Events stream of background-job activity
+/// (contract D2 §2.5/§3). A new subscriber first receives a burst of the
+/// currently-running jobs, then live events as they are published.
+async fn jobs_stream(
+    State(state): State<AppState>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    // Subscribe BEFORE taking the active snapshot so a job that goes terminal in
+    // the gap is delivered live (never lost). A job present in both the snapshot
+    // and the live buffer is a harmless duplicate the SPA upserts by `job_id`.
+    let live = BroadcastStream::new(state.jobs.subscribe()).filter_map(|item| match item {
+        Ok(ev) => Some(Ok(event_from(&ev))),
+        // A lagged slow client drops the gap and keeps streaming (acceptable at
+        // today's low job volume; revisit when high-frequency producers land).
+        Err(BroadcastStreamRecvError::Lagged(_)) => None,
+    });
+    let head = state
+        .jobs
+        .active_snapshot()
+        .into_iter()
+        .map(|job| Ok(event_from(&JobEvent::JobStatus(job))));
+    let stream = tokio_stream::iter(head).chain(live);
+    Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+}
+
+/// `GET /api/jobs/failed`: a REST snapshot of the most-recent failed jobs
+/// (contract D2 §2.1), for the failed-jobs screen.
+async fn jobs_failed(State(state): State<AppState>) -> Json<Value> {
+    Json(json!({ "jobs": state.jobs.failed_snapshot() }))
+}
+
+/// Build the SSE frame for a [`JobEvent`], falling back to a comment frame if
+/// the payload somehow fails to serialize (it never does for our types).
+fn event_from(ev: &JobEvent) -> Event {
+    Event::default()
+        .event(ev.name())
+        .json_data(ev.data())
+        .unwrap_or_else(|_| Event::default().comment("job event serialize error"))
+}
+
+/// A terminal `failed` job carrying an error detail.
+fn job_failed(job_id: u64, detail: String) -> JobStatus {
+    JobStatus {
+        job_id,
+        kind: "clip_delete".to_owned(),
+        state: JobState::Failed,
+        progress: None,
+        detail: Some(detail),
+        handoff_id: None,
+    }
+}
+
+/// Map a terminal [`DeleteOutcome`] to its `job_status` update.
+fn job_for_outcome(job_id: u64, outcome: &DeleteOutcome) -> JobStatus {
+    let kind = "clip_delete";
+    match outcome {
+        DeleteOutcome::Done(handoff_id) => JobStatus {
+            job_id,
+            kind: kind.to_owned(),
+            state: JobState::Done,
+            progress: Some(1.0),
+            detail: None,
+            handoff_id: Some(handoff_id.clone()),
+        },
+        DeleteOutcome::Busy(reason) => JobStatus {
+            job_id,
+            kind: kind.to_owned(),
+            state: JobState::Busy,
+            progress: None,
+            detail: Some(busy_message(reason)),
+            handoff_id: None,
+        },
+        DeleteOutcome::Refused(reason) => JobStatus {
+            job_id,
+            kind: kind.to_owned(),
+            state: JobState::Refused,
+            progress: None,
+            detail: Some(reason.clone()),
+            handoff_id: None,
+        },
+        DeleteOutcome::Failed { handoff_id, detail } => JobStatus {
+            job_id,
+            kind: kind.to_owned(),
+            state: JobState::Failed,
+            progress: None,
+            detail: Some(detail.clone()),
+            handoff_id: Some(handoff_id.clone()),
+        },
+        DeleteOutcome::CriticalFault { handoff_id, detail } => JobStatus {
+            job_id,
+            kind: kind.to_owned(),
+            state: JobState::Failed,
+            progress: None,
+            detail: Some(format!("LUN left ejected: {detail}")),
+            handoff_id: Some(handoff_id.clone()),
+        },
+        DeleteOutcome::BadResponse(msg) => JobStatus {
+            job_id,
+            kind: kind.to_owned(),
+            state: JobState::Failed,
+            progress: None,
+            detail: Some(msg.clone()),
+            handoff_id: None,
+        },
+    }
 }
 
 /// `GET /api/handoff/:id`: poll a prior car-delete handoff, normalized to the D2

@@ -163,8 +163,6 @@ pub struct AngleRecord {
     pub camera: String,
     /// Path within the volume the reader can resolve back to the file.
     pub file_ref: String,
-    /// `ro_usb` / `archive` provenance.
-    pub view_kind: String,
     /// Millisecond offset of this angle relative to the clip start.
     pub offset_ms: i64,
     /// Angle duration in seconds, if known.
@@ -176,7 +174,9 @@ pub struct AngleRecord {
 /// One eligible *file* (camera angle) and its clip-level facts — the unit
 /// the producer emits and the consumer ingests, mirroring the per-file
 /// `process_front` / `process_other` path. `waypoints` is non-empty only
-/// for the front angle (the only one carrying SEI telemetry).
+/// for the front angle (the only one carrying SEI telemetry); the consumer
+/// derives front-ness from [`AngleRecord::camera`] rather than trusting a
+/// forgeable flag, and rejects a non-front record that carries waypoints.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClipAngleRecord {
     /// Camera-independent dedup key: `slot:<parent-dir>/<timestamp>`.
@@ -191,16 +191,28 @@ pub struct ClipAngleRecord {
     pub bucket: Bucket,
     /// Clip duration in seconds, if probed (front only).
     pub duration_s: Option<f64>,
-    /// Whether this is the front angle (drives SEI ingest in the consumer).
-    pub is_front: bool,
     /// This file's angle facts.
     pub angle: AngleRecord,
     /// SEI waypoints (front only; may be empty to clear a stale cache).
     pub waypoints: Vec<WireWaypoint>,
 }
 
-/// Diagnostic counts produced scanner-side (logging only; carries no
-/// control state).
+impl ClipAngleRecord {
+    /// Whether this is the front angle — derived from the camera label
+    /// (the consumer never trusts a separate forgeable flag). Front is the
+    /// only angle carrying SEI telemetry and the only one that drives the
+    /// clip-level `upsert_clip` + waypoint cache in the consumer.
+    #[must_use]
+    pub fn is_front(&self) -> bool {
+        self.angle.camera.eq_ignore_ascii_case("front")
+    }
+}
+
+/// Diagnostic counts the *producer* can know without a database (logging
+/// only; carries no control state). DB-outcome counters
+/// (`clips_upserted`, `front_clips_walked`, `waypoints`) live on the
+/// consumer's apply report instead, since only the writer knows whether a
+/// row was actually committed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProducerStats {
     /// exFAT partitions visited.
@@ -209,12 +221,15 @@ pub struct ProducerStats {
     pub files_seen: usize,
     /// Records reported just-stable this pass.
     pub eligible: usize,
-    /// Front clips whose SEI was walked this pass.
-    pub front_clips_walked: usize,
-    /// Cached waypoints emitted this pass.
-    pub waypoints: usize,
-    /// Eligible files that errored during read/parse and were skipped.
-    pub errors: usize,
+    /// Eligible files that errored during raw read/parse and were skipped.
+    pub read_errors: usize,
+    /// Eligible files with no resolvable recording instant (no `mvhd` and
+    /// an out-of-range filename timestamp): nothing is written, but the
+    /// legacy in-process pass still counted them as "upserted".
+    pub unplaceable_clips: usize,
+    /// Subset of [`Self::unplaceable_clips`] that were the front angle
+    /// (the legacy pass also counted these as "front walked").
+    pub unplaceable_front: usize,
 }
 
 /// A single scan pass's worth of facts: the full present-key set (for the
@@ -277,12 +292,25 @@ pub enum BatchError {
         /// Which field.
         what: &'static str,
     },
+    /// A non-front record carried SEI waypoints (only the front angle
+    /// has telemetry; a non-front record with waypoints is malformed).
+    #[error("non-front record `{key}` carries {count} waypoint(s)")]
+    NonFrontWaypoints {
+        /// The offending record's canonical key.
+        key: String,
+        /// How many waypoints it carried.
+        count: usize,
+    },
 }
 
 impl ScanBatch {
-    /// Validate version + every cap + numeric finiteness. The consumer
-    /// MUST call this before applying any record — the batch is untrusted
-    /// input from the producer.
+    /// Validate **batch-level** invariants: protocol version and the
+    /// gross-size caps that bound consumer memory. A failure here is fatal
+    /// (the whole batch is rejected) because it signals a protocol
+    /// mismatch or a denial-of-service attempt, not one bad clip.
+    /// Per-record validation is [`ClipAngleRecord::validate`], applied
+    /// individually so a single malformed record cannot starve its
+    /// siblings.
     ///
     /// # Errors
     ///
@@ -299,15 +327,15 @@ impl ScanBatch {
         for key in &self.present_keys {
             string_len("present_key", key)?;
         }
-        for record in &self.records {
-            record.validate()?;
-        }
         Ok(())
     }
 }
 
 impl ClipAngleRecord {
-    /// Validate one record's caps, string lengths, and numeric finiteness.
+    /// Validate one record's caps, string lengths, numeric finiteness, and
+    /// the front/waypoint invariant. The consumer calls this **per record**
+    /// inside its apply loop and skips (counting an error) on failure, so a
+    /// single malformed record never aborts the batch.
     ///
     /// # Errors
     ///
@@ -317,8 +345,13 @@ impl ClipAngleRecord {
         string_len("partition", &self.partition)?;
         string_len("camera", &self.angle.camera)?;
         string_len("file_ref", &self.angle.file_ref)?;
-        string_len("view_kind", &self.angle.view_kind)?;
         cap("waypoints", self.waypoints.len(), MAX_WAYPOINTS_PER_RECORD)?;
+        if !self.is_front() && !self.waypoints.is_empty() {
+            return Err(BatchError::NonFrontWaypoints {
+                key: self.canonical_key.clone(),
+                count: self.waypoints.len(),
+            });
+        }
         finite("duration_s", self.duration_s)?;
         finite("angle.duration_s", self.angle.duration_s)?;
         for wp in &self.waypoints {
@@ -418,9 +451,9 @@ mod tests {
                 partitions: 1,
                 files_seen: 4,
                 eligible: 1,
-                front_clips_walked: 1,
-                waypoints: 1,
-                errors: 0,
+                read_errors: 0,
+                unplaceable_clips: 0,
+                unplaceable_front: 0,
             },
             present_keys: vec!["0:TeslaCam/SavedClips/2026-06-01_20-10-04".to_owned()],
             records: vec![ClipAngleRecord {
@@ -430,11 +463,9 @@ mod tests {
                 partition: "slot0".to_owned(),
                 bucket: Bucket::SavedClips,
                 duration_s: Some(60.0),
-                is_front: true,
                 angle: AngleRecord {
                     camera: "front".to_owned(),
                     file_ref: "TeslaCam/SavedClips/2026-06-01_20-10-04/x-front.mp4".to_owned(),
-                    view_kind: "ro_usb".to_owned(),
                     offset_ms: 0,
                     duration_s: None,
                     size_bytes: Some(1024),
@@ -513,7 +544,11 @@ mod tests {
 
     #[test]
     fn validate_accepts_good_batch() {
-        assert!(sample_batch().validate().is_ok());
+        let batch = sample_batch();
+        assert!(batch.validate().is_ok());
+        for record in &batch.records {
+            assert!(record.validate().is_ok());
+        }
     }
 
     #[test]
@@ -527,22 +562,40 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_oversize_string() {
+    fn record_validate_rejects_oversize_string() {
         let mut batch = sample_batch();
         batch.records[0].canonical_key = "x".repeat(MAX_STRING_LEN + 1);
         assert!(matches!(
-            batch.validate(),
+            batch.records[0].validate(),
             Err(super::BatchError::StringTooLong { .. })
         ));
     }
 
     #[test]
-    fn validate_rejects_non_finite_waypoint() {
+    fn record_validate_rejects_non_finite_waypoint() {
         let mut batch = sample_batch();
         batch.records[0].waypoints[0].lat = f64::NAN;
         assert!(matches!(
-            batch.validate(),
+            batch.records[0].validate(),
             Err(super::BatchError::NonFinite { .. })
         ));
+    }
+
+    #[test]
+    fn record_validate_rejects_non_front_with_waypoints() {
+        let mut batch = sample_batch();
+        batch.records[0].angle.camera = "back".to_owned();
+        assert!(matches!(
+            batch.records[0].validate(),
+            Err(super::BatchError::NonFrontWaypoints { .. })
+        ));
+    }
+
+    #[test]
+    fn is_front_is_derived_from_camera() {
+        let mut batch = sample_batch();
+        assert!(batch.records[0].is_front());
+        batch.records[0].angle.camera = "left_repeater".to_owned();
+        assert!(!batch.records[0].is_front());
     }
 }

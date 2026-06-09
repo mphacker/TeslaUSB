@@ -531,47 +531,16 @@ pub fn utc_civil_date(epoch_s: i64) -> String {
 /// documented clock-skew (flagged: `indexd.md` clock-skew rule); mvhd-GPS
 /// is always preferred when present.
 ///
+/// Delegates to [`scannerd::timestamp::epoch_from_tesla_timestamp`] — the
+/// single implementation, re-homed in the raw-parsing crate so the
+/// `scannerd` producer can resolve `started_at` without a dependency cycle
+/// back into `indexd`.
+///
 /// Returns `None` if the string is not a parseable Tesla timestamp.
 #[must_use]
 pub fn epoch_from_tesla_timestamp(ts: &str) -> Option<i64> {
-    // Expected shape: "YYYY-MM-DD_HH-MM-SS" (19 chars).
-    let bytes = ts.as_bytes();
-    if bytes.len() != 19 {
-        return None;
-    }
-    let year: i64 = ts.get(0..4)?.parse().ok()?;
-    let month: i64 = ts.get(5..7)?.parse().ok()?;
-    let day: i64 = ts.get(8..10)?.parse().ok()?;
-    let hour: i64 = ts.get(11..13)?.parse().ok()?;
-    let minute: i64 = ts.get(14..16)?.parse().ok()?;
-    let second: i64 = ts.get(17..19)?.parse().ok()?;
-    if !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
-        || !(0..=23).contains(&hour)
-        || !(0..=59).contains(&minute)
-        || !(0..=60).contains(&second)
-    {
-        return None;
-    }
-    let days = days_from_civil(year, month, day);
-    Some(days * 86_400 + hour * 3_600 + minute * 60 + second)
+    scannerd::timestamp::epoch_from_tesla_timestamp(ts)
 }
-
-/// Convert `(year, month, day)` to days-since-Unix-epoch
-/// (Howard Hinnant, inverse of [`civil_from_days`]).
-// `era`/`yoe`/`doy`/`doe` are the canonical names from the published
-// algorithm; renaming them for clippy would obscure the citation.
-#[allow(clippy::similar_names)]
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let doy = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
-}
-
-/// Convert days-since-Unix-epoch to `(year, month, day)`
 /// (Howard Hinnant, <http://howardhinnant.github.io/date_algorithms.html>).
 // `doe`/`doy`/`yoe` are the canonical names from the published algorithm;
 // renaming them for clippy would obscure the citation.

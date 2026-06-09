@@ -25,6 +25,7 @@
 //! is reused from `scannerd` + `teslausb-core` (never re-implemented
 //! here), and the `SQLite` syscalls live behind the [`db`] store.
 
+pub mod apply;
 pub mod db;
 pub mod derive;
 pub mod geo;

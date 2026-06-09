@@ -102,3 +102,4 @@ config.yaml.bak.*
 
 # Task 7.2 release build output (binaries, staged trees, tarballs)
 release/.build/
+rust/target-aarch64-out/

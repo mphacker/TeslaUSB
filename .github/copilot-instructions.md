@@ -4,6 +4,21 @@ Working notes for any Copilot agent (CLI, cloud, code review) operating
 on this repository. These rules are binding alongside
 `docs/03-CODE-QUALITY-CHARTER.md`.
 
+## Builds — use podman, never local WSL (binding)
+
+All cross-compilation / artifact builds for the B-1 stack MUST run
+through **podman on the Windows host** (the documented release path:
+`release/build-release.sh --cross-podman`, Debian image + the
+`gcc-aarch64-linux-gnu` cross linker, target `aarch64-unknown-linux-gnu`,
+toolchain pinned to 1.85.0). **Do not build in local WSL** — it is slow
+on this Windows host and is not the sanctioned/reproducible build
+environment. Podman is installed on the Windows host (`podman.exe`, a
+running `podman-machine-default`); the release builder copies sources off
+a read-only bind mount and builds into named cargo volumes for cache
+reuse. If a one-off scoped build is needed (e.g. a single daemon), mirror
+the same container recipe (`debian:bookworm`, same env vars and cross
+linker) rather than dropping to host WSL.
+
 ## UI / website work — Playwright is mandatory
 
 Any time you change code that affects the rendered website (templates,

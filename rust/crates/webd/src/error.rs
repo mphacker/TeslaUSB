@@ -20,6 +20,18 @@ pub(crate) enum ApiError {
     },
     /// `404` — the addressed resource does not exist.
     NotFound,
+    /// A mutation-path error carrying an explicit status, machine code, and
+    /// message (used by the car-delete handoff route for `409`/`422`/`500`/
+    /// `501`/`502`/`503`). Internal failures still route through [`Self::Internal`]
+    /// so a DB message never leaks.
+    Status {
+        /// The HTTP status to emit.
+        status: StatusCode,
+        /// Machine-readable error code.
+        code: &'static str,
+        /// Human-readable message (safe to surface; never a raw DB error).
+        message: String,
+    },
     /// `500` — an unexpected internal failure (DB error, task join). The
     /// detail is kept server-side and never serialized.
     Internal,
@@ -29,6 +41,19 @@ impl ApiError {
     /// A `400` for an invalid query parameter.
     pub(crate) fn bad_request(code: &'static str, message: impl Into<String>) -> Self {
         Self::BadRequest {
+            code,
+            message: message.into(),
+        }
+    }
+
+    /// A mutation-path error with an explicit status.
+    pub(crate) fn status(
+        status: StatusCode,
+        code: &'static str,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::Status {
+            status,
             code,
             message: message.into(),
         }
@@ -56,6 +81,11 @@ impl IntoResponse for ApiError {
                 "not_found",
                 "resource not found".to_owned(),
             ),
+            Self::Status {
+                status,
+                code,
+                message,
+            } => (status, code, message),
             Self::Internal => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal",

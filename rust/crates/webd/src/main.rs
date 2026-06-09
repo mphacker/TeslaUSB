@@ -11,6 +11,8 @@
 //!                           system temp dir; on the Pi point this at `NVMe`
 //!                           storage, not tmpfs, so a large export cannot
 //!                           exhaust RAM).
+//!   * `WEBD_GADGETD_SOCK` — the `gadgetd` control socket for the car-delete
+//!                           handoff (default `/run/teslausb/gadgetd.sock`).
 //!
 //! `WEBD_BIND` MUST be a LAN/AP address, never a public-internet interface
 //! (SPEC.md §7, webd.md §3.1). The default `127.0.0.1` is a safe dev default; on
@@ -50,8 +52,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var_os("WEBD_CACHE_DIR").map_or_else(std::env::temp_dir, PathBuf::from);
     let media = MediaConfig::new(archive_root, cache_dir);
 
+    let gadget_sock = std::env::var_os("WEBD_GADGETD_SOCK").map_or_else(
+        || PathBuf::from("/run/teslausb/gadgetd.sock"),
+        PathBuf::from,
+    );
+
     let catalog = Catalog::open(db_path)?;
-    let app = build_router(catalog, static_dir, media);
+    let app = build_router(catalog, static_dir, media, gadget_sock);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("webd listening on http://{addr}");

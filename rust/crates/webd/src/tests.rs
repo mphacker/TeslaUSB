@@ -19,11 +19,13 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use http_body_util::BodyExt;
 use rusqlite::{Connection, params};
-use serde_json::Value;
+use serde_json::{Value, json};
+use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
-use crate::{Catalog, MediaConfig, build_router};
+use crate::gadget::{GadgetClient, TransportError};
+use crate::{Catalog, MediaConfig, build_router, router_with_gadget};
 
 /// A live fixture: a seeded catalog + its router. `_dir` keeps the temp files
 /// alive for the duration of the test (handlers open the DB per request).
@@ -54,7 +56,10 @@ fn fixture() -> Fixture {
     std::fs::create_dir_all(&archive_dir).unwrap();
     std::fs::create_dir_all(&cache_dir).unwrap();
     let media = MediaConfig::new(archive_dir, cache_dir);
-    let app = build_router(catalog, static_dir, media);
+    // Read-only tests never issue a DELETE, so they never connect; point the
+    // gadgetd socket at a path that does not exist.
+    let gadget_sock = dir.path().join("gadgetd.sock");
+    let app = build_router(catalog, static_dir, media, gadget_sock);
     Fixture { _dir: dir, app }
 }
 
@@ -443,7 +448,8 @@ fn media_fixture() -> MediaFixture {
 
     let catalog = Catalog::open(&db_path).unwrap();
     let media = MediaConfig::new(archive, cache);
-    let app = build_router(catalog, static_dir, media);
+    let gadget_sock = dir.path().join("gadgetd.sock");
+    let app = build_router(catalog, static_dir, media, gadget_sock);
     MediaFixture { _dir: dir, app }
 }
 
@@ -963,5 +969,259 @@ async fn stream_rejects_symlink_escape_via_canonicalize() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     let (status, _, _) = request(&fx.app, Method::GET, "/api/clips/19/export", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+// ---------------------------------------------------------------------------
+// Car-delete handoff route (`DELETE /api/clips/:id?target=car`,
+// `GET /api/handoff/:id`). The gadgetd socket is mocked: these tests cover the
+// route's validation, gadgetd request shape, and outcome→HTTP mapping without a
+// real daemon. The live destructive delete is an operator-gated hardware test.
+// ---------------------------------------------------------------------------
+
+/// What the mock gadgetd returns for a call.
+enum Reply {
+    /// A canned JSON response value.
+    Json(Value),
+    /// A transport "unavailable" error (socket down/absent).
+    Unavailable,
+}
+
+/// A mock [`GadgetClient`] that records the last request and returns a canned
+/// reply, so the route's request-building and response-mapping are exercised
+/// without a real Unix socket.
+struct MockGadget {
+    reply: Reply,
+    last: Arc<Mutex<Option<Value>>>,
+}
+
+impl GadgetClient for MockGadget {
+    fn call(&self, request: Value) -> Result<Value, TransportError> {
+        *self.last.lock().unwrap() = Some(request);
+        match &self.reply {
+            Reply::Json(v) => Ok(v.clone()),
+            Reply::Unavailable => Err(TransportError::Unavailable("socket down".to_owned())),
+        }
+    }
+}
+
+/// A delete fixture: a catalog seeded with car-deletable clips plus a router
+/// wired to a mock gadgetd. `last` captures the request sent to gadgetd.
+struct DeleteFixture {
+    _dir: TempDir,
+    app: Router,
+    last: Arc<Mutex<Option<Value>>>,
+}
+
+const EVENT: &str = "2026-06-01_20-10-04";
+const EVENT2: &str = "2026-06-01_20-11-04";
+
+fn delete_fixture(reply: Reply) -> DeleteFixture {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("catalog.db");
+    seed_car_clips(&db_path);
+
+    let static_dir = dir.path().join("static");
+    std::fs::create_dir_all(&static_dir).unwrap();
+    std::fs::write(static_dir.join("index.html"), "<!doctype html>shell").unwrap();
+
+    let catalog = Catalog::open(&db_path).unwrap();
+    let media = MediaConfig::new(dir.path().join("archive"), dir.path().join("cache"));
+    let last = Arc::new(Mutex::new(None));
+    let gadget: Arc<dyn GadgetClient> = Arc::new(MockGadget {
+        reply,
+        last: Arc::clone(&last),
+    });
+    let app = router_with_gadget(catalog, static_dir, media, gadget);
+    DeleteFixture {
+        _dir: dir,
+        app,
+        last,
+    }
+}
+
+/// Seed clips with the real `slot0` / `TeslaCam/...` encoding the planner needs.
+fn seed_car_clips(path: &std::path::Path) {
+    let mut conn = Connection::open(path).unwrap();
+    conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+    indexd::db::apply_migrations(&mut conn).unwrap();
+
+    // clip 10: a well-formed car-deletable SavedClips minute with two ro_usb
+    //   angles whose file_refs match the canonical_key-derived paths.
+    // clip 11: same shape but on slot1 (media) → planner refuses (not car).
+    // clip 12: ro_usb angle whose file_ref escapes the clip → planner refuses.
+    let key = format!("0:TeslaCam/SavedClips/{EVENT}/{EVENT}");
+    let key1 = format!("1:TeslaCam/SavedClips/{EVENT}/{EVENT}");
+    let key12 = format!("0:TeslaCam/SavedClips/{EVENT2}/{EVENT2}");
+    conn.execute_batch(&format!(
+        "INSERT INTO clips (id, canonical_key, started_at, ended_at, partition, folder_class, is_sentry, duration_s, availability, created_at, updated_at) VALUES
+            (10, '{key}', 1000, 1060, 'slot0', 'SavedClips', 0, 60.0, 'present', 0, 0),
+            (11, '{key1}', 1000, 1060, 'slot1', 'SavedClips', 0, 60.0, 'present', 0, 0),
+            (12, '{key12}', 1000, 1060, 'slot0', 'SavedClips', 0, 60.0, 'present', 0, 0);
+         INSERT INTO angles (id, clip_id, camera, file_ref, view_kind, offset_ms, duration_s, size_bytes) VALUES
+            (1, 10, 'back',  'TeslaCam/SavedClips/{EVENT}/{EVENT}-back.mp4',  'ro_usb', 0, 60.0, 1),
+            (2, 10, 'front', 'TeslaCam/SavedClips/{EVENT}/{EVENT}-front.mp4', 'ro_usb', 0, 60.0, 2),
+            (3, 11, 'front', 'TeslaCam/SavedClips/{EVENT}/{EVENT}-front.mp4', 'ro_usb', 0, 60.0, 2),
+            (4, 12, 'front', 'TeslaCam/SavedClips/{EVENT2}/2026-06-01_20-09-04-front.mp4', 'ro_usb', 0, 60.0, 2);"
+    ))
+    .unwrap();
+}
+
+/// Issue a DELETE and return `(status, parsed-json)`.
+async fn delete_json(app: &Router, uri: &str) -> (StatusCode, Value) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, value)
+}
+
+#[tokio::test]
+async fn delete_car_clip_happy_path_sends_one_handoff() {
+    let fx = delete_fixture(Reply::Json(
+        json!({ "handoff_id": "h-1", "result": "done" }),
+    ));
+    let (status, body) = delete_json(&fx.app, "/api/clips/10?target=car").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["state"], "done");
+    assert_eq!(body["handoff_id"], "h-1");
+
+    // gadgetd saw ONE request: partition 1, op delete_paths, both derived files.
+    let req = fx.last.lock().unwrap().clone().unwrap();
+    assert_eq!(req["cmd"], "request_mutation");
+    assert_eq!(req["partition"], 1);
+    assert_eq!(req["mutation"]["op"], "delete_paths");
+    let paths = req["mutation"]["rel_paths"].as_array().unwrap();
+    assert_eq!(paths.len(), 2);
+    assert_eq!(
+        paths[0],
+        format!("TeslaCam/SavedClips/{EVENT}/{EVENT}-back.mp4")
+    );
+    assert_eq!(
+        paths[1],
+        format!("TeslaCam/SavedClips/{EVENT}/{EVENT}-front.mp4")
+    );
+}
+
+#[tokio::test]
+async fn delete_requires_explicit_target() {
+    let fx = delete_fixture(Reply::Json(
+        json!({ "handoff_id": "h-1", "result": "done" }),
+    ));
+    let (status, body) = delete_json(&fx.app, "/api/clips/10").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "target_required");
+    // No destructive default: gadgetd must NOT have been contacted.
+    assert!(fx.last.lock().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn delete_archive_target_is_not_implemented() {
+    let fx = delete_fixture(Reply::Json(
+        json!({ "handoff_id": "h-1", "result": "done" }),
+    ));
+    let (status, body) = delete_json(&fx.app, "/api/clips/10?target=archive").await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(body["error"]["code"], "not_implemented");
+    assert!(fx.last.lock().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn delete_unknown_clip_is_404() {
+    let fx = delete_fixture(Reply::Json(
+        json!({ "handoff_id": "h-1", "result": "done" }),
+    ));
+    let (status, _) = delete_json(&fx.app, "/api/clips/999?target=car").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(fx.last.lock().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn delete_non_car_partition_is_refused_before_handoff() {
+    let fx = delete_fixture(Reply::Json(
+        json!({ "handoff_id": "h-1", "result": "done" }),
+    ));
+    let (status, body) = delete_json(&fx.app, "/api/clips/11?target=car").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["code"], "not_car_deletable");
+    assert!(fx.last.lock().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn delete_with_escaping_file_ref_is_refused_before_handoff() {
+    let fx = delete_fixture(Reply::Json(
+        json!({ "handoff_id": "h-1", "result": "done" }),
+    ));
+    let (status, body) = delete_json(&fx.app, "/api/clips/12?target=car").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["code"], "invalid_clip");
+    assert!(fx.last.lock().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn delete_busy_handoff_is_409() {
+    let fx = delete_fixture(Reply::Json(json!({ "refused": "handoff_active" })));
+    let (status, body) = delete_json(&fx.app, "/api/clips/10?target=car").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"]["code"], "handoff_busy");
+}
+
+#[tokio::test]
+async fn delete_save_active_is_409() {
+    // Car mid-save: a transient, retryable refusal (contract §2.3 → 409),
+    // NOT a 422 validation refusal.
+    let fx = delete_fixture(Reply::Json(
+        json!({ "handoff_id": "h-1", "refused": "save_active" }),
+    ));
+    let (status, body) = delete_json(&fx.app, "/api/clips/10?target=car").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"]["code"], "handoff_busy");
+}
+
+#[tokio::test]
+async fn delete_gadgetd_unavailable_is_503() {
+    let fx = delete_fixture(Reply::Unavailable);
+    let (status, body) = delete_json(&fx.app, "/api/clips/10?target=car").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"]["code"], "gadgetd_unavailable");
+}
+
+#[tokio::test]
+async fn delete_critical_fault_is_500() {
+    let fx = delete_fixture(Reply::Json(
+        json!({ "handoff_id": "h-9", "result": "critical_fault", "detail": "stuck mount" }),
+    ));
+    let (status, body) = delete_json(&fx.app, "/api/clips/10?target=car").await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body["error"]["code"], "critical_fault");
+}
+
+#[tokio::test]
+async fn handoff_status_normalizes_in_flight_phase() {
+    let fx = delete_fixture(Reply::Json(
+        json!({ "handoff_id": "h-3", "phase": "applying", "result": null }),
+    ));
+    let (status, body) = get_json(&fx.app, "/api/handoff/h-3").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["state"], "applying");
+    assert_eq!(body["handoff_id"], "h-3");
+}
+
+#[tokio::test]
+async fn handoff_status_unknown_id_is_404() {
+    let fx = delete_fixture(Reply::Json(json!({ "error": "unknown handoff_id: h-x" })));
+    let (status, _) = get_json(&fx.app, "/api/handoff/h-x").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }

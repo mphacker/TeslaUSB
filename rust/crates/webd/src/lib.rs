@@ -32,6 +32,7 @@
 mod catalog;
 mod dto;
 mod error;
+mod gadget;
 mod health;
 mod media;
 mod polyline;
@@ -56,15 +57,18 @@ use tokio::sync::Semaphore;
 /// and cache-filesystem pressure from a burst of `GET /api/clips/{id}/export`.
 const MAX_CONCURRENT_EXPORTS: usize = 2;
 
-/// Shared handler state: the read-only catalog handle plus the media config and
-/// export concurrency limiter. Cheap to clone (`Arc`-backed), so each request
-/// can open its own short-lived read-only connection inside a blocking task.
+/// Shared handler state: the read-only catalog handle plus the media config,
+/// export concurrency limiter, system-probe handle, and the `gadgetd` control
+/// client used by the car-delete handoff route. Cheap to clone (`Arc`-backed),
+/// so each request can open its own short-lived read-only connection inside a
+/// blocking task.
 #[derive(Clone)]
 struct AppState {
     catalog: Catalog,
     media: MediaConfig,
     export_sem: Arc<Semaphore>,
     sys: SysHandle,
+    gadget: Arc<dyn gadget::GadgetClient>,
 }
 
 /// The read-only system-probe handle carried in [`AppState`] for the
@@ -85,7 +89,43 @@ struct SysHandle {
 /// `index.html` so client-side routes resolve. Unknown `/api/*` paths return
 /// the JSON error envelope (never the SPA shell). `media` supplies the archive
 /// root (the jail for streamed/exported files) and the zip-export cache dir.
-pub fn build_router(catalog: Catalog, static_dir: PathBuf, media: MediaConfig) -> Router {
+/// `gadget_sock` is the `gadgetd` control socket used by the car-delete handoff.
+pub fn build_router(
+    catalog: Catalog,
+    static_dir: PathBuf,
+    media: MediaConfig,
+    gadget_sock: PathBuf,
+) -> Router {
+    router_with_gadget(
+        catalog,
+        static_dir,
+        media,
+        default_gadget_client(gadget_sock),
+    )
+}
+
+/// Construct the platform default `gadgetd` client: a Unix-socket client on the
+/// Pi (Linux), and an always-unavailable stub on non-Unix dev hosts.
+fn default_gadget_client(gadget_sock: PathBuf) -> Arc<dyn gadget::GadgetClient> {
+    #[cfg(unix)]
+    {
+        Arc::new(gadget::UnixGadgetClient::new(gadget_sock))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = gadget_sock;
+        Arc::new(gadget::UnavailableGadgetClient)
+    }
+}
+
+/// Assemble the router over an explicit `gadgetd` client (the injection seam used
+/// by [`build_router`] and the handler tests).
+fn router_with_gadget(
+    catalog: Catalog,
+    static_dir: PathBuf,
+    media: MediaConfig,
+    gadget: Arc<dyn gadget::GadgetClient>,
+) -> Router {
     let sys = SysHandle {
         probe: Arc::new(sysinfo::LinuxProbe),
         paths: Arc::new(sysinfo::SysPaths {
@@ -97,6 +137,7 @@ pub fn build_router(catalog: Catalog, static_dir: PathBuf, media: MediaConfig) -
         media,
         export_sem: Arc::new(Semaphore::new(MAX_CONCURRENT_EXPORTS)),
         sys,
+        gadget,
     };
     route::router(state, static_dir)
 }

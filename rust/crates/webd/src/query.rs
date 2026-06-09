@@ -264,6 +264,28 @@ pub(crate) fn list_archive_angles(
     Ok(out)
 }
 
+/// List the **`ro_usb`-view** angles of a clip for the car-delete handoff, as
+/// `(camera, file_ref)` pairs ordered by `camera`.
+///
+/// Only `view_kind = 'ro_usb'` angles are returned: those are the live files on
+/// the car-visible USB volume that a `gadgetd` eject-handoff can delete. An
+/// empty vec means the clip has no car-visible files (or does not exist) — the
+/// caller refuses the delete. `file_ref` is volume-root-relative and is **never**
+/// placed in any browser-facing DTO; it is handed only to `gadgetd`.
+pub(crate) fn list_ro_usb_angles(
+    conn: &Connection,
+    clip_id: i64,
+) -> Result<Vec<(String, String)>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT camera, file_ref FROM angles \
+         WHERE clip_id = ?1 AND view_kind = 'ro_usb' ORDER BY camera ASC",
+    )?;
+    let out = stmt
+        .query_map(params![clip_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(out)
+}
+
 /// Fetch all angles for a set of clip ids in one query, grouped by clip id and
 /// ordered by `camera` for deterministic output.
 fn angles_for_clips(

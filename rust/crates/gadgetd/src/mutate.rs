@@ -141,11 +141,76 @@ fn apply_op(mnt: &Path, mutation: &Mutation) -> io::Result<()> {
                 std::fs::remove_file(&target)
             }
         }
+        Mutation::DeletePaths { rel_paths } => delete_files(mnt, rel_paths),
         Mutation::InstallFile {
             rel_path,
             source_path,
         } => install_file(mnt, rel_path, Path::new(source_path)),
     }
+}
+
+/// Delete a set of individual files within the single mount (one eject), using
+/// an **all-or-nothing preflight** so a stale or corrupt request can never cause
+/// a partial, ambiguous delete:
+///
+/// 1. Resolve + jail + stat every path (regular-file-only; reject dirs, mount
+///    root, escapes, duplicates) BEFORE removing anything.
+/// 2. Decide on the whole set (fail closed on the ambiguous middle):
+///    - every target already absent → idempotent success (a retried delete);
+///    - every target present        → delete the whole set;
+///    - a *mix* of present + absent  → refuse and delete nothing (stale catalog
+///      or a partial prior delete; requires a rescan, not a guess).
+fn delete_files(mnt: &Path, rel_paths: &[String]) -> io::Result<()> {
+    let mnt_canon = std::fs::canonicalize(mnt)?;
+    let mut present: Vec<PathBuf> = Vec::new();
+    let mut seen: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
+    let mut absent = 0_usize;
+
+    for rel_path in rel_paths {
+        let rel = validate_rel_path(rel_path).map_err(io::Error::other)?;
+        let joined = mnt_canon.join(&rel);
+        match std::fs::canonicalize(&joined) {
+            Ok(canon) => {
+                if canon == mnt_canon {
+                    return Err(io::Error::other("refusing to operate on the mount root"));
+                }
+                if !canon.starts_with(&mnt_canon) {
+                    return Err(io::Error::other(format!(
+                        "resolved path {} escapes the mount",
+                        canon.display()
+                    )));
+                }
+                let meta = std::fs::symlink_metadata(&canon)?;
+                if !meta.is_file() {
+                    return Err(io::Error::other(
+                        "refusing to delete a non-regular file (clip delete removes files only)",
+                    ));
+                }
+                if !seen.insert(canon.clone()) {
+                    return Err(io::Error::other("duplicate path in delete set"));
+                }
+                present.push(canon);
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => absent += 1,
+            Err(e) => return Err(e),
+        }
+    }
+
+    if present.is_empty() {
+        // Every target already gone: a retried/duplicate delete is safe.
+        return Ok(());
+    }
+    if absent > 0 {
+        return Err(io::Error::other(format!(
+            "clip in inconsistent state: {absent} of {} target files already absent; \
+             refusing partial delete (rescan required)",
+            rel_paths.len()
+        )));
+    }
+    for path in &present {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
 }
 
 /// Resolve a validated relative path under `mnt` and prove it stays within the
@@ -386,9 +451,88 @@ fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> io::Result<Vec<u8>>
 #[cfg(test)]
 #[allow(clippy::panic, clippy::expect_used, clippy::unwrap_used)]
 mod tests {
-    use super::{run_with_timeout, unescape_mountinfo};
+    use super::{delete_files, run_with_timeout, unescape_mountinfo};
+    use std::path::PathBuf;
     use std::process::Command;
     use std::time::Duration;
+
+    /// Create a fresh, unique temp directory for a single test.
+    fn temp_mnt(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "gadgetd-delfiles-{tag}-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn touch(root: &std::path::Path, rel: &str) {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, b"x").unwrap();
+    }
+
+    #[test]
+    fn delete_files_removes_a_whole_present_set() {
+        let mnt = temp_mnt("present");
+        let a = "TeslaCam/SavedClips/2026-06-01_20-10-04/2026-06-01_20-10-04-front.mp4";
+        let b = "TeslaCam/SavedClips/2026-06-01_20-10-04/2026-06-01_20-10-04-back.mp4";
+        touch(&mnt, a);
+        touch(&mnt, b);
+        delete_files(&mnt, &[a.to_owned(), b.to_owned()]).expect("all present deletes");
+        assert!(!mnt.join(a).exists());
+        assert!(!mnt.join(b).exists());
+        std::fs::remove_dir_all(&mnt).ok();
+    }
+
+    #[test]
+    fn delete_files_is_idempotent_when_all_absent() {
+        let mnt = temp_mnt("absent");
+        let a = "TeslaCam/SavedClips/e/2026-06-01_20-10-04-front.mp4";
+        // Nothing created: a retried delete of an already-gone clip must succeed.
+        delete_files(&mnt, &[a.to_owned()]).expect("all absent is idempotent success");
+        std::fs::remove_dir_all(&mnt).ok();
+    }
+
+    #[test]
+    fn delete_files_refuses_a_mixed_set_and_deletes_nothing() {
+        let mnt = temp_mnt("mixed");
+        let present = "TeslaCam/SavedClips/e/2026-06-01_20-10-04-front.mp4";
+        let absent = "TeslaCam/SavedClips/e/2026-06-01_20-10-04-back.mp4";
+        touch(&mnt, present);
+        let err = delete_files(&mnt, &[present.to_owned(), absent.to_owned()])
+            .expect_err("mixed present/absent is refused");
+        assert!(err.to_string().contains("inconsistent state"));
+        // Fail closed: the present file must NOT have been deleted.
+        assert!(mnt.join(present).exists());
+        std::fs::remove_dir_all(&mnt).ok();
+    }
+
+    #[test]
+    fn delete_files_refuses_a_directory_target() {
+        let mnt = temp_mnt("dir");
+        let dir_rel = "TeslaCam/SavedClips/2026-06-01_20-10-04";
+        std::fs::create_dir_all(mnt.join(dir_rel)).unwrap();
+        let err = delete_files(&mnt, &[dir_rel.to_owned()]).expect_err("a directory is refused");
+        assert!(err.to_string().contains("non-regular file"));
+        assert!(mnt.join(dir_rel).exists());
+        std::fs::remove_dir_all(&mnt).ok();
+    }
+
+    #[test]
+    fn delete_files_refuses_a_duplicate_path() {
+        let mnt = temp_mnt("dup");
+        let a = "TeslaCam/SavedClips/e/2026-06-01_20-10-04-front.mp4";
+        touch(&mnt, a);
+        let err = delete_files(&mnt, &[a.to_owned(), a.to_owned()])
+            .expect_err("duplicate present path is refused");
+        assert!(err.to_string().contains("duplicate"));
+        std::fs::remove_dir_all(&mnt).ok();
+    }
 
     #[test]
     fn unescape_mountinfo_decodes_octal_spaces() {

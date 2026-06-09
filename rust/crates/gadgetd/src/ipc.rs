@@ -244,9 +244,8 @@ fn request_mutation(state: &ServeState, partition: u8, mutation: &Mutation) -> s
         Ok(p) => p,
         Err(e) => return json!({ "refused": e }),
     };
-    // Validate the path(s) up front so a bad request never even ejects.
-    if let Err(e) = handoff::validate_rel_path(mutation.rel_path()) {
-        return json!({ "refused": format!("invalid rel_path: {e}") });
+    if let Err(e) = mutation.validate() {
+        return json!({ "refused": format!("invalid mutation: {e}") });
     }
 
     // Serialize: a second handoff is refused, never queued (spec §4).

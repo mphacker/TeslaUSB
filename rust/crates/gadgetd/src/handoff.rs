@@ -65,6 +65,15 @@ pub(crate) enum Mutation {
         /// Partition-root-relative path to remove.
         rel_path: String,
     },
+    /// Delete a SET of individual files in a SINGLE handoff (one eject), e.g. the
+    /// camera-angle files of one clip. Unlike [`Mutation::DeletePath`], each entry
+    /// must resolve to a regular file (never a directory) so a clip-granular delete
+    /// can never recurse into and remove sibling clips or a whole event folder. An
+    /// already-absent path is treated as success, so a retried delete is safe.
+    DeletePaths {
+        /// Partition-root-relative file paths to remove (1..=[`MAX_DELETE_PATHS`]).
+        rel_paths: Vec<String>,
+    },
     /// Copy a staged file from `source_path` (outside the image) to `rel_path`
     /// under the mounted partition root, via a temp file + atomic rename.
     InstallFile {
@@ -75,12 +84,39 @@ pub(crate) enum Mutation {
     },
 }
 
+/// Upper bound on the number of paths in a single [`Mutation::DeletePaths`]. A
+/// clip has one file per camera (≤6 today); the cap leaves head-room while
+/// keeping the bounded single-mount delete loop honest.
+pub(crate) const MAX_DELETE_PATHS: usize = 16;
+
 impl Mutation {
-    /// The validated, root-relative destination/target path of this mutation.
-    pub(crate) fn rel_path(&self) -> &str {
+    /// Validate every path this mutation carries (and any set-size bounds)
+    /// up-front, so a malformed request is refused before the LUN is ever
+    /// ejected.
+    ///
+    /// # Errors
+    /// Returns a human-readable reason for the first rejected path or bound.
+    pub(crate) fn validate(&self) -> Result<(), String> {
         match self {
-            Self::DeletePath { rel_path } | Self::InstallFile { rel_path, .. } => rel_path,
+            Self::DeletePath { rel_path } | Self::InstallFile { rel_path, .. } => {
+                validate_rel_path(rel_path)?;
+            }
+            Self::DeletePaths { rel_paths } => {
+                if rel_paths.is_empty() {
+                    return Err("delete_paths: empty path set".to_owned());
+                }
+                if rel_paths.len() > MAX_DELETE_PATHS {
+                    return Err(format!(
+                        "delete_paths: {} paths exceed the cap of {MAX_DELETE_PATHS}",
+                        rel_paths.len()
+                    ));
+                }
+                for rel_path in rel_paths {
+                    validate_rel_path(rel_path)?;
+                }
+            }
         }
+        Ok(())
     }
 }
 
@@ -346,6 +382,39 @@ mod tests {
             "TeslaCam/clip.mp4"
         );
         assert_eq!(validate_rel_path("event123").unwrap(), "event123");
+    }
+
+    #[test]
+    fn mutation_validate_bounds_delete_paths_set() {
+        // Good: a small set of valid file paths.
+        let ok = Mutation::DeletePaths {
+            rel_paths: vec![
+                "TeslaCam/SavedClips/2026-06-01_20-10-04/2026-06-01_20-10-04-front.mp4".to_owned(),
+                "TeslaCam/SavedClips/2026-06-01_20-10-04/2026-06-01_20-10-04-back.mp4".to_owned(),
+            ],
+        };
+        assert!(ok.validate().is_ok());
+
+        // Empty set is refused (nothing to do, and an empty handoff is wasteful).
+        assert!(
+            Mutation::DeletePaths { rel_paths: vec![] }
+                .validate()
+                .is_err()
+        );
+
+        // Over the cap is refused before any eject.
+        let too_many = Mutation::DeletePaths {
+            rel_paths: (0..=super::MAX_DELETE_PATHS)
+                .map(|i| format!("TeslaCam/SavedClips/e/{i}.mp4"))
+                .collect(),
+        };
+        assert!(too_many.validate().is_err());
+
+        // A single traversal entry poisons the whole set.
+        let bad = Mutation::DeletePaths {
+            rel_paths: vec!["TeslaCam/ok.mp4".to_owned(), "../escape".to_owned()],
+        };
+        assert!(bad.validate().is_err());
     }
 
     // ---- Fakes for the orchestration tests ----

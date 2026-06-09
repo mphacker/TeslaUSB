@@ -48,6 +48,7 @@ pub(crate) fn router(state: AppState, static_dir: PathBuf) -> Router {
         )
         .route("/analytics", get(analytics))
         .route("/settings", get(settings))
+        .merge(crate::health::routes())
         .fallback(api_not_found)
         .with_state(state);
 

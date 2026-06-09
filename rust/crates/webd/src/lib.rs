@@ -32,11 +32,13 @@
 mod catalog;
 mod dto;
 mod error;
+mod health;
 mod media;
 mod polyline;
 mod query;
 mod range;
 mod route;
+mod sysinfo;
 
 #[cfg(test)]
 mod tests;
@@ -62,6 +64,17 @@ struct AppState {
     catalog: Catalog,
     media: MediaConfig,
     export_sem: Arc<Semaphore>,
+    sys: SysHandle,
+}
+
+/// The read-only system-probe handle carried in [`AppState`] for the
+/// device-status endpoints. Cloning is cheap (`Arc`-backed). It carries no
+/// service clients — only a kernel-fact probe and the paths to probe — so the
+/// web backend stays a read-only observer (`webd.md` §4).
+#[derive(Clone)]
+struct SysHandle {
+    probe: Arc<dyn sysinfo::SystemProbe>,
+    paths: Arc<sysinfo::SysPaths>,
 }
 
 /// Build the full `webd` application router: the `/api/*` read endpoints plus
@@ -73,10 +86,17 @@ struct AppState {
 /// the JSON error envelope (never the SPA shell). `media` supplies the archive
 /// root (the jail for streamed/exported files) and the zip-export cache dir.
 pub fn build_router(catalog: Catalog, static_dir: PathBuf, media: MediaConfig) -> Router {
+    let sys = SysHandle {
+        probe: Arc::new(sysinfo::LinuxProbe),
+        paths: Arc::new(sysinfo::SysPaths {
+            archive_root: media.archive_root_path(),
+        }),
+    };
     let state = AppState {
         catalog,
         media,
         export_sem: Arc::new(Semaphore::new(MAX_CONCURRENT_EXPORTS)),
+        sys,
     };
     route::router(state, static_dir)
 }

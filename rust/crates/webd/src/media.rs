@@ -101,6 +101,13 @@ impl MediaConfig {
             cache_dir: Arc::new(cache_dir),
         }
     }
+
+    /// The canonical archive root — the Pi-side data filesystem the
+    /// device-status endpoints probe (`statvfs`, writability, mount facts).
+    #[must_use]
+    pub(crate) fn archive_root_path(&self) -> PathBuf {
+        self.archive_root.as_ref().clone()
+    }
 }
 
 /// Query string of `GET /api/clips/{id}/stream`.

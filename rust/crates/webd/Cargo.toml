@@ -39,6 +39,14 @@ zip = { version = "7", default-features = false }
 # in memory. Promoted from a dev-dependency to a runtime dependency.
 tempfile = "3"
 
+# Unix-only: the read-only device-status endpoints (system/storage health,
+# webd.md §2.2/§3) need statvfs(3) + access(2). rustix exposes both via SAFE
+# wrappers (the workspace denies unsafe_code), and is already in the tree as a
+# transitive dep. cfg(unix)-gated so the non-Linux build host still compiles
+# (statvfs/writability degrade to None/false there).
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs"] }
+
 [dev-dependencies]
 # Tests build a fixture catalog via indexd's authoritative migration
 # ladder so they bind to the as-built schema. webd never depends on

@@ -1,0 +1,162 @@
+/*
+ * Failed jobs screen styling.
+ *
+ * Self-contained and themed entirely through the design-system CSS custom
+ * properties (no hard-coded palette values, so light/dark/high-contrast follow
+ * automatically), matching the house card/border/pill/definition-list look the
+ * sibling read-only screens (storage health, media hub) already use. Every
+ * selector is scoped under `.failed-jobs-page` so nothing bleeds into other
+ * screens sharing the bundle.
+ */
+.failed-jobs-page { display: grid; gap: var(--space-6); }
+
+.failed-jobs-page .fj-header,
+.failed-jobs-page .fj-card,
+.failed-jobs-page .fj-item {
+  padding: var(--space-6);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  display: grid;
+  gap: var(--space-4);
+}
+
+.failed-jobs-page .fj-header-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--space-3); flex-wrap: wrap;
+}
+
+.failed-jobs-page .fj-title {
+  margin: 0; color: var(--text-primary); font-size: var(--text-3xl);
+}
+
+.failed-jobs-page .fj-copy {
+  margin: 0; color: var(--text-secondary); font-size: var(--text-sm);
+  max-width: 70ch;
+}
+
+.failed-jobs-page .fj-status {
+  margin: 0; color: var(--text-secondary); font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+/* Refresh / Retry buttons — neutral, touch-friendly (>=44px tap target). */
+.failed-jobs-page .fj-refresh,
+.failed-jobs-page .fj-retry {
+  display: inline-flex; align-items: center; gap: var(--space-2);
+  min-height: 44px;
+  padding: var(--space-2) var(--space-4);
+  background: var(--form-input-bg);
+  border: 1px solid var(--border-input);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+.failed-jobs-page .fj-refresh:hover:not(:disabled),
+.failed-jobs-page .fj-retry:hover { border-color: var(--text-secondary); }
+.failed-jobs-page .fj-refresh:disabled { opacity: 0.6; cursor: default; }
+.failed-jobs-page .fj-refresh:focus-visible,
+.failed-jobs-page .fj-retry:focus-visible {
+  outline: 2px solid var(--accent-primary, #2f81f7);
+  outline-offset: 2px;
+}
+.failed-jobs-page .fj-refresh-icon { width: 16px; height: 16px; }
+
+/* Refresh spinner while loading — disabled under reduced-motion. */
+.failed-jobs-page .fj-spin { animation: fj-spin 1s linear infinite; transform-origin: center; }
+@keyframes fj-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .failed-jobs-page .fj-spin { animation: none; }
+}
+
+/* List of failed-job cards. */
+.failed-jobs-page .fj-list { display: grid; gap: var(--space-4); }
+
+.failed-jobs-page .fj-cap-note {
+  margin: 0;
+  padding: var(--space-3);
+  background: var(--bg-tertiary, var(--form-input-bg));
+  border: 1px dashed var(--border-input);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+
+.failed-jobs-page .fj-item-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--space-3); flex-wrap: wrap;
+}
+.failed-jobs-page .fj-kind {
+  color: var(--text-primary); font-weight: 600; font-size: var(--text-base);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+}
+
+/* "Failed" badge — design-system error accent. */
+.failed-jobs-page .fj-badge {
+  display: inline-flex; align-items: center; gap: var(--space-2);
+  padding: var(--space-1, 4px) var(--space-3);
+  border-radius: 999px;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  border: 1px solid var(--border-input);
+  color: var(--accent-error, #f85149);
+}
+.failed-jobs-page .fj-badge .fj-dot {
+  width: 10px; height: 10px; border-radius: 50%; display: inline-block;
+  flex-shrink: 0; background: var(--accent-error, #f85149);
+}
+
+/* Definition list of job facts (label / value pairs). */
+.failed-jobs-page .fj-dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: minmax(96px, max-content) 1fr;
+  gap: var(--space-2) var(--space-4);
+  font-size: var(--text-sm);
+}
+.failed-jobs-page .fj-dl dt { color: var(--text-secondary); }
+.failed-jobs-page .fj-dl dd { margin: 0; color: var(--text-primary); }
+.failed-jobs-page .fj-mono {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-variant-numeric: tabular-nums;
+}
+/* Long, untrusted strings (handoff ids, error detail) must wrap on mobile. */
+.failed-jobs-page .fj-wrap { overflow-wrap: anywhere; word-break: break-word; }
+.failed-jobs-page .fj-detail { color: var(--text-secondary); }
+
+/* Loading / error / empty primitives. */
+.failed-jobs-page .fj-note { color: var(--text-secondary); font-size: var(--text-sm); }
+
+.failed-jobs-page .fj-error { border-color: var(--accent-error, #f85149); }
+.failed-jobs-page .fj-error-head {
+  display: flex; align-items: center; gap: var(--space-2);
+  color: var(--text-primary); font-size: var(--text-base);
+}
+.failed-jobs-page .fj-error-icon {
+  width: 20px; height: 20px; color: var(--accent-error, #f85149); flex-shrink: 0;
+}
+.failed-jobs-page .fj-retry { justify-self: start; }
+
+.failed-jobs-page .fj-empty {
+  justify-items: center; text-align: center; gap: var(--space-2);
+}
+.failed-jobs-page .fj-empty-icon {
+  width: 40px; height: 40px; color: var(--accent-success, #2ea043);
+}
+.failed-jobs-page .fj-empty-title {
+  margin: 0; color: var(--text-primary); font-size: var(--text-xl); font-weight: 600;
+}
+.failed-jobs-page .fj-empty-copy {
+  margin: 0; color: var(--text-secondary); font-size: var(--text-sm);
+}
+
+@media (max-width: 48rem) {
+  .failed-jobs-page .fj-header,
+  .failed-jobs-page .fj-card,
+  .failed-jobs-page .fj-item { padding: var(--space-4); }
+  .failed-jobs-page .fj-dl { grid-template-columns: 1fr; gap: var(--space-1, 4px) 0; }
+  .failed-jobs-page .fj-dl dt { margin-top: var(--space-2); }
+}

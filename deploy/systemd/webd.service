@@ -12,6 +12,12 @@
 # are intentionally omitted here. The OOM order (SPEC.md §7) is encoded via
 # OOMScoreAdjust.
 #
+# Privileged-port note: webd serves the UI on port 80 (the parity Python app's
+# port). 80 is privileged (<1024); this works because webd currently runs as
+# root (no User= yet). When M5 / Task 7.4c introduces a dedicated non-root User=,
+# this unit MUST also gain `AmbientCapabilities=CAP_NET_BIND_SERVICE` (and a
+# matching CapabilityBoundingSet) so the unprivileged user can still bind :80.
+#
 # Install: copy to /etc/systemd/system/webd.service, then
 #   systemctl daemon-reload && systemctl enable webd.service
 [Unit]
@@ -38,7 +44,7 @@ Type=simple
 # exports don't pressure the 512 MB Pi's RAM-backed /tmp.
 Environment=WEBD_DB=/var/lib/teslausb/index.sqlite3
 Environment=WEBD_STATIC=/usr/local/share/teslausb/spa
-Environment=WEBD_BIND=0.0.0.0:8080
+Environment=WEBD_BIND=0.0.0.0:80
 Environment=WEBD_ARCHIVE_ROOT=/data/teslausb/archive
 Environment=WEBD_CACHE_DIR=/data/teslausb/cache
 ExecStart=/usr/local/bin/webd

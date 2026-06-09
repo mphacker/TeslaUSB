@@ -103,6 +103,12 @@ this rebuild preserves it — do **not** silently add or remove authentication
 - [ ] Runs within `MemoryMax`; in the OOM kill order it is killed **after**
       `uploadd`/`wifid` and **before** `scannerd`/`retentiond`/`indexd`; `gadgetd`
       is never killed (canonical order: [`SPEC.md` §7](./SPEC.md)).
+- [ ] Binds the **privileged port 80** (parity with the legacy Python app). This
+      works only while webd runs as root. **M5 / Task 7.4c gate:** when the
+      dedicated non-root `User=` lands, `webd.service` MUST also carry
+      `AmbientCapabilities=CAP_NET_BIND_SERVICE` (and a matching
+      `CapabilityBoundingSet`) or it will fail closed at bind — verify the SPA is
+      reachable on :80 as a non-root user before signing off the hardening task.
 
 ## 6. Testing
 

@@ -73,6 +73,13 @@ export { expect };
 
 /** Read APIs the settings-dashboard screen is permitted to call. webd is
  *  read-only; anything outside this set (or any non-GET) is a hard failure.
- *  The dashboard's only live read is /api/settings (config-form bindings); the
- *  full catalog client is exercised separately by api-client.spec.ts. */
-export const ALLOWED_API = new Set(["/api/settings", "/api/clips"]);
+ *  The dashboard reads /api/settings (config-form bindings), /api/clips (Video
+ *  Indexer enrichment), and the three read-only device-status probes (5.1d).
+ *  The full catalog client is exercised separately by api-client.spec.ts. */
+export const ALLOWED_API = new Set([
+  "/api/settings",
+  "/api/clips",
+  "/api/system/health",
+  "/api/system/metrics",
+  "/api/storage/health",
+]);

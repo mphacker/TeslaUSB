@@ -14,17 +14,17 @@ import { resolve } from "node:path";
 // Each test drives the REAL bundle served by webd against a seeded read-only
 // catalog (global-setup). Fresh context per test ⇒ cold cache, no bleed.
 //
-// PARITY: the home screen is a faithful reproduction of the legacy Flask
-// settings/device-status dashboard captured at
-// docs/tasks/parity-baseline/media-hub/. webd's read-only catalog API does NOT
-// serve the legacy system services (/api/system/health|metrics, /api/storage/
-// health) or any mutation route, so the device-status, System Health, Live
-// Metrics and Storage Health sections render the legacy template's DEGRADED /
-// LOADING / UNKNOWN initial state — the parity the integrator endorsed ("a
-// catalog-only webd organically reproduces that look — that IS parity"). We
-// assert that degraded-state structure + copy and capture screenshots as
-// artifacts; we do NOT pixel-diff the PNG (the captured PNG shows the populated
-// dev-box probe data, which a read-only build cannot and must not fabricate).
+// PARITY + LIVE DATA: the home screen reproduces the legacy Flask settings /
+// device-status dashboard captured at docs/tasks/parity-baseline/media-hub/.
+// As of 5.1d, webd serves read-only device-status probes (/api/system/health,
+// /api/system/metrics, /api/storage/health) and the screen renders them. Those
+// handlers never 5xx and degrade to unknown/null for anything webd cannot
+// observe honestly, so unprobed subsystems still render the legacy "unknown /
+// —" state. To keep assertions deterministic and host-independent, the
+// functional-parity test intercepts the three probes with fixtures and proves
+// the UI renders them; the clean/read-only/wiring tests hit the REAL endpoints
+// to prove they return 2xx with a clean console. We capture screenshots as
+// artifacts; we do NOT pixel-diff the PNG.
 
 const SECTION_ORDER = [
   "System Health",
@@ -38,11 +38,56 @@ const SECTION_ORDER = [
   "System",
 ];
 
+// Deterministic device-status fixtures (5.1d). Field names mirror the webd
+// serde DTOs exactly. Used by the functional-parity test via route interception
+// so the assertions never depend on the build host's real /proc or disk.
+const HEALTH_FIXTURE = {
+  overall: "ok",
+  subsystems: {
+    gadget: { severity: "ok", message: "USB gadget configured (attached)" },
+    disk: { severity: "ok", message: "50.0 GB free of 64.0 GB (78%)" },
+    storage_writable: { severity: "ok", message: "archive root writable" },
+  },
+};
+const METRICS_FIXTURE = {
+  uptime_s: 123456,
+  load: { one: 0.15, five: 0.22, fifteen: 0.18 },
+  mem: { total_bytes: 536870912, available_bytes: 268435456, used_pct: 50 },
+  swap: null,
+  updated_at: 1700000000,
+};
+const STORAGE_FIXTURE = {
+  severity: "ok",
+  summary: "50.0 GB free of 64.0 GB",
+  device: "/dev/mmcblk0p2",
+  fstype: "ext4",
+  mount: "/data",
+  used_bytes: 15032385536,
+  total_bytes: 68719476736,
+  fs_errors: null,
+  io_errors_24h: null,
+  trim: null,
+};
+
+/** Intercept the three device-status probes with deterministic fixtures so the
+ *  functional-parity assertions are host-independent. Must be called BEFORE the
+ *  navigation that triggers the screen's mount-time fetches. */
+async function routeSystemProbes(page: Page) {
+  const json = (body: unknown) => ({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify(body),
+  });
+  await page.route("**/api/system/health", (r) => r.fulfill(json(HEALTH_FIXTURE)));
+  await page.route("**/api/system/metrics", (r) => r.fulfill(json(METRICS_FIXTURE)));
+  await page.route("**/api/storage/health", (r) => r.fulfill(json(STORAGE_FIXTURE)));
+}
+
 /** Settle: bundle executed, dashboard structure painted. */
 async function gotoDashboard(page: Page) {
   await page.goto("/settings", { waitUntil: "load" });
   await expect(page.locator("[data-screen=settings-dashboard]")).toBeVisible();
-  await expect(page.locator(".device-status-card")).toContainText("Status Unknown");
+  await expect(page.locator(".device-status-card")).toBeVisible();
 }
 
 function assertCleanConsole(probe: Probe) {
@@ -59,10 +104,11 @@ function assertCleanConsole(probe: Probe) {
 
 test.describe("settings dashboard UAT", () => {
   // ── Gate 1: functional + structural parity ─────────────────────────────
-  test("functional parity — shell, degraded device/health/metrics, section order", async ({
+  test("functional parity — shell, live device/health/metrics, section order", async ({
     page,
     probe,
   }, testInfo) => {
+    await routeSystemProbes(page);
     await gotoDashboard(page);
 
     // App shell (base.html parity): brand + toast region.
@@ -79,43 +125,50 @@ test.describe("settings dashboard UAT", () => {
     await expect(activeNav).toHaveAttribute("aria-current", "page");
     await expect(activeNav).toContainText("Settings");
 
-    // Device status — degraded "unknown" banner (exact baseline copy).
-    const card = page.locator(".device-status-card.device-status-unknown");
+    // Device status — driven by health.overall ("ok" fixture → Online banner).
+    const card = page.locator(".device-status-card.device-status-ok");
     await expect(card).toBeVisible();
-    await expect(card).toContainText("Status Unknown");
-    await expect(card).toContainText("Unable to determine current device status.");
+    await expect(card).toContainText("Online");
+    await expect(card).toContainText("All systems nominal.");
 
-    // System Health — open. The legacy /api/system/health probe is not in the
-    // read-only catalog API, so the overall stays the legacy degraded default
-    // and every subsystem row degrades to the legacy "—" state, EXCEPT Video
-    // Indexer, which is populated from real catalog data (seed = 6 clips).
+    // System Health — open. overall + the three probed subsystem rows come from
+    // the fixture; Video Indexer comes from the real catalog (seed = 6 clips);
+    // the remaining six subsystems have no probe data and degrade to "—".
     const sh = page.locator("#system-health-section");
     await expect(sh).toHaveAttribute("open", "");
-    await expect(page.locator("#system-health-overall-text")).toHaveText("Unknown");
+    await expect(page.locator("#system-health-overall-text")).toHaveText("Healthy");
     await expect(
-      sh.locator("#system-health-overall .health-dot.health-dot-unknown"),
+      sh.locator("#system-health-overall .health-dot.health-dot-ok"),
     ).toBeVisible();
-    // 10 legacy subsystem rows × 3 grid cells = 30 direct children.
+    // 10 subsystem rows × 3 grid cells = 30 direct children.
     await expect(page.locator("#system-health-rows > div")).toHaveCount(30);
     const shText = await page.locator("#system-health-rows").innerText();
-    expect(shText).toContain("USB Gadget"); // a system-probe label is present
+    expect(shText).toContain("USB Gadget");
+    expect(shText).toContain("USB gadget configured (attached)"); // probe message
+    expect(shText).toContain("archive root writable");
     expect(shText).toContain("Video Indexer");
     // Video Indexer carries REAL catalog data in the baseline's exact phrasing.
     expect(shText).toMatch(/6 clips indexed; newest is \d+ d old/);
-    // Every other (non-catalog) subsystem degrades to "—" — none is fabricated.
-    expect((shText.match(/—/g) ?? []).length).toBe(9);
+    // The six unprobed subsystems degrade to "—" — none is fabricated.
+    expect((shText.match(/—/g) ?? []).length).toBe(6);
 
-    // Live Metrics — open, six zero-state tiles, "—" footer (no fabricated nums).
+    // Live Metrics — open; load/mem/uptime from the fixture, CPU + SD/USB I/O
+    // and the (null) swap stay "—" (webd does not sample those — not fabricated).
     const lm = page.locator("#live-metrics-section");
     await expect(lm).toHaveAttribute("open", "");
     const tiles = page.locator("#live-metrics-grid .metric-tile");
     await expect(tiles).toHaveCount(6);
-    for (let i = 0; i < 6; i++) {
-      await expect(tiles.nth(i).locator(".metric-value")).toHaveText("—");
-    }
+    await expect(page.locator("#metric-load .metric-value")).toHaveText(
+      "0.15 / 0.22 / 0.18",
+    );
+    await expect(page.locator("#metric-mem .metric-value")).toHaveText("50%");
+    await expect(page.locator("#metric-mem .metric-detail")).toHaveText(
+      "256 MB / 512 MB",
+    );
+    await expect(page.locator("#metric-cpu .metric-value")).toHaveText("—");
+    await expect(page.locator("#metric-swap .metric-value")).toHaveText("—");
     await expect(page.locator("#live-metrics-foot")).toContainText("Updated");
-    await expect(page.locator("#live-metrics-updated")).toHaveText("—");
-    await expect(page.locator("#live-metrics-uptime")).toHaveText("—");
+    await expect(page.locator("#live-metrics-uptime")).toHaveText("up 1d 10h 17m");
 
     // WiFi + Access Point — degraded read-only copy (no nmcli/AP tooling).
     await expect(page.locator("#savedNetworksList")).toContainText(
@@ -126,20 +179,30 @@ test.describe("settings dashboard UAT", () => {
     });
     await expect(ap).toContainText("AP status unavailable");
 
-    // Storage Health — static "checking" skeleton; ALL six rows are "—" (none
-    // may be fabricated from a live probe webd does not serve).
-    await expect(page.locator("#storage-health-summary")).toHaveText("Checking…");
+    // Storage Health — severity/summary/device/fs/mount from the fixture; the
+    // wear-telemetry rows (fs errors, I/O errors, TRIM) stay "—" (SD exposes
+    // none — never fabricated).
+    await expect(page.locator("#storage-health-summary")).toHaveText(
+      "50.0 GB free of 64.0 GB",
+    );
     await expect(page.locator("#storage-health-grid dd")).toHaveText([
-      "—", "—", "—", "—", "—", "—",
+      "/dev/mmcblk0p2",
+      "ext4",
+      "/data",
+      "—",
+      "—",
+      "—",
     ]);
 
-    // System — host facts are unknown in the read-only build (not fabricated);
-    // only the static B-1 version string is shown.
+    // System — Uptime + Memory now come from the metrics fixture; Hostname / IP
+    // / Platform remain unknown in the read-only build (not fabricated).
     const sys = page.locator("details.settings-section", {
-      has: page.locator("summary", { hasText: "System" }),
+      has: page.locator("summary", { hasText: /^System$/ }),
     });
     await expect(sys.locator("strong")).toHaveText("—"); // Hostname value
     await expect(sys.locator("code")).toHaveText("B-1");
+    await expect(sys).toContainText("up 1d 10h 17m");
+    await expect(sys).toContainText("256 MB / 512 MB");
 
     // /api/settings binding proof — these fields are populated from the live
     // settings response and the seed sets them to NON-DEFAULT values, so each
@@ -230,10 +293,22 @@ test.describe("settings dashboard UAT", () => {
       return seen;
     }
     const apiSeen = assertOnlyWhitelistedApi();
-    // The config bindings + the Video Indexer enrichment prove the catalog API
-    // is actually wired in (settings → forms, clips → System Health row).
+    // The config bindings + the Video Indexer enrichment + the device-status
+    // probes prove the catalog API is actually wired in.
     expect(apiSeen.has("/api/settings"), "/api/settings was never requested").toBe(true);
     expect(apiSeen.has("/api/clips"), "/api/clips was never requested").toBe(true);
+    expect(
+      apiSeen.has("/api/system/health"),
+      "/api/system/health was never requested",
+    ).toBe(true);
+    expect(
+      apiSeen.has("/api/system/metrics"),
+      "/api/system/metrics was never requested",
+    ).toBe(true);
+    expect(
+      apiSeen.has("/api/storage/health"),
+      "/api/storage/health was never requested",
+    ).toBe(true);
 
     // ACTIVELY exercise the mutation surface: expand every section, then prove
     // each config <form> swallows its submit (onSubmit preventDefault) and that
@@ -281,8 +356,8 @@ test.describe("settings dashboard UAT", () => {
     await gotoDashboard(page);
     await page.waitForLoadState("networkidle");
     // Bounded post-load window: a regression that introduces a delayed poller
-    // (e.g. a timer that fetches the absent /api/system/health) would log a
-    // console error / produce a non-2xx here rather than escaping the gate.
+    // or a probe that 5xx's (e.g. a timer hammering /api/system/health) would
+    // log a console error / produce a non-2xx here rather than escaping the gate.
     await page.waitForTimeout(750);
 
     assertCleanConsole(probe);

@@ -130,6 +130,23 @@ impl StabilityTracker {
     pub fn tracked_len(&self) -> usize {
         self.states.len()
     }
+
+    /// Re-arm every already-emitted file so the next [`Self::observe`]
+    /// re-emits each one that is still eligible — i.e. replays the full
+    /// currently-stable set instead of only newly-eligible files.
+    ///
+    /// This backs the daemon's `resync` path: the consumer (which owns the
+    /// durable, rebuildable DB) asks for a replay on first connect or after
+    /// an apply failure, recovering a batch that was produced (the tracker
+    /// already advanced past it) but never durably committed. It only
+    /// clears the `emitted` flag; the fingerprint / settle window are left
+    /// intact, so a clip the car is still writing — which was never emitted
+    /// — is unaffected and cannot be falsely replayed.
+    pub fn arm_resync(&mut self) {
+        for state in self.states.values_mut() {
+            state.emitted = false;
+        }
+    }
 }
 
 /// Decide eligibility for a single observed record.
@@ -255,6 +272,32 @@ mod tests {
         assert!(t2.observe(&grown, 5).is_empty()); // changed → reset
         assert!(t2.observe(&grown, 12).is_empty()); // only 1 stable scan since reset window/quiescence
         assert_eq!(t2.observe(&grown, 20), vec![0]);
+    }
+
+    #[test]
+    fn arm_resync_replays_currently_stable_clips() {
+        let mut t = StabilityTracker::new(config());
+        let recs = vec![record("2026-06-01_20-10-04-front.mp4", 1000, 1000)];
+        assert!(t.observe(&recs, 0).is_empty());
+        assert_eq!(t.observe(&recs, 20), vec![0]); // emitted once
+        assert!(t.observe(&recs, 30).is_empty()); // not re-emitted
+        // A resync re-arms the emitted flag, so the next observe replays it.
+        t.arm_resync();
+        assert_eq!(t.observe(&recs, 40), vec![0]);
+        // And only once more — the flag is set again after the replay.
+        assert!(t.observe(&recs, 50).is_empty());
+    }
+
+    #[test]
+    fn arm_resync_does_not_emit_an_unsettled_clip() {
+        let mut t = StabilityTracker::new(config());
+        // Mid-write clip (VDL < DataLength) is never eligible.
+        let recs = vec![record("2026-06-01_20-10-04-front.mp4", 500, 1000)];
+        assert!(t.observe(&recs, 0).is_empty());
+        assert!(t.observe(&recs, 20).is_empty());
+        t.arm_resync();
+        // Re-arming must not conjure an emit for a clip that never settled.
+        assert!(t.observe(&recs, 40).is_empty());
     }
 
     /// Adversarial record with explicit completeness/consistency fields.

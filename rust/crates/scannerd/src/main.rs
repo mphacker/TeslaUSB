@@ -17,6 +17,9 @@ use std::process::ExitCode;
 #[cfg(unix)]
 mod io;
 
+#[cfg(unix)]
+mod serve;
+
 #[cfg(not(unix))]
 fn main() -> ExitCode {
     eprintln!("scannerd: this binary runs on Linux (the Pi) only");
@@ -68,8 +71,19 @@ mod unix_app {
     /// Run the binary.
     pub fn run() -> ExitCode {
         let args: Vec<String> = std::env::args().collect();
+
+        // `serve` is the production daemon mode: bind the IPC socket and
+        // stream facts to indexd. The bare `<image>` / `--watch` modes
+        // remain the read-only diagnostic spike vehicles.
+        if args.get(1).map(String::as_str) == Some("serve") {
+            return crate::serve::run_serve(&args);
+        }
+
         let Some(path) = args.get(1) else {
-            eprintln!("usage: scannerd <image-path> [--watch <interval_secs> <iterations>]");
+            eprintln!(
+                "usage: scannerd <image-path> [--watch <interval_secs> <iterations>]\n       \
+                 scannerd serve <image-path> [--socket <path>] [--sample-rate <n>]"
+            );
             return ExitCode::FAILURE;
         };
 

@@ -23,9 +23,11 @@ import "../styles/player.css";
  * ref" pattern as `map/controller.ts`. The controller reads telemetry from the
  * streamed MP4's embedded SEI in production, or from a UAT-seeded fixture.
  *
- * DEFERRED (webd 5.1c, routed through the unbuilt gadgetd eject hand-off): the
- * delete-clip and archive-to-cloud mutations. Both render inert/disabled here,
- * exactly as the media-hub did for its deferred mutation forms.
+ * DEFERRED (webd 5.1c): the archive-to-cloud mutation renders inert/disabled
+ * here, exactly as the media-hub did for its deferred mutation forms. The
+ * delete-clip mutation IS wired (webd `DELETE /api/clips/:id?target=car`, the
+ * `gadgetd` eject-handoff): an operator-gated confirm dialog issues a single
+ * synchronous, terminal delete and reflects success/busy-retry/error inline.
  *
  * FLAG (nav placement): there is no "events" NavKey, so this screen highlights
  * "map" — the existing reversible router default. webd also exposes no city for
@@ -98,6 +100,95 @@ function errMessage(err: unknown): string {
     : (err as Error).message;
 }
 
+/** How the delete UI should react to a failed `deleteClip` call. */
+interface DeleteFailure {
+  message: string;
+  /** Transient — keep the dialog open and offer a Retry button. */
+  retryable: boolean;
+  /** The clip is already gone from the car — treat as a soft success (remove it). */
+  softGone: boolean;
+}
+
+/**
+ * Map a `deleteClip` rejection to operator-facing UI state, keyed on the HTTP
+ * `status` (and `code` where it changes the meaning). The contract's terminal
+ * outcomes:
+ *  - `409 handoff_busy` / network → transient, retryable.
+ *  - `409 not_present` / `404`    → already gone from the car → soft success.
+ *  - `503` (gadgetd unreachable)  → distinct message, retryable (may come back).
+ *  - `400` / `422`                → validation, terminal (no retry).
+ *  - `502` / `500` / `501`        → failed / fault / unsupported, terminal.
+ */
+function classifyDeleteFailure(err: unknown): DeleteFailure {
+  if (err instanceof ApiError) {
+    if (err.status === 0 || err.code === "network") {
+      return {
+        message: "Couldn't reach the device. Check the connection and retry.",
+        retryable: true,
+        softGone: false,
+      };
+    }
+    if (err.status === 409) {
+      if (err.code === "not_present") {
+        return {
+          message: "This clip is already gone from the car — removing it.",
+          retryable: false,
+          softGone: true,
+        };
+      }
+      return {
+        message: `${err.message} You can retry in a moment.`,
+        retryable: true,
+        softGone: false,
+      };
+    }
+    if (err.status === 404) {
+      return {
+        message: "That clip no longer exists — removing it.",
+        retryable: false,
+        softGone: true,
+      };
+    }
+    if (err.status === 503) {
+      return {
+        message: "The device is unreachable right now. Try again once it's back.",
+        retryable: true,
+        softGone: false,
+      };
+    }
+    if (err.status === 400 || err.status === 422) {
+      return { message: err.message, retryable: false, softGone: false };
+    }
+    if (err.status === 502) {
+      return {
+        message: `The delete couldn't be completed on the car: ${err.message}`,
+        retryable: false,
+        softGone: false,
+      };
+    }
+    if (err.status === 500) {
+      return {
+        message: `The device reported a fault during delete: ${err.message}`,
+        retryable: false,
+        softGone: false,
+      };
+    }
+    if (err.status === 501) {
+      return {
+        message: "Only car-side delete is available.",
+        retryable: false,
+        softGone: false,
+      };
+    }
+    return { message: err.message, retryable: false, softGone: false };
+  }
+  return {
+    message: (err as Error).message || "Unexpected error.",
+    retryable: true,
+    softGone: false,
+  };
+}
+
 export function EventPlayer() {
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -109,6 +200,15 @@ export function EventPlayer() {
   const [camera, setCamera] = useState("front");
   const [hudOn, setHudOn] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // ── Clip-delete (operator-gated destructive action) ──
+  const [pending, setPending] = useState<{ clipId: number; label: string } | null>(
+    null,
+  );
+  const [deleting, setDeleting] = useState(false);
+  const [deleteFail, setDeleteFail] = useState<DeleteFailure | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const deleteAbortRef = useRef<AbortController | null>(null);
 
   const currentEvent = events && events.length ? events[index] : undefined;
   const streamUrl = clip ? api.streamUrl(clip.id, camera) : "";
@@ -205,6 +305,70 @@ export function EventPlayer() {
 
   const cameraAvailable = (cam: CameraDef): boolean =>
     !!clip && clip.angles.some((a) => a.camera === cam.key);
+
+  // ── Keep `index` in range as the list shrinks (e.g. after a delete). When the
+  //    last clip is removed the list goes empty and `currentEvent` becomes
+  //    undefined; the stream URL collapses to "" and the player shows empty. ──
+  useEffect(() => {
+    if (events && index > Math.max(0, events.length - 1)) {
+      setIndex(Math.max(0, events.length - 1));
+    }
+  }, [events, index]);
+
+  // ── Auto-dismiss the success/soft-gone notice so it doesn't linger. ──
+  useEffect(() => {
+    if (!notice) return;
+    const id = setTimeout(() => setNotice(null), 4000);
+    return () => clearTimeout(id);
+  }, [notice]);
+
+  // ── Abort any in-flight delete if the screen unmounts. ──
+  useEffect(() => () => deleteAbortRef.current?.abort(), []);
+
+  const openDeleteDialog = () => {
+    if (!clip || !currentEvent) return;
+    const label = `${humanize(currentEvent.type)} \u2014 ${fmtDateTime(currentEvent.t)}`;
+    setPending({ clipId: clip.id, label });
+    setDeleteFail(null);
+    setNotice(null);
+  };
+
+  const closeDeleteDialog = () => {
+    if (deleting) return; // can't dismiss mid-flight
+    setPending(null);
+    setDeleteFail(null);
+  };
+
+  /** Remove the deleted clip by stable id (never by the current `index`, which
+   *  can move) and clear the streamed clip if it was the one removed. */
+  const finishDeletion = (clipId: number, msg: string) => {
+    setPending(null);
+    setDeleteFail(null);
+    setNotice(msg);
+    setClip((prev) => (prev && prev.id === clipId ? null : prev));
+    setEvents((prev) => (prev ? prev.filter((e) => e.clip_id !== clipId) : prev));
+  };
+
+  const confirmDelete = async () => {
+    if (!pending || deleting) return;
+    const clipId = pending.clipId;
+    setDeleting(true);
+    setDeleteFail(null);
+    const ac = new AbortController();
+    deleteAbortRef.current = ac;
+    try {
+      await api.deleteClip(clipId, ac.signal);
+      finishDeletion(clipId, "Clip deleted from the car.");
+    } catch (err) {
+      if (ac.signal.aborted) return; // silent: the user/unmount cancelled
+      const fail = classifyDeleteFailure(err);
+      if (fail.softGone) finishDeletion(clipId, fail.message);
+      else setDeleteFail(fail);
+    } finally {
+      if (deleteAbortRef.current === ac) deleteAbortRef.current = null;
+      setDeleting(false);
+    }
+  };
 
   return (
     <div class="event-player-container" data-screen="event-player" ref={containerRef}>
@@ -368,17 +532,97 @@ export function EventPlayer() {
           <div class="camera-label">Archive</div>
         </div>
 
-        {/* Delete clip — DEFERRED (webd 5.1c, gadgetd eject hand-off): inert. */}
-        <div
-          class="camera-option delete-option disabled"
+        {/* Delete clip — operator-gated destructive action (webd car-handoff). */}
+        <button
+          type="button"
+          class={`camera-option delete-option${clip ? "" : " disabled"}`}
           id="deleteButton"
-          title="Delete is deferred to webd 5.1c"
-          aria-disabled="true"
+          onClick={openDeleteDialog}
+          disabled={!clip || deleting}
+          aria-disabled={clip ? "false" : "true"}
+          aria-haspopup="dialog"
+          title={clip ? "Delete this clip from the car" : "No clip to delete"}
         >
           <Icon name="trash-2" class="camera-icon" />
           <div class="camera-label">Delete</div>
-        </div>
+        </button>
       </div>
+
+      {/* Operator-gated delete confirmation (names the clip; no one-click delete). */}
+      {pending && (
+        <div
+          class="delete-modal-backdrop"
+          role="presentation"
+          onClick={closeDeleteDialog}
+        >
+          <div
+            class="delete-modal"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="deleteModalTitle"
+            aria-describedby="deleteModalDesc"
+            data-testid="delete-dialog"
+            onClick={(e: Event) => e.stopPropagation()}
+          >
+            <h3 id="deleteModalTitle" class="delete-modal-title">
+              Delete this clip?
+            </h3>
+            <p id="deleteModalDesc" class="delete-modal-desc">
+              This permanently removes{" "}
+              <strong class="delete-modal-clip">{pending.label}</strong> from the
+              car's USB drive. This can't be undone.
+            </p>
+
+            {deleteFail && (
+              <div
+                class={`delete-modal-status${deleteFail.retryable ? " retryable" : " fatal"}`}
+                role="alert"
+                data-testid="delete-error"
+              >
+                {deleteFail.message}
+              </div>
+            )}
+
+            <div class="delete-modal-actions">
+              <button
+                type="button"
+                class="delete-modal-btn cancel"
+                onClick={closeDeleteDialog}
+                disabled={deleting}
+              >
+                {deleteFail && !deleteFail.retryable ? "Close" : "Cancel"}
+              </button>
+              {(!deleteFail || deleteFail.retryable) && (
+                <button
+                  type="button"
+                  class="delete-modal-btn confirm"
+                  data-testid="delete-confirm"
+                  onClick={confirmDelete}
+                  disabled={deleting}
+                  aria-busy={deleting ? "true" : "false"}
+                >
+                  {deleting ? (
+                    <>
+                      <span class="delete-spinner" aria-hidden="true" /> Deleting
+                      {"\u2026"}
+                    </>
+                  ) : deleteFail ? (
+                    "Retry"
+                  ) : (
+                    "Delete"
+                  )}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {notice && (
+        <div class="event-player-notice" role="status" data-testid="delete-notice">
+          {notice}
+        </div>
+      )}
 
       {error && (
         <div

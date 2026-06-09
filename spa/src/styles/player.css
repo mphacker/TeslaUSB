@@ -462,6 +462,164 @@
   transform: none;
 }
 
+/* The Delete control is a <button>; strip native chrome so it matches the
+   sibling camera-option cards exactly. */
+.event-player-container button.camera-option {
+  font: inherit;
+  color: inherit;
+  margin: 0;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.event-player-container button.camera-option:disabled {
+  cursor: not-allowed;
+}
+
+/* ── Clip-delete confirmation modal (operator-gated destructive action) ── */
+.event-player-container .delete-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 1100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.72);
+  backdrop-filter: blur(4px);
+}
+
+.event-player-container .delete-modal {
+  width: min(440px, 100%);
+  padding: 22px 22px 18px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 14px;
+  background: rgba(28, 28, 30, 0.98);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-family: inherit;
+}
+
+.event-player-container .delete-modal-title {
+  margin: 0 0 8px;
+  font-size: 1.15em;
+  font-weight: 700;
+}
+
+.event-player-container .delete-modal-desc {
+  margin: 0 0 16px;
+  font-size: 0.9em;
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.78);
+}
+
+.event-player-container .delete-modal-clip {
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+}
+
+.event-player-container .delete-modal-status {
+  margin: 0 0 14px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  font-size: 0.84em;
+  line-height: 1.4;
+}
+
+.event-player-container .delete-modal-status.retryable {
+  border: 1px solid rgba(255, 196, 0, 0.4);
+  background: rgba(120, 90, 20, 0.35);
+  color: #ffd864;
+}
+
+.event-player-container .delete-modal-status.fatal {
+  border: 1px solid rgba(255, 59, 48, 0.45);
+  background: rgba(120, 30, 30, 0.4);
+  color: #ff9b94;
+}
+
+.event-player-container .delete-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.event-player-container .delete-modal-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 9px 18px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  font: inherit;
+  font-size: 0.9em;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.event-player-container .delete-modal-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.event-player-container .delete-modal-btn.cancel {
+  border-color: rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.event-player-container .delete-modal-btn.cancel:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.event-player-container .delete-modal-btn.confirm {
+  border-color: rgba(255, 59, 48, 1);
+  background: rgba(255, 59, 48, 0.9);
+  color: #fff;
+}
+
+.event-player-container .delete-modal-btn.confirm:hover:not(:disabled) {
+  background: rgba(255, 59, 48, 1);
+}
+
+.event-player-container .delete-spinner {
+  width: 15px;
+  height: 15px;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: delete-spin 0.7s linear infinite;
+}
+
+@keyframes delete-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .event-player-container .delete-spinner {
+    animation: none;
+  }
+}
+
+/* Success / soft-gone notice after a clip is removed. */
+.event-player-container .event-player-notice {
+  position: absolute;
+  bottom: 110px;
+  left: 50%;
+  z-index: 1101;
+  transform: translateX(-50%);
+  padding: 8px 14px;
+  border: 1px solid rgba(52, 199, 89, 0.5);
+  border-radius: 8px;
+  background: rgba(28, 90, 48, 0.92);
+  color: #fff;
+  font-size: 0.85em;
+}
+
 /* SEI Overlay Toggle */
 .event-player-container .sei-toggle-container {
   display: flex;

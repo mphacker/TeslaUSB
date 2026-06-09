@@ -1,10 +1,14 @@
 /**
- * Typed client for the webd read-only catalog API (contract D2).
+ * Typed client for the webd catalog API (contract D2).
  *
- * webd is **read-only**: this client exposes GETs only — never mutations.
- * Errors surface as {@link ApiError} carrying the server's `{code, message}`
- * envelope when present. All paths are same-origin (`/api/...`) because the
- * bundle is served by webd itself; in dev, Vite proxies `/api` to webd.
+ * webd is **read-only** with one exception: the car-visible clip delete
+ * (`DELETE /api/clips/:id?target=car`, contract §2.3), which routes through the
+ * `gadgetd` eject-handoff and is the only mutation this client exposes. Every
+ * other method is a GET. Errors surface as {@link ApiError} carrying the
+ * server's `{code, message}` envelope when present (and the HTTP `status`, which
+ * callers use to tell a transient `409` from a terminal `422`). All paths are
+ * same-origin (`/api/...`) because the bundle is served by webd itself; in dev,
+ * Vite proxies `/api` to webd.
  */
 import type {
   Analytics,
@@ -44,11 +48,15 @@ function qs(params: Record<string, string | number | undefined>): string {
   return `?${sp.toString()}`;
 }
 
-async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
+async function request<T>(
+  method: string,
+  path: string,
+  signal?: AbortSignal,
+): Promise<T> {
   let resp: Response;
   try {
     resp = await fetch(path, {
-      method: "GET",
+      method,
       headers: { Accept: "application/json" },
       credentials: "same-origin",
       signal,
@@ -75,6 +83,17 @@ async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
     throw new ApiError(resp.status, code, message);
   }
   return body as T;
+}
+
+function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
+  return request<T>("GET", path, signal);
+}
+
+/** Terminal result of a successful car-delete handoff (`200 {handoff_id, state}`). */
+export interface DeleteClipResult {
+  handoff_id: string;
+  /** Always `"done"` for a 200; any other value is an unexpected protocol state. */
+  state: string;
 }
 
 export interface EventsParams {
@@ -135,6 +154,36 @@ export const api = {
 
   downloadUrl: (id: number, camera: string) =>
     `/api/clips/${id}/angles/${encodeURIComponent(camera)}/download`,
+
+  /**
+   * Delete a clip's car-visible (Tesla USB) copy via the `gadgetd` eject-handoff
+   * (contract §2.3, the **only** mutation webd exposes). `target=car` is baked in
+   * so a caller can never omit it — the server 400-rejects an absent target (no
+   * destructive default), and `car` is the only implemented target (archive/both
+   * → 501). webd blocks on gadgetd and returns the **terminal** state
+   * synchronously: a `200 {handoff_id, state:"done"}` means the delete completed.
+   * Any other 2xx shape is treated as an unexpected protocol state (not a
+   * completed delete). Transient refusals surface as `ApiError` with `status 409`
+   * (retryable); validation refusals as `422` (terminal). Throws on abort.
+   */
+  deleteClip: async (
+    id: number,
+    signal?: AbortSignal,
+  ): Promise<DeleteClipResult> => {
+    const res = await request<DeleteClipResult>(
+      "DELETE",
+      `/api/clips/${id}?target=car`,
+      signal,
+    );
+    if (!res || res.state !== "done") {
+      throw new ApiError(
+        502,
+        "gadgetd_protocol",
+        `unexpected delete state: ${res?.state ?? "<none>"}`,
+      );
+    }
+    return res;
+  },
 };
 
 export type Api = typeof api;

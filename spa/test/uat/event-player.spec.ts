@@ -16,9 +16,11 @@ import { resolve } from "node:path";
 //
 // PARITY: the event-player screen reproduces the legacy Flask event_player.html
 // (fullscreen native <video> over webd's byte-range /stream, plus the Tesla
-// telemetry HUD overlay). webd is read-only; delete/archive mutations are
-// DEFERRED to webd 5.1c and render inert here, exactly as the media-hub did for
-// its deferred mutation forms.
+// telemetry HUD overlay). webd is read-only here EXCEPT the operator-gated clip
+// delete (covered by clip-delete.spec.ts); the archive mutation stays DEFERRED
+// to webd 5.1c and renders inert. These gates never issue the (destructive)
+// DELETE — they only prove the read path + that opening/cancelling the confirm
+// dialog fires no mutation.
 //
 // FALSE-GREEN GUARDS (the substantive part — "tests pass / 200 OK" is NOT
 // enough). Hardened after an adversarial review of this very spec:
@@ -449,8 +451,9 @@ test.describe("event-player UAT", () => {
   });
 
   // ── Gate 3 (read-only): only whitelisted GET; switched camera streams; the
-  //    deferred mutation controls are inert ────────────────────────────────
-  test("read-only — only whitelisted GET, switched camera decodes, deferred actions inert", async ({
+  //    archive control stays inert; opening + cancelling the Delete confirm
+  //    fires NO mutation ──────────────────────────────────────────────────
+  test("read-only — only whitelisted GET, switched camera decodes, delete-confirm gated + inert archive", async ({
     page,
     probe,
   }) => {
@@ -494,16 +497,25 @@ test.describe("event-player UAT", () => {
     expect(backDecode.readyState, "switched camera must decode").toBeGreaterThanOrEqual(2);
     expect(backDecode.videoWidth).toBeGreaterThan(0);
 
-    // Deferred actions render disabled and inert (no navigation, no request).
+    // Archive stays deferred/inert (no navigation, no request).
     await expect(page.locator("#archiveButton")).toHaveClass(/disabled/);
-    await expect(page.locator("#deleteButton")).toHaveClass(/disabled/);
     await expect(page.locator("#archiveButton")).toHaveAttribute("aria-disabled", "true");
-    await expect(page.locator("#deleteButton")).toHaveAttribute("aria-disabled", "true");
     const urlBefore = page.url();
-    await page.locator("#deleteButton").click();
     await page.locator("#archiveButton").click();
-    await page.waitForTimeout(300);
-    expect(page.url(), "inert actions must not navigate").toBe(urlBefore);
+    await page.waitForTimeout(150);
+    expect(page.url(), "inert archive must not navigate").toBe(urlBefore);
+
+    // The Delete control is now ACTIVE (operator-gated) — but opening AND
+    // cancelling the confirm dialog must NOT issue any mutation (the DELETE only
+    // fires on explicit confirm; covered destructively-mocked in clip-delete.spec).
+    await expect(page.locator("#deleteButton")).not.toHaveClass(/disabled/);
+    await expect(page.locator("#deleteButton")).toHaveAttribute("aria-disabled", "false");
+    await page.locator("#deleteButton").click();
+    await expect(page.locator("[data-testid=delete-dialog]")).toBeVisible();
+    // Cancel closes it with no navigation and (asserted below) no request.
+    await page.locator(".delete-modal-btn.cancel").click();
+    await expect(page.locator("[data-testid=delete-dialog]")).toHaveCount(0);
+    expect(page.url(), "cancelling delete must not navigate").toBe(urlBefore);
 
     // Re-assert the FULL whitelist after the exercise + zero mutating methods.
     assertOnlyWhitelistedApi();

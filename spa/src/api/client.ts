@@ -14,6 +14,10 @@ import type {
   EventItem,
   Page,
   Pref,
+  StorageHealth,
+  StorageInfo,
+  SystemHealth,
+  SystemMetrics,
   Trip,
   TripDetail,
 } from "./types";
@@ -107,6 +111,19 @@ export const api = {
     getJson<Analytics>("/api/analytics", signal),
 
   settings: (signal?: AbortSignal) => getJson<Pref[]>("/api/settings", signal),
+
+  // Device-status reads (webd 5.1d). All read-only; handlers never 5xx and
+  // degrade to unknown/null when a subsystem can't be probed honestly.
+  systemHealth: (signal?: AbortSignal) =>
+    getJson<SystemHealth>("/api/system/health", signal),
+
+  systemMetrics: (signal?: AbortSignal) =>
+    getJson<SystemMetrics>("/api/system/metrics", signal),
+
+  storage: (signal?: AbortSignal) => getJson<StorageInfo>("/api/storage", signal),
+
+  storageHealth: (signal?: AbortSignal) =>
+    getJson<StorageHealth>("/api/storage/health", signal),
 
   // Media URL builders (webd 5.1b). These return same-origin URLs assigned to
   // a native `<video src>` / download anchor; the browser does the byte-range

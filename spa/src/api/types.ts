@@ -122,6 +122,73 @@ export interface Pref {
   value: string;
 }
 
+/** One `{severity, message}` row of `GET /api/system/health`. */
+export interface HealthBlock {
+  /** `ok | warn | error | unknown`. */
+  severity: string;
+  message: string;
+}
+
+/** `GET /api/system/health`. Subsystems webd cannot probe are omitted. */
+export interface SystemHealth {
+  overall: string;
+  subsystems: Record<string, HealthBlock>;
+}
+
+/** Load averages (1/5/15 min). */
+export interface LoadAvg {
+  one: number;
+  five: number;
+  fifteen: number;
+}
+
+/** A memory or swap tile. */
+export interface MemStat {
+  total_bytes: number;
+  available_bytes: number;
+  used_pct: number;
+}
+
+/** `GET /api/system/metrics`. Fields webd cannot read honestly are null. */
+export interface SystemMetrics {
+  uptime_s: number | null;
+  load: LoadAvg | null;
+  mem: MemStat | null;
+  swap: MemStat | null;
+  updated_at: number | null;
+}
+
+/** One filesystem of `GET /api/storage`. */
+export interface FilesystemEntry {
+  mount: string;
+  device: string;
+  fstype: string;
+  free_bytes: number;
+  total_bytes: number;
+  free_inodes: number;
+  total_inodes: number;
+}
+
+/** `GET /api/storage`. `governor` is null until retentiond is wired in. */
+export interface StorageInfo {
+  filesystems: FilesystemEntry[];
+  governor: unknown | null;
+}
+
+/** `GET /api/storage/health`. Wear telemetry is null (SD cards expose none). */
+export interface StorageHealth {
+  severity: string;
+  summary: string;
+  device: string | null;
+  fstype: string | null;
+  mount: string | null;
+  used_bytes: number | null;
+  total_bytes: number | null;
+  fs_errors: number | null;
+  io_errors_24h: number | null;
+  trim: string | null;
+}
+
 /** Uniform error envelope (`{"error": {code, message}}`). */
 export interface ApiErrorBody {
   error: { code: string; message: string };

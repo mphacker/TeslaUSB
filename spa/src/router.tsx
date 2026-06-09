@@ -6,6 +6,7 @@ import { Media } from "./screens/Media";
 import { TripMap } from "./screens/TripMap";
 import { Analytics } from "./screens/Analytics";
 import { EventPlayer } from "./screens/EventPlayer";
+import { StorageHealth } from "./screens/StorageHealth";
 import { ComingSoon } from "./screens/ComingSoon";
 
 /**
@@ -46,6 +47,7 @@ export const ROUTES: Route[] = [
   { path: "/events", active: "map", screen: EventPlayer, title: "Events" },
   { path: "/cloud", active: "cloud", screen: comingSoon("Cloud", "cloud"), title: "Cloud" },
   { path: "/settings", active: "settings", screen: MediaHub, title: "Settings" },
+  { path: "/storage", active: "settings", screen: StorageHealth, title: "Storage" },
 ];
 
 /** Build a titled ComingSoon screen bound to a nav key (placeholder routes). */

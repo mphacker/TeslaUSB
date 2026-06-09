@@ -1,0 +1,150 @@
+/*
+ * Storage health screen styling.
+ *
+ * Carried from the parity baseline page captured at
+ * docs/tasks/parity-baseline/storage/ (its inline <style> block) so the
+ * read-only health screen lands with the same layout, cards, pills and
+ * capacity-bar look as the legacy Flask "Storage" page. The legacy page was a
+ * settings FORM; this screen is read-only, so the form-input rules are dropped
+ * and a few health-only primitives (severity badge, definition list,
+ * filesystem rows, used/free capacity segments, metric tiles) are added. All
+ * selectors are scoped under `.storage-page` to avoid bleeding into other
+ * screens that share the bundle.
+ */
+.storage-page { display: grid; gap: var(--space-6); }
+
+.storage-page .storage-header,
+.storage-page .storage-card {
+  padding: var(--space-6);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  display: grid;
+  gap: var(--space-4);
+}
+
+.storage-page .storage-title { margin: 0; color: var(--text-primary); font-size: var(--text-3xl); }
+.storage-page .storage-card-title { margin: 0; color: var(--text-primary); font-size: var(--text-xl); }
+
+.storage-page .storage-card-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--space-3); flex-wrap: wrap;
+}
+
+.storage-page .storage-copy,
+.storage-page .storage-help {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+
+.storage-page .storage-pill-row {
+  display: flex; gap: var(--space-3); flex-wrap: wrap;
+}
+.storage-page .storage-pill {
+  display: inline-flex; align-items: center; gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: var(--form-input-bg);
+  border: 1px solid var(--border-input);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+}
+.storage-page .storage-pill-muted { color: var(--text-secondary); }
+
+/* Severity badge (ok/warn/error/unknown) — uses the design-system accents. */
+.storage-page .storage-badge {
+  display: inline-flex; align-items: center; gap: var(--space-2);
+  padding: var(--space-1, 4px) var(--space-3);
+  border-radius: 999px;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  border: 1px solid var(--border-input);
+}
+.storage-page .storage-badge .storage-dot {
+  width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex-shrink: 0;
+}
+.storage-page .storage-badge-ok      { color: var(--accent-success, #2ea043); }
+.storage-page .storage-badge-warn    { color: var(--accent-warning, #d29922); }
+.storage-page .storage-badge-error   { color: var(--accent-error,   #f85149); }
+.storage-page .storage-badge-unknown { color: var(--text-secondary); }
+
+/* Definition list of health facts (label / value pairs). */
+.storage-page .storage-dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: minmax(120px, max-content) 1fr;
+  gap: var(--space-2) var(--space-4);
+  font-size: var(--text-sm);
+}
+.storage-page .storage-dl dt { color: var(--text-secondary); }
+.storage-page .storage-dl dd { margin: 0; color: var(--text-primary); word-break: break-word; }
+
+/* One filesystem block (mount + per-fs used/free bar). */
+.storage-page .fs-list { display: grid; gap: var(--space-4); }
+.storage-page .fs-item { display: grid; gap: var(--space-2); }
+.storage-page .fs-item-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: var(--space-3); flex-wrap: wrap;
+}
+.storage-page .fs-mount { color: var(--text-primary); font-weight: 600; font-size: var(--text-base); }
+.storage-page .fs-meta { color: var(--text-secondary); font-size: var(--text-sm); }
+
+/* Capacity bar (used | free). Distinct classes from the legacy allocation bar
+ * so the read-only "used/free" semantics are never confused with the legacy
+ * TeslaCam/Media/OS+reserve allocation segments. */
+.storage-page .cap-bar {
+  display: flex;
+  width: 100%;
+  height: 24px;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  border: 1px solid var(--border-input);
+  background: var(--form-input-bg);
+}
+.storage-page .cap-seg { height: 100%; min-width: 0; }
+.storage-page .cap-seg-used { background: #2f81f7; }
+.storage-page .cap-seg-used-warn { background: #d29922; }
+.storage-page .cap-seg-used-crit { background: #f85149; }
+.storage-page .cap-seg-free { background: transparent; }
+
+.storage-page .cap-legend {
+  display: flex; gap: var(--space-4); flex-wrap: wrap;
+  font-size: var(--text-sm); color: var(--text-secondary);
+}
+.storage-page .cap-legend span { display: inline-flex; align-items: center; gap: var(--space-2); }
+.storage-page .cap-swatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+
+/* Live metric tiles (memory / swap / load / uptime). */
+.storage-page .storage-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: var(--space-3);
+}
+.storage-page .storage-metric {
+  display: grid; gap: var(--space-1, 4px);
+  padding: var(--space-3);
+  background: var(--form-input-bg);
+  border: 1px solid var(--border-input);
+  border-radius: var(--radius-md);
+}
+.storage-page .storage-metric-label { color: var(--text-secondary); font-size: var(--text-sm); }
+.storage-page .storage-metric-value { color: var(--text-primary); font-size: var(--text-xl); font-weight: 600; }
+.storage-page .storage-metric-detail { color: var(--text-secondary); font-size: var(--text-sm); }
+
+.storage-page .storage-note {
+  padding: var(--space-3);
+  background: var(--bg-tertiary, var(--form-input-bg));
+  border: 1px dashed var(--border-input);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+
+@media (max-width: 48rem) {
+  .storage-page .storage-header,
+  .storage-page .storage-card { padding: var(--space-4); }
+  .storage-page .storage-dl { grid-template-columns: 1fr; gap: var(--space-1, 4px) 0; }
+  .storage-page .storage-dl dt { margin-top: var(--space-2); }
+}

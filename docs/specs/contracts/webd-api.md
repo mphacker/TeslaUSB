@@ -69,6 +69,7 @@ SQLite ([D1](./indexd-schema.md)).
 | `GET /api/storage` | Storage settings | reserves/quotas/policy + per-FS free bytes+inodes | `prefs`, `retentiond` |
 | `GET /api/storage/health` | Storage health | full `StorageHealth` (§4): governor tier, per-FS free **bytes+inodes**, `disk.img` logical-vs-alloc (sparse warn), archive breakdown by class, WAL/staging/thumb/log usage, **pinned/leased/reclaimable** bytes, next candidate classes, undurable-sacrifice flag, paused writers, last eviction, two distinct signals | `retentiond` + `archive_items`/`leases` ([`storage.md §6`](../storage.md)) |
 | `GET /api/system/health` | System health | uptime, mem, service states, gadget bound/UDC, write-heartbeat | services |
+| `GET /api/gadget/status` | Settings → USB Drive | live USB-gadget state `{present, bound, bound_udc, udc_state, lun_file, media_lun_file, handoff_active, last_result, last_handoff_id}`. `present` is load-bearing (a missing/unparseable reply ⇒ `502`); other fields degrade to `false`/`null`. `gadgetd` unreachable ⇒ `503`. Read-only — does **not** mutate or trigger a handoff. | `gadgetd` control socket (`gadget_status`) |
 | `GET /api/settings` | Settings | all editable prefs/thresholds | `prefs` |
 
 ### 2.2 Streaming / export (with playback lease — D3)

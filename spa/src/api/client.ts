@@ -17,6 +17,8 @@ import type {
   Clip,
   DaySummary,
   EventItem,
+  MediaHandoffResult,
+  MediaList,
   Page,
   Pref,
   StorageHealth,
@@ -263,6 +265,240 @@ export const api = {
     const res = await request<ChimeHandoffResult>(
       "DELETE",
       `/api/chimes/${LOCK_CHIME_ID}`,
+      signal,
+    );
+    if (!res || res.state !== "done") {
+      throw new ApiError(
+        502,
+        "gadgetd_protocol",
+        `unexpected remove state: ${res?.state ?? "<none>"}`,
+      );
+    }
+    return res;
+  },
+
+  // ── Toybox media categories (GET = catalog read; POST/DELETE = gadgetd handoff) ──
+
+  /** List installed boombox horn sounds (`GET /api/boombox`). */
+  boombox: (signal?: AbortSignal) =>
+    getJson<MediaList>("/api/boombox", signal),
+
+  /** Install a boombox horn sound (`POST /api/boombox`, multipart `file`). */
+  installBoombox: async (
+    file: File | Blob,
+    signal?: AbortSignal,
+  ): Promise<MediaHandoffResult> => {
+    const form = new FormData();
+    form.append("file", file, "name" in file ? file.name : "horn.wav");
+    const res = await request<MediaHandoffResult>(
+      "POST",
+      "/api/boombox",
+      signal,
+      form,
+    );
+    if (!res || res.state !== "done") {
+      throw new ApiError(
+        502,
+        "gadgetd_protocol",
+        `unexpected install state: ${res?.state ?? "<none>"}`,
+      );
+    }
+    return res;
+  },
+
+  /** Remove a boombox horn sound by file name (`DELETE /api/boombox/:name`). */
+  removeBoombox: async (
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<MediaHandoffResult> => {
+    const res = await request<MediaHandoffResult>(
+      "DELETE",
+      `/api/boombox/${encodeURIComponent(name)}`,
+      signal,
+    );
+    if (!res || res.state !== "done") {
+      throw new ApiError(
+        502,
+        "gadgetd_protocol",
+        `unexpected remove state: ${res?.state ?? "<none>"}`,
+      );
+    }
+    return res;
+  },
+
+  /** List installed music files (`GET /api/music`). */
+  music: (signal?: AbortSignal) => getJson<MediaList>("/api/music", signal),
+
+  /** Install a music file (`POST /api/music`, multipart `file`). */
+  installMusic: async (
+    file: File | Blob,
+    signal?: AbortSignal,
+  ): Promise<MediaHandoffResult> => {
+    const form = new FormData();
+    form.append("file", file, "name" in file ? file.name : "track.mp3");
+    const res = await request<MediaHandoffResult>(
+      "POST",
+      "/api/music",
+      signal,
+      form,
+    );
+    if (!res || res.state !== "done") {
+      throw new ApiError(
+        502,
+        "gadgetd_protocol",
+        `unexpected install state: ${res?.state ?? "<none>"}`,
+      );
+    }
+    return res;
+  },
+
+  /** Remove a music file by name (`DELETE /api/music/:name`). */
+  removeMusic: async (
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<MediaHandoffResult> => {
+    const res = await request<MediaHandoffResult>(
+      "DELETE",
+      `/api/music/${encodeURIComponent(name)}`,
+      signal,
+    );
+    if (!res || res.state !== "done") {
+      throw new ApiError(
+        502,
+        "gadgetd_protocol",
+        `unexpected remove state: ${res?.state ?? "<none>"}`,
+      );
+    }
+    return res;
+  },
+
+  /** List installed light shows (`GET /api/lightshows`, excludes wraps). */
+  lightshows: (signal?: AbortSignal) =>
+    getJson<MediaList>("/api/lightshows", signal),
+
+  /** Install a light show file (`POST /api/lightshows`, multipart `file`). */
+  installLightshow: async (
+    file: File | Blob,
+    signal?: AbortSignal,
+  ): Promise<MediaHandoffResult> => {
+    const form = new FormData();
+    form.append("file", file, "name" in file ? file.name : "show.fseq");
+    const res = await request<MediaHandoffResult>(
+      "POST",
+      "/api/lightshows",
+      signal,
+      form,
+    );
+    if (!res || res.state !== "done") {
+      throw new ApiError(
+        502,
+        "gadgetd_protocol",
+        `unexpected install state: ${res?.state ?? "<none>"}`,
+      );
+    }
+    return res;
+  },
+
+  /** Remove a light show file by name (`DELETE /api/lightshows/:name`). */
+  removeLightshow: async (
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<MediaHandoffResult> => {
+    const res = await request<MediaHandoffResult>(
+      "DELETE",
+      `/api/lightshows/${encodeURIComponent(name)}`,
+      signal,
+    );
+    if (!res || res.state !== "done") {
+      throw new ApiError(
+        502,
+        "gadgetd_protocol",
+        `unexpected remove state: ${res?.state ?? "<none>"}`,
+      );
+    }
+    return res;
+  },
+
+  /** List installed license plate images (`GET /api/plates`). */
+  plates: (signal?: AbortSignal) => getJson<MediaList>("/api/plates", signal),
+
+  /** Install a license plate PNG (`POST /api/plates`, multipart `file`). */
+  installPlate: async (
+    file: File | Blob,
+    signal?: AbortSignal,
+  ): Promise<MediaHandoffResult> => {
+    const form = new FormData();
+    form.append("file", file, "name" in file ? file.name : "plate.png");
+    const res = await request<MediaHandoffResult>(
+      "POST",
+      "/api/plates",
+      signal,
+      form,
+    );
+    if (!res || res.state !== "done") {
+      throw new ApiError(
+        502,
+        "gadgetd_protocol",
+        `unexpected install state: ${res?.state ?? "<none>"}`,
+      );
+    }
+    return res;
+  },
+
+  /** Remove a license plate image by name (`DELETE /api/plates/:name`). */
+  removePlate: async (
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<MediaHandoffResult> => {
+    const res = await request<MediaHandoffResult>(
+      "DELETE",
+      `/api/plates/${encodeURIComponent(name)}`,
+      signal,
+    );
+    if (!res || res.state !== "done") {
+      throw new ApiError(
+        502,
+        "gadgetd_protocol",
+        `unexpected remove state: ${res?.state ?? "<none>"}`,
+      );
+    }
+    return res;
+  },
+
+  /** List installed wrap images (`GET /api/wraps`). */
+  wraps: (signal?: AbortSignal) => getJson<MediaList>("/api/wraps", signal),
+
+  /** Install a wrap PNG (`POST /api/wraps`, multipart `file`). */
+  installWrap: async (
+    file: File | Blob,
+    signal?: AbortSignal,
+  ): Promise<MediaHandoffResult> => {
+    const form = new FormData();
+    form.append("file", file, "name" in file ? file.name : "wrap.png");
+    const res = await request<MediaHandoffResult>(
+      "POST",
+      "/api/wraps",
+      signal,
+      form,
+    );
+    if (!res || res.state !== "done") {
+      throw new ApiError(
+        502,
+        "gadgetd_protocol",
+        `unexpected install state: ${res?.state ?? "<none>"}`,
+      );
+    }
+    return res;
+  },
+
+  /** Remove a wrap image by name (`DELETE /api/wraps/:name`). */
+  removeWrap: async (
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<MediaHandoffResult> => {
+    const res = await request<MediaHandoffResult>(
+      "DELETE",
+      `/api/wraps/${encodeURIComponent(name)}`,
       signal,
     );
     if (!res || res.state !== "done") {

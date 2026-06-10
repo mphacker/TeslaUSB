@@ -1,27 +1,25 @@
 import { Icon } from "../components/Icon";
 import { MediaPills } from "../components/MediaPills";
 import { useScreenHook } from "../components/screenHook";
+import { api } from "../api/client";
+import { fmtBytes, useMediaCategory } from "../hooks/useMediaCategory";
 import "../styles/license-plates.css";
 
 /**
- * Custom License Plates screen (route `/license_plates`, parity port of the
- * legacy `license_plates.html`).
+ * Custom License Plates screen (route `/license_plates`).
  *
- * Tesla custom-background license-plate PNGs live in the `/LicensePlate`
- * folder at the root of the media (p2) partition. The v1 page is a media-pill
- * page with a requirements card, upload drop zone, and a table of installed
- * plates.
- *
- * B-1 reality: webd has NO toybox list/read/upload endpoint for this media
- * partition yet, and every media mutation routes through the operator-gated
- * gadgetd eject-handoff. So this screen reproduces the v1 LOOK faithfully but
- * is strictly READ-ONLY: static requirements render verbatim, the drop zone
- * renders in its inert `.is-disabled` state (no `<form>`, no file input, no
- * submit — zero mutation surface), and the library renders an honest pending
- * state instead of fabricated rows or actions. It makes NO API calls.
+ * Reads `GET /api/plates` on mount — PNG images under `LicensePlate/` on p2.
+ * Install (POST) and remove (DELETE) route through the gadgetd eject-handoff.
+ * PNG magic-byte validation is done server-side; client validates extension only.
  */
 export function LicensePlates() {
   useScreenHook("plates");
+
+  const cat = useMediaCategory({
+    fetchList: api.plates,
+    install: api.installPlate,
+    remove: api.removePlate,
+  });
 
   return (
     <div class="container media-page" data-page="plates" data-screen="plates">
@@ -32,7 +30,7 @@ export function LicensePlates() {
         Custom background images for the in-car license plate selector.
       </p>
 
-      {/* ── Tesla requirements info (ported from v1) ── */}
+      {/* ── Tesla requirements info ── */}
       <div
         class="license-plates-info"
         data-testid="license-plates-requirements"
@@ -57,88 +55,136 @@ export function LicensePlates() {
             (Europe / Italy)
           </li>
           <li>
-            <strong>Filename:</strong> 12 characters max, letters and numbers
-            only (no spaces, dashes, or underscores)
-          </li>
-          <li>
             <strong>Count:</strong> Up to 5 plates at a time
           </li>
         </ul>
         <p class="license-plates-info-note">
           <strong>Usage:</strong> License plates appear in the in-car Background
-          &rarr; Image selector under license plate config. <a
-            href="https://github.com/teslamotors/custom-wraps"
-            target="_blank"
-            rel="noopener"
-          >
-            View Tesla's custom-wraps repository
-          </a> (license-plate spec is documented in <a
-            href="https://github.com/teslamotors/custom-wraps/issues/13"
-            target="_blank"
-            rel="noopener"
-          >
-            issue #13
-          </a>).
-        </p>
-        <p class="license-plates-info-note">
-          Drop any image and we'll open a cropper to produce a Tesla-compliant
-          PNG &mdash; no need to resize ahead of time.
+          &rarr; Image selector under license plate config.
         </p>
       </div>
 
-      {/* ── Upload zone visual (inert; uploads are operator-gated) ── */}
-      <div
-        class="license-plates-drop-zone is-disabled"
-        aria-disabled="true"
+      {/* ── Notice banner ── */}
+      {cat.notice && (
+        <div class="settings-section" role="status" style="color: var(--accent-success);">
+          {cat.notice}{" "}
+          <button class="action-btn" style="font-size:12px;padding:2px 8px;" onClick={cat.clearNotice}>Dismiss</button>
+        </div>
+      )}
+
+      {/* ── Upload zone ── */}
+      <form
+        class="license-plates-drop-zone"
+        onSubmit={cat.onUploadSubmit}
+        aria-busy={cat.uploading}
         data-testid="license-plates-dropzone"
       >
         <div class="license-plates-drop-content">
           <Icon name="image" class="license-plates-drop-icon" />
-          <p class="license-plates-drop-title">
-            Uploads are managed on the device
-          </p>
-          <p class="license-plates-drop-hint">
-            Installing a custom license plate momentarily ejects the USB drive
-            from the vehicle, so it stays an operator-gated maintenance action —
-            not available from this always-on page. Tesla output is PNG cropped
-            to 420x75 or 492x75, max 512 KB.
-          </p>
+          <p class="license-plates-drop-title">Choose a PNG file (≤ 512 KB)</p>
+          <p class="license-plates-drop-hint">PNG only. Tesla output: 420x75 or 492x75.</p>
+          <input
+            ref={cat.fileInputRef}
+            type="file"
+            accept=".png,image/png"
+            onChange={cat.onFileChange}
+            disabled={cat.uploading}
+            aria-label="Choose license plate PNG"
+          />
+          {cat.selectedFile && (
+            <p>{cat.selectedFile.name} ({fmtBytes(cat.selectedFile.size)})</p>
+          )}
         </div>
-      </div>
+        {cat.uploadFail && (
+          <p role="alert" style="color: var(--accent-error); margin: 8px 0;">
+            {cat.uploadFail.message}
+            {cat.uploadFail.retryable && (
+              <> <button type="submit" class="action-btn" disabled={!cat.selectedFile}>Retry</button></>
+            )}
+          </p>
+        )}
+        <button
+          type="submit"
+          class="action-btn"
+          disabled={!cat.selectedFile || cat.uploading}
+          aria-busy={cat.uploading}
+          style="margin-top: 8px;"
+        >
+          {cat.uploading ? "Installing…" : "Install"}
+        </button>
+      </form>
 
-      {/* ── License plate library (no read endpoint → honest empty-state) ── */}
+      {/* ── Confirm remove dialog ── */}
+      {cat.confirmRemoveName && (
+        <div class="settings-section" role="dialog" aria-label="Confirm remove">
+          <p>Remove <strong>{cat.confirmRemoveName}</strong>? This ejects the USB drive momentarily.</p>
+          {cat.removeFail && (
+            <p role="alert" style="color: var(--accent-error);">{cat.removeFail.message}</p>
+          )}
+          <button class="action-btn" onClick={cat.onConfirmRemove} disabled={cat.removing} aria-busy={cat.removing}>
+            {cat.removing ? "Removing…" : "Remove"}
+          </button>{" "}
+          <button class="action-btn" onClick={cat.onCancelRemove} disabled={cat.removing}>Cancel</button>
+        </div>
+      )}
+
+      {/* ── License plate library ── */}
       <div
         class="license-plates-table-container"
         data-testid="license-plates-library"
       >
-        <table class="license-plates-table" style="table-layout: fixed;">
-          <thead>
-            <tr>
-              <th style="width: 18%;">Preview</th>
-              <th style="width: 28%;">Filename</th>
-              <th style="width: 14%;">Dimensions</th>
-              <th style="width: 12%;">Size</th>
-              <th style="width: 28%;">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td colSpan={5}>
-                <div
-                  class="license-plates-empty"
-                  data-testid="license-plates-empty"
-                >
-                  <Icon name="image" class="license-plates-empty-icon" />
-                  <p>
-                    The license-plate library will list installed plates once
-                    webd can read the media partition. No plates can be listed
-                    in this build yet.
-                  </p>
-                </div>
-              </td>
-            </tr>
-          </tbody>
-        </table>
+        {cat.state.tag === "loading" && (
+          <div role="status" aria-busy="true" data-testid="license-plates-loading">Loading…</div>
+        )}
+        {cat.state.tag === "error" && (
+          <div role="alert" data-testid="license-plates-error">
+            Couldn't load license plates.{" "}
+            <button class="action-btn" onClick={cat.refetch}>Retry</button>
+          </div>
+        )}
+        {cat.state.tag === "ready" && (
+          <table class="license-plates-table" style="table-layout: fixed;">
+            <thead>
+              <tr>
+                <th style="width: 42%;">Filename</th>
+                <th style="width: 18%;">Size</th>
+                <th style="width: 40%;">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {cat.state.items.length === 0 ? (
+                <tr>
+                  <td colSpan={3}>
+                    <div
+                      class="license-plates-empty"
+                      data-testid="license-plates-empty"
+                    >
+                      <Icon name="image" class="license-plates-empty-icon" />
+                      <p>No custom license plates installed yet.</p>
+                    </div>
+                  </td>
+                </tr>
+              ) : (
+                cat.state.items.map((item) => (
+                  <tr key={item.rel_path}>
+                    <td>{item.name}</td>
+                    <td>{fmtBytes(item.size_bytes)}</td>
+                    <td>
+                      <button
+                        class="action-btn"
+                        onClick={() => cat.onRequestRemove(item.name)}
+                        disabled={cat.removing}
+                        aria-label={`Remove ${item.name}`}
+                      >
+                        Remove
+                      </button>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        )}
       </div>
     </div>
   );

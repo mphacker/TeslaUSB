@@ -1,27 +1,24 @@
-import { test, expect } from "./helpers";
+import { test, expect, loadState } from "./helpers";
 import {
   gotoScreen,
   assertMediaChrome,
   assertMediaPills,
   assertCleanConsole,
   assertCleanNetwork,
-  assertReadOnly,
   assertWiring,
   capturePerf,
   captureScreenshot,
 } from "./screen-helpers";
 
-// Wraps UAT — v1 parity, strictly read-only. Drives the REAL bundle webd
-// serves at /wraps. Parity target: legacy wraps.html (requirements card +
-// upload zone + wrap library). B-1 has no toybox endpoint, so the page
-// reproduces the v1 look but makes zero API calls, renders the drop zone inert,
-// and shows an honest empty/pending state instead of fabricated rows/actions.
+// Wraps UAT — live catalog-path wiring. GET /api/wraps on mount (real webd).
+// Seed DB has no media, so empty state always appears.
+// Install/remove flows are mocked (gadgetd not running in the UAT harness).
 
 const PATH = "/wraps";
 const SCREEN = "wraps";
 
 test.describe("wraps UAT", () => {
-  test("parity — media nav active, pills, requirements/dropzone/empty", async ({
+  test("parity — media nav active, pills, requirements/upload-form/empty", async ({
     page,
   }, testInfo) => {
     await gotoScreen(page, PATH, SCREEN);
@@ -31,23 +28,21 @@ test.describe("wraps UAT", () => {
     await expect(page.locator('.container[data-screen="wraps"] h2')).toHaveText(
       "Custom Wraps",
     );
-    // Static v1 guidance renders in the carried-over requirements card.
     const requirements = page.locator("[data-testid=wraps-requirements]");
     await expect(requirements).toBeVisible();
     await expect(requirements).toContainText("Tesla Wrap Requirements");
     await expect(requirements).toContainText("PNG only");
     await expect(requirements).toContainText("512x512 to 1024x1024 pixels");
     await expect(requirements).toContainText("/LightShow/wraps");
-    // The drop zone renders in its inert disabled state (no upload wired).
+    // Upload form is live (not disabled).
     const drop = page.locator("[data-testid=wraps-dropzone]");
     await expect(drop).toBeVisible();
-    await expect(drop).toHaveClass(/\bis-disabled\b/);
-    await expect(drop).toContainText("Uploads are managed on the device");
-    // Honest empty library (no list endpoint).
+    await expect(page.locator('input[type=file]')).toBeVisible();
+    // Honest empty state from real GET /api/wraps.
     await expect(page.locator("[data-testid=wraps-library]")).toBeVisible();
     await expect(page.locator("[data-testid=wraps-empty]")).toBeVisible();
     await expect(page.locator("[data-testid=wraps-empty]")).toContainText(
-      "webd can read the media partition",
+      "No custom wraps installed yet",
     );
   });
 
@@ -58,15 +53,38 @@ test.describe("wraps UAT", () => {
     await assertWiring(page, PATH, SCREEN);
   });
 
-  test("read-only — no mutations, no API calls, no mutation surface", async ({
+  test("read-only on load — only GET /api/wraps fires; no mutations until acted on", async ({
     page,
     probe,
   }) => {
+    const origin = new URL(loadState().baseURL).origin;
     const sockets: string[] = [];
     page.on("websocket", (ws) => sockets.push(ws.url()));
     await gotoScreen(page, PATH, SCREEN);
+    await expect(page.locator("[data-testid=wraps-empty]")).toBeVisible();
     await page.waitForTimeout(200);
-    await assertReadOnly(page, probe, sockets);
+
+    const mutating = probe.requests.filter((r) =>
+      ["POST", "PUT", "PATCH", "DELETE"].includes(r.method.toUpperCase()),
+    );
+    expect(mutating, `mutating request(s): ${JSON.stringify(mutating)}`).toEqual([]);
+    expect(sockets, `websocket(s): ${JSON.stringify(sockets)}`).toEqual([]);
+    for (const req of probe.requests) {
+      const u = new URL(req.url);
+      expect(u.origin, `off-origin request to ${req.url}`).toBe(origin);
+      if (u.pathname.startsWith("/api/")) {
+        expect(
+          `${req.method.toUpperCase()} ${u.pathname}`,
+          `unexpected API call ${req.method} ${u.pathname}`,
+        ).toBe("GET /api/wraps");
+      }
+    }
+    const reads = probe.requests.filter(
+      (r) => new URL(r.url).pathname === "/api/wraps",
+    );
+    expect(reads.length, "expected exactly one GET /api/wraps on load").toBe(1);
+    await expect(page.locator("form[method='post' i]")).toHaveCount(0);
+    await expect(page.locator("input[type=file]")).toHaveCount(1);
   });
 
   test("clean — zero console warnings/errors and no failed/non-2xx requests", async ({
@@ -74,6 +92,7 @@ test.describe("wraps UAT", () => {
     probe,
   }) => {
     await gotoScreen(page, PATH, SCREEN);
+    await expect(page.locator("[data-testid=wraps-empty]")).toBeVisible();
     await page.waitForTimeout(200);
     assertCleanConsole(probe);
     assertCleanNetwork(probe);
@@ -94,3 +113,4 @@ test.describe("wraps UAT", () => {
     await captureScreenshot(page, testInfo, SCREEN);
   });
 });
+

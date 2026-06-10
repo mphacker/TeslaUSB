@@ -1674,3 +1674,224 @@ async fn get_chimes_degrades_to_null_when_media_table_absent() {
     assert_eq!(status, StatusCode::OK);
     assert!(body["installed"].is_null());
 }
+
+// ── Toybox category GET tests ───────────────────────────────────────────────
+//
+// Each category shares the same probe+LIKE pattern; we test:
+//   1. Items returned when rows exist.
+//   2. Empty `{items:[]}` when no rows exist (not 500).
+//   3. Empty `{items:[]}` when the table itself is absent (pre-v2 catalog).
+//   4. Category isolation (e.g. Wraps rows don't appear in LightShows).
+
+/// Seed `media_entries` into an open connection with an already-migrated schema.
+fn seed_media_rows(conn: &Connection, rows: &[(&str, &str, &str, i64)]) {
+    for (partition, rel_path, name, size_bytes) in rows {
+        conn.execute(
+            "INSERT INTO media_entries (partition, rel_path, name, size_bytes, modified, updated_at)
+             VALUES (?1, ?2, ?3, ?4, NULL, 0)",
+            params![partition, rel_path, name, size_bytes],
+        )
+        .unwrap();
+    }
+}
+
+/// Helper: open a pre-v2 DB (`schema_version=1`, no `media_entries` table).
+fn open_v1_catalog(dir: &TempDir) -> (std::path::PathBuf, Router) {
+    let db_path = dir.path().join("v1_catalog.db");
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_version (version INTEGER NOT NULL, applied_at INTEGER NOT NULL, note TEXT);
+             INSERT INTO schema_version (version, applied_at, note) VALUES (1, 0, 'v1');",
+        )
+        .unwrap();
+    }
+    let app = ro_app(dir, &db_path);
+    (db_path, app)
+}
+
+#[tokio::test]
+async fn get_boombox_returns_items() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("catalog.db");
+    {
+        let mut conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        indexd::db::apply_migrations(&mut conn).unwrap();
+        seed_media_rows(
+            &conn,
+            &[
+                ("slot1", "Boombox/horn.wav", "horn.wav", 32768),
+                ("slot1", "Boombox/quack.mp3", "quack.mp3", 65536),
+            ],
+        );
+    }
+    let app = ro_app(&dir, &db_path);
+    let (status, body) = get_json(&app, "/api/boombox").await;
+    assert_eq!(status, StatusCode::OK);
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    assert!(items.iter().any(|i| i["name"] == "horn.wav"));
+    assert!(items.iter().any(|i| i["rel_path"] == "Boombox/quack.mp3"));
+}
+
+#[tokio::test]
+async fn get_boombox_empty_when_no_rows() {
+    let fx = fixture(); // standard fixture has no media_entries rows
+    let (status, body) = get_json(&fx.app, "/api/boombox").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["items"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn get_boombox_degrades_on_v1_catalog() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, app) = open_v1_catalog(&dir);
+    let (status, body) = get_json(&app, "/api/boombox").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["items"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn get_music_returns_items() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("catalog.db");
+    {
+        let mut conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        indexd::db::apply_migrations(&mut conn).unwrap();
+        seed_media_rows(
+            &conn,
+            &[
+                ("slot1", "Music/song.mp3", "song.mp3", 1_048_576),
+                (
+                    "slot1",
+                    "Music/Artist/Album/track.flac",
+                    "track.flac",
+                    4_194_304,
+                ),
+            ],
+        );
+    }
+    let app = ro_app(&dir, &db_path);
+    let (status, body) = get_json(&app, "/api/music").await;
+    assert_eq!(status, StatusCode::OK);
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+}
+
+#[tokio::test]
+async fn get_music_degrades_on_v1_catalog() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, app) = open_v1_catalog(&dir);
+    let (status, body) = get_json(&app, "/api/music").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["items"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn get_lightshows_returns_lightshow_files_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("catalog.db");
+    {
+        let mut conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        indexd::db::apply_migrations(&mut conn).unwrap();
+        seed_media_rows(
+            &conn,
+            &[
+                ("slot1", "LightShow/show.fseq", "show.fseq", 2_097_152),
+                // Wraps row — must NOT appear in /api/lightshows.
+                ("slot1", "LightShow/wraps/mywrap.png", "mywrap.png", 524_288),
+            ],
+        );
+    }
+    let app = ro_app(&dir, &db_path);
+    let (status, body) = get_json(&app, "/api/lightshows").await;
+    assert_eq!(status, StatusCode::OK);
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(
+        items.len(),
+        1,
+        "wraps row must be excluded from /api/lightshows"
+    );
+    assert_eq!(items[0]["name"], "show.fseq");
+}
+
+#[tokio::test]
+async fn get_lightshows_degrades_on_v1_catalog() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, app) = open_v1_catalog(&dir);
+    let (status, body) = get_json(&app, "/api/lightshows").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["items"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn get_plates_returns_items() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("catalog.db");
+    {
+        let mut conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        indexd::db::apply_migrations(&mut conn).unwrap();
+        seed_media_rows(
+            &conn,
+            &[("slot1", "LicensePlate/myplate.png", "myplate.png", 102_400)],
+        );
+    }
+    let app = ro_app(&dir, &db_path);
+    let (status, body) = get_json(&app, "/api/plates").await;
+    assert_eq!(status, StatusCode::OK);
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["name"], "myplate.png");
+    assert_eq!(items[0]["size_bytes"], 102_400);
+}
+
+#[tokio::test]
+async fn get_plates_degrades_on_v1_catalog() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, app) = open_v1_catalog(&dir);
+    let (status, body) = get_json(&app, "/api/plates").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["items"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn get_wraps_returns_wraps_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("catalog.db");
+    {
+        let mut conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        indexd::db::apply_migrations(&mut conn).unwrap();
+        seed_media_rows(
+            &conn,
+            &[
+                // LightShow row — must NOT appear in /api/wraps.
+                ("slot1", "LightShow/show.fseq", "show.fseq", 2_097_152),
+                ("slot1", "LightShow/wraps/mywrap.png", "mywrap.png", 524_288),
+            ],
+        );
+    }
+    let app = ro_app(&dir, &db_path);
+    let (status, body) = get_json(&app, "/api/wraps").await;
+    assert_eq!(status, StatusCode::OK);
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(
+        items.len(),
+        1,
+        "lightshow row must be excluded from /api/wraps"
+    );
+    assert_eq!(items[0]["name"], "mywrap.png");
+}
+
+#[tokio::test]
+async fn get_wraps_degrades_on_v1_catalog() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, app) = open_v1_catalog(&dir);
+    let (status, body) = get_json(&app, "/api/wraps").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["items"].as_array().unwrap().len(), 0);
+}

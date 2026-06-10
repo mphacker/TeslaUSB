@@ -65,6 +65,46 @@ pub(crate) fn router(state: AppState, static_dir: PathBuf) -> Router {
                 .layer(DefaultBodyLimit::max(crate::chimes::CHIME_BODY_LIMIT)),
         )
         .route("/chimes/{id}", delete(crate::chimes::remove_chime))
+        .route(
+            "/boombox",
+            get(crate::boombox::list_boombox)
+                .post(crate::boombox::install_boombox)
+                .layer(DefaultBodyLimit::max(crate::boombox::BOOMBOX_BODY_LIMIT)),
+        )
+        .route("/boombox/{name}", delete(crate::boombox::remove_boombox))
+        .route(
+            "/music",
+            get(crate::music::list_music)
+                .post(crate::music::install_music)
+                .layer(DefaultBodyLimit::max(crate::music::MUSIC_BODY_LIMIT)),
+        )
+        .route("/music/{name}", delete(crate::music::remove_music))
+        .route(
+            "/lightshows",
+            get(crate::lightshows::list_lightshows)
+                .post(crate::lightshows::install_lightshow)
+                .layer(DefaultBodyLimit::max(
+                    crate::lightshows::LIGHTSHOW_BODY_LIMIT,
+                )),
+        )
+        .route(
+            "/lightshows/{name}",
+            delete(crate::lightshows::remove_lightshow),
+        )
+        .route(
+            "/plates",
+            get(crate::plates::list_plates)
+                .post(crate::plates::install_plate)
+                .layer(DefaultBodyLimit::max(crate::plates::PLATES_BODY_LIMIT)),
+        )
+        .route("/plates/{name}", delete(crate::plates::remove_plate))
+        .route(
+            "/wraps",
+            get(crate::wraps::list_wraps)
+                .post(crate::wraps::install_wrap)
+                .layer(DefaultBodyLimit::max(crate::wraps::WRAPS_BODY_LIMIT)),
+        )
+        .route("/wraps/{name}", delete(crate::wraps::remove_wrap))
         .route("/jobs", get(jobs_stream))
         .route("/jobs/failed", get(jobs_failed))
         .route("/analytics", get(analytics))
@@ -348,12 +388,12 @@ fn stage_upload(dir: &std::path::Path, bytes: &[u8]) -> std::io::Result<tempfile
 ///
 /// To add another media feature, validate + read the upload bytes in a thin
 /// handler, then call `run_install` with that feature's `kind`, `partition`,
-/// and fixed `rel_path` — no new gadgetd or job plumbing required.
+/// and `rel_path` — no new gadgetd or job plumbing required.
 pub(crate) async fn run_install(
     state: AppState,
     kind: &'static str,
     partition: u8,
-    rel_path: &'static str,
+    rel_path: String,
     bytes: Vec<u8>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let job_id = state.jobs.next_job_id();
@@ -377,7 +417,7 @@ pub(crate) async fn run_install(
             jobs.publish_job(job_failed(job_id, kind, detail.clone()));
             return Err(detail);
         };
-        let request = gadget::install_request(partition, rel_path, &source_path);
+        let request = gadget::install_request(partition, &rel_path, &source_path);
         let result = client.call(request);
         match &result {
             Ok(resp) => {
@@ -424,20 +464,20 @@ pub(crate) async fn run_install(
 }
 
 /// Generic p2-media remove primitive: hand `gadgetd` a `delete_paths` mutation
-/// for the single fixed `rel_path` (idempotent on an already-absent asset,
+/// for the single `rel_path` (idempotent on an already-absent asset,
 /// file-only) and bracket the round-trip with `job_status` events under `kind`.
 pub(crate) async fn run_remove(
     state: AppState,
     kind: &'static str,
     partition: u8,
-    rel_path: &'static str,
+    rel_path: String,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let job_id = state.jobs.next_job_id();
     state.jobs.publish_job(JobStatus::running(job_id, kind));
 
     let client = state.gadget.clone();
     let jobs = state.jobs.clone();
-    let request = gadget::remove_request(partition, rel_path);
+    let request = gadget::remove_request(partition, &rel_path);
 
     let join = tokio::task::spawn_blocking(move || {
         let result = client.call(request);

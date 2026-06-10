@@ -250,3 +250,30 @@ pub(crate) struct ChimesDto {
     /// The installed lock chime, or `null`.
     pub installed: Option<InstalledChimeDto>,
 }
+
+/// One file inventoried on the MEDIA (p2) partition for the toybox categories
+/// (Boombox, Music, `LightShow`, `LicensePlate`, Wraps). Mirrors the catalog
+/// `media_entries` row shape without a `category` column — callers derive
+/// the category from the `rel_path` prefix.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct MediaItemDto {
+    /// `media_entries.name` (file name component, e.g. `horn.wav`).
+    pub name: String,
+    /// `media_entries.rel_path` (partition-root-relative, e.g.
+    /// `Boombox/horn.wav`). Also serves as the delete `id`.
+    pub rel_path: String,
+    /// `media_entries.size_bytes`.
+    pub size_bytes: i64,
+    /// `media_entries.modified` — best-effort naive-local
+    /// `YYYY-MM-DDThh:mm:ss`, or `null` when the on-disk timestamp was
+    /// unreadable.
+    pub modified: Option<String>,
+}
+
+/// Generic response envelope for a toybox media category list
+/// (`GET /api/boombox`, `/api/music`, etc.).
+#[derive(Debug, Serialize)]
+pub(crate) struct MediaListDto {
+    /// All installed items for this category (may be empty).
+    pub items: Vec<MediaItemDto>,
+}

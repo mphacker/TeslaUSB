@@ -1,3 +1,11 @@
+/** The server's standard `{error:{code,message}}` error envelope. */
+export interface ApiErrorBody {
+  error?: {
+    code?: string;
+    message?: string;
+  };
+}
+
 /**
  * Wire DTO types for the webd read API (contract D2).
  *
@@ -189,9 +197,33 @@ export interface StorageHealth {
   trim: string | null;
 }
 
-/** Uniform error envelope (`{"error": {code, message}}`). */
-export interface ApiErrorBody {
-  error: { code: string; message: string };
+/**
+ * One file inventoried on the MEDIA (p2) partition for the toybox categories
+ * (Boombox, Music, LightShows, LicensePlates, Wraps). Mirrors `MediaItemDto`
+ * in `rust/crates/webd/src/dto.rs`. `modified` is a best-effort naive-local
+ * `YYYY-MM-DDThh:mm:ss` string (null when the exFAT timestamp couldn't be
+ * decoded). `rel_path` doubles as the delete id.
+ */
+export interface MediaItem {
+  name: string;
+  rel_path: string;
+  size_bytes: number;
+  modified: string | null;
+}
+
+/**
+ * Generic list response for a toybox media category
+ * (`GET /api/boombox`, `/api/music`, `/api/lightshows`, `/api/plates`, `/api/wraps`).
+ * `items` is empty when nothing is installed — never absent.
+ */
+export interface MediaList {
+  items: MediaItem[];
+}
+
+/** Terminal result of a successful media install/remove handoff. */
+export interface MediaHandoffResult {
+  handoff_id: string;
+  state: string;
 }
 
 /**

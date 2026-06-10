@@ -1,24 +1,24 @@
 import { Icon } from "../components/Icon";
 import { MediaPills } from "../components/MediaPills";
 import { useScreenHook } from "../components/screenHook";
+import { api } from "../api/client";
+import { fmtBytes, useMediaCategory } from "../hooks/useMediaCategory";
 import "../styles/wraps.css";
 
 /**
- * Wraps screen (route `/wraps`, parity port of the legacy `wraps.html`).
+ * Wraps screen (route `/wraps`).
  *
- * Tesla custom wraps are PNG images stored under `/LightShow/wraps` on the
- * media partition and shown in Toybox → Paint Shop → Wraps.
- *
- * B-1 reality: webd has NO toybox list/read/upload endpoint yet, and every
- * media mutation routes through the operator-gated gadgetd eject-handoff. This
- * screen reproduces the v1 LOOK faithfully but is strictly READ-ONLY: static
- * requirements render verbatim, the upload zone is an inert `.is-disabled`
- * div (no `<form>`, no file input, no submit — zero mutation surface), and the
- * library renders the v1 table shell with an honest pending note instead of
- * fabricated previews/actions. It makes NO API calls.
+ * Reads `GET /api/wraps` on mount — PNG images under `LightShow/wraps/` on p2.
+ * Install (POST) and remove (DELETE) route through the gadgetd eject-handoff.
  */
 export function Wraps() {
   useScreenHook("wraps");
+
+  const cat = useMediaCategory({
+    fetchList: api.wraps,
+    install: api.installWrap,
+    remove: api.removeWrap,
+  });
 
   return (
     <div class="container media-page" data-page="wraps" data-screen="wraps">
@@ -30,7 +30,7 @@ export function Wraps() {
         Shop.
       </p>
 
-      {/* ── Tesla requirements info (ported from v1) ── */}
+      {/* ── Tesla requirements info ── */}
       <div class="wraps-info-box" data-testid="wraps-requirements">
         <p>
           <strong>Tesla Wrap Requirements:</strong>
@@ -50,16 +50,12 @@ export function Wraps() {
             <strong>Dimensions:</strong> 512x512 to 1024x1024 pixels
           </li>
           <li>
-            <strong>Filename:</strong> 30 characters max (letters, numbers,
-            underscores, dashes, spaces)
-          </li>
-          <li>
             <strong>Count:</strong> Up to 10 wraps at a time
           </li>
         </ul>
         <p class="wraps-usage">
           <strong>Usage:</strong> Wraps appear in Toybox → Paint Shop → Wraps
-          tab. {" "}
+          tab.{" "}
           <a
             href="https://github.com/teslamotors/custom-wraps"
             target="_blank"
@@ -70,55 +66,123 @@ export function Wraps() {
         </p>
       </div>
 
-      {/* ── Upload visual (inert; uploads are operator-gated) ── */}
+      {/* ── Notice banner ── */}
+      {cat.notice && (
+        <div class="settings-section" role="status" style="color: var(--accent-success);">
+          {cat.notice}{" "}
+          <button class="action-btn" style="font-size:12px;padding:2px 8px;" onClick={cat.clearNotice}>Dismiss</button>
+        </div>
+      )}
+
+      {/* ── Upload zone ── */}
       <div class="wraps-folder-controls" id="wrapUploadControls">
-        <div
-          class="wraps-drop-zone is-disabled"
-          aria-disabled="true"
+        <form
+          class="wraps-drop-zone"
+          onSubmit={cat.onUploadSubmit}
+          aria-busy={cat.uploading}
           data-testid="wraps-dropzone"
         >
           <div class="wraps-drop-inner">
             <Icon name="image" class="wraps-drop-icon" />
-            <p class="wraps-drop-title">Uploads are managed on the device</p>
-            <p class="wraps-drop-hint">
-              PNG files only • 512-1024px • Max 1 MB each
-            </p>
-            <p class="wraps-drop-note">
-              Installing a custom wrap momentarily ejects the USB drive from
-              the vehicle, so it stays an operator-gated maintenance action —
-              not available from this always-on page.
-            </p>
+            <p class="wraps-drop-title">Choose a PNG wrap (≤ 1 MB)</p>
+            <p class="wraps-drop-hint">PNG files only • 512–1024px</p>
+            <input
+              ref={cat.fileInputRef}
+              type="file"
+              accept=".png,image/png"
+              onChange={cat.onFileChange}
+              disabled={cat.uploading}
+              aria-label="Choose wrap PNG"
+            />
+            {cat.selectedFile && (
+              <p>{cat.selectedFile.name} ({fmtBytes(cat.selectedFile.size)})</p>
+            )}
           </div>
-        </div>
+          {cat.uploadFail && (
+            <p role="alert" style="color: var(--accent-error); margin: 8px 0;">
+              {cat.uploadFail.message}
+              {cat.uploadFail.retryable && (
+                <> <button type="submit" class="action-btn" disabled={!cat.selectedFile}>Retry</button></>
+              )}
+            </p>
+          )}
+          <button
+            type="submit"
+            class="action-btn"
+            disabled={!cat.selectedFile || cat.uploading}
+            aria-busy={cat.uploading}
+            style="margin-top: 8px;"
+          >
+            {cat.uploading ? "Installing…" : "Install"}
+          </button>
+        </form>
       </div>
 
-      {/* ── Wrap library (no list endpoint → honest v1 table empty-state) ── */}
+      {/* ── Confirm remove dialog ── */}
+      {cat.confirmRemoveName && (
+        <div class="settings-section" role="dialog" aria-label="Confirm remove">
+          <p>Remove <strong>{cat.confirmRemoveName}</strong>? This ejects the USB drive momentarily.</p>
+          {cat.removeFail && (
+            <p role="alert" style="color: var(--accent-error);">{cat.removeFail.message}</p>
+          )}
+          <button class="action-btn" onClick={cat.onConfirmRemove} disabled={cat.removing} aria-busy={cat.removing}>
+            {cat.removing ? "Removing…" : "Remove"}
+          </button>{" "}
+          <button class="action-btn" onClick={cat.onCancelRemove} disabled={cat.removing}>Cancel</button>
+        </div>
+      )}
+
+      {/* ── Wrap library ── */}
       <div class="wraps-table-container" data-testid="wraps-library">
-        <table class="wraps-table">
-          <thead>
-            <tr>
-              <th class="wraps-preview-col">Preview</th>
-              <th class="wraps-filename-col">Filename</th>
-              <th class="wraps-dimensions-col">Dimensions</th>
-              <th class="wraps-size-col">Size</th>
-              <th class="wraps-actions-col">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td colSpan={5}>
-                <div class="wraps-empty" data-testid="wraps-empty">
-                  <Icon name="palette" class="wraps-empty-icon" />
-                  <p>
-                    The Custom Wraps library will list installed wraps once
-                    webd can read the media partition. No wraps can be listed
-                    in this build yet.
-                  </p>
-                </div>
-              </td>
-            </tr>
-          </tbody>
-        </table>
+        {cat.state.tag === "loading" && (
+          <div role="status" aria-busy="true" data-testid="wraps-loading">Loading…</div>
+        )}
+        {cat.state.tag === "error" && (
+          <div role="alert" data-testid="wraps-error">
+            Couldn't load wraps.{" "}
+            <button class="action-btn" onClick={cat.refetch}>Retry</button>
+          </div>
+        )}
+        {cat.state.tag === "ready" && (
+          <table class="wraps-table">
+            <thead>
+              <tr>
+                <th class="wraps-filename-col">Filename</th>
+                <th class="wraps-size-col">Size</th>
+                <th class="wraps-actions-col">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {cat.state.items.length === 0 ? (
+                <tr>
+                  <td colSpan={3}>
+                    <div class="wraps-empty" data-testid="wraps-empty">
+                      <Icon name="palette" class="wraps-empty-icon" />
+                      <p>No custom wraps installed yet.</p>
+                    </div>
+                  </td>
+                </tr>
+              ) : (
+                cat.state.items.map((item) => (
+                  <tr key={item.rel_path}>
+                    <td>{item.name}</td>
+                    <td>{fmtBytes(item.size_bytes)}</td>
+                    <td>
+                      <button
+                        class="action-btn"
+                        onClick={() => cat.onRequestRemove(item.name)}
+                        disabled={cat.removing}
+                        aria-label={`Remove ${item.name}`}
+                      >
+                        Remove
+                      </button>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        )}
       </div>
     </div>
   );

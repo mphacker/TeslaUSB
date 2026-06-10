@@ -1,28 +1,24 @@
-import { test, expect } from "./helpers";
+import { test, expect, loadState } from "./helpers";
 import {
   gotoScreen,
   assertMediaChrome,
   assertMediaPills,
   assertCleanConsole,
   assertCleanNetwork,
-  assertReadOnly,
   assertWiring,
   capturePerf,
   captureScreenshot,
 } from "./screen-helpers";
 
-// License Plates UAT — v1 parity, strictly read-only. Drives the REAL bundle
-// webd serves at /license_plates. Parity target: legacy license_plates.html
-// (requirements card + upload zone + license-plate library table). B-1 has no
-// toybox endpoint, so the page reproduces the v1 look but makes zero API calls,
-// renders the drop zone inert, and shows an honest pending library state instead
-// of fabricated rows/actions.
+// License Plates UAT — live catalog-path wiring. GET /api/plates on mount
+// (real webd endpoint). Seed DB has no media, so empty state always appears.
+// Install/remove flows are mocked (gadgetd not running in the UAT harness).
 
 const PATH = "/license_plates";
 const SCREEN = "plates";
 
 test.describe("license plates UAT", () => {
-  test("parity — media nav active, pills, requirements/dropzone/empty", async ({
+  test("parity — media nav active, pills, requirements/upload-form/empty", async ({
     page,
   }, testInfo) => {
     await gotoScreen(page, PATH, SCREEN);
@@ -48,16 +44,21 @@ test.describe("license plates UAT", () => {
       page.locator("[data-testid=license-plates-requirements]"),
     ).toContainText("492x75");
 
+    // Upload form is live (not disabled).
     const drop = page.locator("[data-testid=license-plates-dropzone]");
     await expect(drop).toBeVisible();
-    await expect(drop).toHaveClass(/\bis-disabled\b/);
+    await expect(page.locator('input[type=file]')).toBeVisible();
 
     await expect(
       page.locator("[data-testid=license-plates-library]"),
     ).toBeVisible();
+    // Honest empty state from real GET /api/plates.
     await expect(
       page.locator("[data-testid=license-plates-empty]"),
     ).toBeVisible();
+    await expect(
+      page.locator("[data-testid=license-plates-empty]"),
+    ).toContainText("No custom license plates installed yet");
   });
 
   test("wiring — served HTML runs the built bundle and the plates module ran", async ({
@@ -67,15 +68,38 @@ test.describe("license plates UAT", () => {
     await assertWiring(page, PATH, SCREEN);
   });
 
-  test("read-only — no mutations, no API calls, no mutation surface", async ({
+  test("read-only on load — only GET /api/plates fires; no mutations until acted on", async ({
     page,
     probe,
   }) => {
+    const origin = new URL(loadState().baseURL).origin;
     const sockets: string[] = [];
     page.on("websocket", (ws) => sockets.push(ws.url()));
     await gotoScreen(page, PATH, SCREEN);
+    await expect(page.locator("[data-testid=license-plates-empty]")).toBeVisible();
     await page.waitForTimeout(200);
-    await assertReadOnly(page, probe, sockets);
+
+    const mutating = probe.requests.filter((r) =>
+      ["POST", "PUT", "PATCH", "DELETE"].includes(r.method.toUpperCase()),
+    );
+    expect(mutating, `mutating request(s): ${JSON.stringify(mutating)}`).toEqual([]);
+    expect(sockets, `websocket(s): ${JSON.stringify(sockets)}`).toEqual([]);
+    for (const req of probe.requests) {
+      const u = new URL(req.url);
+      expect(u.origin, `off-origin request to ${req.url}`).toBe(origin);
+      if (u.pathname.startsWith("/api/")) {
+        expect(
+          `${req.method.toUpperCase()} ${u.pathname}`,
+          `unexpected API call ${req.method} ${u.pathname}`,
+        ).toBe("GET /api/plates");
+      }
+    }
+    const reads = probe.requests.filter(
+      (r) => new URL(r.url).pathname === "/api/plates",
+    );
+    expect(reads.length, "expected exactly one GET /api/plates on load").toBe(1);
+    await expect(page.locator("form[method='post' i]")).toHaveCount(0);
+    await expect(page.locator("input[type=file]")).toHaveCount(1);
   });
 
   test("clean — zero console warnings/errors and no failed/non-2xx requests", async ({
@@ -83,6 +107,7 @@ test.describe("license plates UAT", () => {
     probe,
   }) => {
     await gotoScreen(page, PATH, SCREEN);
+    await expect(page.locator("[data-testid=license-plates-empty]")).toBeVisible();
     await page.waitForTimeout(200);
     assertCleanConsole(probe);
     assertCleanNetwork(probe);

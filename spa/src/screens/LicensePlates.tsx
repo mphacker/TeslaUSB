@@ -7,8 +7,8 @@ import "../styles/license-plates.css";
  * Custom License Plates screen (route `/license_plates`, parity port of the
  * legacy `license_plates.html`).
  *
- * Tesla custom-background license-plate PNGs live in the lightshow media
- * partition's `/lightshow/LicensePlate` folder. The v1 page is a media-pill
+ * Tesla custom-background license-plate PNGs live in the `/LicensePlate`
+ * folder at the root of the media (p2) partition. The v1 page is a media-pill
  * page with a requirements card, upload drop zone, and a table of installed
  * plates.
  *
@@ -43,8 +43,8 @@ export function LicensePlates() {
         </p>
         <ul>
           <li>
-            <strong>Folder:</strong> <code>/lightshow/LicensePlate</code> on
-            the lightshow USB partition (managed for you)
+            <strong>Folder:</strong> <code>/LicensePlate</code> at the root of
+            the media partition (managed for you)
           </li>
           <li>
             <strong>Format:</strong> PNG only

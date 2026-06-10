@@ -4,6 +4,24 @@ Working notes for any Copilot agent (CLI, cloud, code review) operating
 on this repository. These rules are binding alongside
 `docs/03-CODE-QUALITY-CHARTER.md`.
 
+## Rust-only solution — no Python, ever (binding)
+
+The B-1 solution is implemented in **Rust only**. The backend is the Rust
+daemon set (`gadgetd`, `scannerd`, `indexd`, `webd`, `retentiond`,
+`uploadd`, `wifid`); the frontend is the existing **preact / TypeScript SPA**
+under `spa/`. **No Python may be added, copied, or used** anywhere in the
+shipped solution.
+
+The legacy **v1 app (`teslausb_web`, Flask/Python) is REFERENCE ONLY** — we
+want v1's *features, capabilities, and look-and-feel*, re-implemented in Rust
+with better performance and zero video-clip loss. You MAY read v1 source to
+learn how a feature worked or to recover an authoritative Tesla media path,
+folder name, or validation rule. You MUST NOT copy v1 Python code (verbatim or
+translated-line-by-line) into this repo, reintroduce a Python runtime, Flask,
+Jinja templates, gunicorn, or any `.py` file into the build/deploy surface.
+When a v1 detail is needed, port the *behavior* into Rust/TS idiomatically;
+cite v1 only as the source of the requirement.
+
 ## Builds — use podman, never local WSL (binding)
 
 All cross-compilation / artifact builds for the B-1 stack MUST run

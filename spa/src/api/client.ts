@@ -13,6 +13,7 @@
 import type {
   Analytics,
   ApiErrorBody,
+  Chimes,
   Clip,
   DaySummary,
   EventItem,
@@ -143,6 +144,14 @@ export const api = {
 
   storageHealth: (signal?: AbortSignal) =>
     getJson<StorageHealth>("/api/storage/health", signal),
+
+  /**
+   * Read which lock chime is installed on the p2 MEDIA partition
+   * (`GET /api/chimes`). Read-only: routed through the scannerd→indexd→webd
+   * catalog, NOT the gadgetd eject-handoff. `installed` is null when nothing is
+   * installed or the catalog predates the media schema (webd never 5xx's here).
+   */
+  chimes: (signal?: AbortSignal) => getJson<Chimes>("/api/chimes", signal),
 
   // Media URL builders (webd 5.1b). These return same-origin URLs assigned to
   // a native `<video src>` / download anchor; the browser does the byte-range

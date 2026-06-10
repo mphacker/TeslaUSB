@@ -56,3 +56,54 @@
   margin: 24px 0 12px;
   color: var(--text-primary);
 }
+
+/* Active Lock Chime — the live installed-chime fact (GET /api/chimes). */
+.media-page .active-chime-name {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  word-break: break-word;
+}
+.media-page .active-chime-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+.media-page .chime-pill {
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 2px 10px;
+  border-radius: 9999px;
+  background: var(--bg-primary, rgba(0, 0, 0, 0.06));
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+}
+
+/* Chime Library — one-row table of installed chimes (v1 table look). */
+.media-page .chime-library {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+.media-page .chime-library th,
+.media-page .chime-library td {
+  text-align: left;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+.media-page .chime-library th {
+  color: var(--text-secondary);
+  font-weight: 600;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.media-page .chime-library tbody tr:last-child td {
+  border-bottom: none;
+}
+.media-page .chime-cell-name {
+  color: var(--text-primary);
+  font-weight: 600;
+  word-break: break-word;
+}

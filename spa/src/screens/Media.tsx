@@ -1,5 +1,7 @@
-import { useEffect } from "preact/hooks";
+import { useEffect, useState } from "preact/hooks";
 import { MediaPills } from "../components/MediaPills";
+import { api } from "../api/client";
+import type { Chimes, InstalledChime } from "../api/types";
 import "../styles/media.css";
 
 /**
@@ -16,20 +18,26 @@ import "../styles/media.css";
  * `.settings-section`, …) which the SPA already loads.
  *
  * Backend reality (B-1, intentionally honest — NOT fabricated):
- *  - webd exposes only `POST /api/chimes` (install/replace the single
- *    `LockChime.wav`) and `DELETE /api/chimes/{id}`, BOTH of which route
- *    through the gadgetd eject-handoff that momentarily ejects the USB drive
- *    from the live vehicle. That makes them operator-gated, so they are NOT
- *    wired into this always-on LAN page (a browser confirm is not a safety
- *    boundary); chime management stays a deliberate operator/hardware-rails
- *    action until proper arming/gating exists.
- *  - There is NO read endpoint to list chimes, report the active chime, or
- *    drive the scheduler/random-groups yet (the open "how does webd enumerate
- *    installed p2 media" design gate). So the data-dependent sections render
- *    honest "pending" states rather than inventing rows, players, or controls.
+ *  - `GET /api/chimes` (read-only) reports which lock chime is installed on the
+ *    p2 MEDIA partition, routed through the scannerd→indexd→webd catalog (NOT
+ *    the gadgetd eject-handoff). The "Active Lock Chime" and "Chime Library"
+ *    sections render that live fact, degrading to honest empty/pending states
+ *    (never fabricated rows) when nothing is installed or the catalog can't be
+ *    read.
+ *  - `POST /api/chimes` (install/replace `LockChime.wav`) and
+ *    `DELETE /api/chimes/{id}` BOTH route through the gadgetd eject-handoff that
+ *    momentarily ejects the USB drive from the live vehicle. That makes them
+ *    operator-gated, so they are NOT wired into this always-on LAN page (a
+ *    browser confirm is not a safety boundary); chime management stays a
+ *    deliberate operator/hardware-rails action until proper arming/gating
+ *    exists.
+ *  - The scheduler / random-groups have no backend yet, so they render honest
+ *    "pending" states rather than inventing controls.
  *
- * The screen therefore makes NO API calls and is strictly read-only.
+ * The only API call is the read-only `GET /api/chimes`.
  */
+
+const DASH = "\u2014";
 
 function buildId(): string {
   return (
@@ -38,15 +46,49 @@ function buildId(): string {
   );
 }
 
+/** A lock-chime byte count → compact human string (KB for the sub-1-MiB chimes). */
+function chimeSize(n: number | null | undefined): string {
+  if (n == null || !Number.isFinite(n) || n < 0) return DASH;
+  if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  if (n >= 1024) return `${Math.round(n / 1024)} KB`;
+  return `${n} B`;
+}
+
+/** Naive-local `YYYY-MM-DDThh:mm:ss` → a readable `YYYY-MM-DD hh:mm` (or "—"). */
+function chimeModified(s: string | null | undefined): string {
+  if (!s) return DASH;
+  return s.replace("T", " ").slice(0, 16);
+}
+
+/** Fetch lifecycle of `GET /api/chimes`. */
+type Status = "loading" | "ready" | "error";
+
 export function Media() {
-  // Wiring-proof hook: prove THIS module produced the live DOM (defends the
-  // documented "edited JS the page never loaded" failure mode).
+  const [status, setStatus] = useState<Status>("loading");
+  const [installed, setInstalled] = useState<InstalledChime | null>(null);
+
   useEffect(() => {
+    // Wiring-proof hook: prove THIS module produced the live DOM (defends the
+    // documented "edited JS the page never loaded" failure mode).
     (
       window as unknown as {
         __TESLAUSB_MEDIA_HOOKS__?: { build: string; screen: string };
       }
     ).__TESLAUSB_MEDIA_HOOKS__ = { build: buildId(), screen: "lock-chimes" };
+
+    const ctrl = new AbortController();
+    api
+      .chimes(ctrl.signal)
+      .then((c: Chimes) => {
+        setInstalled(c.installed);
+        setStatus("ready");
+      })
+      .catch(() => {
+        // Aborted on unmount → ignore; any other failure degrades to an honest
+        // error note without logging (the zero-console UAT gate holds).
+        if (!ctrl.signal.aborted) setStatus("error");
+      });
+    return () => ctrl.abort();
   }, []);
 
   return (
@@ -56,14 +98,36 @@ export function Media() {
 
       <h2>Lock Chimes</h2>
 
-      {/* ── Active Lock Chime ── (no read API yet → honest pending state) */}
+      {/* ── Active Lock Chime ── (live from GET /api/chimes) */}
       <div class="media-card" id="activeChimeSection">
         <h3>Active Lock Chime</h3>
-        <p class="media-pending" data-testid="active-chime-pending">
-          The active lock chime can’t be shown yet — webd doesn’t expose a media
-          read endpoint in this build. It will appear here once the catalog
-          indexes the media partition.
-        </p>
+        {status === "ready" && installed ? (
+          <div class="active-chime" data-testid="active-chime">
+            <div class="active-chime-name" data-testid="active-chime-name">
+              {installed.name}
+            </div>
+            <div class="active-chime-meta">
+              <span class="chime-pill">{chimeSize(installed.size_bytes)}</span>
+              <span class="chime-pill">
+                Installed {chimeModified(installed.modified)}
+              </span>
+            </div>
+          </div>
+        ) : status === "ready" ? (
+          <p class="media-pending" data-testid="active-chime-none">
+            No lock chime is installed. The vehicle will play its built-in chime
+            until one is installed through the maintenance tooling.
+          </p>
+        ) : status === "error" ? (
+          <p class="media-pending" data-testid="active-chime-error">
+            The active lock chime couldn’t be read just now. It will appear here
+            once the media catalog can be reached.
+          </p>
+        ) : (
+          <p class="media-pending" data-testid="active-chime-loading">
+            Reading the installed lock chime…
+          </p>
+        )}
       </div>
 
       {/* ── Upload New Chime ── (operator-gated mutation, not wired here) */}
@@ -99,13 +163,39 @@ export function Media() {
         </div>
       </details>
 
-      {/* ── Chime Library ── (no list endpoint → honest pending, no fake rows) */}
+      {/* ── Chime Library ── (live: the one installed chime, else honest empty) */}
       <h3 class="media-library-heading">Chime Library</h3>
       <div class="media-card">
-        <p class="media-pending" data-testid="library-pending">
-          The chime library will list installed chimes once webd can enumerate
-          the media partition. No chimes can be listed yet.
-        </p>
+        {status === "ready" && installed ? (
+          <table class="chime-library" data-testid="chime-library">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Size</th>
+                <th>Installed</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr data-testid="chime-row" data-rel-path={installed.rel_path}>
+                <td class="chime-cell-name">{installed.name}</td>
+                <td>{chimeSize(installed.size_bytes)}</td>
+                <td>{chimeModified(installed.modified)}</td>
+              </tr>
+            </tbody>
+          </table>
+        ) : status === "ready" ? (
+          <p class="media-pending" data-testid="library-empty">
+            No chimes are installed yet.
+          </p>
+        ) : status === "error" ? (
+          <p class="media-pending" data-testid="library-error">
+            The chime library couldn’t be read just now.
+          </p>
+        ) : (
+          <p class="media-pending" data-testid="library-loading">
+            Reading the chime library…
+          </p>
+        )}
       </div>
     </div>
   );

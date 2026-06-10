@@ -193,3 +193,25 @@ export interface StorageHealth {
 export interface ApiErrorBody {
   error: { code: string; message: string };
 }
+
+/**
+ * The installed lock chime (`GET /api/chimes` → `installed`), mirrors
+ * `InstalledChimeDto` in `rust/crates/webd/src/dto.rs`. `modified` is a
+ * best-effort naive-local `YYYY-MM-DDThh:mm:ss` string (null when the exFAT
+ * timestamp couldn't be decoded).
+ */
+export interface InstalledChime {
+  name: string;
+  rel_path: string;
+  size_bytes: number;
+  modified: string | null;
+}
+
+/**
+ * `GET /api/chimes`. `installed` is null when no chime is on the p2 MEDIA
+ * partition OR the catalog predates the media schema (webd degrades to null
+ * rather than erroring).
+ */
+export interface Chimes {
+  installed: InstalledChime | null;
+}

@@ -10,11 +10,12 @@ import { resolve } from "node:path";
 // (Chimes/Music/Boombox/Shows/Wraps/Plates). This screen reproduces that v1
 // look using the carried-over legacy stylesheet (`/static/css/style.css`).
 //
-// Backend reality: the only chime endpoints (POST/DELETE /api/chimes) route
-// through the gadgetd eject-handoff (operator-gated), and there is NO chime
-// read endpoint yet, so the screen is strictly READ-ONLY — it makes no API
-// calls and renders honest "pending" states for the data-dependent sections
-// instead of fabricating a library/active chime/scheduler.
+// Backend reality: `GET /api/chimes` (read-only, routed through the catalog —
+// NOT the gadgetd eject-handoff) reports the installed lock chime. The screen
+// renders that live fact, degrading to honest empty states when nothing is
+// installed (the UAT seed has no media). The install/remove endpoints
+// (POST/DELETE /api/chimes) route through the operator-gated eject-handoff and
+// are deliberately NOT wired here, so the page exposes no mutation surface.
 
 /** The media pill sub-nav, in v1 render order. Only "chimes" is active/built. */
 const EXPECT_PILLS = ["chimes", "music", "boombox", "shows", "wraps", "plates"];
@@ -110,9 +111,10 @@ test.describe("media (lock chimes) UAT", () => {
     await expect(page.locator(".media-library-heading")).toHaveText(
       "Chime Library",
     );
-    // Pending sections are honest (no fabricated data), not operational.
-    await expect(page.locator("[data-testid=active-chime-pending]")).toBeVisible();
-    await expect(page.locator("[data-testid=library-pending]")).toBeVisible();
+    // The seed has no media on p2, so webd reports `{installed: null}` and the
+    // data sections settle into their honest EMPTY states (never fabricated).
+    await expect(page.locator("[data-testid=active-chime-none]")).toBeVisible();
+    await expect(page.locator("[data-testid=library-empty]")).toBeVisible();
   });
 
   // ── Gate 2: wiring proof — the served HTML runs the freshly-built bundle ─
@@ -156,8 +158,8 @@ test.describe("media (lock chimes) UAT", () => {
     expect(html).toContain("/static/css/style.css");
   });
 
-  // ── Gate 3 (read-only): screen makes no API calls and no mutations ──────
-  test("read-only — no mutations, no API calls, no mutation surface", async ({
+  // ── Gate 3 (read-only): only the GET /api/chimes read, no mutations ─────
+  test("read-only — only GET /api/chimes, no mutations, no mutation surface", async ({
     page,
     probe,
   }) => {
@@ -167,6 +169,8 @@ test.describe("media (lock chimes) UAT", () => {
     page.on("websocket", (ws) => sockets.push(ws.url()));
 
     await gotoMedia(page);
+    // Let the single read-only fetch settle.
+    await expect(page.locator("[data-testid=active-chime-none]")).toBeVisible();
     await page.waitForTimeout(200);
 
     // No mutating HTTP method, ever.
@@ -178,16 +182,23 @@ test.describe("media (lock chimes) UAT", () => {
     // No WebSocket of any kind.
     expect(sockets, `websocket(s) opened: ${JSON.stringify(sockets)}`).toEqual([]);
 
-    // The Lock Chimes screen has no read endpoint to call → it issues ZERO
-    // /api/ requests (same-origin only otherwise).
+    // The ONLY /api/ request the Lock Chimes screen makes is the read-only
+    // `GET /api/chimes`; every request is same-origin and nothing else hits /api/.
     for (const req of probe.requests) {
       const u = new URL(req.url);
       expect(u.origin, `off-origin request to ${req.url}`).toBe(origin);
-      expect(
-        u.pathname.startsWith("/api/"),
-        `unexpected API call ${req.method} ${u.pathname}`,
-      ).toBe(false);
+      if (u.pathname.startsWith("/api/")) {
+        expect(
+          `${req.method.toUpperCase()} ${u.pathname}`,
+          `unexpected API call ${req.method} ${u.pathname}`,
+        ).toBe("GET /api/chimes");
+      }
     }
+    // The read endpoint was actually exercised.
+    const chimeReads = probe.requests.filter(
+      (r) => new URL(r.url).pathname === "/api/chimes",
+    );
+    expect(chimeReads.length, "expected exactly one GET /api/chimes").toBe(1);
 
     // No mutation surface in the DOM (no POST form / submit on this page).
     await expect(page.locator("form[method='post' i]")).toHaveCount(0);
@@ -228,7 +239,50 @@ test.describe("media (lock chimes) UAT", () => {
     expect(bad, `non-2xx response(s): ${JSON.stringify(bad)}`).toEqual([]);
   });
 
-  // ── Gate 5: performance — capture + report (dev-box profile) ────────────
+  // ── Gate 5: installed chime renders when GET /api/chimes reports one ─────
+  test("installed — active chime + library row render from GET /api/chimes", async ({
+    page,
+  }) => {
+    // Mock the read so the test is independent of the seed (which has no media).
+    await page.route("**/api/chimes", (route) => {
+      if (route.request().method() !== "GET") return route.continue();
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          installed: {
+            name: "LockChime.wav",
+            rel_path: "LockChime.wav",
+            size_bytes: 219770,
+            modified: "2026-06-01T20:10:04",
+          },
+        }),
+      });
+    });
+
+    await gotoMedia(page);
+
+    // Active Lock Chime card shows the live name + size + install time.
+    const active = page.locator("[data-testid=active-chime]");
+    await expect(active).toBeVisible();
+    await expect(page.locator("[data-testid=active-chime-name]")).toHaveText(
+      "LockChime.wav",
+    );
+    await expect(active).toContainText("215 KB");
+    await expect(active).toContainText("2026-06-01 20:10");
+
+    // No empty state when a chime is installed.
+    await expect(page.locator("[data-testid=active-chime-none]")).toHaveCount(0);
+
+    // Chime Library lists exactly the one installed chime by stable rel_path.
+    const row = page.locator("[data-testid=chime-row]");
+    await expect(row).toHaveCount(1);
+    await expect(row).toHaveAttribute("data-rel-path", "LockChime.wav");
+    await expect(row).toContainText("LockChime.wav");
+    await expect(page.locator("[data-testid=library-empty]")).toHaveCount(0);
+  });
+
+  // ── Gate 6: performance — capture + report (dev-box profile) ────────────
   test("perf — capture TTFB/DCL/FCP + slowest requests", async ({ page }, testInfo) => {
     const navStart = Date.now();
     await gotoMedia(page);
@@ -283,7 +337,7 @@ test.describe("media (lock chimes) UAT", () => {
     expect(report.screenReadyMs).toBeLessThan(8000);
   });
 
-  // ── Gate 6: responsive — render + screenshot at this project's viewport ─
+  // ── Gate 7: responsive — render + screenshot at this project's viewport ─
   test("responsive — renders at viewport and screenshot captured", async ({
     page,
   }, testInfo) => {

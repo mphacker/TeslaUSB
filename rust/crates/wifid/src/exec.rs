@@ -6,21 +6,18 @@
 //!   exercise off-device: [`MonotonicClock`] (a boot-scoped clock over
 //!   `std::time::Instant`) and [`FileCredentialStore`] (atomic `0600`
 //!   persistence).
-//! * **`// HARDWARE-GATED` stubs** for everything that needs the real Pi:
-//!   netlink/`wpa_supplicant`/`hostapd`/`dnsmasq`/`tc`/`rmmod` ([`HardwareNetworkController`]),
-//!   the gadgetd write-heartbeat client ([`GadgetHeartbeatSource`]), and the
-//!   reboot path ([`HardwareRebootController`]). These return
-//!   [`WifidError::HardwareGated`] (or the fail-safe `None`) until the Phase-2
-//!   spikes (esp. Task 2.6, the TX-cap calibration) validate them on hardware.
-//!   They never silently pretend to succeed.
+//! * **Device-only executors** for the parts that need the real Pi: the
+//!   gadgetd write-heartbeat client ([`GadgetHeartbeatSource`], still a
+//!   fail-safe `None` stub until gadgetd exposes the heartbeat — Task 3.2) and
+//!   the last-resort reboot ([`HardwareRebootController`]). The radio/`tc`/chip
+//!   controller lives in [`crate::nmcli`].
 
 use std::time::Instant;
 
 use crate::creds::{CredentialStore, Credentials, Secret};
 use crate::error::{Result, WifidError};
-use crate::link::LinkObservation;
-use crate::traits::{Clock, HeartbeatSource, NetworkController, RebootController};
-use crate::watchdog::{ChipObservation, WriteHeartbeat};
+use crate::traits::{Clock, HeartbeatSource, RebootController};
+use crate::watchdog::WriteHeartbeat;
 
 /// Boot-scoped monotonic clock. `Instant` is monotonic on every supported
 /// platform and resets per process start; combined with a matching `boot_id`
@@ -65,91 +62,50 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     hash
 }
 
-/// HARDWARE-GATED: drives the `WiFi` radio + `tc` + chip reset on the Pi. Every
-/// method is a stub returning [`WifidError::HardwareGated`] until validated on
-/// device (netlink/`wpa_supplicant`/`hostapd`/`dnsmasq`/`tc`/`rmmod`).
-pub(crate) struct HardwareNetworkController;
-
-impl NetworkController for HardwareNetworkController {
-    fn observe_link(&self) -> Result<LinkObservation> {
-        // HARDWARE-GATED: query nl80211 association/signal + carrier/IP + a
-        // gateway reachability probe, plus actual sta/ap-running state.
-        Err(WifidError::Network(
-            "observe_link (nl80211) not available off-device".to_owned(),
-        ))
-    }
-
-    fn observe_chip(&self) -> Result<ChipObservation> {
-        // HARDWARE-GATED: read brcmfmac/SDIO health (driver responsive?).
-        Err(WifidError::Network(
-            "observe_chip (brcmfmac) not available off-device".to_owned(),
-        ))
-    }
-
-    fn start_sta(&self) -> Result<()> {
-        // HARDWARE-GATED: wpa_supplicant up in client mode.
-        Err(WifidError::HardwareGated("start_sta not on device"))
-    }
-
-    fn stop_sta(&self) -> Result<()> {
-        // HARDWARE-GATED: wpa_supplicant down (verify stopped).
-        Err(WifidError::HardwareGated("stop_sta not on device"))
-    }
-
-    fn start_ap(&self) -> Result<()> {
-        // HARDWARE-GATED: hostapd (WPA2) + dnsmasq up.
-        Err(WifidError::HardwareGated("start_ap not on device"))
-    }
-
-    fn stop_ap(&self) -> Result<()> {
-        // HARDWARE-GATED: hostapd + dnsmasq down (verify stopped).
-        Err(WifidError::HardwareGated("stop_ap not on device"))
-    }
-
-    fn apply_tx_cap(&self, _bytes_per_s: u64) -> Result<()> {
-        // HARDWARE-GATED (Task 2.6): tc egress cap. The *value* is calibration-
-        // gated; the mechanism is device-only.
-        Err(WifidError::HardwareGated("apply_tx_cap (tc) not on device"))
-    }
-
-    fn reset_chip(&self) -> Result<()> {
-        // HARDWARE-GATED: rmmod + modprobe brcmfmac (chip-only reset).
-        Err(WifidError::HardwareGated(
-            "reset_chip (brcmfmac) not on device",
-        ))
-    }
-}
-
-/// HARDWARE-GATED: reads gadgetd's write-heartbeat over `gadgetd.sock`
-/// (`gadget_status()` → `write_heartbeat_mono_ms`, `usb_state`). The stub
-/// returns `None`, which the watchdog treats as "car may be writing ⇒ never
-/// reboot" — the safe default.
+/// Reads gadgetd's write-heartbeat over `gadgetd.sock` (`gadget_status()` →
+/// `write_heartbeat_mono_ms`, `usb_state`). The current implementation is a
+/// fail-safe `None` stub, which the watchdog treats as "car may be writing ⇒
+/// never reboot" — the safe default that keeps the reboot path closed.
 ///
 /// CONVERGENCE NOTE: the D4 contract (OQ-5) flags that gadgetd must actually
 /// expose a `write_heartbeat` + `boot_id` in its status RPC; that field does
-/// not exist in `gadgetd` yet (Task 3.2). Until it does, this stays a stub.
+/// not exist in `gadgetd` yet (Task 3.2, a different lane). Until it does, this
+/// stays a stub — and because it returns `None`, the (now real) reboot
+/// controller below can never actually fire, so wiring it up carries no
+/// behavioural risk.
 pub(crate) struct GadgetHeartbeatSource;
 
 impl HeartbeatSource for GadgetHeartbeatSource {
     fn read(&self) -> Option<WriteHeartbeat> {
-        // HARDWARE-GATED: connect gadgetd.sock, request gadget_status, parse the
-        // heartbeat. Fail-safe stub: no reading ⇒ no reboot.
+        // Fail-safe stub: no reading ⇒ no reboot. Replaced once gadgetd exposes
+        // the heartbeat over its status RPC (Task 3.2).
         None
     }
 }
 
-/// HARDWARE-GATED: the single sanctioned non-gadgetd reboot. Left unimplemented
-/// (returns an error) so unvalidated code can never actually reboot the Pi.
+/// The single sanctioned non-gadgetd reboot (`SPEC.md` §2 invariant 4): the
+/// last-resort SDIO-deadlock recovery. Only ever invoked by the orchestrator
+/// after the watchdog has (a) exhausted chip resets and (b) proven USB idle via
+/// gadgetd's heartbeat gate. With the heartbeat source still a `None` stub that
+/// gate never opens, so this is currently unreachable in practice — it is wired
+/// for real so the moment gadgetd's heartbeat lands the recovery path is whole.
 pub(crate) struct HardwareRebootController;
 
 impl RebootController for HardwareRebootController {
     fn reboot(&self) -> Result<()> {
-        // HARDWARE-GATED: `systemctl reboot` (or reboot(2)) — only reachable
-        // after the watchdog proved USB idle. Intentionally not wired up until
-        // on-device validation (SPEC.md §2 invariant 4).
-        Err(WifidError::HardwareGated(
-            "reboot path not validated on device",
-        ))
+        // The watchdog has already proven USB idle (heartbeat gate) before we
+        // get here. Prefer systemd's orderly reboot.
+        let ok = std::process::Command::new("systemctl")
+            .arg("reboot")
+            .status()
+            .is_ok_and(|s| s.success());
+        if ok {
+            Ok(())
+        } else {
+            Err(WifidError::Network(
+                "systemctl reboot failed to initiate".to_owned(),
+            ))
+        }
     }
 }
 
@@ -175,9 +131,11 @@ impl FileCredentialStore {
             out.push_str(psk.reveal());
             out.push('\n');
         }
-        out.push_str("ap_passphrase=");
-        out.push_str(creds.ap_passphrase.reveal());
-        out.push('\n');
+        if let Some(ap) = &creds.ap_passphrase {
+            out.push_str("ap_passphrase=");
+            out.push_str(ap.reveal());
+            out.push('\n');
+        }
         out
     }
 
@@ -200,8 +158,6 @@ impl FileCredentialStore {
                 _ => {} // forward-compatible: ignore unknown keys
             }
         }
-        let ap_passphrase = ap_passphrase
-            .ok_or_else(|| WifidError::Credentials("missing ap_passphrase".to_owned()))?;
         Ok(Credentials {
             sta_psk,
             ap_passphrase,
@@ -210,10 +166,21 @@ impl FileCredentialStore {
 }
 
 impl CredentialStore for FileCredentialStore {
-    fn load(&self) -> Result<Credentials> {
-        let contents = std::fs::read_to_string(&self.path)
-            .map_err(|e| WifidError::Credentials(format!("read {}: {e}", self.path.display())))?;
-        Self::parse(&contents)
+    fn load(&self) -> Result<Option<Credentials>> {
+        match std::fs::read_to_string(&self.path) {
+            Ok(contents) => Self::parse(&contents).map(Some),
+            // The store simply does not exist yet (fresh / unprovisioned
+            // appliance, or its parent dir is absent — both surface as
+            // NotFound). This is a benign empty config, NOT a fatal error: the
+            // daemon must continue into the normal STA/AP state machine instead
+            // of crash-looping. Only NotFound is treated as "absent"; ENOTDIR,
+            // permission-denied, etc. are real faults and are surfaced.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(WifidError::Credentials(format!(
+                "read {}: {e}",
+                self.path.display()
+            ))),
+        }
     }
 
     fn store(&self, creds: &Credentials) -> Result<()> {
@@ -277,12 +244,45 @@ mod tests {
 
         let creds = Credentials {
             sta_psk: Some(Secret::new("home-psk-value")),
-            ap_passphrase: Secret::new("ap-pass-value"),
+            ap_passphrase: Some(Secret::new("ap-pass-value")),
         };
         store.store(&creds).unwrap();
-        let loaded = store.load().unwrap();
+        let loaded = store.load().unwrap().expect("credentials present");
         assert_eq!(loaded, creds);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_store_loads_as_empty_config_not_error() {
+        // The live crash-loop fix: a credential file that does not exist must
+        // load as `Ok(None)` (benign empty config), never as an error that
+        // would make the daemon exit and systemd restart it forever.
+        let dir = std::env::temp_dir().join(format!("wifid-absent-{}", std::process::id()));
+        // Point at a path under a parent dir that does not exist either, to
+        // cover the fresh-appliance case (both file and parent absent).
+        let path = dir.join("does-not-exist").join("creds");
+        let store = FileCredentialStore::new(&path);
+        match store.load() {
+            Ok(None) => {}
+            other => panic!("missing store must be Ok(None), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn malformed_store_is_surfaced_as_error_not_silently_empty() {
+        // A file that *exists* but is corrupt is a real fault and must be
+        // surfaced (distinct from the benign missing-file case above).
+        let dir = std::env::temp_dir().join(format!("wifid-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("creds");
+        std::fs::write(
+            &path,
+            b"this is not a valid key=value? line\nno-equals-here\n",
+        )
+        .unwrap();
+        let store = FileCredentialStore::new(&path);
+        assert!(store.load().is_err(), "malformed store must error");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -296,7 +296,7 @@ mod tests {
         store
             .store(&Credentials {
                 sta_psk: None,
-                ap_passphrase: Secret::new("ap-pass-value"),
+                ap_passphrase: Some(Secret::new("ap-pass-value")),
             })
             .unwrap();
 

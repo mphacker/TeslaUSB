@@ -50,15 +50,35 @@ impl std::fmt::Debug for Secret {
 }
 
 /// The credentials `wifid` owns.
+///
+/// Both fields are optional so that an **unprovisioned** appliance — one whose
+/// credential store does not exist yet — is representable as
+/// [`Credentials::empty`] rather than forcing a fatal error at startup. A
+/// missing store must never crash the daemon (it previously crash-looped on
+/// `ENOENT`); it simply means "nothing configured yet", and the state machine
+/// continues into AP-onboarding / idle until `webd` provisions credentials.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Credentials {
     /// Home-WiFi PSK. `None` ⇒ no STA configured ⇒ AP-onboarding only.
     pub(crate) sta_psk: Option<Secret>,
-    /// The WPA2 passphrase the onboarding AP advertises (never open).
-    pub(crate) ap_passphrase: Secret,
+    /// The WPA2 passphrase the onboarding AP advertises (never open). `None`
+    /// ⇒ not provisioned yet: the AP **cannot** be brought up (an open AP is
+    /// forbidden), so the executor refuses to start it until a passphrase is
+    /// set. Never `None` once `set-credentials` has run.
+    pub(crate) ap_passphrase: Option<Secret>,
 }
 
 impl Credentials {
+    /// The credentials of a freshly-imaged, unprovisioned appliance: nothing
+    /// configured. Used when the credential store file does not exist yet, so a
+    /// missing store is a benign empty config rather than a fatal error.
+    pub(crate) fn empty() -> Self {
+        Self {
+            sta_psk: None,
+            ap_passphrase: None,
+        }
+    }
+
     /// Whether a home-WiFi PSK is configured (drives `sta_configured` in the
     /// link state machine). Reads no secret value.
     pub(crate) fn sta_configured(&self) -> bool {
@@ -122,7 +142,7 @@ pub(crate) fn apply_update(
 
     let ap_passphrase = if let Some(ap) = &update.ap_passphrase {
         validate_wpa2_passphrase(ap).map_err(WifidError::InvalidCredential)?;
-        Secret::new(ap.clone())
+        Some(Secret::new(ap.clone()))
     } else {
         current.ap_passphrase.clone()
     };
@@ -138,9 +158,17 @@ pub(crate) fn apply_update(
 pub(crate) trait CredentialStore {
     /// Load the persisted credentials.
     ///
+    /// Returns `Ok(None)` when the store **does not exist yet** (an
+    /// unprovisioned appliance) — this is a benign empty config, never a fatal
+    /// error, so the daemon must not crash-loop on a missing file. Returns
+    /// `Ok(Some(..))` when credentials were loaded, and `Err(..)` only for a
+    /// *real* fault (I/O error other than not-found, bad permissions, or
+    /// malformed contents), which is surfaced rather than silently ignored.
+    ///
     /// # Errors
-    /// Returns [`WifidError::Credentials`] if the store is missing or malformed.
-    fn load(&self) -> Result<Credentials>;
+    /// Returns [`WifidError::Credentials`] / [`WifidError::Io`] if the store
+    /// exists but cannot be read or parsed.
+    fn load(&self) -> Result<Option<Credentials>>;
 
     /// Persist `creds` (atomically, `0600`).
     ///
@@ -159,7 +187,7 @@ mod tests {
     fn base() -> Credentials {
         Credentials {
             sta_psk: Some(Secret::new(SENTINEL)),
-            ap_passphrase: Secret::new("onboarding-pass"),
+            ap_passphrase: Some(Secret::new("onboarding-pass")),
         }
     }
 
@@ -209,7 +237,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(updated.sta_psk.as_ref().unwrap().reveal(), "newpassword");
-        assert_eq!(updated.ap_passphrase.reveal(), "onboarding-pass");
+        assert_eq!(
+            updated.ap_passphrase.as_ref().unwrap().reveal(),
+            "onboarding-pass"
+        );
     }
 
     #[test]

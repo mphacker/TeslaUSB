@@ -24,6 +24,35 @@ pub(crate) struct WifidConfig {
     pub(crate) throttle: ThrottleConfig,
     /// Liveness watchdog + recovery escalation.
     pub(crate) watchdog: WatchdogConfig,
+    /// Platform/hardware integration knobs (interface + NM profile names).
+    pub(crate) platform: PlatformConfig,
+}
+
+/// Names the production [`crate::nmcli`] controller needs to drive the real
+/// radio. **No policy is hardcoded into logic** — the interface, the two
+/// `NetworkManager` profile names `wifid` toggles, and the kernel module it
+/// reloads all live here so the device's provisioning (owned elsewhere) and
+/// `wifid` agree by configuration, not by a magic string buried in code.
+///
+/// `wifid` never *creates* these profiles (that is the device-setup concern,
+/// which also owns the SSID + secrets); it only brings the pre-provisioned
+/// profiles up/down and observes them, so a secret never reaches a command
+/// line through this daemon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PlatformConfig {
+    /// The Wi-Fi interface (e.g. `wlan0`).
+    pub(crate) wifi_iface: String,
+    /// The pre-provisioned `NetworkManager` connection profile for station
+    /// (home-WiFi) mode.
+    pub(crate) sta_profile: String,
+    /// The pre-provisioned `NetworkManager` connection profile for the WPA2
+    /// onboarding access point. Always WPA2 (never an open AP); if it is not
+    /// provisioned, bringing the AP up simply fails — `wifid` never falls back
+    /// to an open network.
+    pub(crate) ap_profile: String,
+    /// The Wi-Fi kernel module the chip-reset watchdog reloads to recover a
+    /// wedged BCM43436 (`rmmod`/`modprobe`).
+    pub(crate) wifi_module: String,
 }
 
 /// STA/AP state-machine timing knobs (`wifid.md` §2.1: debounce flaps).
@@ -127,6 +156,12 @@ impl Default for WifidConfig {
                 reboot_idle_grace: Duration::from_secs(30),
                 heartbeat_max_age: Duration::from_secs(10),
             },
+            platform: PlatformConfig {
+                wifi_iface: "wlan0".to_owned(),
+                sta_profile: "teslausb-sta".to_owned(),
+                ap_profile: "teslausb-ap".to_owned(),
+                wifi_module: "brcmfmac".to_owned(),
+            },
         }
     }
 }
@@ -160,6 +195,23 @@ impl WifidConfig {
             // Chip-reset is always preferred over a Pi reboot; zero would send a
             // confirmed wedge straight to the reboot gate (invariant 2).
             return Err("max_chip_resets_before_reboot must be >= 1");
+        }
+        if self.platform.wifi_iface.is_empty() {
+            return Err("platform.wifi_iface must not be empty");
+        }
+        if self.platform.sta_profile.is_empty() {
+            return Err("platform.sta_profile must not be empty");
+        }
+        if self.platform.ap_profile.is_empty() {
+            return Err("platform.ap_profile must not be empty");
+        }
+        if self.platform.sta_profile == self.platform.ap_profile {
+            // Toggling between modes relies on two *distinct* NM profiles;
+            // collapsing them would make stop-before-start ambiguous.
+            return Err("platform.sta_profile and ap_profile must differ");
+        }
+        if self.platform.wifi_module.is_empty() {
+            return Err("platform.wifi_module must not be empty");
         }
         Ok(())
     }
@@ -201,6 +253,20 @@ mod tests {
     fn settle_window_longer_than_down_debounce_is_rejected() {
         let mut cfg = WifidConfig::default();
         cfg.link.transition_settle = cfg.link.sta_down_debounce + std::time::Duration::from_secs(1);
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn identical_sta_and_ap_profiles_are_rejected() {
+        let mut cfg = WifidConfig::default();
+        cfg.platform.ap_profile = cfg.platform.sta_profile.clone();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn empty_platform_names_are_rejected() {
+        let mut cfg = WifidConfig::default();
+        cfg.platform.wifi_iface = String::new();
         assert!(cfg.validate().is_err());
     }
 }

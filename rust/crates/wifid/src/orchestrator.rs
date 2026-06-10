@@ -69,7 +69,13 @@ where
         cfg: WifidConfig,
         boot_id: u64,
     ) -> Result<Self> {
-        let creds = store.load()?;
+        // A missing credential store is a benign empty config (fresh appliance),
+        // never a fatal error — this is the fix for the on-device crash-loop
+        // where `serve` exited every few seconds because the credential file did
+        // not exist yet. We continue into the normal state machine; with no
+        // credentials the link machine onboards via AP (which the executor will
+        // refuse to start until a passphrase is provisioned).
+        let creds = store.load()?.unwrap_or_else(Credentials::empty);
         let now = clock.now_mono_ms();
         let machine = LinkMachine::new(&cfg.link, now);
         let watchdog = Watchdog::new(&cfg.watchdog);
@@ -393,14 +399,14 @@ mod tests {
     }
 
     struct FakeStore {
-        creds: RefCell<Credentials>,
+        creds: RefCell<Option<Credentials>>,
     }
     impl CredentialStore for FakeStore {
-        fn load(&self) -> Result<Credentials> {
+        fn load(&self) -> Result<Option<Credentials>> {
             Ok(self.creds.borrow().clone())
         }
         fn store(&self, creds: &Credentials) -> Result<()> {
-            *self.creds.borrow_mut() = creds.clone();
+            *self.creds.borrow_mut() = Some(creds.clone());
             Ok(())
         }
     }
@@ -426,12 +432,12 @@ mod tests {
         let creds = if sta_configured {
             Credentials {
                 sta_psk: Some(Secret::new("home-psk-1234")),
-                ap_passphrase: Secret::new("ap-pass-1234"),
+                ap_passphrase: Some(Secret::new("ap-pass-1234")),
             }
         } else {
             Credentials {
                 sta_psk: None,
-                ap_passphrase: Secret::new("ap-pass-1234"),
+                ap_passphrase: Some(Secret::new("ap-pass-1234")),
             }
         };
         Daemon::new(
@@ -450,12 +456,41 @@ mod tests {
                 calls: RefCell::new(0),
             },
             FakeStore {
-                creds: RefCell::new(creds),
+                creds: RefCell::new(Some(creds)),
             },
             WifidConfig::default(),
             BOOT,
         )
         .unwrap()
+    }
+
+    /// Build a daemon whose credential store is **absent** (returns `Ok(None)`)
+    /// — the on-device crash-loop scenario. `Daemon::new` must succeed with an
+    /// empty config rather than erroring.
+    fn build_absent_store() -> TestDaemon {
+        let o = obs();
+        Daemon::new(
+            FakeClock { ms: Cell::new(0) },
+            FakeNet {
+                link: RefCell::new(o),
+                chip: Cell::new(true),
+                calls: RefCell::new(Calls::default()),
+                both_running: Cell::new(false),
+                fail_observe: Cell::new(false),
+            },
+            FakeHeartbeat {
+                hb: RefCell::new(None),
+            },
+            FakeReboot {
+                calls: RefCell::new(0),
+            },
+            FakeStore {
+                creds: RefCell::new(None),
+            },
+            WifidConfig::default(),
+            BOOT,
+        )
+        .expect("missing credential store must not be fatal")
     }
 
     fn set_time(d: &TestDaemon, ms: i64) {
@@ -553,10 +588,70 @@ mod tests {
         }))
         .unwrap();
         // Stored secret is retrievable only through the store, never via status.
-        assert!(d.store.creds.borrow().sta_configured());
+        assert!(
+            d.store
+                .creds
+                .borrow()
+                .as_ref()
+                .is_some_and(Credentials::sta_configured)
+        );
         let st = d.status().unwrap();
         let json = serde_json::to_string(&st).unwrap();
         assert!(!json.contains("new-home-psk"));
+    }
+
+    #[test]
+    fn missing_credential_store_boots_into_ap_onboarding_not_a_crash() {
+        // Regression for the on-device crash-loop: with no credential file the
+        // daemon must come up (no error) and run the state machine. With no STA
+        // configured the link machine onboards via AP, and the AP is actually
+        // started (not merely intended).
+        let mut d = build_absent_store();
+        assert!(
+            !d.creds.sta_configured(),
+            "absent store must be empty config"
+        );
+        let st = d.tick().unwrap();
+        assert_eq!(
+            st.mode,
+            LinkMode::Ap,
+            "unprovisioned daemon should onboard via AP"
+        );
+        assert!(!st.throttle.body.uploads_allowed);
+        assert!(
+            d.net.calls.borrow().start_ap >= 1,
+            "AP onboarding was never started"
+        );
+    }
+
+    #[test]
+    fn sta_configured_but_unreachable_falls_back_to_the_ap_backstop() {
+        // Connectivity backstop, end-to-end through the daemon: STA is
+        // configured but the home network is never reachable (no gateway), so
+        // after the down-debounce wifid must fall back to AP onboarding and
+        // actually bring the AP up — stopping STA first (never both at once).
+        let mut d = build(true);
+        d.tick().unwrap(); // Down -> Sta (StartSta); STA runs but is never viable.
+        let mut t = 1000;
+        let mut reached_ap = false;
+        while t <= 60_000 {
+            set_time(&d, t);
+            if d.tick().unwrap().mode == LinkMode::Ap {
+                reached_ap = true;
+                break;
+            }
+            t += 1000;
+        }
+        assert!(
+            reached_ap,
+            "unreachable STA never fell back to the AP backstop"
+        );
+        let calls = d.net.calls.borrow();
+        assert!(calls.start_ap >= 1, "AP backstop was never started");
+        assert!(
+            calls.stop_sta >= 1,
+            "STA was not stopped before the AP came up"
+        );
     }
 
     #[test]

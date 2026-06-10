@@ -24,11 +24,6 @@ pub(crate) enum WifidError {
     #[error("invalid credential: {0}")]
     InvalidCredential(&'static str),
 
-    /// An operation is only available on the live Linux device and the
-    /// hardware-gated executor has not been validated yet (Phase 2 spikes).
-    #[error("hardware-gated: {0}")]
-    HardwareGated(&'static str),
-
     /// Underlying I/O error.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),

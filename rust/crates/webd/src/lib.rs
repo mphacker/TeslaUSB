@@ -29,6 +29,7 @@
 //!   `axum::Router`, the single public entry point used by the binary and the
 //!   handler tests.
 
+mod boombox;
 mod catalog;
 mod chimes;
 mod dto;
@@ -36,12 +37,17 @@ mod error;
 mod gadget;
 mod health;
 mod jobs;
+mod lightshows;
 mod media;
+mod media_upload;
+mod music;
+mod plates;
 mod polyline;
 mod query;
 mod range;
 mod route;
 mod sysinfo;
+mod wraps;
 
 #[cfg(test)]
 mod tests;

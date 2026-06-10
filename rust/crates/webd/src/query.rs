@@ -6,7 +6,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::dto::{
     AnalyticsDto, AngleDto, Bbox, ClipDto, DaySummary, DayTripCount, EventDto, EventTypeCount,
-    InstalledChimeDto, PrefDto, TripDetailDto, TripDto, TripPointDto,
+    InstalledChimeDto, MediaItemDto, PrefDto, TripDetailDto, TripDto, TripPointDto,
 };
 use crate::polyline;
 
@@ -429,4 +429,110 @@ fn map_event(row: &Row<'_>) -> Result<EventDto, rusqlite::Error> {
         front_frame_offset_ms: row.get(9)?,
         description: row.get(10)?,
     })
+}
+
+// ── Toybox media category list queries ─────────────────────────────────────
+//
+// All five share the same probe + LIKE pattern:
+//   1. Check `sqlite_master` so an old DB without the table degrades to `Ok([])`.
+//   2. Query `media_entries WHERE partition = 'slot1' AND rel_path LIKE '<prefix>%'`.
+//   3. Return a `Vec<MediaItemDto>` (never `Err` on "table missing" — only real I/O
+//      errors propagate).
+//
+// LightShows excludes the `LightShow/wraps/` subtree (those rows belong to
+// the Wraps category); Wraps targets exactly that subtree.
+
+/// Return `true` iff the `media_entries` table exists in this connection's DB.
+fn media_entries_present(conn: &Connection) -> Result<bool, rusqlite::Error> {
+    conn.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_entries'",
+        [],
+        |_| Ok(true),
+    )
+    .optional()
+    .map(|v| v.unwrap_or(false))
+}
+
+/// Map a `media_entries` row (name, `rel_path`, `size_bytes`, modified) to a
+/// [`MediaItemDto`].
+fn map_media_item(row: &Row<'_>) -> Result<MediaItemDto, rusqlite::Error> {
+    Ok(MediaItemDto {
+        name: row.get(0)?,
+        rel_path: row.get(1)?,
+        size_bytes: row.get(2)?,
+        modified: row.get(3)?,
+    })
+}
+
+/// `GET /api/boombox` — files under `Boombox/` on p2.
+pub(crate) fn list_boombox(conn: &Connection) -> Result<Vec<MediaItemDto>, rusqlite::Error> {
+    if !media_entries_present(conn)? {
+        return Ok(vec![]);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT name, rel_path, size_bytes, modified FROM media_entries \
+         WHERE partition = 'slot1' AND rel_path LIKE 'Boombox/%' \
+         ORDER BY rel_path ASC",
+    )?;
+    stmt.query_map([], map_media_item)?
+        .collect::<Result<Vec<_>, _>>()
+}
+
+/// `GET /api/music` — files under `Music/` on p2 (any depth).
+pub(crate) fn list_music(conn: &Connection) -> Result<Vec<MediaItemDto>, rusqlite::Error> {
+    if !media_entries_present(conn)? {
+        return Ok(vec![]);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT name, rel_path, size_bytes, modified FROM media_entries \
+         WHERE partition = 'slot1' AND rel_path LIKE 'Music/%' \
+         ORDER BY rel_path ASC",
+    )?;
+    stmt.query_map([], map_media_item)?
+        .collect::<Result<Vec<_>, _>>()
+}
+
+/// `GET /api/lightshows` — files under `LightShow/` on p2, **excluding**
+/// the `LightShow/wraps/` subtree (those belong to [`list_wraps`]).
+pub(crate) fn list_lightshows(conn: &Connection) -> Result<Vec<MediaItemDto>, rusqlite::Error> {
+    if !media_entries_present(conn)? {
+        return Ok(vec![]);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT name, rel_path, size_bytes, modified FROM media_entries \
+         WHERE partition = 'slot1' \
+           AND rel_path LIKE 'LightShow/%' \
+           AND rel_path NOT LIKE 'LightShow/wraps/%' \
+         ORDER BY rel_path ASC",
+    )?;
+    stmt.query_map([], map_media_item)?
+        .collect::<Result<Vec<_>, _>>()
+}
+
+/// `GET /api/plates` — files under `LicensePlate/` on p2.
+pub(crate) fn list_plates(conn: &Connection) -> Result<Vec<MediaItemDto>, rusqlite::Error> {
+    if !media_entries_present(conn)? {
+        return Ok(vec![]);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT name, rel_path, size_bytes, modified FROM media_entries \
+         WHERE partition = 'slot1' AND rel_path LIKE 'LicensePlate/%' \
+         ORDER BY rel_path ASC",
+    )?;
+    stmt.query_map([], map_media_item)?
+        .collect::<Result<Vec<_>, _>>()
+}
+
+/// `GET /api/wraps` — files under `LightShow/wraps/` on p2.
+pub(crate) fn list_wraps(conn: &Connection) -> Result<Vec<MediaItemDto>, rusqlite::Error> {
+    if !media_entries_present(conn)? {
+        return Ok(vec![]);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT name, rel_path, size_bytes, modified FROM media_entries \
+         WHERE partition = 'slot1' AND rel_path LIKE 'LightShow/wraps/%' \
+         ORDER BY rel_path ASC",
+    )?;
+    stmt.query_map([], map_media_item)?
+        .collect::<Result<Vec<_>, _>>()
 }

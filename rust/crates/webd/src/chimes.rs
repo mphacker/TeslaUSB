@@ -86,7 +86,7 @@ pub(crate) async fn install_chime(
         state,
         "chime_install",
         PARTITION_MEDIA,
-        CHIME_REL_PATH,
+        CHIME_REL_PATH.to_owned(),
         bytes,
     )
     .await
@@ -105,7 +105,13 @@ pub(crate) async fn remove_chime(
     if id != CHIME_ID {
         return Err(ApiError::NotFound);
     }
-    crate::route::run_remove(state, "chime_remove", PARTITION_MEDIA, CHIME_REL_PATH).await
+    crate::route::run_remove(
+        state,
+        "chime_remove",
+        PARTITION_MEDIA,
+        CHIME_REL_PATH.to_owned(),
+    )
+    .await
 }
 
 /// Read the single `file` field from the multipart body, enforcing the size cap
@@ -156,7 +162,7 @@ fn map_multipart_err(err: MultipartError) -> ApiError {
 /// mono/stereo channels at 44.1/48 kHz and 16-bit samples (with the derived
 /// `byte_rate`/`block_align` cross-checked so a hand-crafted header cannot lie),
 /// and a non-empty `data` chunk. All offset math is checked; no slice indexing.
-fn validate_lock_chime_wav(bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn validate_lock_chime_wav(bytes: &[u8]) -> Result<(), String> {
     if bytes.len() < 12 {
         return Err("file too small to be a WAV".to_owned());
     }

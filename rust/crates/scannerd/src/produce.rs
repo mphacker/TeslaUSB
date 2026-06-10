@@ -118,10 +118,7 @@ fn partition_label(slot: u8) -> String {
 /// lightshows). Slot 0 is the dashcam (p1) partition.
 const MEDIA_PARTITION_SLOT: u8 = 1;
 
-/// The single media file slice 1 inventories: the lock chime at the root of
-/// p2. Deliberately scoped to exactly this name so the producer does not yet
-/// generically enumerate all of p2 — the broader media listing is a later
-/// slice with its own conventions (`LightShow/`, `Boombox/`, `Music/`).
+/// The lock chime at the p2 root (exact path, no directory prefix).
 const LOCK_CHIME_REL_PATH: &str = "LockChime.wav";
 
 /// Decode an exFAT packed DOS date-time (`modify_timestamp`) into a NAIVE
@@ -155,20 +152,52 @@ fn decode_exfat_timestamp(packed: u32) -> Option<String> {
     ))
 }
 
-/// Collect the MEDIA-partition (p2) inventory facts from the full walk. Slice
-/// 1 emits at most one record: a COMPLETE `LockChime.wav` at the p2 root.
-/// "Complete" means the exFAT entry's set-checksum verified AND
-/// `valid_data_length == data_length` — a torn mid-install entry (which fails
-/// the checksum the gadgetd temp+atomic-rename install guards against) is
-/// excluded, so the consumer never records a half-written chime.
+/// Return `true` when a p2 `rel_path` belongs to one of the toybox media
+/// categories the producer inventories. Evaluated on the walk-level path
+/// (partition-root-relative), never on a filesystem path.
+///
+/// Categories:
+/// * Lock chime — root-level `LockChime.wav` (exact match).
+/// * Boombox — any file under `Boombox/` (Tesla loads the first 5
+///   alphabetically; subdirectories are allowed by the producer but Tesla
+///   only plays root-level names in practice).
+/// * Music — any file under `Music/` (supports artist/album subdirectories).
+/// * `LightShow` — any file under `LightShow/` **except** the `LightShow/wraps/`
+///   subtree, which belongs to Wraps.
+/// * `LicensePlate` — any file under `LicensePlate/`.
+/// * Wraps — any file under `LightShow/wraps/`.
+///
+/// The LightShow/Wraps disambiguation is done in `webd`'s query layer
+/// (`rel_path LIKE 'LightShow/wraps/%'` vs the broader `LightShow/%` minus
+/// wraps). Producing both under `LightShow/` keeps the scannerd logic simple
+/// and the category filter co-located with its consumers.
+fn is_toybox_path(path: &str) -> bool {
+    path == LOCK_CHIME_REL_PATH
+        || path.starts_with("Boombox/")
+        || path.starts_with("Music/")
+        || path.starts_with("LightShow/")
+        || path.starts_with("LicensePlate/")
+}
+
+/// Collect the MEDIA-partition (p2) inventory facts from the full walk.
+///
+/// Includes:
+/// * `LockChime.wav` at the partition root (exact match).
+/// * All files under `Boombox/`, `Music/`, `LightShow/` (including
+///   `LightShow/wraps/`), and `LicensePlate/`.
+///
+/// Only "complete" entries are collected: both the exFAT set-checksum must
+/// pass AND `valid_data_length == data_length` must hold — a mid-install
+/// torn entry (which fails the checksum the `gadgetd` temp+atomic-rename
+/// install guards against) is excluded so the consumer never records a
+/// half-written file.
 fn collect_media(all_records: &[FileRecord]) -> Vec<MediaFileRecord> {
     let mut media: Vec<MediaFileRecord> = Vec::new();
     for record in all_records {
         if record.partition_slot != MEDIA_PARTITION_SLOT {
             continue;
         }
-        // Root-level only: the path is exactly the file name (no parent dir).
-        if record.path != LOCK_CHIME_REL_PATH || record.name != LOCK_CHIME_REL_PATH {
+        if !is_toybox_path(&record.path) {
             continue;
         }
         if !record.set_checksum_ok || record.valid_data_length != record.data_length {
@@ -493,7 +522,7 @@ mod tests {
 
     use super::{
         ClipIdent, MEDIA_PARTITION_SLOT, clip_identity, collect_media, decode_exfat_timestamp,
-        partition_label,
+        is_toybox_path, partition_label,
     };
     use crate::record::Bucket;
     use crate::walk::FileRecord;
@@ -639,15 +668,108 @@ mod tests {
     }
 
     #[test]
-    fn collect_media_ignores_p1_and_nonchime_and_nested() {
+    fn collect_media_ignores_p1_and_unknown_paths() {
         let recs = vec![
-            // Right name but dashcam partition (slot 0).
+            // Right name but dashcam partition (slot 0) → ignored.
             media_record("LockChime.wav", true, 0),
-            // Media partition but a different/nested file.
-            media_record("Boombox/horn.wav", true, MEDIA_PARTITION_SLOT),
+            // Media partition but no known category prefix → ignored.
             media_record("Other.wav", true, MEDIA_PARTITION_SLOT),
+            media_record("UnknownDir/file.wav", true, MEDIA_PARTITION_SLOT),
         ];
         assert!(collect_media(&recs).is_empty());
+    }
+
+    #[test]
+    fn collect_media_finds_boombox_file_on_p2() {
+        let recs = vec![media_record("Boombox/horn.wav", true, MEDIA_PARTITION_SLOT)];
+        let media = collect_media(&recs);
+        assert_eq!(media.len(), 1);
+        assert_eq!(media[0].rel_path, "Boombox/horn.wav");
+        assert_eq!(media[0].name, "Boombox/horn.wav");
+        assert_eq!(media[0].partition, "slot1");
+    }
+
+    #[test]
+    fn collect_media_finds_music_file_on_p2() {
+        let recs = vec![
+            media_record("Music/song.mp3", true, MEDIA_PARTITION_SLOT),
+            media_record("Music/Artist/Album/track.flac", true, MEDIA_PARTITION_SLOT),
+        ];
+        let media = collect_media(&recs);
+        assert_eq!(media.len(), 2);
+    }
+
+    #[test]
+    fn collect_media_finds_lightshow_excludes_wraps_from_lightshow_set() {
+        // Both LightShow and LightShow/wraps files are emitted — the
+        // LightShow/Wraps disambiguation is done in webd's query layer.
+        let recs = vec![
+            media_record("LightShow/show.fseq", true, MEDIA_PARTITION_SLOT),
+            media_record("LightShow/wraps/mywrap.png", true, MEDIA_PARTITION_SLOT),
+        ];
+        let media = collect_media(&recs);
+        assert_eq!(media.len(), 2);
+        // Both are under the LightShow/ prefix in the catalog.
+        assert!(media.iter().any(|m| m.rel_path == "LightShow/show.fseq"));
+        assert!(
+            media
+                .iter()
+                .any(|m| m.rel_path == "LightShow/wraps/mywrap.png")
+        );
+    }
+
+    #[test]
+    fn collect_media_finds_license_plate_on_p2() {
+        let recs = vec![media_record(
+            "LicensePlate/myplate.png",
+            true,
+            MEDIA_PARTITION_SLOT,
+        )];
+        let media = collect_media(&recs);
+        assert_eq!(media.len(), 1);
+        assert_eq!(media[0].rel_path, "LicensePlate/myplate.png");
+    }
+
+    #[test]
+    fn collect_media_skips_torn_category_file() {
+        let recs = vec![media_record(
+            "Boombox/horn.wav",
+            false,
+            MEDIA_PARTITION_SLOT,
+        )];
+        assert!(collect_media(&recs).is_empty());
+    }
+
+    // ── is_toybox_path unit tests ──────────────────────────────────────────
+
+    #[test]
+    fn is_toybox_path_accepts_lock_chime() {
+        assert!(is_toybox_path("LockChime.wav"));
+    }
+
+    #[test]
+    fn is_toybox_path_accepts_all_categories() {
+        assert!(is_toybox_path("Boombox/foo.wav"));
+        assert!(is_toybox_path("Music/song.mp3"));
+        assert!(is_toybox_path("Music/Artist/Album/track.flac"));
+        assert!(is_toybox_path("LightShow/show.fseq"));
+        assert!(is_toybox_path("LightShow/wraps/mywrap.png"));
+        assert!(is_toybox_path("LicensePlate/myplate.png"));
+    }
+
+    #[test]
+    fn is_toybox_path_rejects_unknown_paths() {
+        assert!(!is_toybox_path("Other.wav"));
+        assert!(!is_toybox_path("UnknownDir/file.wav"));
+        assert!(!is_toybox_path(""));
+        assert!(!is_toybox_path("BoomboxExtra/file.wav")); // prefix-but-not-dir
+    }
+
+    #[test]
+    fn is_toybox_path_rejects_p1_files() {
+        // Slot filtering is done in collect_media, not here — but path-level
+        // the function should not accept TeslaCam paths.
+        assert!(!is_toybox_path("TeslaCam/SavedClips/2026-01-01/clip.mp4"));
     }
 
     // ---- two-image / two-LUN produce path -------------------------------

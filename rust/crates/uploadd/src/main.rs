@@ -35,14 +35,22 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("serve") => {
-            // The live daemon loop (queue hydration, wifid subscription, lease
-            // RPCs, the real transfer backend) is hardware/IPC-gated and
-            // calibration-gated; it is not part of the host-testable core this
-            // lane delivers.
+            // The host-testable orchestration core is implemented and tested:
+            // `uploadd::serve::Scheduler` (priority-ordered, lease-aware,
+            // throttle-aware drain loop over the durable queue) drives an
+            // `uploadd::serve::UploadProcessor`, and `uploadd::rclone`'s
+            // `RcloneUploadEngine` is the chosen v1 backend (whole-file `rclone
+            // copyto` + `hashsum` verify behind a `CommandRunner` subprocess
+            // seam). The remaining *live wiring* — the `indexd` queue/lease/
+            // durability RPC clients, the `wifid` throttle subscription, the
+            // archive filesystem reads, and spawning the real `rclone` binary —
+            // is hardware/IPC-gated and depends on the Task 2.6 `WiFi` TX-cap
+            // calibration, so it is not constructed here.
             eprintln!(
-                "uploadd serve: live wiring is hardware/IPC-gated (Task 2.6 WiFi \
-                 TX-cap calibration; rclone-vs-Rust backend is an unresolved \
-                 ASK-FIRST decision) and not built in the host-core lane."
+                "uploadd serve: orchestration core is implemented + host-tested \
+                 (uploadd::serve::Scheduler + uploadd::rclone::RcloneUploadEngine); \
+                 live IPC/throttle/rclone wiring is hardware/calibration-gated and \
+                 not built in this lane."
             );
             ExitCode::FAILURE
         }

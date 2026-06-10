@@ -58,6 +58,8 @@ pub mod error;
 pub mod lease;
 pub mod priority;
 pub mod queue;
+pub mod rclone;
+pub mod serve;
 pub mod source;
 pub mod status;
 pub mod throttle;

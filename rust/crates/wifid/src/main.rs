@@ -31,6 +31,7 @@ mod creds;
 mod error;
 mod exec;
 mod link;
+mod nmcli;
 mod orchestrator;
 mod status;
 mod throttle;
@@ -43,9 +44,10 @@ use std::time::Duration;
 use config::WifidConfig;
 use creds::{CredentialStore, CredentialUpdate, Credentials, Secret};
 use exec::{
-    FileCredentialStore, GadgetHeartbeatSource, HardwareNetworkController,
-    HardwareRebootController, MonotonicClock, current_boot_id,
+    FileCredentialStore, GadgetHeartbeatSource, HardwareRebootController, MonotonicClock,
+    current_boot_id,
 };
+use nmcli::NmcliNetworkController;
 use orchestrator::Daemon;
 
 /// Default credential file (Pi-side ext4 data area, never on the Tesla volume).
@@ -92,7 +94,7 @@ fn build_daemon(
 ) -> Result<
     Daemon<
         MonotonicClock,
-        HardwareNetworkController,
+        NmcliNetworkController,
         GadgetHeartbeatSource,
         HardwareRebootController,
         FileCredentialStore,
@@ -101,9 +103,10 @@ fn build_daemon(
 > {
     let cfg = WifidConfig::default();
     cfg.validate().map_err(|e| format!("invalid config: {e}"))?;
+    let net = NmcliNetworkController::new(cfg.platform.clone());
     Daemon::new(
         MonotonicClock::default(),
-        HardwareNetworkController,
+        net,
         GadgetHeartbeatSource,
         HardwareRebootController,
         FileCredentialStore::new(cred_path),
@@ -131,10 +134,14 @@ fn cmd_serve(cred_path: &str) -> Result<(), String> {
                 }
             }
             Err(e) => {
-                // On the host (no radio) observation is HARDWARE-GATED: report
-                // and stop rather than spin on a guaranteed error.
-                eprintln!("wifid: tick failed (expected off-device): {e}");
-                return Ok(());
+                // A failed observation is NOT fatal: `tick` has already
+                // published a fail-closed throttle (uploads off) internally, so
+                // a transient radio/driver hiccup must never terminate the
+                // daemon and hand systemd a restart loop. Log and keep ticking;
+                // the next observation re-reconciles from actual radio state.
+                // (Off-device, where the hardware-gated executor always errors,
+                // this loops harmlessly until interrupted.)
+                eprintln!("wifid: tick failed (continuing): {e}");
             }
         }
         std::thread::sleep(TICK_INTERVAL);
@@ -172,15 +179,18 @@ fn cmd_check_tx(args: &[String], cred_path: &str) -> Result<(), String> {
 fn cmd_set_credentials(args: &[String], cred_path: &str) -> Result<(), String> {
     let store = FileCredentialStore::new(cred_path);
     // First run: there is no credential file yet. The AP must always have a
-    // WPA2 passphrase, so seed a base from --ap-pass before the daemon loads.
-    if store.load().is_err() {
+    // WPA2 passphrase, so seed a base from --ap-pass before the daemon loads. A
+    // genuine read/parse error (not a missing file) is surfaced, not papered
+    // over — we must never overwrite a store we failed to read.
+    let existing = store.load().map_err(|e| e.to_string())?;
+    if existing.is_none() {
         let ap = opt_flag(args, "--ap-pass")?.ok_or_else(|| {
             "no existing credentials: --ap-pass is required to initialise".to_owned()
         })?;
         creds::validate_wpa2_passphrase(&ap).map_err(str::to_owned)?;
         let base = Credentials {
             sta_psk: None,
-            ap_passphrase: Secret::new(ap),
+            ap_passphrase: Some(Secret::new(ap)),
         };
         store.store(&base).map_err(|e| e.to_string())?;
     }

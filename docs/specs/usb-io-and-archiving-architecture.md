@@ -339,16 +339,25 @@ gadget cutover, and restart them together.
 - **scannerd reads two images.** Today scannerd opens one `disk.img` (both
   partitions). With two single-partition images it must open **both**
   `teslacam.img` (clips → trips/events) **and** `media.img` (media catalog), still
-  read-only / raw / never mounting. `scannerd.service` (`ExecStart … serve
-  /data/teslausb/disk.img`) and the scanner's image-path handling are a **required
-  companion change** — the two-image system is not functionally complete end-to-end
-  until scannerd is repointed. This is a separate lane (`scannerd-two-image`),
-  gated the same way, and must cut over in the same atomic window as the gadget.
+  read-only / raw / never mounting. **DONE (committed, host-verified):** the
+  `scannerd-two-image` lane added an `ImageSource` abstraction that stamps a
+  logical slot per image (`teslacam.img` → slot 0, `media.img` → slot 1) so
+  downstream classification is unchanged; `produce()` merges records across both
+  sources and aborts the batch on any structural error. `scannerd.service`
+  `ExecStart` now serves `teslacam.img --media media.img`; `indexd`'s in-process
+  `run_scan_pass` wraps its single reader as a native source. Back-compat: with no
+  `--media`, scannerd serves the single combined `disk.img` (native MBR slots).
+  Workspace gate green (fmt, clippy `-D warnings`, `cargo test --workspace`). This
+  must still cut over in the same atomic window as the gadget.
 - **Installer disk.img name/sentinel.** `setup-lib/common.sh` (`TESLAUSB_DISK_IMG=
   …/disk.img`) and the deploy-app symlink/sentinel guards protect the single image
-  by name. Migration-time reconciliation must teach them about `teslacam.img`
-  (the car-facing image the sentinel guards) + `media.img`, keeping the installer
-  denylist/symlink-refusal tests green.
+  by name. **DONE (committed):** `common.sh` now defines `TESLAUSB_TESLACAM_IMG` +
+  `TESLAUSB_MEDIA_IMG` and a `TESLAUSB_LUN_IMAGES` set (legacy `disk.img` kept so a
+  mid-migration device is still guarded); a new `is_lun_image()` resolves symlinks
+  and the rollback guards + `assert_safe_dest()` refuse a write-through / restore-
+  over for **any** backing image. Installer suite extended (47/0) with cases proving
+  deploy-app refuses a symlink resolving to `teslacam.img`/`media.img` and rollback
+  ignores a planted sidecar for each; denylist/symlink-refusal tests stay green.
 - **systemd units** are already updated to the two-image CLI
   (`gadgetd{,-provision,-control}.service`); the provision unit takes
   `--teslacam-mib`/`--media-mib`.

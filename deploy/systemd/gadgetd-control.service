@@ -25,7 +25,7 @@ OOMScoreAdjust=-1000
 # refused while the host is enumerated (car connected) until prototype-unknown
 # #2 — the car's eject tolerance during an active save — is HW-measured
 # (SPEC.md §9). Enable the flag only for bench validation, never on the car.
-ExecStart=/usr/local/bin/gadgetd serve --image /data/teslausb/disk.img
+ExecStart=/usr/local/bin/gadgetd serve --image /data/teslausb/teslacam.img --media-image /data/teslausb/media.img
 # Create /run/teslausb (socket + per-handoff working dirs), root-owned, mode 0750.
 RuntimeDirectory=teslausb
 RuntimeDirectoryMode=0750

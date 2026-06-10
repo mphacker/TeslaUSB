@@ -45,11 +45,12 @@ impl Partition {
         }
     }
 
-    /// The 1-based partition index (used to build the `loopNpX` node name).
-    pub(crate) fn index(self) -> u8 {
+    /// The LUN index this partition maps to in the two-LUN gadget:
+    /// `P1` (`TeslaCam`) → `lun.0`, `P2` (media) → `lun.1`.
+    pub(crate) fn lun_index(self) -> u8 {
         match self {
-            Self::P1 => 1,
-            Self::P2 => 2,
+            Self::P1 => 0,
+            Self::P2 => 1,
         }
     }
 }

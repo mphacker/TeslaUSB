@@ -5,6 +5,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::config;
 use crate::config::{ConfigfsOp, GadgetConfig};
 
 /// Directory the kernel lists available USB Device Controllers under.
@@ -160,8 +161,10 @@ pub(crate) struct GadgetStatus {
     pub(crate) bound_udc: Option<String>,
     /// Controller state (`configured` when the host has enumerated it).
     pub(crate) udc_state: Option<String>,
-    /// Backing file the LUN currently exports.
+    /// Backing file `lun.0` (`TeslaCam`) currently exports.
     pub(crate) lun_file: Option<String>,
+    /// Backing file `lun.1` (MEDIA) currently exports.
+    pub(crate) media_lun_file: Option<String>,
 }
 
 /// Read the current [`GadgetStatus`] for `cfg` from the live filesystem.
@@ -171,12 +174,16 @@ pub(crate) fn read_status(cfg: &GadgetConfig) -> GadgetStatus {
     let udc_state = bound_udc
         .as_ref()
         .and_then(|udc| read_trimmed(&PathBuf::from(UDC_SYSFS).join(udc).join("state")));
-    let lun_file = read_trimmed(&cfg.lun_dir().join("file")).filter(|s| !s.is_empty());
+    let lun_file =
+        read_trimmed(&cfg.lun_dir(config::TESLACAM_LUN).join("file")).filter(|s| !s.is_empty());
+    let media_lun_file =
+        read_trimmed(&cfg.lun_dir(config::MEDIA_LUN).join("file")).filter(|s| !s.is_empty());
     GadgetStatus {
         present,
         bound_udc,
         udc_state,
         lun_file,
+        media_lun_file,
     }
 }
 
@@ -186,23 +193,29 @@ fn read_trimmed(path: &Path) -> Option<String> {
         .map(|s| s.trim().to_owned())
 }
 
-/// Live [`LunControl`]: ejects/re-presents by writing `lun.0/file` and reads the
-/// gadget binding from configfs/sysfs. This is the only writer of the LUN
-/// backing attribute, preserving the single-writer guarantee on the write path.
+/// Live [`LunControl`]: ejects/re-presents one LUN by writing its
+/// `lun.<index>/file` and reads the gadget binding from configfs/sysfs. This is
+/// the only writer of the LUN backing attribute, preserving the single-writer
+/// guarantee on the write path.
+///
+/// A `LiveLun` is bound to a single LUN index (`0` = `TeslaCam`, `1` = MEDIA), so
+/// a media handoff that cycles `lun.1` can never touch the sacred `lun.0`
+/// backing file, and recovery re-presents each LUN's OWN image.
 #[cfg(unix)]
 pub(crate) struct LiveLun {
     cfg: GadgetConfig,
+    lun: u8,
 }
 
 #[cfg(unix)]
 impl LiveLun {
-    /// Build a live LUN controller for `cfg`.
-    pub(crate) fn new(cfg: GadgetConfig) -> Self {
-        Self { cfg }
+    /// Build a live controller for `lun` (`0` = `TeslaCam`, `1` = MEDIA).
+    pub(crate) fn for_lun(cfg: GadgetConfig, lun: u8) -> Self {
+        Self { cfg, lun }
     }
 
     fn lun_file_path(&self) -> PathBuf {
-        self.cfg.lun_dir().join("file")
+        self.cfg.lun_dir(self.lun).join("file")
     }
 }
 
@@ -228,19 +241,23 @@ impl crate::handoff::LunControl for LiveLun {
             Ok(())
         } else {
             Err(io::Error::other(
-                "eject verification failed: lun.0/file not empty",
+                "eject verification failed: lun file not empty",
             ))
         }
     }
 
     fn represent(&self) -> io::Result<()> {
         let path = self.lun_file_path();
-        let image = self.cfg.lun_file.to_string_lossy().into_owned();
+        let image = self
+            .cfg
+            .image_for_lun(self.lun)
+            .to_string_lossy()
+            .into_owned();
         std::fs::write(&path, &image)
             .map_err(|e| annotate(&e, "represent (set lun file)", &path))?;
         if self.lun_is_empty()? {
             Err(io::Error::other(
-                "re-present verification failed: lun.0/file still empty",
+                "re-present verification failed: lun file still empty",
             ))
         } else {
             Ok(())
@@ -315,11 +332,15 @@ mod tests {
 
     #[test]
     fn status_of_absent_gadget_is_empty() {
-        let mut cfg = GadgetConfig::teslausb(PathBuf::from("/data/disk.img"));
+        let mut cfg = GadgetConfig::teslausb(
+            PathBuf::from("/data/teslacam.img"),
+            PathBuf::from("/data/media.img"),
+        );
         cfg.configfs_root = std::env::temp_dir().join("gadgetd-status-absent");
         let st = read_status(&cfg);
         assert!(!st.present);
         assert_eq!(st.bound_udc, None);
         assert_eq!(st.lun_file, None);
+        assert_eq!(st.media_lun_file, None);
     }
 }

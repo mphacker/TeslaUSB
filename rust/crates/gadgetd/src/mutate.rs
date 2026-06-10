@@ -29,8 +29,14 @@ const UMOUNT_TIMEOUT: Duration = Duration::from_secs(10);
 const SYNC_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Mutates a backing image by loop-mounting it.
+///
+/// In the two-LUN model each backing image holds exactly ONE partition (MBR
+/// `p1`), so a mutator is constructed against a single per-LUN image and always
+/// mounts node `p1`. The `Partition` argument to [`ImageMutator::apply`] only
+/// names which LUN/image the handoff targets; the caller already selected the
+/// matching image when it built this mutator.
 pub(crate) struct LoopMutator {
-    /// Backing image path (`disk.img`).
+    /// Backing image path for this LUN (`teslacam.img` or `media.img`).
     image: PathBuf,
     /// Runtime root for per-handoff mount dirs (e.g. `/run/teslausb/handoff`).
     runtime_root: PathBuf,
@@ -66,7 +72,7 @@ impl ImageMutator for LoopMutator {
         }
     }
 
-    fn apply(&self, partition: Partition, mutation: &Mutation) -> Result<(), MutateError> {
+    fn apply(&self, _partition: Partition, mutation: &Mutation) -> Result<(), MutateError> {
         // Attach the loop; before any mount, a failure means the image is still
         // released (the eject already closed the kernel's fd).
         let loopdev = match losetup_attach(&self.image) {
@@ -74,7 +80,8 @@ impl ImageMutator for LoopMutator {
             Err(e) => return Err(released_err(format!("losetup attach: {e}"))),
         };
 
-        let node = format!("{loopdev}p{}", partition.index());
+        // Each per-LUN image is single-partition (MBR p1).
+        let node = format!("{loopdev}p1");
         if let Err(e) = wait_for_block(Path::new(&node), Duration::from_secs(3)) {
             let _ = losetup_detach(&loopdev);
             return Err(released_err(format!("partition node {node}: {e}")));

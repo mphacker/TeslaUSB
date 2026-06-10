@@ -1,6 +1,12 @@
-//! Backing-image provisioning: create `disk.img`, lay out an MBR with two
-//! exFAT partitions (p1 `TeslaCam`, p2 media), format them, and ensure the
-//! `TeslaCam` directory exists so the car enables dashcam recording.
+//! Backing-image provisioning: create a single-partition exFAT backing image
+//! and (for the `TeslaCam` image) ensure the `TeslaCam` directory exists so the
+//! car enables dashcam recording.
+//!
+//! The two-LUN gadget is backed by TWO independent single-partition images —
+//! `teslacam.img` (label `TESLACAM`, seeded with `TeslaCam/`) on `lun.0` and
+//! `media.img` (label `MEDIA`) on `lun.1`. Each image holds exactly ONE MBR
+//! partition so that a media (`lun.1`) eject-handoff cycles only its own LUN
+//! and never disturbs the car-facing `TeslaCam` LUN.
 //!
 //! The deterministic command-argument builders are pure and unit-tested; the
 //! orchestrator shells out to the standard `util-linux` / `exfatprogs` tools
@@ -13,38 +19,47 @@ use std::time::{Duration, Instant};
 
 /// 1 MiB front-of-disk gap for MBR alignment.
 const RESERVE_MIB: u64 = 1;
-/// Smallest partition-1 (`TeslaCam`) we will create.
-const MIN_P1_MIB: u64 = 16;
-/// Smallest partition-2 (media) we will create.
+/// Smallest usable `TeslaCam` partition we will create.
+const MIN_TESLACAM_MIB: u64 = 16;
+/// Smallest usable media partition we will create.
 const MIN_MEDIA_MIB: u64 = 1;
 
-/// Desired on-disk layout for the backing image.
+/// Desired on-disk layout for ONE single-partition backing image.
 #[derive(Debug, Clone)]
-pub(crate) struct PartitionPlan {
+pub(crate) struct ImagePlan {
     /// Backing image path on the Pi's ext4 data area.
     pub(crate) image: PathBuf,
     /// Total image size in MiB (fully allocated — never sparse).
     pub(crate) size_mib: u64,
-    /// exFAT label for partition 1 (`TeslaCam` / dashcam).
-    pub(crate) p1_label: String,
-    /// End offset of partition 1 in MiB; partition 2 takes the remainder.
-    pub(crate) p1_end_mib: u64,
-    /// exFAT label for partition 2 (media: chimes / lightshow / boombox).
-    pub(crate) p2_label: String,
+    /// exFAT volume label for the single partition.
+    pub(crate) label: String,
+    /// Whether to seed a top-level `TeslaCam/` directory (`TeslaCam` image only).
+    pub(crate) seed_teslacam: bool,
+    /// Smallest usable partition size (MiB) tolerated for this image.
+    min_usable_mib: u64,
 }
 
-impl PartitionPlan {
-    /// A sensible default split for a `size_mib` image: p1 gets all but the
-    /// final ~`media_mib` MiB (reserving a 1 MiB MBR-alignment gap at the
-    /// front), p2 gets the remainder.
-    pub(crate) fn split(image: PathBuf, size_mib: u64, media_mib: u64) -> Self {
-        let p1_end = size_mib.saturating_sub(media_mib).max(2);
+impl ImagePlan {
+    /// The `TeslaCam` (`lun.0`) image: single `TESLACAM` exFAT partition seeded
+    /// with a top-level `TeslaCam/` directory so the car records immediately.
+    pub(crate) fn teslacam(image: PathBuf, size_mib: u64) -> Self {
         Self {
             image,
             size_mib,
-            p1_label: "TESLACAM".to_owned(),
-            p1_end_mib: p1_end,
-            p2_label: "MEDIA".to_owned(),
+            label: "TESLACAM".to_owned(),
+            seed_teslacam: true,
+            min_usable_mib: MIN_TESLACAM_MIB,
+        }
+    }
+
+    /// The media (`lun.1`) image: single `MEDIA` exFAT partition, no seed.
+    pub(crate) fn media(image: PathBuf, size_mib: u64) -> Self {
+        Self {
+            image,
+            size_mib,
+            label: "MEDIA".to_owned(),
+            seed_teslacam: false,
+            min_usable_mib: MIN_MEDIA_MIB,
         }
     }
 
@@ -55,25 +70,11 @@ impl PartitionPlan {
     /// # Errors
     /// Returns an error describing the first constraint violated.
     fn validate(&self) -> io::Result<()> {
-        let media_mib = self.size_mib.saturating_sub(self.p1_end_mib);
-        if media_mib < MIN_MEDIA_MIB {
+        let usable = self.size_mib.saturating_sub(RESERVE_MIB);
+        if self.size_mib <= RESERVE_MIB || usable < self.min_usable_mib {
             return Err(io::Error::other(format!(
-                "media partition too small ({media_mib} MiB; need >= {MIN_MEDIA_MIB})"
-            )));
-        }
-        if self.p1_end_mib <= RESERVE_MIB
-            || self.p1_end_mib.saturating_sub(RESERVE_MIB) < MIN_P1_MIB
-        {
-            return Err(io::Error::other(format!(
-                "TeslaCam partition too small (p1 end {} MiB; need >= {} MiB usable)",
-                self.p1_end_mib,
-                RESERVE_MIB + MIN_P1_MIB
-            )));
-        }
-        if self.p1_end_mib >= self.size_mib {
-            return Err(io::Error::other(format!(
-                "partition layout exceeds image ({} MiB end vs {} MiB total)",
-                self.p1_end_mib, self.size_mib
+                "{} image too small ({} MiB total; need >= {} MiB usable after a {} MiB MBR gap)",
+                self.label, self.size_mib, self.min_usable_mib, RESERVE_MIB
             )));
         }
         Ok(())
@@ -147,8 +148,9 @@ fn run(program: &str, args: &[String]) -> io::Result<String> {
     }
 }
 
-/// Provision the backing image to [`PartitionPlan`] if it does not already
-/// exist. Idempotent: returns `Ok(false)` (no work) when the image is present.
+/// Provision a single-partition backing image to [`ImagePlan`] if it does not
+/// already exist. Idempotent: returns `Ok(false)` (no work) when the image is
+/// present.
 ///
 /// The image is built at a sibling `*.partial` path and atomically renamed
 /// into place only after every step succeeds, so a failure or crash never
@@ -157,7 +159,7 @@ fn run(program: &str, args: &[String]) -> io::Result<String> {
 /// # Errors
 /// Returns an error if the layout is invalid, the target is currently exported
 /// by a bound gadget, or any provisioning command fails.
-pub(crate) fn provision_image(plan: &PartitionPlan) -> io::Result<bool> {
+pub(crate) fn provision_image(plan: &ImagePlan) -> io::Result<bool> {
     plan.validate()?;
     if plan.image.exists() {
         return Ok(false);
@@ -188,12 +190,11 @@ pub(crate) fn provision_image(plan: &PartitionPlan) -> io::Result<bool> {
     Ok(true)
 }
 
-fn build_image(plan: &PartitionPlan, tmp: &Path) -> io::Result<()> {
+fn build_image(plan: &ImagePlan, tmp: &Path) -> io::Result<()> {
     run("fallocate", &fallocate_args(tmp, plan.size_mib))?;
     run("parted", &parted_label_args(tmp))?;
-    let p1_end = format!("{}MiB", plan.p1_end_mib);
-    run("parted", &parted_mkpart_args(tmp, "1MiB", &p1_end))?;
-    run("parted", &parted_mkpart_args(tmp, &p1_end, "100%"))?;
+    // One partition spanning the whole image after the 1 MiB alignment gap.
+    run("parted", &parted_mkpart_args(tmp, "1MiB", "100%"))?;
 
     let loop_dev = run(
         "losetup",
@@ -210,7 +211,6 @@ fn build_image(plan: &PartitionPlan, tmp: &Path) -> io::Result<()> {
     detached?; // a leaked loop device must fail provisioning, not be ignored
 
     run("sfdisk", &sfdisk_parttype_args(tmp, 1))?;
-    run("sfdisk", &sfdisk_parttype_args(tmp, 2))?;
     Ok(())
 }
 
@@ -222,16 +222,18 @@ fn partial_path(image: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
-fn format_and_seed(plan: &PartitionPlan, loop_dev: &str) -> io::Result<()> {
+fn format_and_seed(plan: &ImagePlan, loop_dev: &str) -> io::Result<()> {
     let p1 = PathBuf::from(format!("{loop_dev}p1"));
-    let p2 = PathBuf::from(format!("{loop_dev}p2"));
     wait_for_path(&p1)?;
-    wait_for_path(&p2)?;
-    run("mkfs.exfat", &mkfs_exfat_args(&p1, &plan.p1_label))?;
-    run("mkfs.exfat", &mkfs_exfat_args(&p2, &plan.p2_label))?;
+    run("mkfs.exfat", &mkfs_exfat_args(&p1, &plan.label))?;
 
-    // Ensure the TeslaCam directory exists on p1 (the car needs it to record).
-    // A unique mountpoint avoids colliding with a concurrent or crashed run.
+    if !plan.seed_teslacam {
+        return Ok(());
+    }
+
+    // Ensure the TeslaCam directory exists on the TeslaCam image (the car needs
+    // it to record). A unique mountpoint avoids colliding with a concurrent or
+    // crashed run.
     let mnt = std::env::temp_dir().join(format!("gadgetd-provision-{}", std::process::id()));
     std::fs::create_dir_all(&mnt)?;
     run(
@@ -269,90 +271,91 @@ fn wait_for_path(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        PartitionPlan, fallocate_args, mkfs_exfat_args, parted_label_args, parted_mkpart_args,
+        ImagePlan, fallocate_args, mkfs_exfat_args, parted_label_args, parted_mkpart_args,
         sfdisk_parttype_args,
     };
     use std::path::{Path, PathBuf};
 
-    fn plan() -> PartitionPlan {
-        PartitionPlan::split(PathBuf::from("/data/disk.img"), 4096, 1024)
+    fn teslacam_plan() -> ImagePlan {
+        ImagePlan::teslacam(PathBuf::from("/data/teslacam.img"), 3072)
+    }
+
+    fn media_plan() -> ImagePlan {
+        ImagePlan::media(PathBuf::from("/data/media.img"), 1024)
     }
 
     #[test]
-    fn split_reserves_media_at_tail() {
-        let p = plan();
-        assert_eq!(
-            p.p1_end_mib, 3072,
-            "p1 ends where the 1 GiB media tail begins"
-        );
-        assert_eq!(p.p1_label, "TESLACAM");
-        assert_eq!(p.p2_label, "MEDIA");
+    fn teslacam_plan_labels_and_seeds() {
+        let p = teslacam_plan();
+        assert_eq!(p.label, "TESLACAM");
+        assert!(p.seed_teslacam, "the TeslaCam image must seed TeslaCam/");
+    }
+
+    #[test]
+    fn media_plan_labels_and_does_not_seed() {
+        let p = media_plan();
+        assert_eq!(p.label, "MEDIA");
+        assert!(!p.seed_teslacam, "the media image must not seed TeslaCam/");
     }
 
     #[test]
     fn fallocate_uses_full_size_in_mib() {
         assert_eq!(
-            fallocate_args(Path::new("/data/disk.img"), 4096),
-            vec!["-l", "4096MiB", "/data/disk.img"]
+            fallocate_args(Path::new("/data/teslacam.img"), 3072),
+            vec!["-l", "3072MiB", "/data/teslacam.img"]
         );
     }
 
     #[test]
-    fn valid_layout_passes_validation() {
-        assert!(plan().validate().is_ok());
+    fn valid_layouts_pass_validation() {
+        assert!(teslacam_plan().validate().is_ok());
+        assert!(media_plan().validate().is_ok());
     }
 
     #[test]
-    fn rejects_media_partition_larger_than_image() {
-        // media >= size leaves p1_end clamped to 2 -> media partition vanishes.
-        let p = PartitionPlan::split(PathBuf::from("/data/d.img"), 64, 64);
-        assert!(p.validate().is_err(), "media >= size must be rejected");
-    }
-
-    #[test]
-    fn rejects_tiny_image() {
-        let p = PartitionPlan::split(PathBuf::from("/data/d.img"), 8, 1);
+    fn rejects_tiny_teslacam_image() {
+        let p = ImagePlan::teslacam(PathBuf::from("/data/t.img"), 8);
         assert!(
             p.validate().is_err(),
-            "p1 below the minimum must be rejected"
+            "a TeslaCam image below the minimum must be rejected"
         );
     }
 
     #[test]
-    fn rejects_zero_media() {
-        let p = PartitionPlan::split(PathBuf::from("/data/d.img"), 4096, 0);
+    fn rejects_image_with_no_usable_space() {
+        let p = ImagePlan::media(PathBuf::from("/data/m.img"), 1);
         assert!(
             p.validate().is_err(),
-            "zero media partition must be rejected"
+            "an image that is all MBR gap must be rejected"
         );
     }
 
     #[test]
     fn partial_path_keeps_full_filename() {
         assert_eq!(
-            super::partial_path(Path::new("/data/disk.img")),
-            PathBuf::from("/data/disk.img.partial")
+            super::partial_path(Path::new("/data/teslacam.img")),
+            PathBuf::from("/data/teslacam.img.partial")
         );
     }
 
     #[test]
     fn parted_label_is_msdos() {
-        let args = parted_label_args(Path::new("/data/disk.img"));
-        assert_eq!(args, vec!["-s", "/data/disk.img", "mklabel", "msdos"]);
+        let args = parted_label_args(Path::new("/data/teslacam.img"));
+        assert_eq!(args, vec!["-s", "/data/teslacam.img", "mklabel", "msdos"]);
     }
 
     #[test]
-    fn mkpart_passes_start_and_end() {
-        let args = parted_mkpart_args(Path::new("/data/disk.img"), "1MiB", "3072MiB");
+    fn mkpart_spans_whole_image() {
+        let args = parted_mkpart_args(Path::new("/data/teslacam.img"), "1MiB", "100%");
         assert_eq!(
             args,
             vec![
                 "-s",
-                "/data/disk.img",
+                "/data/teslacam.img",
                 "mkpart",
                 "primary",
                 "1MiB",
-                "3072MiB"
+                "100%"
             ]
         );
     }
@@ -365,7 +368,7 @@ mod tests {
 
     #[test]
     fn parttype_is_exfat_0x07() {
-        let args = sfdisk_parttype_args(Path::new("/data/disk.img"), 2);
-        assert_eq!(args, vec!["--part-type", "/data/disk.img", "2", "7"]);
+        let args = sfdisk_parttype_args(Path::new("/data/media.img"), 1);
+        assert_eq!(args, vec!["--part-type", "/data/media.img", "1", "7"]);
     }
 }

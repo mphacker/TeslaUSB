@@ -29,8 +29,8 @@ Type=oneshot
 RemainAfterExit=yes
 # The single most important process on the device: never an OOM-kill victim.
 OOMScoreAdjust=-1000
-ExecStart=/usr/local/bin/gadgetd up --image /data/teslausb/disk.img
-ExecStop=/usr/local/bin/gadgetd down --image /data/teslausb/disk.img
+ExecStart=/usr/local/bin/gadgetd up --image /data/teslausb/teslacam.img --media-image /data/teslausb/media.img
+ExecStop=/usr/local/bin/gadgetd down --image /data/teslausb/teslacam.img --media-image /data/teslausb/media.img
 
 [Install]
 WantedBy=multi-user.target

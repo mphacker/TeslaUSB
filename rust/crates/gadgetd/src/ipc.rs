@@ -22,7 +22,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::config::GadgetConfig;
+use crate::config::{self, GadgetConfig};
 use crate::exec::{self, LiveLun, MtimeSaveGuard};
 use crate::handoff::{self, HandoffOutcome, ImageMutator, LunControl, Mutation, Partition};
 use crate::mutate::LoopMutator;
@@ -67,7 +67,6 @@ struct HandoffRecord {
 /// Shared daemon state.
 struct ServeState {
     cfg: GadgetConfig,
-    image: PathBuf,
     runtime_root: PathBuf,
     allow_hot: bool,
     record: Mutex<Option<HandoffRecord>>,
@@ -104,13 +103,12 @@ fn write_frame(stream: &mut impl Write, payload: &[u8]) -> io::Result<()> {
 /// are logged and do not stop the daemon.
 pub(crate) fn serve(
     cfg: GadgetConfig,
-    image: PathBuf,
     runtime_root: PathBuf,
     socket_path: &Path,
     allow_hot: bool,
 ) -> io::Result<()> {
     // Handoff crash-recovery BEFORE serving (never touches gadget bring-up).
-    recover_interrupted_handoff(&cfg, &image, &runtime_root);
+    recover_interrupted_handoff(&cfg, &runtime_root);
 
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -127,7 +125,6 @@ pub(crate) fn serve(
 
     let state = Arc::new(ServeState {
         cfg,
-        image,
         runtime_root,
         allow_hot,
         record: Mutex::new(None),
@@ -151,17 +148,30 @@ pub(crate) fn serve(
     Ok(())
 }
 
-/// On startup, reconcile an interrupted handoff: first clear any stale loop
-/// device / mount left on the image, and only then — if the gadget is bound but
-/// the LUN is empty — re-present. Never re-present while the image might still
-/// be held locally (the never-double-writer precedence).
-fn recover_interrupted_handoff(cfg: &GadgetConfig, image: &Path, runtime_root: &Path) {
-    let lun = LiveLun::new(cfg.clone());
+/// On startup, reconcile an interrupted handoff on BOTH LUNs independently. Each
+/// LUN backs its own single-partition image, so recovery is per-LUN: clear any
+/// stale loop device / mount left on THAT LUN's image, and only then — if the
+/// gadget is bound but that LUN is empty — re-present THAT LUN's own image. The
+/// `TeslaCam` LUN (`lun.0`) is recovered first (it is sacred — the car-facing
+/// dashcam drive must never stay ejected) and an image is only ever re-presented
+/// onto its own LUN (never cross-wired). Never re-present while the image might
+/// still be held locally (the never-double-writer precedence).
+fn recover_interrupted_handoff(cfg: &GadgetConfig, runtime_root: &Path) {
+    for lun in [config::TESLACAM_LUN, config::MEDIA_LUN] {
+        recover_lun(cfg, runtime_root, lun);
+    }
+}
+
+fn recover_lun(cfg: &GadgetConfig, runtime_root: &Path, lun_index: u8) {
+    let image = cfg.image_for_lun(lun_index);
+    let lun = LiveLun::for_lun(cfg.clone(), lun_index);
     let mutator = LoopMutator::new(image.to_path_buf(), runtime_root.to_path_buf());
 
     let cleanup = mutator.cleanup_stale();
     if let Err(e) = &cleanup {
-        eprintln!("gadgetd serve: stale-mount cleanup failed during recovery: {e}");
+        eprintln!(
+            "gadgetd serve: stale-mount cleanup failed during recovery (lun.{lun_index}): {e}"
+        );
     }
 
     match (lun.is_bound(), lun.lun_is_empty()) {
@@ -169,19 +179,25 @@ fn recover_interrupted_handoff(cfg: &GadgetConfig, image: &Path, runtime_root: &
             if cleanup.is_ok() {
                 match lun.represent() {
                     Ok(()) => {
-                        println!("gadgetd serve: recovered interrupted handoff (re-presented LUN)");
+                        println!(
+                            "gadgetd serve: recovered interrupted handoff (re-presented lun.{lun_index})"
+                        );
                     }
-                    Err(e) => eprintln!("gadgetd serve: CRITICAL recovery re-present failed: {e}"),
+                    Err(e) => eprintln!(
+                        "gadgetd serve: CRITICAL recovery re-present failed (lun.{lun_index}): {e}"
+                    ),
                 }
             } else {
                 eprintln!(
-                    "gadgetd serve: CRITICAL: LUN ejected but stale mounts remain; \
+                    "gadgetd serve: CRITICAL: lun.{lun_index} ejected but stale mounts remain; \
                      NOT re-presenting to avoid a double-writer — manual recovery needed"
                 );
             }
         }
         (Ok(_), Ok(_)) => {}
-        (b, f) => eprintln!("gadgetd serve: recovery state read failed (bound={b:?}, empty={f:?})"),
+        (b, f) => eprintln!(
+            "gadgetd serve: recovery state read failed (lun.{lun_index}, bound={b:?}, empty={f:?})"
+        ),
     }
 }
 
@@ -221,6 +237,7 @@ fn gadget_status(state: &ServeState) -> serde_json::Value {
         "bound_udc": status.bound_udc,
         "udc_state": status.udc_state,
         "lun_file": status.lun_file,
+        "media_lun_file": status.media_lun_file,
         "handoff_active": handoff_active,
         "last_result": record.as_ref().and_then(|r| r.result.clone()),
         "last_handoff_id": record.as_ref().map(|r| r.id.clone()),
@@ -263,9 +280,11 @@ fn request_mutation(state: &ServeState, partition: u8, mutation: &Mutation) -> s
         },
     );
 
-    let lun = LiveLun::new(state.cfg.clone());
-    let guard = MtimeSaveGuard::new(state.image.clone(), SAVE_SAMPLE);
-    let mutator = LoopMutator::new(state.image.clone(), state.runtime_root.clone());
+    let lun_index = partition.lun_index();
+    let image = state.cfg.image_for_lun(lun_index).to_path_buf();
+    let lun = LiveLun::for_lun(state.cfg.clone(), lun_index);
+    let guard = MtimeSaveGuard::new(image.clone(), SAVE_SAMPLE);
+    let mutator = LoopMutator::new(image, state.runtime_root.clone());
 
     let outcome = handoff::run_handoff(
         &lun,

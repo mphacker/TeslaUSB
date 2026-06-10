@@ -8,7 +8,21 @@ use std::path::PathBuf;
 /// Default configfs mount point for USB gadgets on Linux.
 pub(crate) const DEFAULT_CONFIGFS_ROOT: &str = "/sys/kernel/config/usb_gadget";
 
-/// USB gadget identity and single-LUN mass-storage settings.
+/// configfs LUN directory name for the primary (`TeslaCam`) backing image.
+pub(crate) const TESLACAM_LUN: u8 = 0;
+/// configfs LUN directory name for the media backing image.
+pub(crate) const MEDIA_LUN: u8 = 1;
+
+/// USB gadget identity and **two-LUN** mass-storage settings.
+///
+/// The B-1 appliance presents ONE `mass_storage` function with TWO independent
+/// LUNs, each backed by its own single-partition image:
+/// - `lun.0` ← `teslacam_image` (MBR + 1 exFAT partition `TESLACAM`), and
+/// - `lun.1` ← `media_image`    (MBR + 1 exFAT partition `MEDIA`).
+///
+/// Two LUNs (rather than one image with two partitions) is what lets a media
+/// (p2) eject-handoff cycle `lun.1` **without** clearing the car-facing
+/// `lun.0`, so dashcam recording is never interrupted by a media write.
 ///
 /// Defaults mirror `setup-lib/11-gadget.sh` from the legacy stack
 /// (`idVendor=0x1d6b` Linux Foundation, `idProduct=0x0104` Multifunction
@@ -43,11 +57,16 @@ pub(crate) struct GadgetConfig {
     pub(crate) config_label: String,
     /// `MaxPower` in milliamps.
     pub(crate) max_power_ma: u32,
-    /// Backing image file presented as the LUN (`file=disk.img`).
-    pub(crate) lun_file: PathBuf,
-    /// Whether the LUN advertises as removable (Tesla expects removable).
+    /// Backing image presented as `lun.0` (MBR + 1 exFAT partition `TESLACAM`).
+    /// This is the **sacred** car-facing dashcam LUN — it is the highest-value
+    /// invariant and is recovered ahead of (and independently from) `lun.1`.
+    pub(crate) teslacam_image: PathBuf,
+    /// Backing image presented as `lun.1` (MBR + 1 exFAT partition `MEDIA`).
+    /// Cycling this LUN during a media handoff must NEVER disturb `lun.0`.
+    pub(crate) media_image: PathBuf,
+    /// Whether the LUNs advertise as removable (Tesla expects removable).
     pub(crate) removable: bool,
-    /// Whether the LUN is read-only.
+    /// Whether the LUNs are read-only.
     pub(crate) read_only: bool,
     /// Disable Force-Unit-Access. **Keep `false`** so host flushes are durable
     /// across an abrupt Pi crash (proven on the bench, 2026-06-08).
@@ -57,8 +76,8 @@ pub(crate) struct GadgetConfig {
 }
 
 impl GadgetConfig {
-    /// Build the production default config for the given backing image.
-    pub(crate) fn teslausb(lun_file: PathBuf) -> Self {
+    /// Build the production default config for the two backing images.
+    pub(crate) fn teslausb(teslacam_image: PathBuf, media_image: PathBuf) -> Self {
         Self {
             configfs_root: PathBuf::from(DEFAULT_CONFIGFS_ROOT),
             name: "teslausb".to_owned(),
@@ -72,11 +91,21 @@ impl GadgetConfig {
             product: "TeslaUSB B-1".to_owned(),
             config_label: "Config 1".to_owned(),
             max_power_ma: 250,
-            lun_file,
+            teslacam_image,
+            media_image,
             removable: true,
             read_only: false,
             nofua: false,
             stall: true,
+        }
+    }
+
+    /// Backing image for a LUN index (`0` = `TeslaCam`, `1` = MEDIA).
+    pub(crate) fn image_for_lun(&self, lun: u8) -> &std::path::Path {
+        if lun == MEDIA_LUN {
+            &self.media_image
+        } else {
+            &self.teslacam_image
         }
     }
 
@@ -90,9 +119,9 @@ impl GadgetConfig {
         self.gadget_dir().join("functions").join(&self.function)
     }
 
-    /// `<function>/lun.0`.
-    pub(crate) fn lun_dir(&self) -> PathBuf {
-        self.function_dir().join("lun.0")
+    /// `<function>/lun.<index>`.
+    pub(crate) fn lun_dir(&self, lun: u8) -> PathBuf {
+        self.function_dir().join(format!("lun.{lun}"))
     }
 
     /// `<gadget>/configs/c.1`.
@@ -144,7 +173,8 @@ pub(crate) fn plan_bring_up(cfg: &GadgetConfig, udc_name: &str) -> Vec<ConfigfsO
     let cfg_dir = cfg.config_dir();
     let cfg_strings = cfg_dir.join("strings").join("0x409");
     let func = cfg.function_dir();
-    let lun = cfg.lun_dir();
+    let lun0 = cfg.lun_dir(TESLACAM_LUN);
+    let lun1 = cfg.lun_dir(MEDIA_LUN);
 
     let mut ops = vec![
         ConfigfsOp::Mkdir(gadget.clone()),
@@ -161,25 +191,57 @@ pub(crate) fn plan_bring_up(cfg: &GadgetConfig, udc_name: &str) -> Vec<ConfigfsO
         ConfigfsOp::Write(cfg_dir.join("MaxPower"), cfg.max_power_ma.to_string()),
         ConfigfsOp::Mkdir(func.clone()),
         ConfigfsOp::Write(func.join("stall"), GadgetConfig::bool_attr(cfg.stall)),
-        ConfigfsOp::Write(lun.join("cdrom"), GadgetConfig::bool_attr(false)),
-        ConfigfsOp::Write(lun.join("ro"), GadgetConfig::bool_attr(cfg.read_only)),
-        ConfigfsOp::Write(lun.join("nofua"), GadgetConfig::bool_attr(cfg.nofua)),
-        ConfigfsOp::Write(
-            lun.join("removable"),
-            GadgetConfig::bool_attr(cfg.removable),
-        ),
-        ConfigfsOp::Write(
-            lun.join("file"),
-            cfg.lun_file.to_string_lossy().into_owned(),
-        ),
-        ConfigfsOp::Symlink {
-            target: func,
-            link: cfg_dir.join(&cfg.function),
-        },
-        ConfigfsOp::Write(cfg.udc_path(), udc_name.to_owned()),
     ];
+
+    // lun.0 (TeslaCam) is auto-created with the function instance; lun.1 (MEDIA)
+    // must be explicitly `mkdir`-ed. Both are described BEFORE the UDC bind.
+    push_lun_ops(&mut ops, cfg, &lun0, cfg.teslacam_image.as_path(), false);
+    push_lun_ops(&mut ops, cfg, &lun1, cfg.media_image.as_path(), true);
+
+    ops.push(ConfigfsOp::Symlink {
+        target: func,
+        link: cfg_dir.join(&cfg.function),
+    });
+    // UDC bind is intentionally LAST: the whole gadget (both LUNs) must be fully
+    // described before any controller is attached.
+    ops.push(ConfigfsOp::Write(cfg.udc_path(), udc_name.to_owned()));
+
     ops.shrink_to_fit();
     ops
+}
+
+/// Emit the attribute writes for one LUN. `mkdir_first` is `true` for any LUN
+/// beyond `lun.0` (which the kernel auto-creates with the function instance).
+fn push_lun_ops(
+    ops: &mut Vec<ConfigfsOp>,
+    cfg: &GadgetConfig,
+    lun: &std::path::Path,
+    image: &std::path::Path,
+    mkdir_first: bool,
+) {
+    if mkdir_first {
+        ops.push(ConfigfsOp::Mkdir(lun.to_path_buf()));
+    }
+    ops.push(ConfigfsOp::Write(
+        lun.join("cdrom"),
+        GadgetConfig::bool_attr(false),
+    ));
+    ops.push(ConfigfsOp::Write(
+        lun.join("ro"),
+        GadgetConfig::bool_attr(cfg.read_only),
+    ));
+    ops.push(ConfigfsOp::Write(
+        lun.join("nofua"),
+        GadgetConfig::bool_attr(cfg.nofua),
+    ));
+    ops.push(ConfigfsOp::Write(
+        lun.join("removable"),
+        GadgetConfig::bool_attr(cfg.removable),
+    ));
+    ops.push(ConfigfsOp::Write(
+        lun.join("file"),
+        image.to_string_lossy().into_owned(),
+    ));
 }
 
 /// Plan the ordered ops that unbind and dismantle the gadget tree.
@@ -201,6 +263,9 @@ pub(crate) fn plan_tear_down(cfg: &GadgetConfig) -> Vec<ConfigfsOp> {
     vec![
         ConfigfsOp::Write(cfg.udc_path(), "\n".to_owned()),
         ConfigfsOp::Unlink(cfg_dir.join(&cfg.function)),
+        // lun.1 was created by us, so it must be removed before the function dir;
+        // lun.0 is auto-removed when the function instance is destroyed.
+        ConfigfsOp::Rmdir(cfg.lun_dir(MEDIA_LUN)),
         ConfigfsOp::Rmdir(cfg_strings),
         ConfigfsOp::Rmdir(cfg_dir),
         ConfigfsOp::Rmdir(func),
@@ -216,7 +281,10 @@ mod tests {
     use std::path::PathBuf;
 
     fn test_cfg(root: &str) -> GadgetConfig {
-        let mut cfg = GadgetConfig::teslausb(PathBuf::from("/data/disk.img"));
+        let mut cfg = GadgetConfig::teslausb(
+            PathBuf::from("/data/teslacam.img"),
+            PathBuf::from("/data/media.img"),
+        );
         cfg.configfs_root = PathBuf::from(root);
         cfg.name = "teslausb".to_owned();
         cfg
@@ -248,28 +316,66 @@ mod tests {
     }
 
     #[test]
-    fn bring_up_points_lun_at_backing_image() {
+    fn bring_up_points_lun0_at_teslacam_image() {
         let ops = plan_bring_up(&test_cfg("/cfgroot"), "udc0");
         let has_lun_file = ops.iter().any(|op| {
             matches!(op, ConfigfsOp::Write(p, v)
-                if p.ends_with("lun.0/file") && v == "/data/disk.img")
+                if p.ends_with("lun.0/file") && v == "/data/teslacam.img")
         });
-        assert!(has_lun_file, "lun.0/file must point at the backing image");
+        assert!(has_lun_file, "lun.0/file must point at the TeslaCam image");
+    }
+
+    #[test]
+    fn bring_up_points_lun1_at_media_image() {
+        let ops = plan_bring_up(&test_cfg("/cfgroot"), "udc0");
+        let has_lun_file = ops.iter().any(|op| {
+            matches!(op, ConfigfsOp::Write(p, v)
+                if p.ends_with("lun.1/file") && v == "/data/media.img")
+        });
+        assert!(has_lun_file, "lun.1/file must point at the MEDIA image");
+    }
+
+    #[test]
+    fn bring_up_creates_media_lun_dir_before_binding() {
+        let ops = plan_bring_up(&test_cfg("/cfgroot"), "udc0");
+        let mkdir_idx = ops.iter().position(
+            |op| matches!(op, ConfigfsOp::Mkdir(p) if p.ends_with("mass_storage.usb0/lun.1")),
+        );
+        let udc_idx = ops
+            .iter()
+            .position(|op| matches!(op, ConfigfsOp::Write(p, _) if p.ends_with("teslausb/UDC")));
+        let (Some(m), Some(u)) = (mkdir_idx, udc_idx) else {
+            panic!("expected both a lun.1 mkdir and a UDC write");
+        };
+        assert!(m < u, "lun.1 must be created before the UDC bind");
+    }
+
+    #[test]
+    fn bring_up_does_not_mkdir_lun0() {
+        // lun.0 is auto-created with the function instance; an explicit mkdir
+        // would fail (EEXIST/EBUSY) on the live kernel.
+        let ops = plan_bring_up(&test_cfg("/cfgroot"), "udc0");
+        let mkdir_lun0 = ops
+            .iter()
+            .any(|op| matches!(op, ConfigfsOp::Mkdir(p) if p.ends_with("lun.0")));
+        assert!(!mkdir_lun0, "lun.0 must NOT be explicitly mkdir-ed");
     }
 
     #[test]
     fn bring_up_keeps_fua_enabled_for_durability() {
-        // nofua must be written "0" so the host's flushes are honoured.
+        // nofua must be written "0" on BOTH LUNs so host flushes are honoured.
         let ops = plan_bring_up(&test_cfg("/cfgroot"), "udc0");
-        let nofua = ops.iter().find_map(|op| match op {
-            ConfigfsOp::Write(p, v) if p.ends_with("lun.0/nofua") => Some(v.clone()),
-            _ => None,
-        });
-        assert_eq!(
-            nofua.as_deref(),
-            Some("0"),
-            "nofua must be 0 (FUA honoured)"
-        );
+        for lun in ["lun.0/nofua", "lun.1/nofua"] {
+            let nofua = ops.iter().find_map(|op| match op {
+                ConfigfsOp::Write(p, v) if p.ends_with(lun) => Some(v.clone()),
+                _ => None,
+            });
+            assert_eq!(
+                nofua.as_deref(),
+                Some("0"),
+                "{lun} must be 0 (FUA honoured)"
+            );
+        }
     }
 
     #[test]
@@ -306,5 +412,20 @@ mod tests {
             ConfigfsOp::Rmdir(path) => assert_eq!(path, &PathBuf::from("/cfgroot/teslausb")),
             other => panic!("expected gadget rmdir last, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn tear_down_removes_media_lun_before_function() {
+        let ops = plan_tear_down(&test_cfg("/cfgroot"));
+        let lun1_idx = ops
+            .iter()
+            .position(|op| matches!(op, ConfigfsOp::Rmdir(p) if p.ends_with("lun.1")));
+        let func_idx = ops.iter().position(
+            |op| matches!(op, ConfigfsOp::Rmdir(p) if p.ends_with("functions/mass_storage.usb0")),
+        );
+        let (Some(l), Some(f)) = (lun1_idx, func_idx) else {
+            panic!("expected both a lun.1 rmdir and a function rmdir");
+        };
+        assert!(l < f, "lun.1 must be removed before the function dir");
     }
 }

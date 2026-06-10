@@ -39,8 +39,8 @@ use crate::error::ScannerError;
 use crate::mbr::parse_mbr;
 use crate::reader::BlockReader;
 use crate::record::{
-    AngleRecord, Bucket, ClipAngleRecord, PROTOCOL_VERSION, ProducerStats, ScanBatch, WireWaypoint,
-    autopilot_to_u32, gear_to_u32,
+    AngleRecord, Bucket, ClipAngleRecord, MAX_MEDIA_RECORDS, MediaFileRecord, PROTOCOL_VERSION,
+    ProducerStats, ScanBatch, WireWaypoint, autopilot_to_u32, gear_to_u32,
 };
 use crate::seiwalk::{Waypoint, walk_clip_waypoints};
 use crate::stability::StabilityTracker;
@@ -111,6 +111,81 @@ fn systemtime_to_epoch(st: SystemTime) -> Option<i64> {
 /// camera-independent dedup key already encodes the slot.
 fn partition_label(slot: u8) -> String {
     format!("slot{slot}")
+}
+
+/// MBR slot of the MEDIA (p2) partition — the second exFAT partition, which
+/// holds the operator-installed lock chime (and, later, boombox/music/
+/// lightshows). Slot 0 is the dashcam (p1) partition.
+const MEDIA_PARTITION_SLOT: u8 = 1;
+
+/// The single media file slice 1 inventories: the lock chime at the root of
+/// p2. Deliberately scoped to exactly this name so the producer does not yet
+/// generically enumerate all of p2 — the broader media listing is a later
+/// slice with its own conventions (`LightShow/`, `Boombox/`, `Music/`).
+const LOCK_CHIME_REL_PATH: &str = "LockChime.wav";
+
+/// Decode an exFAT packed DOS date-time (`modify_timestamp`) into a NAIVE
+/// local `YYYY-MM-DDThh:mm:ss` string. Returns `None` when any field is out
+/// of range (e.g. the all-zero sentinel), so a corrupt entry degrades to
+/// "no timestamp" rather than a bogus date.
+///
+/// Layout (mirrors [`FileTimestamps::from_system_time`] packing):
+/// `packed = (date << 16) | time`, with
+/// `date = ((year-1980) << 9) | (month << 5) | day` and
+/// `time = (hour << 11) | (minute << 5) | (second/2)`.
+fn decode_exfat_timestamp(packed: u32) -> Option<String> {
+    let date = packed >> 16;
+    let time = packed & 0xFFFF;
+    let year = ((date >> 9) & 0x7F) + 1980;
+    let month = (date >> 5) & 0x0F;
+    let day = date & 0x1F;
+    let hour = (time >> 11) & 0x1F;
+    let minute = (time >> 5) & 0x3F;
+    let second = (time & 0x1F) * 2;
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return None;
+    }
+    Some(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}"
+    ))
+}
+
+/// Collect the MEDIA-partition (p2) inventory facts from the full walk. Slice
+/// 1 emits at most one record: a COMPLETE `LockChime.wav` at the p2 root.
+/// "Complete" means the exFAT entry's set-checksum verified AND
+/// `valid_data_length == data_length` — a torn mid-install entry (which fails
+/// the checksum the gadgetd temp+atomic-rename install guards against) is
+/// excluded, so the consumer never records a half-written chime.
+fn collect_media(all_records: &[FileRecord]) -> Vec<MediaFileRecord> {
+    let mut media: Vec<MediaFileRecord> = Vec::new();
+    for record in all_records {
+        if record.partition_slot != MEDIA_PARTITION_SLOT {
+            continue;
+        }
+        // Root-level only: the path is exactly the file name (no parent dir).
+        if record.path != LOCK_CHIME_REL_PATH || record.name != LOCK_CHIME_REL_PATH {
+            continue;
+        }
+        if !record.set_checksum_ok || record.valid_data_length != record.data_length {
+            continue;
+        }
+        media.push(MediaFileRecord {
+            partition: partition_label(record.partition_slot),
+            rel_path: record.path.clone(),
+            name: record.name.clone(),
+            size_bytes: i64::try_from(record.data_length).unwrap_or(i64::MAX),
+            modified_local: decode_exfat_timestamp(record.timestamps.modify_timestamp),
+        });
+        if media.len() >= MAX_MEDIA_RECORDS {
+            break;
+        }
+    }
+    media
 }
 
 /// Read a file's valid data region in full (bounded by [`MAX_CLIP_BYTES`]).
@@ -333,6 +408,8 @@ pub fn produce<R: BlockReader + ?Sized>(
         }
     }
 
+    let media = collect_media(&all_records);
+
     Ok(ScanBatch {
         version: PROTOCOL_VERSION,
         generation: 0,
@@ -344,14 +421,22 @@ pub fn produce<R: BlockReader + ?Sized>(
         stats,
         present_keys: present.into_iter().collect(),
         records,
+        // This producer DID inventory p2, so the consumer may prune stale
+        // media rows against `media_present_paths` (gated on `complete`).
+        media_present_paths: media.iter().map(|m| m.rel_path.clone()).collect(),
+        media,
+        media_inventory: true,
     })
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
-    use super::{ClipIdent, clip_identity, partition_label};
+    use super::{
+        ClipIdent, MEDIA_PARTITION_SLOT, clip_identity, collect_media, decode_exfat_timestamp,
+        partition_label,
+    };
     use crate::record::Bucket;
     use crate::walk::FileRecord;
     use teslausb_core::fs::exfat::directory::FileTimestamps;
@@ -430,5 +515,80 @@ mod tests {
     #[test]
     fn partition_label_encodes_slot() {
         assert_eq!(partition_label(3), "slot3");
+    }
+
+    /// Pack a date-time the way `FileTimestamps::from_system_time` does, so
+    /// the decoder is tested against the real on-disk layout.
+    fn pack(year: u32, month: u32, day: u32, hour: u32, minute: u32, second: u32) -> u32 {
+        let date = ((year - 1980) << 9) | (month << 5) | day;
+        let time = (hour << 11) | (minute << 5) | (second / 2);
+        (date << 16) | time
+    }
+
+    #[test]
+    fn decode_timestamp_roundtrips_packed_value() {
+        let packed = pack(2026, 6, 1, 20, 10, 4);
+        assert_eq!(
+            decode_exfat_timestamp(packed).as_deref(),
+            Some("2026-06-01T20:10:04")
+        );
+    }
+
+    #[test]
+    fn decode_timestamp_rejects_zero_sentinel() {
+        // All-zero packs month=0/day=0 → out of range → None, not a bogus date.
+        assert_eq!(decode_exfat_timestamp(0), None);
+    }
+
+    fn media_record(path: &str, complete: bool, slot: u8) -> FileRecord {
+        let mut rec = record(path, path, slot);
+        rec.timestamps = FileTimestamps {
+            modify_timestamp: pack(2026, 6, 1, 20, 10, 4),
+            ..FileTimestamps::default()
+        };
+        if !complete {
+            rec.valid_data_length = rec.data_length - 1;
+        }
+        rec
+    }
+
+    #[test]
+    fn collect_media_finds_complete_lock_chime_on_p2() {
+        let recs = vec![media_record("LockChime.wav", true, MEDIA_PARTITION_SLOT)];
+        let media = collect_media(&recs);
+        assert_eq!(media.len(), 1);
+        assert_eq!(media[0].partition, "slot1");
+        assert_eq!(media[0].rel_path, "LockChime.wav");
+        assert_eq!(media[0].size_bytes, 1024);
+        assert_eq!(
+            media[0].modified_local.as_deref(),
+            Some("2026-06-01T20:10:04")
+        );
+    }
+
+    #[test]
+    fn collect_media_skips_torn_chime() {
+        // valid_data_length < data_length ⇒ mid-install ⇒ excluded.
+        let recs = vec![media_record("LockChime.wav", false, MEDIA_PARTITION_SLOT)];
+        assert!(collect_media(&recs).is_empty());
+    }
+
+    #[test]
+    fn collect_media_skips_bad_checksum() {
+        let mut rec = media_record("LockChime.wav", true, MEDIA_PARTITION_SLOT);
+        rec.set_checksum_ok = false;
+        assert!(collect_media(&[rec]).is_empty());
+    }
+
+    #[test]
+    fn collect_media_ignores_p1_and_nonchime_and_nested() {
+        let recs = vec![
+            // Right name but dashcam partition (slot 0).
+            media_record("LockChime.wav", true, 0),
+            // Media partition but a different/nested file.
+            media_record("Boombox/horn.wav", true, MEDIA_PARTITION_SLOT),
+            media_record("Other.wav", true, MEDIA_PARTITION_SLOT),
+        ];
+        assert!(collect_media(&recs).is_empty());
     }
 }

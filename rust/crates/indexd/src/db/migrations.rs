@@ -29,15 +29,40 @@ pub const SCHEMA_VERSION_NOTE: &str = "v1 (PROVISIONAL — pre-OP-3 freeze)";
 /// The highest schema version this binary knows how to produce. A DB
 /// reporting a higher version was written by a newer `indexd` and must
 /// not be opened read-write.
-pub const LATEST_VERSION: i64 = 1;
+pub const LATEST_VERSION: i64 = 2;
 
 /// The ordered migration ladder. Index order MUST match ascending
 /// `version`; [`MIGRATIONS`] is validated by a test.
-pub const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    note: SCHEMA_VERSION_NOTE,
-    sql: V1_SQL,
-}];
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        note: SCHEMA_VERSION_NOTE,
+        sql: V1_SQL,
+    },
+    Migration {
+        version: 2,
+        note: "v2 — media_entries (p2 read-only inventory)",
+        sql: V2_SQL,
+    },
+];
+
+/// v2 DDL: the MEDIA (p2) read-only inventory the media screens display.
+/// Pure derived state owned by indexd from scannerd's media facts; webd
+/// reads it but never writes it. The row identity is
+/// `(partition, rel_path)` so the same file name on different partitions
+/// (or a future per-folder layout) cannot collide.
+const V2_SQL: &str = "
+CREATE TABLE media_entries (
+    id          INTEGER PRIMARY KEY,
+    partition   TEXT    NOT NULL,
+    rel_path    TEXT    NOT NULL,
+    name        TEXT    NOT NULL,
+    size_bytes  INTEGER NOT NULL,
+    modified    TEXT,
+    updated_at  INTEGER NOT NULL,
+    UNIQUE (partition, rel_path)
+);
+";
 
 /// v1 DDL: contract D1's proposed schema, plus two internal additions
 /// flagged in the build notes:

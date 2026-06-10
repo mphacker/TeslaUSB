@@ -1582,3 +1582,95 @@ async fn remove_chime_unknown_id_is_404() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");
 }
+
+/// Build a read-only app router over the catalog at `db_path` (no gadgetd
+/// contact). Shared by the `GET /api/chimes` tests.
+fn ro_app(dir: &TempDir, db_path: &std::path::Path) -> Router {
+    let static_dir = dir.path().join("static");
+    std::fs::create_dir_all(&static_dir).unwrap();
+    std::fs::write(static_dir.join("index.html"), "<!doctype html>shell").unwrap();
+    let catalog = Catalog::open(db_path).unwrap();
+    let archive_dir = dir.path().join("archive");
+    let cache_dir = dir.path().join("cache");
+    std::fs::create_dir_all(&archive_dir).unwrap();
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    let media = MediaConfig::new(archive_dir, cache_dir);
+    let gadget_sock = dir.path().join("gadgetd.sock");
+    build_router(catalog, static_dir, media, gadget_sock)
+}
+
+#[tokio::test]
+async fn get_chimes_reports_installed_chime() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("catalog.db");
+    {
+        let mut conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        indexd::db::apply_migrations(&mut conn).unwrap();
+        conn.execute(
+            "INSERT INTO media_entries (partition, rel_path, name, size_bytes, modified, updated_at)
+             VALUES ('slot1', 'LockChime.wav', 'LockChime.wav', 219770, '2026-06-01T20:10:04', 0)",
+            [],
+        )
+        .unwrap();
+    }
+    let app = ro_app(&dir, &db_path);
+    let (status, body) = get_json(&app, "/api/chimes").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["installed"]["name"], "LockChime.wav");
+    assert_eq!(body["installed"]["rel_path"], "LockChime.wav");
+    assert_eq!(body["installed"]["size_bytes"], 219_770);
+    assert_eq!(body["installed"]["modified"], "2026-06-01T20:10:04");
+}
+
+#[tokio::test]
+async fn get_chimes_reports_null_when_none_installed() {
+    // The standard fixture is a v2 catalog with NO media_entries rows.
+    let fx = fixture();
+    let (status, body) = get_json(&fx.app, "/api/chimes").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["installed"].is_null());
+}
+
+#[tokio::test]
+async fn get_chimes_ignores_chime_on_wrong_partition() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("catalog.db");
+    {
+        let mut conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        indexd::db::apply_migrations(&mut conn).unwrap();
+        // A row with the right name but on the dashcam partition must not be
+        // reported as the installed lock chime.
+        conn.execute(
+            "INSERT INTO media_entries (partition, rel_path, name, size_bytes, modified, updated_at)
+             VALUES ('slot0', 'LockChime.wav', 'LockChime.wav', 100, NULL, 0)",
+            [],
+        )
+        .unwrap();
+    }
+    let app = ro_app(&dir, &db_path);
+    let (status, body) = get_json(&app, "/api/chimes").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["installed"].is_null());
+}
+
+#[tokio::test]
+async fn get_chimes_degrades_to_null_when_media_table_absent() {
+    // A pre-v2 indexd catalog (schema_version=1, no media_entries table)
+    // opened by a v2-aware webd must answer `{installed: null}`, not 500.
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("catalog.db");
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_version (version INTEGER NOT NULL, applied_at INTEGER NOT NULL, note TEXT);
+             INSERT INTO schema_version (version, applied_at, note) VALUES (1, 0, 'v1');",
+        )
+        .unwrap();
+    }
+    let app = ro_app(&dir, &db_path);
+    let (status, body) = get_json(&app, "/api/chimes").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["installed"].is_null());
+}

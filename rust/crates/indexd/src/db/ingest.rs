@@ -246,6 +246,81 @@ pub fn prune_missing_clips<S: std::hash::BuildHasher>(
     Ok(stale.len())
 }
 
+/// One MEDIA-partition (p2) inventory fact: a file the read-only media
+/// screens display (the lock chime today). Identity is
+/// `(partition, rel_path)`.
+#[derive(Debug, Clone)]
+pub struct MediaFacts {
+    /// Source partition label (`slot1` for MEDIA).
+    pub partition: String,
+    /// Path relative to the partition root (e.g. `LockChime.wav`).
+    pub rel_path: String,
+    /// File name (last path component).
+    pub name: String,
+    /// File size in bytes (never negative).
+    pub size_bytes: i64,
+    /// Best-effort naive-local `YYYY-MM-DDThh:mm:ss` modification string.
+    pub modified: Option<String>,
+}
+
+/// Upsert one media-inventory row by `(partition, rel_path)`. Pure derived
+/// state — `updated_at` is refreshed every pass.
+///
+/// # Errors
+///
+/// Returns [`DbError`] if the statement fails.
+pub fn upsert_media(conn: &Connection, facts: &MediaFacts) -> Result<(), DbError> {
+    let now = now_epoch_s();
+    conn.execute(
+        "INSERT INTO media_entries
+            (partition, rel_path, name, size_bytes, modified, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(partition, rel_path) DO UPDATE SET
+            name       = excluded.name,
+            size_bytes = excluded.size_bytes,
+            modified   = excluded.modified,
+            updated_at = excluded.updated_at",
+        params![
+            facts.partition,
+            facts.rel_path,
+            facts.name,
+            facts.size_bytes,
+            facts.modified,
+            now,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Delete media rows whose `rel_path` is not in `present_paths`. The caller
+/// MUST gate this on the producer's `media_inventory` capability AND a
+/// `complete` batch, so a media-unaware or torn scan never wipes the table.
+///
+/// # Errors
+///
+/// Returns [`DbError`] if a query fails.
+pub fn prune_missing_media<S: std::hash::BuildHasher>(
+    conn: &Connection,
+    present_paths: &HashSet<String, S>,
+) -> Result<usize, DbError> {
+    let stale: Vec<i64> = {
+        let mut stmt = conn.prepare("SELECT id, rel_path FROM media_entries")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        let mut stale = Vec::new();
+        for row in rows {
+            let (id, rel_path) = row?;
+            if !present_paths.contains(&rel_path) {
+                stale.push(id);
+            }
+        }
+        stale
+    };
+    for id in &stale {
+        conn.execute("DELETE FROM media_entries WHERE id = ?1", params![id])?;
+    }
+    Ok(stale.len())
+}
+
 /// Load the front-camera clips with cached waypoints, ready for
 /// derivation. A clip qualifies iff it has `clip_waypoints` rows (only
 /// front clips are walked). Ordered `(started_at, id)` to match the

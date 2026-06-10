@@ -216,6 +216,9 @@ mod tests {
             stats: ProducerStats::default(),
             present_keys: vec!["0:TeslaCam/SavedClips/x".to_owned()],
             records: Vec::new(),
+            media: Vec::new(),
+            media_present_paths: Vec::new(),
+            media_inventory: false,
         };
         let mut buf = Vec::new();
         write_batch(&mut buf, &batch).unwrap();

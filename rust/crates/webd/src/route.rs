@@ -61,6 +61,7 @@ pub(crate) fn router(state: AppState, static_dir: PathBuf) -> Router {
         .route(
             "/chimes",
             post(crate::chimes::install_chime)
+                .get(crate::chimes::list_chimes)
                 .layer(DefaultBodyLimit::max(crate::chimes::CHIME_BODY_LIMIT)),
         )
         .route("/chimes/{id}", delete(crate::chimes::remove_chime))

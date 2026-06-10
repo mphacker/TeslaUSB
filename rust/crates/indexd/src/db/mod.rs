@@ -179,10 +179,11 @@ mod tests {
         assert_eq!(apply_migrations(&mut conn).unwrap(), LATEST_VERSION);
         // Re-applying must be a no-op (no duplicate rows / no error).
         assert_eq!(apply_migrations(&mut conn).unwrap(), LATEST_VERSION);
+        // One row per migration applied from fresh (v1 + v2).
         let rows: i64 = conn
             .query_row("SELECT COUNT(*) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(rows, 1);
+        assert_eq!(rows, LATEST_VERSION);
     }
 
     #[test]
@@ -221,6 +222,7 @@ mod tests {
             "eviction_tombstones",
             "leases",
             "prefs",
+            "media_entries",
         ] {
             let found: i64 = conn
                 .query_row(

@@ -37,8 +37,9 @@ use teslausb_core::sei::tesla::{AutopilotState, Gear};
 
 use crate::db::DbError;
 use crate::db::ingest::{
-    AngleFacts, ClipFacts, ensure_clip, load_derive_clips, prune_missing_clips, rebuild_derived,
-    replace_clip_waypoints, upsert_angle, upsert_clip,
+    AngleFacts, ClipFacts, MediaFacts, ensure_clip, load_derive_clips, prune_missing_clips,
+    prune_missing_media, rebuild_derived, replace_clip_waypoints, upsert_angle, upsert_clip,
+    upsert_media,
 };
 use crate::derive::{DeriveConfig, derive};
 use crate::model::{DeriveWaypoint, FolderClass};
@@ -61,6 +62,11 @@ pub struct ApplyReport {
     pub record_errors: usize,
     /// Clips pruned (present only when the batch was `complete`).
     pub pruned: usize,
+    /// Media rows upserted this pass (p2 inventory).
+    pub media_written: usize,
+    /// Media rows pruned (present only when the producer inventoried media
+    /// AND the batch was `complete`).
+    pub media_pruned: usize,
     /// Trips materialized after the rebuild.
     pub trips: usize,
     /// Events materialized after the rebuild (driving + sentry).
@@ -221,6 +227,43 @@ pub fn apply(
         report.pruned = prune_missing_clips(&tx, &present_keys)?;
     }
 
+    // MEDIA (p2) inventory. Only a media-aware producer touches the catalog:
+    // a batch from an older scannerd has `media_inventory == false`, so we
+    // neither upsert nor prune and the existing rows are preserved.
+    if batch.media_inventory {
+        for media in &batch.media {
+            if media.validate().is_err() {
+                report.record_errors += 1;
+                continue;
+            }
+            // A complete inventory's present set must contain every emitted
+            // media path; an inconsistent record (only reachable over a
+            // forged wire) is skipped rather than written.
+            if batch.complete && !batch.media_present_paths.contains(&media.rel_path) {
+                report.record_errors += 1;
+                continue;
+            }
+            upsert_media(
+                &tx,
+                &MediaFacts {
+                    partition: media.partition.clone(),
+                    rel_path: media.rel_path.clone(),
+                    name: media.name.clone(),
+                    size_bytes: media.size_bytes,
+                    modified: media.modified_local.clone(),
+                },
+            )?;
+            report.media_written += 1;
+        }
+        // Prune only when the inventory is also a complete scan: a torn pass
+        // could omit a present file and wrongly delete its row.
+        if batch.complete {
+            let present_paths: HashSet<String> =
+                batch.media_present_paths.iter().cloned().collect();
+            report.media_pruned = prune_missing_media(&tx, &present_paths)?;
+        }
+    }
+
     let clips = load_derive_clips(&tx)?;
     let derivation = derive(&clips, derive_cfg);
     rebuild_derived(&tx, &derivation)?;
@@ -249,7 +292,8 @@ mod tests {
     use rusqlite::Connection;
     use scannerd::produce::wire_waypoint_from_walk;
     use scannerd::record::{
-        AngleRecord, Bucket, ClipAngleRecord, PROTOCOL_VERSION, ProducerStats, ScanBatch,
+        AngleRecord, Bucket, ClipAngleRecord, MediaFileRecord, PROTOCOL_VERSION, ProducerStats,
+        ScanBatch,
     };
     use scannerd::seiwalk::Waypoint;
     use teslausb_core::sei::tesla::{AutopilotState, Gear, SeiMessage};
@@ -364,6 +408,9 @@ mod tests {
             stats: ProducerStats::default(),
             present_keys,
             records,
+            media: Vec::new(),
+            media_present_paths: Vec::new(),
+            media_inventory: false,
         }
     }
 
@@ -389,6 +436,92 @@ mod tests {
         assert_eq!(count(&conn, "clips"), 1);
         assert_eq!(count(&conn, "angles"), 2);
         assert_eq!(count(&conn, "clip_waypoints"), 2);
+    }
+
+    fn media_rec(rel_path: &str) -> MediaFileRecord {
+        MediaFileRecord {
+            partition: "slot1".to_owned(),
+            rel_path: rel_path.to_owned(),
+            name: rel_path.to_owned(),
+            size_bytes: 219_770,
+            modified_local: Some("2026-06-01T20:10:04".to_owned()),
+        }
+    }
+
+    fn media_batch(media: Vec<MediaFileRecord>, inventory: bool, complete: bool) -> ScanBatch {
+        let mut b = batch(Vec::new(), complete);
+        b.media_present_paths = media.iter().map(|m| m.rel_path.clone()).collect();
+        b.media = media;
+        b.media_inventory = inventory;
+        b
+    }
+
+    fn media_row(conn: &Connection, rel_path: &str) -> Option<(String, i64, Option<String>)> {
+        conn.query_row(
+            "SELECT name, size_bytes, modified FROM media_entries WHERE rel_path = ?1",
+            [rel_path],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .ok()
+    }
+
+    #[test]
+    fn apply_upserts_and_prunes_media_when_inventoried() {
+        let mut conn = open_in_memory().unwrap();
+        let b = media_batch(vec![media_rec("LockChime.wav")], true, true);
+        let report = apply(&mut conn, &b, DeriveConfig::default()).unwrap();
+        assert_eq!(report.media_written, 1);
+        assert_eq!(report.media_pruned, 0);
+        let row = media_row(&conn, "LockChime.wav").unwrap();
+        assert_eq!(row.0, "LockChime.wav");
+        assert_eq!(row.1, 219_770);
+        assert_eq!(row.2.as_deref(), Some("2026-06-01T20:10:04"));
+
+        // A later complete inventory with the chime GONE prunes the row.
+        let empty = media_batch(Vec::new(), true, true);
+        let report2 = apply(&mut conn, &empty, DeriveConfig::default()).unwrap();
+        assert_eq!(report2.media_pruned, 1);
+        assert_eq!(count(&conn, "media_entries"), 0);
+    }
+
+    #[test]
+    fn apply_idempotent_media_no_duplicate_rows() {
+        let mut conn = open_in_memory().unwrap();
+        let b = media_batch(vec![media_rec("LockChime.wav")], true, true);
+        apply(&mut conn, &b, DeriveConfig::default()).unwrap();
+        apply(&mut conn, &b, DeriveConfig::default()).unwrap();
+        assert_eq!(count(&conn, "media_entries"), 1);
+    }
+
+    #[test]
+    fn media_unaware_batch_never_touches_catalog() {
+        let mut conn = open_in_memory().unwrap();
+        // First, a media-aware pass installs a row.
+        let installed = media_batch(vec![media_rec("LockChime.wav")], true, true);
+        apply(&mut conn, &installed, DeriveConfig::default()).unwrap();
+        assert_eq!(count(&conn, "media_entries"), 1);
+
+        // Then a pass from an OLD (media-unaware) scannerd: empty media,
+        // inventory=false, complete=true. It must NOT prune the row.
+        let old = media_batch(Vec::new(), false, true);
+        let report = apply(&mut conn, &old, DeriveConfig::default()).unwrap();
+        assert_eq!(report.media_written, 0);
+        assert_eq!(report.media_pruned, 0);
+        assert_eq!(count(&conn, "media_entries"), 1);
+    }
+
+    #[test]
+    fn incomplete_media_inventory_upserts_but_does_not_prune() {
+        let mut conn = open_in_memory().unwrap();
+        let installed = media_batch(vec![media_rec("LockChime.wav")], true, true);
+        apply(&mut conn, &installed, DeriveConfig::default()).unwrap();
+
+        // A torn (incomplete) pass that no longer sees the chime must keep
+        // the row — prune is gated on `complete`.
+        let torn = media_batch(Vec::new(), true, false);
+        let report = apply(&mut conn, &torn, DeriveConfig::default()).unwrap();
+        assert_eq!(report.media_pruned, 0);
+        assert_eq!(count(&conn, "media_entries"), 1);
     }
 
     #[test]

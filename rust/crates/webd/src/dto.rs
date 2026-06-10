@@ -224,3 +224,29 @@ pub(crate) struct PrefDto {
     /// `prefs.value` (an opaque string; often JSON).
     pub value: String,
 }
+
+/// The installed lock chime (`GET /api/chimes` → `installed`), read from the
+/// `media_entries` catalog (`indexd` v2). `None` at the wire level (serialized
+/// as `"installed": null`) when no chime is installed OR the catalog predates
+/// the media inventory.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct InstalledChimeDto {
+    /// `media_entries.name` (e.g. `LockChime.wav`).
+    pub name: String,
+    /// `media_entries.rel_path` (the fixed `LockChime.wav` at the p2 root).
+    pub rel_path: String,
+    /// `media_entries.size_bytes`.
+    pub size_bytes: i64,
+    /// `media_entries.modified` — best-effort naive-local
+    /// `YYYY-MM-DDThh:mm:ss`, or `null` when the on-disk timestamp was
+    /// unreadable.
+    pub modified: Option<String>,
+}
+
+/// The `GET /api/chimes` response envelope: the single installed lock chime,
+/// or `null` when none is present / the catalog has no media inventory.
+#[derive(Debug, Serialize)]
+pub(crate) struct ChimesDto {
+    /// The installed lock chime, or `null`.
+    pub installed: Option<InstalledChimeDto>,
+}

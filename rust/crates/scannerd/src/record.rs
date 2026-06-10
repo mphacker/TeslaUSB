@@ -43,6 +43,11 @@ pub const MAX_WAYPOINTS_PER_RECORD: usize = 100_000;
 /// Hard cap on any single wire string (canonical key, path, camera, …).
 pub const MAX_STRING_LEN: usize = 4096;
 
+/// Hard cap on media-inventory records (p2 MEDIA files) a single batch may
+/// carry. Slice 1 emits at most one (the lock chime); the cap leaves
+/// headroom for future media listings while bounding a forged peer.
+pub const MAX_MEDIA_RECORDS: usize = 10_000;
+
 /// Tesla source-folder classification for a clip. Mirrors contract D1
 /// `clips.folder_class`; the producer derives it from the directory path,
 /// the consumer maps it straight onto its own `FolderClass` via
@@ -257,6 +262,45 @@ pub struct ScanBatch {
     pub present_keys: Vec<String>,
     /// Eligible files (camera angles) to ingest this pass.
     pub records: Vec<ClipAngleRecord>,
+    /// MEDIA-partition (p2) inventory facts for the read-only media screens
+    /// (lock chime today; boombox/music/lightshows later). Empty on an
+    /// older producer that predates media inventory (`#[serde(default)]`).
+    #[serde(default)]
+    pub media: Vec<MediaFileRecord>,
+    /// Every media `rel_path` currently present on p2 — the consumer's
+    /// media prune set. Trustworthy only when `media_inventory` is set.
+    #[serde(default)]
+    pub media_present_paths: Vec<String>,
+    /// Whether this producer populated the media inventory at all. `false`
+    /// on an older producer (via `#[serde(default)]`): the consumer then
+    /// leaves the media catalog untouched and NEVER prunes it, so a batch
+    /// from a media-unaware scannerd can't wipe the `media_entries` table.
+    #[serde(default)]
+    pub media_inventory: bool,
+}
+
+/// One file inventoried on the MEDIA (p2) partition — the read-only "what is
+/// installed" facts the media screens display. Plain data: `scannerd` reads
+/// the p2 directory raw + read-only, `indexd` stores it, `webd` serves it,
+/// and nothing here mounts or writes the live USB LUN.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaFileRecord {
+    /// Source partition label (`slot1` for MEDIA), matching the clip
+    /// `partition` convention.
+    pub partition: String,
+    /// Path relative to the partition root (e.g. `LockChime.wav`). Together
+    /// with `partition` this is the row's stable identity.
+    pub rel_path: String,
+    /// File name (last path component).
+    pub name: String,
+    /// File size in bytes (`DataLength`); never negative.
+    pub size_bytes: i64,
+    /// Best-effort recorded modification time as a NAIVE local
+    /// `YYYY-MM-DDThh:mm:ss` string, or `None` when the packed exFAT
+    /// timestamp is out of range. Deliberately not a UTC instant: exFAT
+    /// stores local wall-clock plus a separate offset, so claiming an
+    /// absolute time would be misleading.
+    pub modified_local: Option<String>,
 }
 
 /// Why a [`ScanBatch`] failed validation. The consumer treats every
@@ -301,6 +345,14 @@ pub enum BatchError {
         /// How many waypoints it carried.
         count: usize,
     },
+    /// A media record failed per-record validation.
+    #[error("media record `{rel_path}` invalid: {reason}")]
+    MediaInvalid {
+        /// The offending media record's `rel_path`.
+        rel_path: String,
+        /// Why it was rejected.
+        reason: &'static str,
+    },
 }
 
 impl ScanBatch {
@@ -324,8 +376,43 @@ impl ScanBatch {
         }
         cap("present_keys", self.present_keys.len(), MAX_PRESENT_KEYS)?;
         cap("records", self.records.len(), MAX_RECORDS_PER_BATCH)?;
+        cap("media", self.media.len(), MAX_MEDIA_RECORDS)?;
+        cap(
+            "media_present_paths",
+            self.media_present_paths.len(),
+            MAX_MEDIA_RECORDS,
+        )?;
         for key in &self.present_keys {
             string_len("present_key", key)?;
+        }
+        for path in &self.media_present_paths {
+            string_len("media_present_path", path)?;
+        }
+        Ok(())
+    }
+}
+
+impl MediaFileRecord {
+    /// Validate one media record's string caps and non-negative size. The
+    /// consumer calls this **per record** inside its apply loop and skips
+    /// (counting) on failure, so a single malformed media row never aborts
+    /// the batch.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first [`BatchError`] encountered.
+    pub fn validate(&self) -> Result<(), BatchError> {
+        string_len("media.partition", &self.partition)?;
+        string_len("media.rel_path", &self.rel_path)?;
+        string_len("media.name", &self.name)?;
+        if let Some(modified) = &self.modified_local {
+            string_len("media.modified_local", modified)?;
+        }
+        if self.size_bytes < 0 {
+            return Err(BatchError::MediaInvalid {
+                rel_path: self.rel_path.clone(),
+                reason: "negative size_bytes",
+            });
         }
         Ok(())
     }
@@ -390,8 +477,8 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::float_cmp, clippy::indexing_slicing)]
 
     use super::{
-        AngleRecord, Bucket, ClipAngleRecord, MAX_STRING_LEN, PROTOCOL_VERSION, ProducerStats,
-        ScanBatch, WireWaypoint, autopilot_to_u32, gear_to_u32,
+        AngleRecord, Bucket, ClipAngleRecord, MAX_MEDIA_RECORDS, MAX_STRING_LEN, MediaFileRecord,
+        PROTOCOL_VERSION, ProducerStats, ScanBatch, WireWaypoint, autopilot_to_u32, gear_to_u32,
     };
     use teslausb_core::sei::tesla::{AutopilotState, Gear};
 
@@ -443,6 +530,9 @@ mod tests {
                 },
                 waypoints: vec![sample_waypoint()],
             }],
+            media: Vec::new(),
+            media_present_paths: Vec::new(),
+            media_inventory: false,
         }
     }
 
@@ -452,6 +542,67 @@ mod tests {
         let json = serde_json::to_string(&batch).unwrap();
         let back: ScanBatch = serde_json::from_str(&json).unwrap();
         assert_eq!(batch, back);
+    }
+
+    fn sample_media() -> MediaFileRecord {
+        MediaFileRecord {
+            partition: "slot1".to_owned(),
+            rel_path: "LockChime.wav".to_owned(),
+            name: "LockChime.wav".to_owned(),
+            size_bytes: 219_770,
+            modified_local: Some("2026-06-01T20:10:04".to_owned()),
+        }
+    }
+
+    #[test]
+    fn batch_with_media_roundtrips_through_json() {
+        let mut batch = sample_batch();
+        batch.media = vec![sample_media()];
+        batch.media_present_paths = vec!["LockChime.wav".to_owned()];
+        batch.media_inventory = true;
+        let json = serde_json::to_string(&batch).unwrap();
+        let back: ScanBatch = serde_json::from_str(&json).unwrap();
+        assert_eq!(batch, back);
+    }
+
+    #[test]
+    fn old_batch_without_media_fields_deserializes_as_media_unaware() {
+        // A pre-media producer omits the three media fields entirely; the
+        // serde defaults must read back as an empty, NON-inventory batch so
+        // the consumer never prunes the media catalog from it.
+        let json = r#"{
+            "version": 1, "generation": 3, "complete": true,
+            "stats": {"partitions":1,"files_seen":0,"eligible":0,
+                      "read_errors":0,"unplaceable_clips":0,"unplaceable_front":0},
+            "present_keys": [], "records": []
+        }"#;
+        let batch: ScanBatch = serde_json::from_str(json).unwrap();
+        assert!(batch.media.is_empty());
+        assert!(batch.media_present_paths.is_empty());
+        assert!(!batch.media_inventory);
+        batch.validate().unwrap();
+    }
+
+    #[test]
+    fn media_record_validates_and_rejects_negative_size() {
+        sample_media().validate().unwrap();
+        let mut bad = sample_media();
+        bad.size_bytes = -1;
+        assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn media_record_rejects_overlong_strings() {
+        let mut bad = sample_media();
+        bad.rel_path = "x".repeat(MAX_STRING_LEN + 1);
+        assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn batch_rejects_media_over_cap() {
+        let mut batch = sample_batch();
+        batch.media_present_paths = (0..=MAX_MEDIA_RECORDS).map(|i| i.to_string()).collect();
+        assert!(batch.validate().is_err());
     }
 
     #[test]

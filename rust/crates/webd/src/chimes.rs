@@ -23,6 +23,7 @@ use axum::http::StatusCode;
 use serde_json::Value;
 
 use crate::AppState;
+use crate::dto::ChimesDto;
 use crate::error::ApiError;
 
 /// The MEDIA partition wire index (`gadgetd` `Partition::P2`).
@@ -51,6 +52,21 @@ const CHIME_MAX_BYTES: usize = 1024 * 1024;
 /// rather than a generic body-limit rejection. A body above this ceiling is a
 /// `400 invalid_multipart` backstop.
 pub(crate) const CHIME_BODY_LIMIT: usize = 8 * 1024 * 1024;
+
+/// `GET /api/chimes`: report the installed lock chime (read-only).
+///
+/// Reads the `media_entries` catalog (populated by the scannerd→indexd media
+/// inventory) and returns `{installed: {...}}` or `{installed: null}`. This is
+/// the safe, always-on counterpart to the operator-gated install/remove: it
+/// never touches the live USB LUN, only the read-only catalog. A catalog that
+/// predates the media inventory degrades to `{installed: null}` rather than a
+/// `5xx`, so the SPA's media page stays clean.
+pub(crate) async fn list_chimes(
+    State(state): State<AppState>,
+) -> Result<Json<ChimesDto>, ApiError> {
+    let installed = crate::route::read(state.catalog, crate::query::installed_chime).await?;
+    Ok(Json(ChimesDto { installed }))
+}
 
 /// `POST /api/chimes`: install a lock chime onto the MEDIA partition.
 ///

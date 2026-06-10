@@ -6,7 +6,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::dto::{
     AnalyticsDto, AngleDto, Bbox, ClipDto, DaySummary, DayTripCount, EventDto, EventTypeCount,
-    PrefDto, TripDetailDto, TripDto, TripPointDto,
+    InstalledChimeDto, PrefDto, TripDetailDto, TripDto, TripPointDto,
 };
 use crate::polyline;
 
@@ -224,6 +224,50 @@ pub(crate) fn list_settings(conn: &Connection) -> Result<Vec<PrefDto>, rusqlite:
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(out)
+}
+
+/// `GET /api/chimes`: the single installed lock chime, read from the
+/// `media_entries` catalog (`indexd` v2). Returns `None` when no chime row
+/// exists OR the catalog predates the media inventory (the `media_entries`
+/// table is absent) — the latter degrades to "no chime" rather than a 500 so
+/// a `webd` running ahead of an `indexd` migration still answers cleanly.
+///
+/// The `(partition, rel_path)` filter mirrors the producer convention:
+/// scannerd labels the MEDIA (p2) partition `slot1` and writes the lock chime
+/// at the fixed root path `LockChime.wav`.
+pub(crate) fn installed_chime(
+    conn: &Connection,
+) -> Result<Option<InstalledChimeDto>, rusqlite::Error> {
+    // p2 MEDIA partition label + fixed lock-chime root path (scannerd
+    // `partition_label(1)` / `LOCK_CHIME_REL_PATH`).
+    const MEDIA_PARTITION: &str = "slot1";
+    const LOCK_CHIME_REL_PATH: &str = "LockChime.wav";
+
+    let table_present: bool = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_entries'",
+            [],
+            |_| Ok(true),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if !table_present {
+        return Ok(None);
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT name, rel_path, size_bytes, modified FROM media_entries \
+         WHERE partition = ?1 AND rel_path = ?2",
+    )?;
+    stmt.query_row(params![MEDIA_PARTITION, LOCK_CHIME_REL_PATH], |row| {
+        Ok(InstalledChimeDto {
+            name: row.get(0)?,
+            rel_path: row.get(1)?,
+            size_bytes: row.get(2)?,
+            modified: row.get(3)?,
+        })
+    })
+    .optional()
 }
 
 /// Resolve one camera angle's byte source for the stream/download endpoints.

@@ -107,6 +107,15 @@ make_fake_disk_img() {
     printf '%s' "$img"
 }
 
+# make_fake_lun_img <name> — create a fake single-partition LUN image (e.g.
+# teslacam.img or media.img) under the sandbox; echoes its path.
+make_fake_lun_img() {
+    local img="${TESLAUSB_PREFIX}/data/teslausb/$1"
+    mkdir -p "$(dirname "$img")"
+    head -c 1048576 /dev/zero > "$img"
+    printf '%s' "$img"
+}
+
 # disk_fingerprint <img> — sha256 + size + mtime + inode, one line.
 disk_fingerprint() {
     local img="$1"

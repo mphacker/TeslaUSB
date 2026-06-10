@@ -199,7 +199,47 @@ assert_exit 4 "deploy-app refuses a planted symlink at a managed path" -- \
 assert_eq "$(cat "${sbx}/decoy/target")" "x" "decoy symlink target left unmodified"
 cleanup_sandbox "$sbx"
 
-# E3: extract_tarball_safe rejects a tarball containing a symlink member BEFORE
+# ============================================================================
+# F. Two-image layout: BOTH single-partition LUN images are sacred (§2 #1)
+# ============================================================================
+
+# F1: a destination symlink resolving to teslacam.img or media.img is refused,
+# and the image is left byte-for-byte untouched (the B-1 layout splits the old
+# combined disk.img into two single-partition images, one per LUN — both must be
+# protected by the same write-through guard).
+for lun_img in teslacam.img media.img; do
+    new_sandbox; sbx="$SANDBOX"
+    img="$(make_fake_lun_img "$lun_img")"
+    mkdir -p "${TESLAUSB_PREFIX}/usr/local/bin"
+    ln -s "$img" "${TESLAUSB_PREFIX}/usr/local/bin/gadgetd"
+    before="$(disk_fingerprint "$img")"
+    assert_exit 4 "deploy-app refuses to write through a ${lun_img} symlink" -- \
+        run_setup deploy-app --artifact-dir "$GOOD" --yes
+    after="$(disk_fingerprint "$img")"
+    assert_eq "$after" "$before" "${lun_img} untouched after refused symlink write"
+    cleanup_sandbox "$sbx"
+done
+
+# F2: rollback never restores over a single-partition LUN image even with a
+# planted sidecar (the disk.img guard must extend to teslacam.img/media.img).
+for lun_img in teslacam.img media.img; do
+    new_sandbox; sbx="$SANDBOX"
+    img="$(make_fake_lun_img "$lun_img")"
+    cp "$img" "${img}.b1-backup-19990101T000000Z"
+    printf 'TAMPER' >> "${img}.b1-backup-19990101T000000Z"
+    before="$(disk_fingerprint "$img")"
+    run_setup rollback >/dev/null 2>&1 || true
+    after="$(disk_fingerprint "$img")"
+    assert_eq "$after" "$before" "rollback ignores a planted ${lun_img} backup"
+    cleanup_sandbox "$sbx"
+done
+
+# ============================================================================
+# E3. extraction-link safety (subshell-sourced; kept last so its subshell var
+# usage doesn't shadow the straight-line tests above)
+# ============================================================================
+
+# extract_tarball_safe rejects a tarball containing a symlink member BEFORE
 # any extraction (so a link cannot be used to escape the destination). Gated on
 # tar + ln; the remote extraction path is otherwise network-only.
 if command -v tar >/dev/null 2>&1 && command -v ln >/dev/null 2>&1; then

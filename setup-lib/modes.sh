@@ -129,11 +129,11 @@ mode_repair() {
 }
 
 # rollback_one <target> — restore the newest .b1-backup-* sidecar over <target>,
-# unless <target> is the disk image (never restored — contract §8).
+# unless <target> is a car-facing backing image (never restored — contract §8).
 rollback_one() {
     local target="$1" newest dir base
-    if [ "$target" = "$TESLAUSB_DISK_IMG" ]; then
-        log_warn "rollback: refusing to restore over disk.img"
+    if is_lun_image "$target"; then
+        log_warn "rollback: refusing to restore over a car-facing disk image (${target})"
         return 0
     fi
     dir="$(dirname "$target")"
@@ -146,15 +146,15 @@ rollback_one() {
 }
 
 # rollback_dir_sidecars <dir> — restore every *.b1-backup-* sidecar found
-# directly under <dir>. Never touches the data root, so disk.img is structurally
-# out of scope; the explicit disk.img guard in rollback_one is belt-and-braces.
+# directly under <dir>. Never touches the data root, so the LUN images are
+# structurally out of scope; the explicit is_lun_image guard is belt-and-braces.
 rollback_dir_sidecars() {
     local dir="$1" bak orig
     [ -d "$dir" ] || return 0
     while IFS= read -r bak; do
         [ -n "$bak" ] || continue
         orig="${bak%.b1-backup-*}"
-        [ "$orig" = "$TESLAUSB_DISK_IMG" ] && continue
+        is_lun_image "$orig" && continue
         assert_safe_dest "$orig"
         run_mutation "rollback ${bak} -> ${orig}" cp -a "$bak" "$orig"
     done < <(find "$dir" -maxdepth 1 -name '*.b1-backup-*' -print 2>/dev/null | sort)

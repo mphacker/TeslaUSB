@@ -37,7 +37,19 @@ EX_STEP=4
 # --- paths (contract §1; sandbox-overridable) --------------------------------
 : "${TESLAUSB_PREFIX:=}"
 TESLAUSB_DATA_ROOT="${TESLAUSB_PREFIX}/data/teslausb"
+# Car-facing backing images (the sacred LUNs — contract §2 #1 invariant). The
+# B-1 layout splits the legacy single combined image into two single-partition
+# images, one per LUN:
+#   teslacam.img — the dashcam LUN (TESLACAM exFAT; lun.0). NEVER interrupted.
+#   media.img    — the MEDIA LUN (MEDIA exFAT; lun.1).
+# disk.img is the LEGACY single combined image (MBR p1+p2); it is kept in the
+# protected set so a device mid-migration (still on disk.img) is still guarded
+# against an accidental write-through / rollback-over.
 TESLAUSB_DISK_IMG="${TESLAUSB_DATA_ROOT}/disk.img"
+TESLAUSB_TESLACAM_IMG="${TESLAUSB_DATA_ROOT}/teslacam.img"
+TESLAUSB_MEDIA_IMG="${TESLAUSB_DATA_ROOT}/media.img"
+# Every backing image the installer must NEVER write through or restore over.
+TESLAUSB_LUN_IMAGES="${TESLAUSB_DISK_IMG} ${TESLAUSB_TESLACAM_IMG} ${TESLAUSB_MEDIA_IMG}"
 TESLAUSB_ARCHIVE_DIR="${TESLAUSB_DATA_ROOT}/archive"
 TESLAUSB_MEDIA_DIR="${TESLAUSB_DATA_ROOT}/media"
 # webd zip-export scratch (WEBD_CACHE_DIR). On the data FS, not RAM-backed /tmp,
@@ -110,18 +122,31 @@ run_mutation() {
 # (or its leading components) exists; falls back to the literal path otherwise.
 _resolved() { readlink -f -- "$1" 2>/dev/null || printf '%s' "$1"; }
 
+# is_lun_image <path> — true if <path> is one of the sacred car-facing backing
+# images (by literal path OR with symlinks resolved). Used by the rollback
+# guards and assert_safe_dest.
+is_lun_image() {
+    local target="$1" rtarget img rimg
+    rtarget="$(_resolved "$target")"
+    for img in $TESLAUSB_LUN_IMAGES; do
+        rimg="$(_resolved "$img")"
+        if [ "$target" = "$img" ] || [ "$rtarget" = "$rimg" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 # assert_safe_dest <dst> — guard EVERY system-path mutation. Refuses when:
-#   * <dst> is (or, via a symlink, resolves to) the car-facing disk image — string
-#     equality alone is not enough, since a planted symlink could let install/cp/
-#     chmod write THROUGH it onto disk.img (contract §2 #1 invariant); or
+#   * <dst> is (or, via a symlink, resolves to) ANY car-facing backing image —
+#     string equality alone is not enough, since a planted symlink could let
+#     install/cp/chmod write THROUGH it onto a LUN (contract §2 #1 invariant); or
 #   * <dst> is itself an existing symlink — a symlink at a managed system path is
 #     anomalous (tamper/foot-gun); we refuse to write through it rather than mutate
 #     whatever it points at.
 assert_safe_dest() {
-    local dst="$1" rdst rimg
-    rimg="$(_resolved "$TESLAUSB_DISK_IMG")"
-    rdst="$(_resolved "$dst")"
-    if [ "$dst" = "$TESLAUSB_DISK_IMG" ] || [ "$rdst" = "$rimg" ]; then
+    local dst="$1"
+    if is_lun_image "$dst"; then
         die "$EX_STEP" "refusing to mutate the car-facing disk image (target ${dst})"
     fi
     if [ -L "$dst" ]; then

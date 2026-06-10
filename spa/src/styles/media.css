@@ -107,3 +107,191 @@
   font-weight: 600;
   word-break: break-word;
 }
+
+/* ── Upload New Chime — operator-gated install form ─────────────────────── */
+.media-page .chime-upload {
+  margin: 0;
+}
+.media-page .chime-upload-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.media-page .chime-file-input {
+  flex: 1 1 250px;
+  min-width: 0;
+  max-width: 420px;
+  padding: 9px 10px;
+  font-size: 0.9rem;
+  color: var(--text-primary);
+  background: var(--form-input-bg, var(--bg-primary));
+  border: 1px solid var(--border-input, var(--border-color));
+  border-radius: 6px;
+}
+.media-page .chime-file-input:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+/* Equal-weight action buttons sit on the legacy `.action-btn`; we only ensure
+ * the 44px touch target and a consistent icon gap on top of that base. */
+.media-page .chime-upload-btn,
+.media-page .chime-remove-btn {
+  min-height: 44px;
+  gap: 6px;
+}
+.media-page .chime-btn-icon {
+  width: 16px;
+  height: 16px;
+}
+.media-page .chime-upload-hint {
+  margin: 0 0 12px;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+.media-page .chime-upload-selected {
+  margin: 0 0 6px;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+}
+
+/* Status banners — success / retryable / fatal. Themed via tokens; the warning
+ * and danger tints fall back to fixed rgba so they read in every theme. */
+.media-page .chime-upload-status {
+  margin: 0 0 4px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  font-size: 0.84rem;
+  line-height: 1.4;
+  border: 1px solid transparent;
+}
+.media-page .chime-upload-status.success {
+  border-color: var(--accent-success, #2ea043);
+  background: rgba(46, 160, 67, 0.14);
+  color: var(--accent-success, #2ea043);
+}
+.media-page .chime-upload-status.retryable,
+.media-page .chime-modal-status.retryable {
+  border-color: rgba(255, 196, 0, 0.45);
+  background: rgba(150, 110, 20, 0.18);
+  color: var(--accent-warning, #d4a017);
+}
+.media-page .chime-upload-status.fatal,
+.media-page .chime-modal-status.fatal {
+  border-color: rgba(255, 59, 48, 0.45);
+  background: rgba(180, 40, 40, 0.16);
+  color: var(--accent-danger, #dc3545);
+}
+
+/* Active-chime Remove action row. */
+.media-page .active-chime-actions {
+  margin-top: 14px;
+}
+
+/* Busy spinner shared by the Upload button and Remove dialog. */
+.media-page .chime-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(127, 127, 127, 0.4);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: chime-spin 0.7s linear infinite;
+}
+@keyframes chime-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .media-page .chime-spinner {
+    animation: none;
+  }
+}
+
+/* ── Operator-gated Remove confirmation dialog ──────────────────────────── */
+.media-page .chime-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.62);
+  backdrop-filter: blur(3px);
+}
+.media-page .chime-modal {
+  width: min(440px, 100%);
+  padding: 22px 22px 18px;
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  background: var(--bg-secondary);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+  color: var(--text-primary);
+}
+.media-page .chime-modal-title {
+  margin: 0 0 8px;
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.media-page .chime-modal-desc {
+  margin: 0 0 16px;
+  font-size: 0.9rem;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+.media-page .chime-modal-name {
+  color: var(--text-primary);
+  word-break: break-word;
+}
+.media-page .chime-modal-status {
+  margin: 0 0 14px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  font-size: 0.84rem;
+  line-height: 1.4;
+  border: 1px solid transparent;
+}
+.media-page .chime-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+.media-page .chime-modal-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 9px 18px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.media-page .chime-modal-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+.media-page .chime-modal-btn.cancel {
+  border-color: var(--border-color);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+.media-page .chime-modal-btn.cancel:hover:not(:disabled) {
+  background: var(--bg-hover, var(--bg-primary));
+}
+.media-page .chime-modal-btn.confirm {
+  border-color: var(--accent-danger, #dc3545);
+  background: var(--accent-danger, #dc3545);
+  color: #fff;
+}
+.media-page .chime-modal-btn.confirm:hover:not(:disabled) {
+  opacity: 0.9;
+}

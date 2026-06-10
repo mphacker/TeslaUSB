@@ -1,5 +1,5 @@
 import { test, expect, loadState, ARTIFACTS, type Probe } from "./helpers";
-import type { Page } from "@playwright/test";
+import type { Page, Route } from "@playwright/test";
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
@@ -10,12 +10,18 @@ import { resolve } from "node:path";
 // (Chimes/Music/Boombox/Shows/Wraps/Plates). This screen reproduces that v1
 // look using the carried-over legacy stylesheet (`/static/css/style.css`).
 //
-// Backend reality: `GET /api/chimes` (read-only, routed through the catalog —
-// NOT the gadgetd eject-handoff) reports the installed lock chime. The screen
-// renders that live fact, degrading to honest empty states when nothing is
-// installed (the UAT seed has no media). The install/remove endpoints
-// (POST/DELETE /api/chimes) route through the operator-gated eject-handoff and
-// are deliberately NOT wired here, so the page exposes no mutation surface.
+// Backend reality:
+//  - `GET /api/chimes` (read-only, routed through the catalog — NOT the gadgetd
+//    eject-handoff) reports the installed lock chime. The screen renders that
+//    live fact, degrading to honest empty states when nothing is installed (the
+//    UAT seed has no media). This read hits REAL webd.
+//  - `POST /api/chimes` / `DELETE /api/chimes/LockChime` route through the
+//    gadgetd eject-handoff. gadgetd is NOT running in the UAT harness (only webd
+//    is spawned), so a real call would 503. The install/remove FLOWS are
+//    therefore driven against Playwright route mocks (the contract is fixed by
+//    docs/specs/contracts §2.3.1; mocking an absent dependency is sanctioned).
+//    The READ path and the no-mutation-on-load guarantee are still verified
+//    against real webd.
 
 /** The media pill sub-nav, in v1 render order. Only "chimes" is active/built. */
 const EXPECT_PILLS = ["chimes", "music", "boombox", "shows", "wraps", "plates"];
@@ -55,6 +61,78 @@ function assertCleanConsole(probe: Probe) {
     probe.consoleWarnings,
     `console warning(s): ${JSON.stringify(probe.consoleWarnings)}`,
   ).toEqual([]);
+}
+
+/**
+ * Chromium emits a console *error* of the form
+ *   "Failed to load resource: the server responded with a status of 409 …"
+ * for any fetch whose response status is >= 400 — this is the browser logging
+ * the network transaction, NOT a JS/page fault. A gate that DELIBERATELY drives
+ * a 4xx (e.g. the busy-retry flow) must tolerate exactly that one message while
+ * still proving no real JS error, warning, or pageerror leaked. `statuses` is
+ * the set of HTTP codes the gate intentionally provoked.
+ */
+function assertCleanConsoleExceptResourceStatus(probe: Probe, statuses: number[]) {
+  expect(probe.pageErrors, `pageerror(s): ${JSON.stringify(probe.pageErrors)}`).toEqual([]);
+  expect(
+    probe.consoleWarnings,
+    `console warning(s): ${JSON.stringify(probe.consoleWarnings)}`,
+  ).toEqual([]);
+  const allowed = (e: { text: string }) =>
+    /Failed to load resource/i.test(e.text) &&
+    statuses.some((s) => e.text.includes(`status of ${s}`));
+  const leaked = probe.consoleErrors.filter((e) => !allowed(e));
+  expect(leaked, `unexpected console error(s): ${JSON.stringify(leaked)}`).toEqual([]);
+}
+
+/** A canonical InstalledChime DTO for the mocked GET /api/chimes. */
+const INSTALLED = {
+  name: "LockChime.wav",
+  rel_path: "LockChime.wav",
+  size_bytes: 219770,
+  modified: "2026-06-01T20:10:04",
+};
+
+/** Build a minimal but structurally-valid PCM WAV (matches webd's validator). */
+function wavBuffer(
+  opts: {
+    channels?: number;
+    sampleRate?: number;
+    bits?: number;
+    audioFormat?: number;
+    dataLen?: number;
+  } = {},
+): Buffer {
+  const channels = opts.channels ?? 1;
+  const sampleRate = opts.sampleRate ?? 44100;
+  const bits = opts.bits ?? 16;
+  const audioFormat = opts.audioFormat ?? 1;
+  const dataLen = opts.dataLen ?? 256;
+  const blockAlign = channels * (bits / 8);
+  const byteRate = sampleRate * blockAlign;
+  const buf = Buffer.alloc(44 + dataLen);
+  buf.write("RIFF", 0, "ascii");
+  buf.writeUInt32LE(36 + dataLen, 4);
+  buf.write("WAVE", 8, "ascii");
+  buf.write("fmt ", 12, "ascii");
+  buf.writeUInt32LE(16, 16);
+  buf.writeUInt16LE(audioFormat, 20);
+  buf.writeUInt16LE(channels, 22);
+  buf.writeUInt32LE(sampleRate, 24);
+  buf.writeUInt32LE(byteRate, 28);
+  buf.writeUInt16LE(blockAlign, 32);
+  buf.writeUInt16LE(bits, 34);
+  buf.write("data", 36, "ascii");
+  buf.writeUInt32LE(dataLen, 40);
+  return buf;
+}
+
+function jsonRoute(route: Route, status: number, body: unknown) {
+  return route.fulfill({
+    status,
+    contentType: "application/json",
+    body: JSON.stringify(body),
+  });
 }
 
 test.describe("media (lock chimes) UAT", () => {
@@ -111,6 +189,14 @@ test.describe("media (lock chimes) UAT", () => {
     await expect(page.locator(".media-library-heading")).toHaveText(
       "Chime Library",
     );
+
+    // (c) The Upload New Chime manage surface is wired and present: a real file
+    //     input + a submit button that starts DISABLED (no file selected yet),
+    //     so install is always a deliberate pick-a-file → Upload action.
+    await expect(page.locator("[data-testid=chime-file-input]")).toBeVisible();
+    await expect(page.locator("[data-testid=chime-upload-submit]")).toBeVisible();
+    await expect(page.locator("[data-testid=chime-upload-submit]")).toBeDisabled();
+
     // The seed has no media on p2, so webd reports `{installed: null}` and the
     // data sections settle into their honest EMPTY states (never fabricated).
     await expect(page.locator("[data-testid=active-chime-none]")).toBeVisible();
@@ -158,8 +244,9 @@ test.describe("media (lock chimes) UAT", () => {
     expect(html).toContain("/static/css/style.css");
   });
 
-  // ── Gate 3 (read-only): only the GET /api/chimes read, no mutations ─────
-  test("read-only — only GET /api/chimes, no mutations, no mutation surface", async ({
+  // ── Gate 3: on load, only the GET read fires; the manage surface is present
+  //    but inert until the operator acts (no mutation without a deliberate click).
+  test("read-only on load — only GET /api/chimes, no mutation until acted on", async ({
     page,
     probe,
   }) => {
@@ -173,17 +260,17 @@ test.describe("media (lock chimes) UAT", () => {
     await expect(page.locator("[data-testid=active-chime-none]")).toBeVisible();
     await page.waitForTimeout(200);
 
-    // No mutating HTTP method, ever.
+    // No mutating HTTP method fires on load — install/remove require a click.
     const mutating = probe.requests.filter((r) =>
       ["POST", "PUT", "PATCH", "DELETE"].includes(r.method.toUpperCase()),
     );
-    expect(mutating, `mutating request(s): ${JSON.stringify(mutating)}`).toEqual([]);
+    expect(mutating, `mutating request(s) on load: ${JSON.stringify(mutating)}`).toEqual([]);
 
     // No WebSocket of any kind.
     expect(sockets, `websocket(s) opened: ${JSON.stringify(sockets)}`).toEqual([]);
 
-    // The ONLY /api/ request the Lock Chimes screen makes is the read-only
-    // `GET /api/chimes`; every request is same-origin and nothing else hits /api/.
+    // The ONLY /api/ request on load is the read-only `GET /api/chimes`; every
+    // request is same-origin and nothing else hits /api/.
     for (const req of probe.requests) {
       const u = new URL(req.url);
       expect(u.origin, `off-origin request to ${req.url}`).toBe(origin);
@@ -194,18 +281,17 @@ test.describe("media (lock chimes) UAT", () => {
         ).toBe("GET /api/chimes");
       }
     }
-    // The read endpoint was actually exercised.
     const chimeReads = probe.requests.filter(
       (r) => new URL(r.url).pathname === "/api/chimes",
     );
-    expect(chimeReads.length, "expected exactly one GET /api/chimes").toBe(1);
+    expect(chimeReads.length, "expected exactly one GET /api/chimes on load").toBe(1);
 
-    // No mutation surface in the DOM (no POST form / submit on this page).
+    // The manage surface is a deliberate two-step action, never a native POST:
+    // the form does not submit to the server (SPA preventDefault) and there is
+    // no `method=post` form, but the file input + submit control DO exist.
     await expect(page.locator("form[method='post' i]")).toHaveCount(0);
-    await expect(page.locator("button[type=submit], input[type=submit]")).toHaveCount(0);
-    // The eject-handoff mutation is operator-gated and deliberately not wired:
-    // no file input is exposed.
-    await expect(page.locator("input[type=file]")).toHaveCount(0);
+    await expect(page.locator("input[type=file]")).toHaveCount(1);
+    await expect(page.locator("[data-testid=chime-upload-submit]")).toBeDisabled();
   });
 
   // ── Gate 4 (console + network): zero warnings/errors, no failed/non-2xx ──
@@ -246,23 +332,12 @@ test.describe("media (lock chimes) UAT", () => {
     // Mock the read so the test is independent of the seed (which has no media).
     await page.route("**/api/chimes", (route) => {
       if (route.request().method() !== "GET") return route.continue();
-      return route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          installed: {
-            name: "LockChime.wav",
-            rel_path: "LockChime.wav",
-            size_bytes: 219770,
-            modified: "2026-06-01T20:10:04",
-          },
-        }),
-      });
+      return jsonRoute(route, 200, { installed: INSTALLED });
     });
 
     await gotoMedia(page);
 
-    // Active Lock Chime card shows the live name + size + install time.
+    // Active Lock Chime card shows the live name + size + install time + Remove.
     const active = page.locator("[data-testid=active-chime]");
     await expect(active).toBeVisible();
     await expect(page.locator("[data-testid=active-chime-name]")).toHaveText(
@@ -270,6 +345,7 @@ test.describe("media (lock chimes) UAT", () => {
     );
     await expect(active).toContainText("215 KB");
     await expect(active).toContainText("2026-06-01 20:10");
+    await expect(page.locator("[data-testid=active-chime-remove]")).toBeVisible();
 
     // No empty state when a chime is installed.
     await expect(page.locator("[data-testid=active-chime-none]")).toHaveCount(0);
@@ -282,7 +358,213 @@ test.describe("media (lock chimes) UAT", () => {
     await expect(page.locator("[data-testid=library-empty]")).toHaveCount(0);
   });
 
-  // ── Gate 6: performance — capture + report (dev-box profile) ────────────
+  // ── Gate 6: install (upload) success — POST handoff + GET re-fetch ──────
+  test("install — valid WAV uploads via POST /api/chimes and the card refreshes", async ({
+    page,
+    probe,
+  }) => {
+    let installedNow: typeof INSTALLED | null = null;
+    const posts: string[] = [];
+
+    await page.route("**/api/chimes", (route) => {
+      const m = route.request().method();
+      if (m === "GET") return jsonRoute(route, 200, { installed: installedNow });
+      if (m === "POST") {
+        posts.push(route.request().method());
+        installedNow = INSTALLED; // the handoff "installed" it
+        return jsonRoute(route, 200, { handoff_id: "h-install-1", state: "done" });
+      }
+      return route.continue();
+    });
+
+    await gotoMedia(page);
+    await expect(page.locator("[data-testid=active-chime-none]")).toBeVisible();
+
+    // Pick a structurally-valid WAV; client validation passes → button enables.
+    await page.locator("[data-testid=chime-file-input]").setInputFiles({
+      name: "Chime.wav",
+      mimeType: "audio/wav",
+      buffer: wavBuffer({ channels: 2, sampleRate: 48000, dataLen: 512 }),
+    });
+    await expect(page.locator("[data-testid=chime-upload-selected]")).toContainText(
+      "Chime.wav",
+    );
+    await expect(page.locator("[data-testid=chime-upload-submit]")).toBeEnabled();
+
+    // Upload → POST fires, success notice shows, card re-fetches the new chime.
+    await page.locator("[data-testid=chime-upload-submit]").click();
+    await expect(page.locator("[data-testid=chime-notice]")).toContainText(
+      "Installed Chime.wav",
+    );
+    await expect(page.locator("[data-testid=active-chime-name]")).toHaveText(
+      "LockChime.wav",
+    );
+    await expect(page.locator("[data-testid=chime-row]")).toHaveCount(1);
+
+    // Exactly one POST, and at least two GETs (initial + post-success re-fetch).
+    expect(posts.length, "expected exactly one POST /api/chimes").toBe(1);
+    const gets = probe.requests.filter(
+      (r) => new URL(r.url).pathname === "/api/chimes" && r.method === "GET",
+    );
+    expect(gets.length, "expected an initial GET + a re-fetch").toBeGreaterThanOrEqual(2);
+
+    // The input is cleared for the next action, and the JS stayed clean.
+    await expect(page.locator("[data-testid=chime-upload-submit]")).toBeDisabled();
+    assertCleanConsole(probe);
+  });
+
+  // ── Gate 7: transient 409 handoff_busy → friendly retry → success ───────
+  test("install busy — 409 handoff_busy is retryable, retry then succeeds", async ({
+    page,
+    probe,
+  }) => {
+    let attempt = 0;
+    let installedNow: typeof INSTALLED | null = null;
+
+    await page.route("**/api/chimes", (route) => {
+      const m = route.request().method();
+      if (m === "GET") return jsonRoute(route, 200, { installed: installedNow });
+      if (m === "POST") {
+        attempt += 1;
+        if (attempt === 1) {
+          return jsonRoute(route, 409, {
+            error: { code: "handoff_busy", message: "A USB handoff is already in progress." },
+          });
+        }
+        installedNow = INSTALLED;
+        return jsonRoute(route, 200, { handoff_id: "h-install-2", state: "done" });
+      }
+      return route.continue();
+    });
+
+    await gotoMedia(page);
+    await page.locator("[data-testid=chime-file-input]").setInputFiles({
+      name: "Chime.wav",
+      mimeType: "audio/wav",
+      buffer: wavBuffer({ dataLen: 256 }),
+    });
+    await expect(page.locator("[data-testid=chime-upload-submit]")).toBeEnabled();
+
+    // First attempt → 409 → retryable error banner (not fatal), button live again.
+    await page.locator("[data-testid=chime-upload-submit]").click();
+    const err = page.locator("[data-testid=chime-upload-error]");
+    await expect(err).toBeVisible();
+    await expect(err).toHaveClass(/\bretryable\b/);
+    await expect(err).toContainText("retry");
+    await expect(page.locator("[data-testid=chime-upload-submit]")).toBeEnabled();
+
+    // Retry → success.
+    await page.locator("[data-testid=chime-upload-submit]").click();
+    await expect(page.locator("[data-testid=chime-notice]")).toContainText(
+      "Installed Chime.wav",
+    );
+    await expect(page.locator("[data-testid=chime-upload-error]")).toHaveCount(0);
+    expect(attempt, "expected two POST attempts (busy, then success)").toBe(2);
+
+    // The retry flow deliberately provoked one 409 response; Chromium logs that
+    // as a resource-load console error. No OTHER console error / warning /
+    // pageerror is tolerated.
+    assertCleanConsoleExceptResourceStatus(probe, [409]);
+  });
+
+  // ── Gate 8: client-side WAV validation refuses bad files before any POST ─
+  test("install validation — oversize + non-PCM WAV are refused client-side", async ({
+    page,
+    probe,
+  }) => {
+    const posts: string[] = [];
+    await page.route("**/api/chimes", (route) => {
+      const m = route.request().method();
+      if (m === "GET") return jsonRoute(route, 200, { installed: null });
+      if (m === "POST") {
+        posts.push("POST");
+        return jsonRoute(route, 200, { handoff_id: "x", state: "done" });
+      }
+      return route.continue();
+    });
+
+    await gotoMedia(page);
+
+    // (a) Oversize (> 1 MiB) → refused with a size message, submit stays disabled.
+    await page.locator("[data-testid=chime-file-input]").setInputFiles({
+      name: "Big.wav",
+      mimeType: "audio/wav",
+      buffer: wavBuffer({ dataLen: 1024 * 1024 }), // total > 1 MiB
+    });
+    const validation = page.locator("[data-testid=chime-upload-validation]");
+    await expect(validation).toBeVisible();
+    await expect(validation).toContainText("under 1 MB");
+    await expect(page.locator("[data-testid=chime-upload-submit]")).toBeDisabled();
+
+    // (b) Wrong sample rate (32 kHz) → refused with a format message.
+    await page.locator("[data-testid=chime-file-input]").setInputFiles({
+      name: "Odd.wav",
+      mimeType: "audio/wav",
+      buffer: wavBuffer({ sampleRate: 32000, dataLen: 256 }),
+    });
+    await expect(validation).toContainText("44.1 or 48");
+    await expect(page.locator("[data-testid=chime-upload-submit]")).toBeDisabled();
+
+    // (c) A valid WAV clears the error and enables Upload.
+    await page.locator("[data-testid=chime-file-input]").setInputFiles({
+      name: "Good.wav",
+      mimeType: "audio/wav",
+      buffer: wavBuffer({ dataLen: 256 }),
+    });
+    await expect(page.locator("[data-testid=chime-upload-validation]")).toHaveCount(0);
+    await expect(page.locator("[data-testid=chime-upload-submit]")).toBeEnabled();
+
+    // No POST was ever attempted for the rejected files (only client validation).
+    expect(posts, `unexpected POST(s): ${JSON.stringify(posts)}`).toEqual([]);
+    assertCleanConsole(probe);
+  });
+
+  // ── Gate 9: remove — operator-gated confirm → DELETE → empty state ──────
+  test("remove — named confirm dialog deletes via DELETE /api/chimes/LockChime", async ({
+    page,
+    probe,
+  }) => {
+    let installedNow: typeof INSTALLED | null = INSTALLED;
+    const deletes: string[] = [];
+
+    await page.route("**/api/chimes", (route) => {
+      if (route.request().method() !== "GET") return route.continue();
+      return jsonRoute(route, 200, { installed: installedNow });
+    });
+    await page.route("**/api/chimes/*", (route) => {
+      if (route.request().method() !== "DELETE") return route.continue();
+      deletes.push(new URL(route.request().url()).pathname);
+      installedNow = null; // removed
+      return jsonRoute(route, 200, { handoff_id: "h-remove-1", state: "done" });
+    });
+
+    await gotoMedia(page);
+    await expect(page.locator("[data-testid=active-chime]")).toBeVisible();
+
+    // Remove is a deliberate, named confirmation (no one-click delete).
+    await page.locator("[data-testid=active-chime-remove]").click();
+    const dialog = page.locator("[data-testid=chime-remove-dialog]");
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toHaveAttribute("role", "alertdialog");
+    await expect(dialog).toContainText("LockChime.wav");
+
+    await page.locator("[data-testid=chime-remove-confirm]").click();
+
+    // Dialog closes, success notice shows, and the card falls back to empty.
+    await expect(dialog).toHaveCount(0);
+    await expect(page.locator("[data-testid=chime-notice]")).toContainText(
+      "Removed the lock chime",
+    );
+    await expect(page.locator("[data-testid=active-chime-none]")).toBeVisible();
+    await expect(page.locator("[data-testid=library-empty]")).toBeVisible();
+
+    expect(deletes, "expected one DELETE /api/chimes/LockChime").toEqual([
+      "/api/chimes/LockChime",
+    ]);
+    assertCleanConsole(probe);
+  });
+
+  // ── Gate 10: performance — capture + report (dev-box profile) ───────────
   test("perf — capture TTFB/DCL/FCP + slowest requests", async ({ page }, testInfo) => {
     const navStart = Date.now();
     await gotoMedia(page);
@@ -337,7 +619,7 @@ test.describe("media (lock chimes) UAT", () => {
     expect(report.screenReadyMs).toBeLessThan(8000);
   });
 
-  // ── Gate 7: responsive — render + screenshot at this project's viewport ─
+  // ── Gate 11: responsive — render + screenshot at this project's viewport ─
   test("responsive — renders at viewport and screenshot captured", async ({
     page,
   }, testInfo) => {
@@ -346,6 +628,7 @@ test.describe("media (lock chimes) UAT", () => {
     // Content present regardless of breakpoint.
     await expect(page.locator(".media-pills")).toBeVisible();
     await expect(page.locator("#activeChimeSection")).toBeVisible();
+    await expect(page.locator("[data-testid=chime-file-input]")).toBeVisible();
 
     // Breakpoint-specific chrome: desktop shows the rail, mobile the bottom tabs.
     const isMobile = testInfo.project.name.includes("375");

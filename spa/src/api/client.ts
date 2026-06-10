@@ -1,14 +1,14 @@
 /**
  * Typed client for the webd catalog API (contract D2).
  *
- * webd is **read-only** with one exception: the car-visible clip delete
- * (`DELETE /api/clips/:id?target=car`, contract §2.3), which routes through the
- * `gadgetd` eject-handoff and is the only mutation this client exposes. Every
- * other method is a GET. Errors surface as {@link ApiError} carrying the
- * server's `{code, message}` envelope when present (and the HTTP `status`, which
- * callers use to tell a transient `409` from a terminal `422`). All paths are
- * same-origin (`/api/...`) because the bundle is served by webd itself; in dev,
- * Vite proxies `/api` to webd.
+ * webd is **read-only** except for the operator-gated `gadgetd` eject-handoff
+ * mutations: the car-visible clip delete (`DELETE /api/clips/:id?target=car`,
+ * §2.3) and lock-chime management (`POST /api/chimes`, `DELETE /api/chimes/:id`,
+ * §2.3.1). Every other method is a GET. Errors surface as {@link ApiError}
+ * carrying the server's `{code, message}` envelope when present (and the HTTP
+ * `status`, which callers use to tell a transient `409` from a terminal `422`).
+ * All paths are same-origin (`/api/...`) because the bundle is served by webd
+ * itself; in dev, Vite proxies `/api` to webd.
  */
 import type {
   Analytics,
@@ -53,14 +53,18 @@ async function request<T>(
   method: string,
   path: string,
   signal?: AbortSignal,
+  reqBody?: BodyInit,
 ): Promise<T> {
   let resp: Response;
   try {
     resp = await fetch(path, {
       method,
+      // NOTE: never set Content-Type for a FormData body — the browser must
+      // supply the multipart boundary itself, so we only declare Accept.
       headers: { Accept: "application/json" },
       credentials: "same-origin",
       signal,
+      ...(reqBody !== undefined ? { body: reqBody } : {}),
     });
   } catch (err) {
     throw new ApiError(0, "network", (err as Error).message || "network error");
@@ -96,6 +100,23 @@ export interface DeleteClipResult {
   /** Always `"done"` for a 200; any other value is an unexpected protocol state. */
   state: string;
 }
+
+/**
+ * Terminal result of a successful lock-chime install/remove handoff
+ * (`200 {handoff_id, state:"done"}`). Both routes block on the gadgetd
+ * eject-handoff and return the terminal state synchronously, exactly like the
+ * clip-delete mutation.
+ */
+export interface ChimeHandoffResult {
+  handoff_id: string;
+  state: string;
+}
+
+/** The single lock-chime slot id on the p2 MEDIA partition (B-1 is single-slot). */
+export const LOCK_CHIME_ID = "LockChime";
+
+/** Logical lock-chime size cap mirrored from webd's `CHIME_MAX_BYTES` (1 MiB). */
+export const CHIME_MAX_BYTES = 1024 * 1024;
 
 export interface EventsParams {
   after?: number;
@@ -189,6 +210,66 @@ export const api = {
         502,
         "gadgetd_protocol",
         `unexpected delete state: ${res?.state ?? "<none>"}`,
+      );
+    }
+    return res;
+  },
+
+  /**
+   * Install (or replace) the lock chime on the p2 MEDIA partition by POSTing a
+   * finished WAV as multipart `file` (contract §2.3.1). webd validates the WAV
+   * (RIFF/WAVE, PCM 16-bit, mono/stereo, 44.1/48 kHz, ≤1 MiB) and routes the
+   * staged file through the `gadgetd` eject-handoff that momentarily ejects the
+   * USB drive from the live vehicle, returning the **terminal** state
+   * synchronously: `200 {handoff_id, state:"done"}`. Any other 2xx shape is an
+   * unexpected protocol state. Transient refusals surface as `ApiError` with
+   * `status 409` (`handoff_busy`, retryable) or `503` (`gadgetd_unavailable`);
+   * validation refusals as `422` (`invalid_wav`/`chime_too_large`) and `400`
+   * (`upload_required`/`duplicate_field`/`invalid_multipart`); failures as `502`
+   * (`handoff_failed`) / `500` (`critical_fault`/`staging_failed`). Throws on abort.
+   */
+  installChime: async (
+    file: File | Blob,
+    signal?: AbortSignal,
+  ): Promise<ChimeHandoffResult> => {
+    const form = new FormData();
+    // The field name MUST be `file`; preserve a filename so webd's multipart
+    // reader sees a file part (not a plain text field).
+    form.append("file", file, "name" in file ? file.name : "LockChime.wav");
+    const res = await request<ChimeHandoffResult>(
+      "POST",
+      "/api/chimes",
+      signal,
+      form,
+    );
+    if (!res || res.state !== "done") {
+      throw new ApiError(
+        502,
+        "gadgetd_protocol",
+        `unexpected install state: ${res?.state ?? "<none>"}`,
+      );
+    }
+    return res;
+  },
+
+  /**
+   * Remove the installed lock chime via the same `gadgetd` eject-handoff
+   * (`DELETE /api/chimes/LockChime`, contract §2.3.1). The id is baked in
+   * because B-1 is single-slot — any other id is a `404`. Idempotent: removing
+   * when nothing is installed still returns `200 {handoff_id, state:"done"}`.
+   * Same terminal/transient status mapping as {@link installChime}. Throws on abort.
+   */
+  removeChime: async (signal?: AbortSignal): Promise<ChimeHandoffResult> => {
+    const res = await request<ChimeHandoffResult>(
+      "DELETE",
+      `/api/chimes/${LOCK_CHIME_ID}`,
+      signal,
+    );
+    if (!res || res.state !== "done") {
+      throw new ApiError(
+        502,
+        "gadgetd_protocol",
+        `unexpected remove state: ${res?.state ?? "<none>"}`,
       );
     }
     return res;

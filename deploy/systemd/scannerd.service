@@ -32,9 +32,10 @@
 [Unit]
 Description=TeslaUSB scannerd (raw exFAT/MP4/SEI reader + clip-stability gate; IPC producer)
 Documentation=https://github.com/mphacker/TeslaUSB
-# Needs /data (backing image) mounted and the disk.img to exist. gadgetd
-# provisions/owns the image, so order after it but do not hard-require the USB
-# gadget to be bound (scannerd reads the file, not the gadget).
+# Needs /data (backing images) mounted and the images to exist. gadgetd
+# provisions/owns the two single-partition images (teslacam.img + media.img),
+# so order after it but do not hard-require the USB gadget to be bound (scannerd
+# reads the files, not the gadget).
 RequiresMountsFor=/data/teslausb
 After=local-fs.target gadgetd.service
 Wants=gadgetd.service
@@ -46,9 +47,12 @@ Type=simple
 # 0o660 (filesystem-permission authz; ADR 0001).
 RuntimeDirectory=teslausb
 RuntimeDirectoryMode=0750
-# Serve the IPC socket; persistent tracker + per-pass produce. The backing
-# image is opened read-only.
-ExecStart=/usr/local/bin/scannerd serve /data/teslausb/disk.img --socket /run/teslausb/scannerd.sock
+# Serve the IPC socket; persistent tracker + per-pass produce. Both backing
+# images are opened READ-ONLY. The two-LUN layout splits the legacy combined
+# disk.img into teslacam.img (dashcam, logical slot 0) and media.img (MEDIA,
+# logical slot 1); scannerd walks both and emits one combined fact batch, so
+# indexd's catalog is unchanged from the single-image layout.
+ExecStart=/usr/local/bin/scannerd serve /data/teslausb/teslacam.img --media /data/teslausb/media.img --socket /run/teslausb/scannerd.sock
 Restart=always
 RestartSec=5s
 # Idle I/O priority so the car's writes to the backing image always win (the

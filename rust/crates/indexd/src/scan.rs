@@ -24,7 +24,7 @@
 //! is what host tests drive.
 
 use rusqlite::Connection;
-use scannerd::produce::produce;
+use scannerd::produce::{ImageSource, produce};
 use scannerd::reader::BlockReader;
 use scannerd::record::BatchError;
 use scannerd::stability::StabilityTracker;
@@ -134,7 +134,11 @@ pub fn run_scan_pass<R: BlockReader + ?Sized>(
     now_secs: u64,
     config: ScanConfig,
 ) -> Result<ScanReport, ScanError> {
-    let batch = produce(reader, tracker, now_secs, config.sample_rate)?;
+    // In-process composition over a single combined image: keep each
+    // partition's native MBR slot (p1 dashcam, p2 media). The split
+    // two-image serving path lives in `scannerd serve`.
+    let sources = [ImageSource::native(reader)];
+    let batch = produce(&sources, tracker, now_secs, config.sample_rate)?;
     let applied = apply(conn, &batch, config.derive)?;
     let stats = batch.stats;
     Ok(ScanReport {

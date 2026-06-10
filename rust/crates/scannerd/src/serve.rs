@@ -46,7 +46,7 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use scannerd::produce::{DEFAULT_SEI_SAMPLE_RATE, produce};
+use scannerd::produce::{DEFAULT_SEI_SAMPLE_RATE, ImageSource, produce};
 use scannerd::proto::{Request, read_request, write_batch};
 use scannerd::stability::{StabilityConfig, StabilityTracker};
 
@@ -64,27 +64,64 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 /// which would otherwise block the single sequential accept loop forever.
 const READ_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Parse `scannerd serve <image> [--socket <path>] [--sample-rate <n>]`
-/// and run the daemon.
+/// Parse `scannerd serve <teslacam-image> [--media <media-image>]
+/// [--socket <path>] [--sample-rate <n>]` and run the daemon.
+///
+/// The first positional argument is the **`TeslaCam`** (dashcam) image; its
+/// single exFAT partition is stamped logical slot [`DASHCAM_SLOT`]. The
+/// optional `--media <path>` adds the **MEDIA** image, stamped logical slot
+/// [`MEDIA_SLOT`], so the operator-installed lock chime (and later
+/// boombox/music/lightshows) surface in the catalog. With no `--media`,
+/// the single image is walked with its native MBR slots — back-compat with
+/// a pre-migration combined `disk.img` (MBR p1 dashcam + p2 MEDIA).
 pub fn run_serve(args: &[String]) -> ExitCode {
-    let Some(image) = args.get(2) else {
-        eprintln!("usage: scannerd serve <image-path> [--socket <path>] [--sample-rate <n>]");
+    let Some(teslacam) = args.get(2) else {
+        eprintln!(
+            "usage: scannerd serve <teslacam-image> [--media <media-image>] \
+             [--socket <path>] [--sample-rate <n>]"
+        );
         return ExitCode::FAILURE;
     };
+    let media_path = arg_value(args, "--media");
     let socket = arg_value(args, "--socket").unwrap_or_else(|| DEFAULT_SOCKET.to_owned());
     let sample_rate = arg_value(args, "--sample-rate")
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(DEFAULT_SEI_SAMPLE_RATE);
 
-    let reader = match PreadReader::open(Path::new(image)) {
+    let teslacam_reader = match PreadReader::open(Path::new(teslacam)) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("scannerd serve: cannot open {image}: {e}");
+            eprintln!("scannerd serve: cannot open {teslacam}: {e}");
             return ExitCode::FAILURE;
         }
     };
 
-    match serve(&reader, Path::new(&socket), sample_rate) {
+    // Open the media reader (if any) before building sources so both fds
+    // outlive the borrow held by the `ImageSource` slice.
+    let media_reader = match media_path.as_deref() {
+        Some(path) => match PreadReader::open(Path::new(path)) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                eprintln!("scannerd serve: cannot open {path}: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => None,
+    };
+
+    let sources: Vec<ImageSource<'_, PreadReader>> = match &media_reader {
+        // Two single-partition images: stamp logical slots so the dashcam
+        // image classifies as p1 and the media image as p2 downstream.
+        Some(media) => vec![
+            ImageSource::with_slot(&teslacam_reader, DASHCAM_SLOT),
+            ImageSource::with_slot(media, MEDIA_SLOT),
+        ],
+        // Legacy single combined image: keep each partition's native MBR
+        // slot (p1=0 dashcam, p2=1 media).
+        None => vec![ImageSource::native(&teslacam_reader)],
+    };
+
+    match serve(&sources, Path::new(&socket), sample_rate) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("scannerd serve: fatal: {e}");
@@ -92,6 +129,12 @@ pub fn run_serve(args: &[String]) -> ExitCode {
         }
     }
 }
+
+/// Logical slot of the `TeslaCam` (dashcam) image's single partition.
+const DASHCAM_SLOT: u8 = 0;
+/// Logical slot of the MEDIA image's single partition (matches the legacy
+/// combined-image p2 slot so downstream media classification is unchanged).
+const MEDIA_SLOT: u8 = 1;
 
 /// Find the value following a `--flag` in the argument list.
 fn arg_value(args: &[String], flag: &str) -> Option<String> {
@@ -112,7 +155,11 @@ fn now_secs() -> u64 {
 /// Bind the socket and serve until the listener errors. The tracker is
 /// created once here so it persists across every connection for the
 /// daemon's lifetime.
-fn serve(reader: &PreadReader, socket_path: &Path, sample_rate: u32) -> io::Result<()> {
+fn serve(
+    sources: &[ImageSource<'_, PreadReader>],
+    socket_path: &Path,
+    sample_rate: u32,
+) -> io::Result<()> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
         // Restrict the runtime dir so only the owner/group can traverse to
@@ -131,14 +178,15 @@ fn serve(reader: &PreadReader, socket_path: &Path, sample_rate: u32) -> io::Resu
     let mut tracker = StabilityTracker::new(StabilityConfig::default());
 
     println!(
-        "scannerd serve: listening on {} (sample_rate {sample_rate})",
-        socket_path.display()
+        "scannerd serve: listening on {} ({} image(s), sample_rate {sample_rate})",
+        socket_path.display(),
+        sources.len(),
     );
 
     for conn in listener.incoming() {
         match conn {
             Ok(stream) => {
-                if let Err(e) = handle_conn(stream, reader, &mut tracker, sample_rate) {
+                if let Err(e) = handle_conn(stream, sources, &mut tracker, sample_rate) {
                     eprintln!("scannerd serve: connection ended: {e}");
                 }
             }
@@ -153,7 +201,7 @@ fn serve(reader: &PreadReader, socket_path: &Path, sample_rate: u32) -> io::Resu
 /// socket (see the module docs); there is no in-band auth handshake.
 fn handle_conn(
     mut stream: UnixStream,
-    reader: &PreadReader,
+    sources: &[ImageSource<'_, PreadReader>],
     tracker: &mut StabilityTracker,
     sample_rate: u32,
 ) -> io::Result<()> {
@@ -172,7 +220,7 @@ fn handle_conn(
                 if resync {
                     tracker.arm_resync();
                 }
-                let mut batch = produce(reader, tracker, now_secs(), sample_rate)
+                let mut batch = produce(sources, tracker, now_secs(), sample_rate)
                     .map_err(|e| io::Error::other(format!("produce failed: {e}")))?;
                 batch.generation = generation;
                 write_batch(&mut stream, &batch)?;

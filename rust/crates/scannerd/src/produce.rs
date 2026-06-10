@@ -325,8 +325,62 @@ fn shape_other(
     }))
 }
 
-/// Run one **produce** pass: parse + walk + stability-gate the raw image
-/// and build a [`ScanBatch`] of facts for the consumer.
+/// One read-only backing image fed to [`produce`], with an optional
+/// logical-slot override.
+///
+/// In the two-image layout each image is **single-partition** (one exFAT
+/// volume at MBR slot 0): `teslacam.img` holds the dashcam partition and
+/// `media.img` holds the MEDIA partition. The downstream classification
+/// keys on the partition slot ([`MEDIA_PARTITION_SLOT`] = 1 marks media vs
+/// dashcam), so the caller stamps a **logical** slot per image — the
+/// `TeslaCam` image overrides to `0`, the media image to `1` — making the
+/// two single-partition images behave exactly like the legacy combined
+/// `disk.img` (MBR p1 dashcam + p2 MEDIA) for every consumer downstream.
+///
+/// When `slot_override` is `None` the partition's own MBR slot is used,
+/// preserving the legacy single combined-image path (diagnostic modes and
+/// any pre-migration `disk.img`).
+///
+/// Each image must contribute a **unique** logical slot (the volume lookup
+/// in [`produce`] resolves front-clip reads by slot); a single image is
+/// expected to carry exactly one exFAT partition when `slot_override` is
+/// set.
+pub struct ImageSource<'a, R: BlockReader + ?Sized> {
+    /// The read-only reader for this image.
+    pub reader: &'a R,
+    /// Logical partition slot stamped on every record from this image, or
+    /// `None` to use the partition's own MBR slot.
+    pub slot_override: Option<u8>,
+}
+
+impl<'a, R: BlockReader + ?Sized> ImageSource<'a, R> {
+    /// A source that keeps each partition's native MBR slot (legacy
+    /// single combined `disk.img`).
+    #[must_use]
+    pub fn native(reader: &'a R) -> Self {
+        Self {
+            reader,
+            slot_override: None,
+        }
+    }
+
+    /// A source whose single partition is stamped with `slot` (one image
+    /// per LUN in the two-image layout).
+    #[must_use]
+    pub fn with_slot(reader: &'a R, slot: u8) -> Self {
+        Self {
+            reader,
+            slot_override: Some(slot),
+        }
+    }
+}
+
+/// Run one **produce** pass: parse + walk + stability-gate every backing
+/// image and build a single [`ScanBatch`] of facts for the consumer.
+///
+/// Each [`ImageSource`] is walked in order and its records merged into one
+/// batch, so the two single-partition images (`teslacam.img` + `media.img`)
+/// produce the same combined catalog the legacy single `disk.img` did.
 ///
 /// `tracker` persists across passes (the stability gate needs repeated
 /// observations on the same tracker). `now_secs` is the wall-clock time
@@ -336,29 +390,33 @@ fn shape_other(
 /// # Errors
 ///
 /// Returns [`ScannerError`] if a structural raw-media step fails
-/// (`parse_mbr`, a boot sector, or a volume walk) — exactly the cases that
-/// aborted the legacy in-process pass. Individual unreadable clips are
-/// skipped (counted in [`ProducerStats::read_errors`]), never fatal.
+/// (`parse_mbr`, a boot sector, or a volume walk) on **any** source —
+/// exactly the cases that aborted the legacy in-process pass. Individual
+/// unreadable clips are skipped (counted in
+/// [`ProducerStats::read_errors`]), never fatal.
 pub fn produce<R: BlockReader + ?Sized>(
-    reader: &R,
+    sources: &[ImageSource<'_, R>],
     tracker: &mut StabilityTracker,
     now_secs: u64,
     sample_rate: u32,
 ) -> Result<ScanBatch, ScannerError> {
     let mut stats = ProducerStats::default();
 
-    let mbr = parse_mbr(reader)?;
     let mut volumes: Vec<(u8, Volume<'_, R>)> = Vec::new();
     let mut all_records: Vec<FileRecord> = Vec::new();
-    for entry in &mbr {
-        if !entry.is_exfat() {
-            continue;
+    for source in sources {
+        let mbr = parse_mbr(source.reader)?;
+        for entry in &mbr {
+            if !entry.is_exfat() {
+                continue;
+            }
+            let params = parse_boot_sector(source.reader, entry.start_lba)?;
+            let volume = Volume::new(source.reader, params);
+            let slot = source.slot_override.unwrap_or(entry.slot);
+            let records = walk_volume(&volume, slot)?;
+            all_records.extend(records);
+            volumes.push((slot, volume));
         }
-        let params = parse_boot_sector(reader, entry.start_lba)?;
-        let volume = Volume::new(reader, params);
-        let records = walk_volume(&volume, entry.slot)?;
-        all_records.extend(records);
-        volumes.push((entry.slot, volume));
     }
     stats.partitions = volumes.len();
     stats.files_seen = all_records.len();
@@ -590,5 +648,116 @@ mod tests {
             media_record("Other.wav", true, MEDIA_PARTITION_SLOT),
         ];
         assert!(collect_media(&recs).is_empty());
+    }
+
+    // ---- two-image / two-LUN produce path -------------------------------
+
+    use super::{ImageSource, produce};
+    use crate::reader::SliceReader;
+    use crate::stability::{StabilityConfig, StabilityTracker};
+
+    /// Build a minimal but structurally valid single-partition exFAT image
+    /// whose root directory is empty (the walk yields zero files). This is
+    /// the in-memory analogue of one of the two-LUN backing images
+    /// (`teslacam.img` / `media.img`): MBR with one `0x07` partition + a
+    /// valid boot sector + a one-cluster, end-of-directory root.
+    fn empty_single_partition_image() -> Vec<u8> {
+        // 512-byte sectors, 512-byte clusters, one FAT.
+        const START_LBA: u32 = 1;
+        let mut img = vec![0_u8; 4096];
+
+        // --- MBR (sector 0): one exFAT partition at START_LBA. ---
+        let e1 = 446;
+        img[e1 + 4] = 0x07;
+        img[e1 + 8..e1 + 12].copy_from_slice(&START_LBA.to_le_bytes());
+        img[e1 + 12..e1 + 16].copy_from_slice(&15_u32.to_le_bytes());
+        img[510] = 0x55;
+        img[511] = 0xAA;
+
+        // --- Boot sector at START_LBA * 512 = 512. ---
+        let bs = (START_LBA as usize) * 512;
+        img[bs..bs + 3].copy_from_slice(&[0xEB, 0x76, 0x90]);
+        img[bs + 3..bs + 11].copy_from_slice(b"EXFAT   ");
+        img[bs + 64..bs + 72].copy_from_slice(&u64::from(START_LBA).to_le_bytes()); // partition_offset
+        img[bs + 72..bs + 80].copy_from_slice(&16_u64.to_le_bytes()); // volume_length
+        img[bs + 80..bs + 84].copy_from_slice(&1_u32.to_le_bytes()); // fat_offset (rel)
+        img[bs + 84..bs + 88].copy_from_slice(&1_u32.to_le_bytes()); // fat_length
+        img[bs + 88..bs + 92].copy_from_slice(&2_u32.to_le_bytes()); // cluster_heap_offset (rel)
+        img[bs + 92..bs + 96].copy_from_slice(&4_u32.to_le_bytes()); // cluster_count
+        img[bs + 96..bs + 100].copy_from_slice(&2_u32.to_le_bytes()); // first_root_cluster
+        img[bs + 100..bs + 104].copy_from_slice(&0xDEAD_BEEF_u32.to_le_bytes()); // serial
+        img[bs + 108] = 9; // bytes_per_sector_shift (512)
+        img[bs + 109] = 0; // sectors_per_cluster_shift (512-byte clusters)
+        img[bs + 110] = 1; // number_of_fats
+        img[bs + 510] = 0x55;
+        img[bs + 511] = 0xAA;
+
+        // --- FAT (abs (fat_offset + partition_offset) * 512 = 1024): root
+        // cluster 2 is end-of-chain. ---
+        let fat_base = (1 + START_LBA as usize) * 512;
+        let entry2 = fat_base + (2 * 4);
+        img[entry2..entry2 + 4].copy_from_slice(&0xFFFF_FFFF_u32.to_le_bytes());
+
+        // Heap cluster 2 (abs (cluster_heap_offset + partition_offset) * 512
+        // = 1536) is left all-zero ⇒ immediate end-of-directory ⇒ no files.
+        img
+    }
+
+    #[test]
+    fn image_source_constructors_carry_slot() {
+        let img = empty_single_partition_image();
+        let reader = SliceReader::new(img);
+        assert_eq!(ImageSource::native(&reader).slot_override, None);
+        assert_eq!(ImageSource::with_slot(&reader, 1).slot_override, Some(1));
+    }
+
+    #[test]
+    fn produce_walks_two_images_into_one_complete_batch() {
+        let teslacam = SliceReader::new(empty_single_partition_image());
+        let media = SliceReader::new(empty_single_partition_image());
+        let sources = [
+            ImageSource::with_slot(&teslacam, 0),
+            ImageSource::with_slot(&media, 1),
+        ];
+        let mut tracker = StabilityTracker::new(StabilityConfig::default());
+
+        let batch = produce(&sources, &mut tracker, 1_000, 30).expect("two-image produce");
+
+        // Both single-partition images were walked and merged.
+        assert_eq!(batch.stats.partitions, 2);
+        assert!(batch.complete);
+        assert!(batch.media_inventory);
+        // Empty roots ⇒ no clips, no media, nothing to prune.
+        assert!(batch.records.is_empty());
+        assert!(batch.present_keys.is_empty());
+        assert!(batch.media.is_empty());
+        assert!(batch.media_present_paths.is_empty());
+    }
+
+    #[test]
+    fn produce_single_native_image_walks_one_partition() {
+        let reader = SliceReader::new(empty_single_partition_image());
+        let sources = [ImageSource::native(&reader)];
+        let mut tracker = StabilityTracker::new(StabilityConfig::default());
+
+        let batch = produce(&sources, &mut tracker, 1_000, 30).expect("single-image produce");
+        assert_eq!(batch.stats.partitions, 1);
+        assert!(batch.complete);
+    }
+
+    #[test]
+    fn produce_aborts_when_any_source_is_structurally_corrupt() {
+        let good = SliceReader::new(empty_single_partition_image());
+        // A 512-byte buffer with no 0x55AA signature fails parse_mbr.
+        let bad = SliceReader::new(vec![0_u8; 512]);
+        let sources = [
+            ImageSource::with_slot(&good, 0),
+            ImageSource::with_slot(&bad, 1),
+        ];
+        let mut tracker = StabilityTracker::new(StabilityConfig::default());
+
+        // A structural failure on the SECOND source aborts the whole pass —
+        // the consumer must never see a half-walked batch marked complete.
+        assert!(produce(&sources, &mut tracker, 1_000, 30).is_err());
     }
 }

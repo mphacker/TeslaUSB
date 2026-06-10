@@ -32,12 +32,17 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("serve") => {
-            // The live daemon loop (statfs cadence, archive pipeline, governor,
-            // single-deleter) is hardware-gated and calibration-gated; it is not
-            // part of the host-testable core this lane delivers.
+            // The host-testable orchestrator core (`retentiond::serve::RetentionLoop`:
+            // recover → archive → mirror → govern → health) is implemented and
+            // unit/integration-tested behind the I/O seams. The remaining *live
+            // wiring* — real statfs/fsync/rename/unlink, the gadgetd eject-handoff
+            // IPC client, the indexd catalog/RPC client, and the scannerd fact feed
+            // — is hardware-gated and owned by sibling lanes, so this entrypoint
+            // does not yet construct the live seam implementations.
             eprintln!(
-                "retentiond serve: live wiring is hardware-gated (Task 2.7 governor \
-                 calibration / storage.md §7) and not built in the host-core lane."
+                "retentiond serve: orchestrator core is implemented + host-tested \
+                 (retentiond::serve::RetentionLoop); live IPC/syscall seam wiring is \
+                 hardware-gated and not built in this lane."
             );
             ExitCode::FAILURE
         }

@@ -1227,6 +1227,58 @@ async fn handoff_status_unknown_id_is_404() {
 }
 
 #[tokio::test]
+async fn gadget_status_maps_live_state() {
+    let fx = delete_fixture(Reply::Json(json!({
+        "present": true,
+        "bound": true,
+        "bound_udc": "fe980000.usb",
+        "udc_state": "configured",
+        "lun_file": "/data/teslausb/cam.img",
+        "media_lun_file": "/data/teslausb/media.img",
+        "handoff_active": false,
+        "last_result": "done",
+        "last_handoff_id": "h-9",
+    })));
+    let (status, body) = get_json(&fx.app, "/api/gadget/status").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["present"], true);
+    assert_eq!(body["bound"], true);
+    assert_eq!(body["udc_state"], "configured");
+    assert_eq!(body["media_lun_file"], "/data/teslausb/media.img");
+    assert_eq!(body["handoff_active"], false);
+    assert_eq!(body["last_handoff_id"], "h-9");
+    // The route must issue exactly the read-only gadget_status command.
+    let sent = fx.last.lock().unwrap().clone().unwrap();
+    assert_eq!(sent["cmd"], "gadget_status");
+}
+
+#[tokio::test]
+async fn gadget_status_degrades_partial_reply() {
+    // A reply with only `present` must not 500; missing fields read as null/false.
+    let fx = delete_fixture(Reply::Json(json!({ "present": false })));
+    let (status, body) = get_json(&fx.app, "/api/gadget/status").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["present"], false);
+    assert_eq!(body["bound"], false);
+    assert_eq!(body["udc_state"], Value::Null);
+    assert_eq!(body["handoff_active"], false);
+}
+
+#[tokio::test]
+async fn gadget_status_gadgetd_down_is_503() {
+    let fx = delete_fixture(Reply::Unavailable);
+    let (status, _) = get_json(&fx.app, "/api/gadget/status").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn gadget_status_error_frame_is_502() {
+    let fx = delete_fixture(Reply::Json(json!({ "error": "internal" })));
+    let (status, _) = get_json(&fx.app, "/api/gadget/status").await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+}
+
+#[tokio::test]
 async fn jobs_stream_is_an_event_stream() {
     let fx = delete_fixture(Reply::Json(
         json!({ "handoff_id": "h-1", "result": "done" }),

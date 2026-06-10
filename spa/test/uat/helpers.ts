@@ -82,4 +82,5 @@ export const ALLOWED_API = new Set([
   "/api/system/health",
   "/api/system/metrics",
   "/api/storage/health",
+  "/api/gadget/status",
 ]);

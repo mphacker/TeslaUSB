@@ -214,6 +214,12 @@ pub(crate) fn status_request(handoff_id: &str) -> Value {
     json!({ "cmd": "handoff_status", "handoff_id": handoff_id })
 }
 
+/// Build the read-only `gadget_status` wire request. `gadgetd` answers this
+/// concurrently with an in-flight handoff, so it never blocks the UI.
+pub(crate) fn gadget_status_request() -> Value {
+    json!({ "cmd": "gadget_status" })
+}
+
 /// The terminal outcome of a `gadgetd` mutation handoff (clip delete, media
 /// install, or media remove), as interpreted from `gadgetd`'s JSON response
 /// (mapped to an HTTP status in the route layer). The response shape is
@@ -303,6 +309,31 @@ pub(crate) fn map_status(resp: &Value) -> Option<Value> {
         "handoff_id": handoff_id,
         "state": state,
         "detail": resp.get("detail").cloned().unwrap_or(Value::Null),
+    }))
+}
+
+/// Normalize a `gadgetd` `gadget_status` response into the stable
+/// `/api/gadget/status` shape the SPA consumes. `present` is the load-bearing
+/// field; if it is absent the frame is unusable and we return `None` (mapped to
+/// `502`). All other fields degrade to `false`/`null` so the read never 500s on
+/// a partial reply.
+pub(crate) fn map_gadget_status(resp: &Value) -> Option<Value> {
+    if resp.get("error").is_some() {
+        return None;
+    }
+    let present = resp.get("present").and_then(Value::as_bool)?;
+    let field = |k: &str| resp.get(k).cloned().unwrap_or(Value::Null);
+    let flag = |k: &str| resp.get(k).and_then(Value::as_bool).unwrap_or(false);
+    Some(json!({
+        "present": present,
+        "bound": flag("bound"),
+        "bound_udc": field("bound_udc"),
+        "udc_state": field("udc_state"),
+        "lun_file": field("lun_file"),
+        "media_lun_file": field("media_lun_file"),
+        "handoff_active": flag("handoff_active"),
+        "last_handoff_id": field("last_handoff_id"),
+        "last_result": field("last_result"),
     }))
 }
 

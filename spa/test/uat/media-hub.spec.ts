@@ -29,6 +29,7 @@ import { resolve } from "node:path";
 const SECTION_ORDER = [
   "System Health",
   "Live Metrics",
+  "USB Drive",
   "WiFi Networks",
   "Access Point",
   "Storage & Auto-Cleanup",
@@ -68,6 +69,21 @@ const STORAGE_FIXTURE = {
   io_errors_24h: null,
   trim: null,
 };
+// USB-gadget status fixture. Field names mirror webd's /api/gadget/status DTO.
+// gadgetd is NOT spawned in the UAT harness, so the live socket read 503s; we
+// mock the daemon-present (200) state — the normal production state — exactly as
+// every other gadgetd-dependent flow (install/remove handoffs) is mocked here.
+const GADGET_FIXTURE = {
+  present: true,
+  bound: true,
+  bound_udc: "fe980000.usb",
+  udc_state: "configured",
+  lun_file: "/data/teslausb/cam.img",
+  media_lun_file: "/data/teslausb/media.img",
+  handoff_active: false,
+  last_handoff_id: "h-42",
+  last_result: "done",
+};
 
 /** Intercept the three device-status probes with deterministic fixtures so the
  *  functional-parity assertions are host-independent. Must be called BEFORE the
@@ -81,6 +97,21 @@ async function routeSystemProbes(page: Page) {
   await page.route("**/api/system/health", (r) => r.fulfill(json(HEALTH_FIXTURE)));
   await page.route("**/api/system/metrics", (r) => r.fulfill(json(METRICS_FIXTURE)));
   await page.route("**/api/storage/health", (r) => r.fulfill(json(STORAGE_FIXTURE)));
+}
+
+/** Mock gadgetd-present (200) for `/api/gadget/status`. gadgetd is not spawned
+ *  in the harness, so the live socket read would 503; mocking the daemon-up
+ *  state mirrors the established gadgetd-flow mocking and represents the normal
+ *  production state. The `gadget-status — unavailable` test overrides this with
+ *  a 503 to prove graceful degradation. */
+async function routeGadgetStatus(page: Page) {
+  await page.route("**/api/gadget/status", (r) =>
+    r.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(GADGET_FIXTURE),
+    }),
+  );
 }
 
 /** Settle: bundle executed, dashboard structure painted. */
@@ -103,6 +134,13 @@ function assertCleanConsole(probe: Probe) {
 }
 
 test.describe("settings dashboard UAT", () => {
+  // gadgetd is not spawned in the harness; mock its control-socket read as
+  // "present" (the normal production state) for every test. The dedicated
+  // degradation test below overrides this to assert the 503 → unavailable path.
+  test.beforeEach(async ({ page }) => {
+    await routeGadgetStatus(page);
+  });
+
   // ── Gate 1: functional + structural parity ─────────────────────────────
   test("functional parity — shell, live device/health/metrics, section order", async ({
     page,
@@ -169,6 +207,21 @@ test.describe("settings dashboard UAT", () => {
     await expect(page.locator("#metric-swap .metric-value")).toHaveText("—");
     await expect(page.locator("#live-metrics-foot")).toContainText("Updated");
     await expect(page.locator("#live-metrics-uptime")).toHaveText("up 1d 10h 17m");
+
+    // USB Drive — open; live gadgetd control-socket read (mocked "present").
+    // Proves the first cross-daemon control-socket read renders end-to-end.
+    const usb = page.locator("#usb-gadget-section");
+    await expect(usb).toHaveAttribute("open", "");
+    await expect(page.locator("[data-testid=usb-present]")).toHaveText("Yes");
+    await expect(page.locator("[data-testid=usb-bound]")).toHaveText(
+      "Yes (configured)",
+    );
+    await expect(page.locator("#usb-gadget-card")).toContainText(
+      "/data/teslausb/cam.img",
+    );
+    await expect(page.locator("#usb-gadget-card")).toContainText(
+      "/data/teslausb/media.img",
+    );
 
     // WiFi + Access Point — degraded read-only copy (no nmcli/AP tooling).
     await expect(page.locator("#savedNetworksList")).toContainText(
@@ -373,6 +426,47 @@ test.describe("settings dashboard UAT", () => {
       (r) => new URL(r.url).origin === origin && r.status >= 400,
     );
     expect(bad, `non-2xx response(s): ${JSON.stringify(bad)}`).toEqual([]);
+  });
+
+  // ── Gate: graceful degradation when gadgetd is unreachable ──────────────
+  test("gadget-status — 503 renders an honest 'unavailable' state, console clean", async ({
+    page,
+    probe,
+  }) => {
+    // Override the beforeEach "present" mock: simulate gadgetd down (the live
+    // on-device failure mode, and the harness's real state). The screen must
+    // show the honest unavailable copy — never a fabricated "connected" — and
+    // the handled 503 must NOT leak a console error or pageerror.
+    await page.unroute("**/api/gadget/status");
+    await page.route("**/api/gadget/status", (r) =>
+      r.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({
+          error: { code: "gadgetd_unavailable", message: "gadgetd is not reachable" },
+        }),
+      }),
+    );
+    await gotoDashboard(page);
+    await expect(page.locator("[data-testid=usb-gadget-unavailable]")).toBeVisible();
+    await expect(page.locator("[data-testid=usb-present]")).toHaveCount(0);
+    // Chromium itself logs a "Failed to load resource: …503…" console error for
+    // the failed fetch — that's the browser, not the app. Tolerate exactly that
+    // one message for /api/gadget/status; assert nothing else leaked (no
+    // pageerror, no warning, no other console error, no SECOND 503).
+    const expected503 = probe.consoleErrors.filter(
+      (e) => e.text.includes("503") && e.location.includes("/api/gadget/status"),
+    );
+    expect(expected503.length, "expected exactly one 503 resource-load log").toBe(1);
+    const other = probe.consoleErrors.filter(
+      (e) => !(e.text.includes("503") && e.location.includes("/api/gadget/status")),
+    );
+    expect(other, `unexpected console error(s): ${JSON.stringify(other)}`).toEqual([]);
+    expect(probe.pageErrors, `pageerror(s): ${JSON.stringify(probe.pageErrors)}`).toEqual([]);
+    expect(
+      probe.consoleWarnings,
+      `console warning(s): ${JSON.stringify(probe.consoleWarnings)}`,
+    ).toEqual([]);
   });
 
   // ── Gate 2: performance — capture + report (dev-box profile) ────────────

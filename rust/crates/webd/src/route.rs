@@ -58,6 +58,7 @@ pub(crate) fn router(state: AppState, static_dir: PathBuf) -> Router {
             get(crate::media::download),
         )
         .route("/handoff/{id}", get(handoff_status))
+        .route("/gadget/status", get(gadget_status))
         .route(
             "/chimes",
             post(crate::chimes::install_chime)
@@ -636,6 +637,27 @@ async fn handoff_status(
     gadget::map_status(&resp)
         .map(Json)
         .ok_or(ApiError::NotFound)
+}
+
+/// `GET /api/gadget/status`: read-only USB-gadget state (present/bound/udc plus
+/// the two LUN backing files and the last handoff result) from `gadgetd`'s live
+/// control socket — the same socket the car-delete handoff uses. `gadgetd`
+/// answers this concurrently with an in-flight handoff. Transport faults map to
+/// `503` (gadgetd down) / `502` (unparseable reply).
+async fn gadget_status(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let client = state.gadget.clone();
+    let request = gadget::gadget_status_request();
+    let resp = tokio::task::spawn_blocking(move || client.call(request))
+        .await
+        .map_err(|_| ApiError::Internal)?
+        .map_err(transport_to_error)?;
+    gadget::map_gadget_status(&resp).map(Json).ok_or_else(|| {
+        ApiError::status(
+            StatusCode::BAD_GATEWAY,
+            "gadgetd_protocol",
+            "unparseable gadget_status response",
+        )
+    })
 }
 
 /// Map a pre-handoff planning refusal to its HTTP error.

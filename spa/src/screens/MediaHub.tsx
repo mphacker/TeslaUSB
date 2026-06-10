@@ -2,6 +2,7 @@ import { useEffect, useState } from "preact/hooks";
 import { Fragment } from "preact";
 import { api } from "../api/client";
 import type {
+  GadgetStatus,
   HealthBlock,
   Pref,
   StorageHealth,
@@ -177,6 +178,8 @@ export function MediaHub() {
   const [health, setHealth] = useState<SystemHealth | null>(null);
   const [metrics, setMetrics] = useState<SystemMetrics | null>(null);
   const [storage, setStorage] = useState<StorageHealth | null>(null);
+  const [gadget, setGadget] = useState<GadgetStatus | null>(null);
+  const [gadgetUnavailable, setGadgetUnavailable] = useState(false);
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -193,6 +196,16 @@ export function MediaHub() {
     api.systemHealth(ctrl.signal).then(setHealth).catch(() => {});
     api.systemMetrics(ctrl.signal).then(setMetrics).catch(() => {});
     api.storageHealth(ctrl.signal).then(setStorage).catch(() => {});
+    // USB-gadget status is the first cross-daemon control-socket read: it talks
+    // to gadgetd's live socket and so, unlike the catalog reads, it CAN be
+    // unavailable (gadgetd down / not running). Surface an honest "unavailable"
+    // state on a real failure; ignore aborts (unmount) to keep the console clean.
+    api
+      .gadgetStatus(ctrl.signal)
+      .then(setGadget)
+      .catch(() => {
+        if (!ctrl.signal.aborted) setGadgetUnavailable(true);
+      });
     // Video Indexer status is the one System Health row that IS catalog data:
     // clip count + newest-clip age, derived from the read-only catalog. Every
     // other subsystem comes from /api/system/health (or stays unknown).
@@ -340,6 +353,56 @@ export function MediaHub() {
                 </span>
               </p>
             </div>
+          </div>
+        </details>
+
+        {/* USB Drive — live state from gadgetd's control socket
+            (GET /api/gadget/status), the first cross-daemon control-socket read
+            surfaced in the SPA. Unlike the catalog reads this CAN be unavailable
+            (gadgetd down / not running), in which case we show an honest
+            "unavailable" state rather than fabricating a "connected" status. */}
+        <details class="settings-section" id="usb-gadget-section" open>
+          <summary>USB Drive</summary>
+          <div class="section-content">
+            {gadget ? (
+              <div
+                id="usb-gadget-card"
+                style="display:grid; grid-template-columns:auto 1fr; gap:6px 12px; font-size:0.9rem; align-items:center;"
+              >
+                <div style="color:var(--text-secondary)">Presented to car</div>
+                <div data-testid="usb-present" style="color:var(--text-primary)">
+                  {gadget.present ? "Yes" : "No"}
+                </div>
+                <div style="color:var(--text-secondary)">Controller bound</div>
+                <div data-testid="usb-bound" style="color:var(--text-primary)">
+                  {gadget.bound
+                    ? `Yes (${gadget.udc_state ?? "unknown"})`
+                    : "No"}
+                </div>
+                <div style="color:var(--text-secondary)">Dashcam image</div>
+                <div style="color:var(--text-primary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
+                  {gadget.lun_file ?? "\u2014"}
+                </div>
+                <div style="color:var(--text-secondary)">Media image</div>
+                <div style="color:var(--text-primary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
+                  {gadget.media_lun_file ?? "\u2014"}
+                </div>
+              </div>
+            ) : gadgetUnavailable ? (
+              <div
+                data-testid="usb-gadget-unavailable"
+                style="text-align:center; padding:12px; color:var(--text-secondary)"
+              >
+                USB gadget status is unavailable (gadgetd is not reachable).
+              </div>
+            ) : (
+              <div
+                data-testid="usb-gadget-loading"
+                style="text-align:center; padding:12px; color:var(--text-secondary)"
+              >
+                Loading USB status&#8230;
+              </div>
+            )}
           </div>
         </details>
 

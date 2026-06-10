@@ -198,6 +198,25 @@ export interface StorageHealth {
 }
 
 /**
+ * `GET /api/gadget/status`. Live USB-gadget state read from gadgetd's control
+ * socket — present/bound/udc plus the two LUN backing files and the last
+ * handoff result. Unlike the catalog reads, this CAN fail with 503 (gadgetd
+ * down / socket absent) or 502 (unparseable reply); callers should render an
+ * ApiError as "USB status unavailable" rather than treat it as an app crash.
+ */
+export interface GadgetStatus {
+  present: boolean;
+  bound: boolean;
+  bound_udc: string | null;
+  udc_state: string | null;
+  lun_file: string | null;
+  media_lun_file: string | null;
+  handoff_active: boolean;
+  last_handoff_id: string | null;
+  last_result: unknown | null;
+}
+
+/**
  * One file inventoried on the MEDIA (p2) partition for the toybox categories
  * (Boombox, Music, LightShows, LicensePlates, Wraps). Mirrors `MediaItemDto`
  * in `rust/crates/webd/src/dto.rs`. `modified` is a best-effort naive-local

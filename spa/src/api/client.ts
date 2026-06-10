@@ -17,6 +17,7 @@ import type {
   Clip,
   DaySummary,
   EventItem,
+  GadgetStatus,
   MediaHandoffResult,
   MediaList,
   Page,
@@ -167,6 +168,16 @@ export const api = {
 
   storageHealth: (signal?: AbortSignal) =>
     getJson<StorageHealth>("/api/storage/health", signal),
+
+  /**
+   * Live USB-gadget state (`GET /api/gadget/status`) from gadgetd's control
+   * socket — present/bound/udc + both LUN backing files. Distinct from the
+   * catalog reads above: this CAN throw {@link ApiError} (503 gadgetd-down /
+   * 502 protocol) because it talks to a live daemon socket. Callers render
+   * those as "USB status unavailable", never a crash.
+   */
+  gadgetStatus: (signal?: AbortSignal) =>
+    getJson<GadgetStatus>("/api/gadget/status", signal),
 
   /**
    * Read which lock chime is installed on the p2 MEDIA partition

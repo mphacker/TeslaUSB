@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { MediaPills } from "../components/MediaPills";
 import { Icon } from "../components/Icon";
+import { ChimeScheduler } from "./ChimeScheduler";
 import { api, ApiError, CHIME_MAX_BYTES, isQueued } from "../api/client";
 import type { Chimes, InstalledChime } from "../api/types";
 import "../styles/media.css";
@@ -474,60 +475,8 @@ export function Media() {
         </div>
       </details>
 
-      {/* ── Chime Scheduler ── (single-slot B-1: no scheduler backend) */}
-      <details class="settings-section" id="chimeSchedulerSection">
-        <summary>Chime Scheduler</summary>
-        <div class="section-content">
-          <p class="media-pending">
-            Scheduled chime switching isn’t available in this build yet.
-          </p>
-        </div>
-      </details>
-
-      {/* ── Random Chime Groups ── (single-slot B-1: no group backend) */}
-      <details class="settings-section" id="randomChimeGroupsSection">
-        <summary>Random Chime Groups</summary>
-        <div class="section-content">
-          <p class="media-pending">
-            Random chime groups aren’t available in this build yet.
-          </p>
-        </div>
-      </details>
-
-      {/* ── Chime Library ── (live: the one installed chime, else honest empty) */}
-      <h3 class="media-library-heading">Chime Library</h3>
-      <div class="media-card">
-        {status === "ready" && installed ? (
-          <table class="chime-library" data-testid="chime-library">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Size</th>
-                <th>Installed</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr data-testid="chime-row" data-rel-path={installed.rel_path}>
-                <td class="chime-cell-name">{installed.name}</td>
-                <td>{chimeSize(installed.size_bytes)}</td>
-                <td>{chimeModified(installed.modified)}</td>
-              </tr>
-            </tbody>
-          </table>
-        ) : status === "ready" ? (
-          <p class="media-pending" data-testid="library-empty">
-            No chimes are installed yet.
-          </p>
-        ) : status === "error" ? (
-          <p class="media-pending" data-testid="library-error">
-            The chime library couldn’t be read just now.
-          </p>
-        ) : (
-          <p class="media-pending" data-testid="library-loading">
-            Reading the chime library…
-          </p>
-        )}
-      </div>
+      {/* ── Chime Scheduler · Random Groups · Library ── (live: schedulerd via webd) */}
+      <ChimeScheduler />
 
       {/* ── Operator-gated remove confirmation (names the chime; no one-click). ── */}
       {removePending && (

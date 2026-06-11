@@ -298,3 +298,78 @@ export interface InstalledChime {
 export interface Chimes {
   installed: InstalledChime | null;
 }
+
+// ── Chime scheduler (GET/POST/PUT/DELETE /api/chime-scheduler/*) ──
+// webd is a pure proxy to schedulerd; these mirror `schedulerd::model`
+// (camelCase JSON). The SPA forwards inputs verbatim and renders the snapshot.
+
+/** A schedule's trigger kind — matches schedulerd's `scheduleType` tokens. */
+export type ScheduleType = "weekly" | "date" | "holiday" | "recurring";
+
+/** A schedule definition (request body for create/update). */
+export interface ScheduleInput {
+  name: string;
+  chimeFilename: string;
+  scheduleType: ScheduleType;
+  /** Weekday names (weekly). */
+  days?: string[];
+  /** Calendar month 1–12 (date). */
+  month?: number | null;
+  /** Day-of-month 1–31 (date). */
+  day?: number | null;
+  /** Holiday label (holiday). */
+  holiday?: string | null;
+  /** Interval token (recurring). */
+  interval?: string | null;
+  /** Trigger hour 0–23 (weekly/date). */
+  hour?: number | null;
+  /** Trigger minute 0–59 (weekly/date). */
+  minute?: number | null;
+  enabled: boolean;
+}
+
+/** A persisted schedule: an input plus its server-assigned id. */
+export type StoredSchedule = ScheduleInput & { id: string };
+
+/** A named group of chimes for scoped random selection. */
+export interface ChimeGroup {
+  id: string;
+  name: string;
+  description: string;
+  chimes: string[];
+}
+
+/** Group create/update body (no id). */
+export interface GroupInput {
+  name: string;
+  description: string;
+  chimes: string[];
+}
+
+/** Random-on-boot configuration. */
+export interface RandomMode {
+  enabled: boolean;
+  groupId?: string | null;
+}
+
+/** One file in the chime library. */
+export interface LibraryEntry {
+  filename: string;
+  bytes: number;
+}
+
+/** Form menu metadata derived from the engine's source-of-truth lists. */
+export interface SchedulerMenus {
+  holidays: string[];
+  intervals: string[];
+  weekdays: string[];
+}
+
+/** `GET /api/chime-scheduler` — the full scheduler snapshot in one round-trip. */
+export interface SchedulerSnapshot {
+  schedules: StoredSchedule[];
+  groups: ChimeGroup[];
+  randomMode: RandomMode;
+  library: LibraryEntry[];
+  menus: SchedulerMenus;
+}

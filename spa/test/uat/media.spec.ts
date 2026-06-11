@@ -39,8 +39,58 @@ function hooks(page: Page): Promise<MediaHooks | undefined> {
   );
 }
 
+/** A structurally-valid, EMPTY scheduler snapshot. The Lock Chimes screen now
+ *  embeds the schedulerd-backed <ChimeScheduler/>, which fetches this on mount.
+ *  In this harness schedulerd is never spawned, so we mock the read to a clean
+ *  empty snapshot — the scheduler/groups/library sections render their honest
+ *  empty states and the console stays clean. Deep scheduler behavior is covered
+ *  by chime-scheduler.spec.ts. Menus mirror schedulerd::model::SchedulerMenus. */
+const SCHED_MENUS = {
+  holidays: [
+    "New Year's Day",
+    "Martin Luther King Jr. Day",
+    "Valentine's Day",
+    "Presidents' Day",
+    "St. Patrick's Day",
+    "Easter",
+    "Mother's Day",
+    "Memorial Day",
+    "Father's Day",
+    "Independence Day",
+    "Labor Day",
+    "Columbus Day",
+    "Halloween",
+    "Veterans Day",
+    "Thanksgiving",
+    "Christmas Eve",
+    "Christmas Day",
+    "New Year's Eve",
+  ],
+  intervals: ["on_boot", "15min", "30min", "1hour", "2hour", "4hour", "6hour", "12hour"],
+  weekdays: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
+};
+
+const SCHED_EMPTY = {
+  schedules: [],
+  groups: [],
+  randomMode: { enabled: false },
+  library: [],
+  menus: SCHED_MENUS,
+};
+
+/** Register a default mock for the scheduler snapshot read so the embedded
+ *  <ChimeScheduler/> settles cleanly. Tests that need a populated snapshot
+ *  register their own (later-registered, more specific) route first. */
+async function mockSchedulerSnapshot(page: Page, snap: unknown = SCHED_EMPTY) {
+  await page.route("**/api/chime-scheduler", (route) => {
+    if (route.request().method() !== "GET") return route.continue();
+    return jsonRoute(route, 200, snap);
+  });
+}
+
 /** Navigate to /media and wait until the Lock Chimes screen has rendered. */
 async function gotoMedia(page: Page) {
+  await mockSchedulerSnapshot(page);
   await page.goto("/media", { waitUntil: "load" });
   await expect(page.locator(".container[data-screen=media]")).toBeVisible();
   await page.waitForFunction(() => {
@@ -180,13 +230,13 @@ test.describe("media (lock chimes) UAT", () => {
     await expect(page.locator("#chimeUploadControls summary")).toHaveText(
       "Upload New Chime",
     );
-    await expect(page.locator("#chimeSchedulerSection summary")).toHaveText(
+    await expect(page.locator("#scheduler-section summary")).toHaveText(
       "Chime Scheduler",
     );
-    await expect(page.locator("#randomChimeGroupsSection summary")).toHaveText(
+    await expect(page.locator("#groups-section summary")).toHaveText(
       "Random Chime Groups",
     );
-    await expect(page.locator(".media-library-heading")).toHaveText(
+    await expect(page.locator("#library-section summary")).toHaveText(
       "Chime Library",
     );
 
@@ -288,16 +338,18 @@ test.describe("media (lock chimes) UAT", () => {
     // No WebSocket of any kind.
     expect(sockets, `websocket(s) opened: ${JSON.stringify(sockets)}`).toEqual([]);
 
-    // The ONLY /api/ request on load is the read-only `GET /api/chimes`; every
-    // request is same-origin and nothing else hits /api/.
+    // The ONLY /api/ requests on load are the read-only `GET /api/chimes` (active
+    // chime) and `GET /api/chime-scheduler` (the embedded scheduler snapshot);
+    // both are GETs, same-origin, and nothing else hits /api/.
+    const allowedReads = new Set(["GET /api/chimes", "GET /api/chime-scheduler"]);
     for (const req of probe.requests) {
       const u = new URL(req.url);
       expect(u.origin, `off-origin request to ${req.url}`).toBe(origin);
       if (u.pathname.startsWith("/api/")) {
         expect(
-          `${req.method.toUpperCase()} ${u.pathname}`,
+          allowedReads.has(`${req.method.toUpperCase()} ${u.pathname}`),
           `unexpected API call ${req.method} ${u.pathname}`,
-        ).toBe("GET /api/chimes");
+        ).toBe(true);
       }
     }
     const chimeReads = probe.requests.filter(
@@ -307,9 +359,10 @@ test.describe("media (lock chimes) UAT", () => {
 
     // The manage surface is a deliberate two-step action, never a native POST:
     // the form does not submit to the server (SPA preventDefault) and there is
-    // no `method=post` form, but the file input + submit control DO exist.
+    // no `method=post` form. Two file inputs exist: the active-chime upload and
+    // the scheduler's chime-library upload.
     await expect(page.locator("form[method='post' i]")).toHaveCount(0);
-    await expect(page.locator("input[type=file]")).toHaveCount(1);
+    await expect(page.locator("input[type=file]")).toHaveCount(2);
     await expect(page.locator("[data-testid=chime-upload-submit]")).toBeDisabled();
   });
 
@@ -345,7 +398,7 @@ test.describe("media (lock chimes) UAT", () => {
   });
 
   // ── Gate 5: installed chime renders when GET /api/chimes reports one ─────
-  test("installed — active chime + library row render from GET /api/chimes", async ({
+  test("installed — active chime card renders from GET /api/chimes", async ({
     page,
   }) => {
     // Mock the read so the test is independent of the seed (which has no media).
@@ -368,13 +421,6 @@ test.describe("media (lock chimes) UAT", () => {
 
     // No empty state when a chime is installed.
     await expect(page.locator("[data-testid=active-chime-none]")).toHaveCount(0);
-
-    // Chime Library lists exactly the one installed chime by stable rel_path.
-    const row = page.locator("[data-testid=chime-row]");
-    await expect(row).toHaveCount(1);
-    await expect(row).toHaveAttribute("data-rel-path", "LockChime.wav");
-    await expect(row).toContainText("LockChime.wav");
-    await expect(page.locator("[data-testid=library-empty]")).toHaveCount(0);
   });
 
   // ── Gate 6: install (upload) success — POST handoff + GET re-fetch ──────
@@ -418,7 +464,6 @@ test.describe("media (lock chimes) UAT", () => {
     await expect(page.locator("[data-testid=active-chime-name]")).toHaveText(
       "LockChime.wav",
     );
-    await expect(page.locator("[data-testid=chime-row]")).toHaveCount(1);
 
     // Exactly one POST, and at least two GETs (initial + post-success re-fetch).
     expect(posts.length, "expected exactly one POST /api/chimes").toBe(1);

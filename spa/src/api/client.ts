@@ -13,17 +13,24 @@
 import type {
   Analytics,
   ApiErrorBody,
+  ChimeGroup,
   Chimes,
   Clip,
   DaySummary,
   EventItem,
   GadgetStatus,
+  GroupInput,
+  LibraryEntry,
   MediaHandoffResult,
   MediaList,
   Page,
   Pref,
+  RandomMode,
+  ScheduleInput,
+  SchedulerSnapshot,
   StorageHealth,
   StorageInfo,
+  StoredSchedule,
   SystemHealth,
   SystemMetrics,
   Trip,
@@ -519,6 +526,106 @@ export const api = {
     bulkDelete("/api/plates/bulk-delete", names, signal),
   bulkDeleteWraps: (names: string[], signal?: AbortSignal) =>
     bulkDelete("/api/wraps/bulk-delete", names, signal),
+
+  // ── Chime scheduler (webd proxies these to schedulerd) ──
+
+  /**
+   * Read the full scheduler snapshot (`GET /api/chime-scheduler`): schedules,
+   * groups, random-on-boot mode, the chime library, and the form menus — one
+   * round-trip so the page bootstraps without a waterfall. Throws {@link ApiError}
+   * (503 scheduler-down / 502 protocol) when schedulerd is unreachable.
+   */
+  scheduler: (signal?: AbortSignal) =>
+    getJson<SchedulerSnapshot>("/api/chime-scheduler", signal),
+
+  /** Create a schedule (`POST /api/chime-scheduler/schedules`). 422 on invalid input. */
+  addSchedule: (input: ScheduleInput, signal?: AbortSignal) =>
+    request<StoredSchedule>(
+      "POST",
+      "/api/chime-scheduler/schedules",
+      signal,
+      JSON.stringify(input),
+      "application/json",
+    ),
+
+  /** Replace a schedule by id (`PUT /api/chime-scheduler/schedules/:id`). */
+  updateSchedule: (id: string, input: ScheduleInput, signal?: AbortSignal) =>
+    request<StoredSchedule>(
+      "PUT",
+      `/api/chime-scheduler/schedules/${encodeURIComponent(id)}`,
+      signal,
+      JSON.stringify(input),
+      "application/json",
+    ),
+
+  /** Delete a schedule by id (`DELETE /api/chime-scheduler/schedules/:id`). */
+  deleteSchedule: (id: string, signal?: AbortSignal) =>
+    request<{ ok?: boolean }>(
+      "DELETE",
+      `/api/chime-scheduler/schedules/${encodeURIComponent(id)}`,
+      signal,
+    ),
+
+  /** Create a chime group (`POST /api/chime-scheduler/groups`). */
+  addGroup: (input: GroupInput, signal?: AbortSignal) =>
+    request<ChimeGroup>(
+      "POST",
+      "/api/chime-scheduler/groups",
+      signal,
+      JSON.stringify(input),
+      "application/json",
+    ),
+
+  /** Replace a group by id (`PUT /api/chime-scheduler/groups/:id`). */
+  updateGroup: (id: string, input: GroupInput, signal?: AbortSignal) =>
+    request<ChimeGroup>(
+      "PUT",
+      `/api/chime-scheduler/groups/${encodeURIComponent(id)}`,
+      signal,
+      JSON.stringify(input),
+      "application/json",
+    ),
+
+  /** Delete a group by id (`DELETE /api/chime-scheduler/groups/:id`). */
+  deleteGroup: (id: string, signal?: AbortSignal) =>
+    request<{ ok?: boolean }>(
+      "DELETE",
+      `/api/chime-scheduler/groups/${encodeURIComponent(id)}`,
+      signal,
+    ),
+
+  /** Set the random-on-boot configuration (`PUT /api/chime-scheduler/random-mode`). */
+  setRandomMode: (mode: RandomMode, signal?: AbortSignal) =>
+    request<RandomMode>(
+      "PUT",
+      "/api/chime-scheduler/random-mode",
+      signal,
+      JSON.stringify(mode),
+      "application/json",
+    ),
+
+  /** Upload a WAV into the chime library (`POST /api/chime-scheduler/library`, multipart `file`). */
+  uploadLibraryChime: async (
+    file: File | Blob,
+    signal?: AbortSignal,
+  ): Promise<LibraryEntry> => {
+    const form = new FormData();
+    form.append("file", file, "name" in file ? file.name : "chime.wav");
+    return request<LibraryEntry>(
+      "POST",
+      "/api/chime-scheduler/library",
+      signal,
+      form,
+    );
+  },
+
+  /** Remove a library chime by filename (`DELETE /api/chime-scheduler/library/:filename`). */
+  deleteLibraryChime: (filename: string, signal?: AbortSignal) =>
+    request<{ ok?: boolean }>(
+      "DELETE",
+      `/api/chime-scheduler/library/${encodeURIComponent(filename)}`,
+      signal,
+    ),
 };
 
 export type Api = typeof api;

@@ -1534,47 +1534,57 @@ fn staging_is_empty(dir: &std::path::Path) -> bool {
 }
 
 #[tokio::test]
-async fn install_chime_happy_path_sends_install_file_and_cleans_up() {
-    let fx = chime_fixture(Reply::Json(
-        json!({ "handoff_id": "h-1", "result": "done" }),
-    ));
+async fn install_chime_happy_path_enqueues_install_file_and_retains_blob() {
+    let fx = chime_fixture(Reply::Json(json!({ "job_id": "m-1", "state": "queued" })));
     let (status, body) = post_chime(&fx.app, multipart_body(&[("file", &sample_wav(64))])).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["state"], "done");
-    assert_eq!(body["handoff_id"], "h-1");
+    // Frictionless write path: accepted into gadgetd's durable queue (202),
+    // never a transient-busy error, even with the car connected.
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(body["state"], "queued");
+    assert_eq!(body["job_id"], "m-1");
 
-    // gadgetd saw ONE install_file mutation on the MEDIA partition at the fixed
-    // root path, with a staged source that existed and was non-empty.
+    // gadgetd saw ONE enqueue_mutation install_file on the MEDIA partition at
+    // the fixed root path, with a staged source that existed and was non-empty.
     let req = fx.last.lock().unwrap().clone().unwrap();
-    assert_eq!(req["cmd"], "request_mutation");
+    assert_eq!(req["cmd"], "enqueue_mutation");
     assert_eq!(req["partition"], 2);
     assert_eq!(req["mutation"]["op"], "install_file");
     assert_eq!(req["mutation"]["rel_path"], "LockChime.wav");
     assert!(req["mutation"]["source_path"].is_string());
+    assert!(req["blob_path"].is_string());
     assert_eq!(*fx.source_existed.lock().unwrap(), Some(true));
 
-    // Staged file is unlinked after the handoff returns.
-    assert!(staging_is_empty(&fx.staging), "staging dir must be empty");
+    // The staged blob is RETAINED after a successful enqueue: gadgetd owns it
+    // and reclaims it after apply, so webd must not unlink it.
+    assert!(
+        !staging_is_empty(&fx.staging),
+        "staged blob must be retained for gadgetd to apply"
+    );
 
-    // A successful install is not a failure.
+    // A queued install is not a failure.
     let (_, failed) = get_json(&fx.app, "/api/jobs/failed").await;
     assert!(failed["jobs"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
-async fn install_chime_transient_refusal_is_409_not_failed() {
-    let fx = chime_fixture(Reply::Json(json!({ "refused": "handoff_active" })));
+async fn install_chime_rejected_is_422_and_cleans_up() {
+    // gadgetd rejecting the mutation up-front (e.g. a full queue) is a 422; the
+    // staged blob is unlinked by webd because gadgetd never took ownership.
+    let fx = chime_fixture(Reply::Json(json!({ "error": "queue full" })));
     let (status, body) = post_chime(&fx.app, multipart_body(&[("file", &sample_wav(64))])).await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(body["error"]["code"], "handoff_busy");
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["code"], "refused");
     assert!(staging_is_empty(&fx.staging), "staging dir must be empty");
 
+    // A rejected mutation is not retained in the failed ring.
     let (_, failed) = get_json(&fx.app, "/api/jobs/failed").await;
     assert!(failed["jobs"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
-async fn install_chime_failed_is_502_and_recorded_and_cleaned_up() {
+async fn install_chime_bad_reply_is_502_and_recorded_and_cleaned_up() {
+    // An unparseable gadgetd enqueue reply (no job_id/state:"queued") is a 502,
+    // recorded as a failed job, and the staged blob is cleaned up.
     let fx = chime_fixture(Reply::Json(
         json!({ "handoff_id": "h-9", "result": "failed", "detail": "io error" }),
     ));
@@ -1587,7 +1597,6 @@ async fn install_chime_failed_is_502_and_recorded_and_cleaned_up() {
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0]["kind"], "chime_install");
     assert_eq!(jobs[0]["state"], "failed");
-    assert_eq!(jobs[0]["detail"], "io error");
 }
 
 #[tokio::test]
@@ -1641,16 +1650,15 @@ async fn install_chime_duplicate_file_field_is_400() {
 }
 
 #[tokio::test]
-async fn remove_chime_happy_path_sends_delete_paths() {
-    let fx = chime_fixture(Reply::Json(
-        json!({ "handoff_id": "h-2", "result": "done" }),
-    ));
+async fn remove_chime_happy_path_enqueues_delete_paths() {
+    let fx = chime_fixture(Reply::Json(json!({ "job_id": "m-2", "state": "queued" })));
     let (status, body) = delete_json(&fx.app, "/api/chimes/LockChime").await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["state"], "done");
-    assert_eq!(body["handoff_id"], "h-2");
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(body["state"], "queued");
+    assert_eq!(body["job_id"], "m-2");
 
     let req = fx.last.lock().unwrap().clone().unwrap();
+    assert_eq!(req["cmd"], "enqueue_mutation");
     assert_eq!(req["partition"], 2);
     assert_eq!(req["mutation"]["op"], "delete_paths");
     let paths = req["mutation"]["rel_paths"].as_array().unwrap();
@@ -1691,9 +1699,9 @@ async fn post_json(app: &Router, uri: &str, body: Value) -> (StatusCode, Value) 
 }
 
 #[tokio::test]
-async fn bulk_delete_boombox_sends_one_handoff_with_all_paths() {
+async fn bulk_delete_boombox_enqueues_one_mutation_with_all_paths() {
     let fx = delete_fixture(Reply::Json(
-        json!({ "handoff_id": "h-bulk", "result": "done" }),
+        json!({ "job_id": "m-bulk", "state": "queued" }),
     ));
     let (status, body) = post_json(
         &fx.app,
@@ -1701,13 +1709,14 @@ async fn bulk_delete_boombox_sends_one_handoff_with_all_paths() {
         json!({ "names": ["horn.wav", "airhorn.mp3"] }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["state"], "done");
-    assert_eq!(body["handoff_id"], "h-bulk");
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(body["state"], "queued");
+    assert_eq!(body["job_id"], "m-bulk");
 
-    // gadgetd saw exactly ONE request carrying BOTH derived paths (one
+    // gadgetd saw exactly ONE enqueue carrying BOTH derived paths (one
     // eject/remount for the batch, not one per file).
     let req = fx.last.lock().unwrap().clone().unwrap();
+    assert_eq!(req["cmd"], "enqueue_mutation");
     assert_eq!(req["partition"], 2);
     assert_eq!(req["mutation"]["op"], "delete_paths");
     let paths = req["mutation"]["rel_paths"].as_array().unwrap();
@@ -1718,16 +1727,14 @@ async fn bulk_delete_boombox_sends_one_handoff_with_all_paths() {
 
 #[tokio::test]
 async fn bulk_delete_wraps_rebuilds_wraps_subdir() {
-    let fx = delete_fixture(Reply::Json(
-        json!({ "handoff_id": "h-w", "result": "done" }),
-    ));
+    let fx = delete_fixture(Reply::Json(json!({ "job_id": "m-w", "state": "queued" })));
     let (status, _) = post_json(
         &fx.app,
         "/api/wraps/bulk-delete",
         json!({ "names": ["cyber.png"] }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::ACCEPTED);
     let req = fx.last.lock().unwrap().clone().unwrap();
     let paths = req["mutation"]["rel_paths"].as_array().unwrap();
     assert_eq!(paths[0], "LightShow/wraps/cyber.png");
@@ -1735,16 +1742,14 @@ async fn bulk_delete_wraps_rebuilds_wraps_subdir() {
 
 #[tokio::test]
 async fn bulk_delete_dedupes_repeated_names() {
-    let fx = delete_fixture(Reply::Json(
-        json!({ "handoff_id": "h-d", "result": "done" }),
-    ));
+    let fx = delete_fixture(Reply::Json(json!({ "job_id": "m-d", "state": "queued" })));
     let (status, _) = post_json(
         &fx.app,
         "/api/music/bulk-delete",
         json!({ "names": ["a.mp3", "a.mp3", "b.flac"] }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::ACCEPTED);
     let req = fx.last.lock().unwrap().clone().unwrap();
     let paths = req["mutation"]["rel_paths"].as_array().unwrap();
     assert_eq!(paths.len(), 2, "duplicate name collapsed to one path");
@@ -1754,7 +1759,7 @@ async fn bulk_delete_dedupes_repeated_names() {
 
 #[tokio::test]
 async fn bulk_delete_empty_batch_is_400_before_handoff() {
-    let fx = delete_fixture(Reply::Json(json!({ "result": "done" })));
+    let fx = delete_fixture(Reply::Json(json!({ "state": "queued" })));
     let (status, body) =
         post_json(&fx.app, "/api/plates/bulk-delete", json!({ "names": [] })).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -1764,7 +1769,7 @@ async fn bulk_delete_empty_batch_is_400_before_handoff() {
 
 #[tokio::test]
 async fn bulk_delete_traversal_name_is_refused_before_handoff() {
-    let fx = delete_fixture(Reply::Json(json!({ "result": "done" })));
+    let fx = delete_fixture(Reply::Json(json!({ "state": "queued" })));
     let (status, body) = post_json(
         &fx.app,
         "/api/lightshows/bulk-delete",

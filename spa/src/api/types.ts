@@ -269,8 +269,12 @@ export interface MediaList {
 
 /** Terminal result of a successful media install/remove handoff. */
 export interface MediaHandoffResult {
-  handoff_id: string;
+  /** Present only on the synchronous `"done"` path (a completed handoff). */
+  handoff_id?: string;
+  /** `"done"` (applied synchronously) or `"queued"` (accepted into the durable queue, a 202). */
   state: string;
+  /** gadgetd queue entry id; present only on the `"queued"` path. */
+  job_id?: string;
 }
 
 /**

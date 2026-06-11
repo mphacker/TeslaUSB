@@ -57,6 +57,11 @@ pub(crate) enum JobState {
     /// Declined for a transient device state — terminal for this job; the
     /// caller may issue a new request.
     Busy,
+    /// Accepted into `gadgetd`'s durable mutation queue — terminal for this
+    /// `webd` job; the change is saved and applies automatically at the next
+    /// safe window (the frictionless write path). The SPA shows "saved, syncing"
+    /// rather than blocking on the handoff.
+    Queued,
 }
 
 /// A single `webd` job's status — the payload of a `job_status` SSE event.
@@ -200,7 +205,7 @@ impl JobHub {
                         snap.failed.pop_front();
                     }
                 }
-                JobState::Done | JobState::Refused | JobState::Busy => {}
+                JobState::Done | JobState::Refused | JobState::Busy | JobState::Queued => {}
             }
         }
         // No subscribers is not an error: the snapshot still carries state.

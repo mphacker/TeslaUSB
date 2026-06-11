@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { MediaPills } from "../components/MediaPills";
 import { Icon } from "../components/Icon";
-import { api, ApiError, CHIME_MAX_BYTES } from "../api/client";
+import { api, ApiError, CHIME_MAX_BYTES, isQueued } from "../api/client";
 import type { Chimes, InstalledChime } from "../api/types";
 import "../styles/media.css";
 
@@ -285,10 +285,14 @@ export function Media() {
     const ac = new AbortController();
     uploadAbortRef.current = ac;
     try {
-      await api.installChime(selectedFile, ac.signal);
+      const res = await api.installChime(selectedFile, ac.signal);
       const name = selectedFile.name;
       resetUpload();
-      setNotice(`Installed ${name} as the active lock chime.`);
+      setNotice(
+        isQueued(res)
+          ? `Saved ${name} as the active lock chime — syncing to the car.`
+          : `Installed ${name} as the active lock chime.`,
+      );
       await refetch();
     } catch (err) {
       if (ac.signal.aborted) return; // silent: user/unmount cancelled
@@ -317,9 +321,13 @@ export function Media() {
     const ac = new AbortController();
     removeAbortRef.current = ac;
     try {
-      await api.removeChime(ac.signal);
+      const res = await api.removeChime(ac.signal);
       setRemovePending(false);
-      setNotice("Removed the lock chime — the car will use its built-in chime.");
+      setNotice(
+        isQueued(res)
+          ? "Removing the lock chime — syncing to the car."
+          : "Removed the lock chime — the car will use its built-in chime.",
+      );
       await refetch();
     } catch (err) {
       if (ac.signal.aborted) return; // silent: user/unmount cancelled

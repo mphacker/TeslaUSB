@@ -432,7 +432,46 @@ test.describe("media (lock chimes) UAT", () => {
     assertCleanConsole(probe);
   });
 
-  // ── Gate 7: transient 409 handoff_busy → friendly retry → success ───────
+  // ── Gate 6b: install accepted into the durable queue (202 queued) ───────
+  test("install queued — 202 queued shows the syncing notice, no error", async ({
+    page,
+    probe,
+  }) => {
+    const posts: string[] = [];
+
+    await page.route("**/api/chimes", (route) => {
+      const m = route.request().method();
+      // The car is connected, so gadgetd queues the change instead of applying
+      // it now: the catalog GET keeps reporting "none" until it syncs. The
+      // frictionless path must NEVER surface an error for this.
+      if (m === "GET") return jsonRoute(route, 200, { installed: null });
+      if (m === "POST") {
+        posts.push(m);
+        return jsonRoute(route, 202, { state: "queued", job_id: "m-1" });
+      }
+      return route.continue();
+    });
+
+    await gotoMedia(page);
+    await expect(page.locator("[data-testid=active-chime-none]")).toBeVisible();
+
+    await page.locator("[data-testid=chime-file-input]").setInputFiles({
+      name: "Chime.wav",
+      mimeType: "audio/wav",
+      buffer: wavBuffer({ channels: 2, sampleRate: 48000, dataLen: 512 }),
+    });
+    await expect(page.locator("[data-testid=chime-upload-submit]")).toBeEnabled();
+
+    await page.locator("[data-testid=chime-upload-submit]").click();
+    // Success notice communicates the saved-and-syncing state; NO error banner.
+    await expect(page.locator("[data-testid=chime-notice]")).toContainText(
+      "syncing to the car",
+    );
+    await expect(page.locator("[data-testid=chime-upload-error]")).toHaveCount(0);
+
+    expect(posts.length, "expected exactly one POST /api/chimes").toBe(1);
+    assertCleanConsole(probe);
+  });
   test("install busy — 409 handoff_busy is retryable, retry then succeeds", async ({
     page,
     probe,

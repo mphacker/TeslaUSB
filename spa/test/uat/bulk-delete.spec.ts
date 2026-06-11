@@ -90,6 +90,28 @@ test.describe("media bulk-delete UAT (A2)", () => {
     expect(captured()).toEqual(["horn.wav", "airhorn.mp3", "klaxon.wav"]);
   });
 
+  test("boombox queued — 202 queued bulk-delete shows the syncing notice", async ({
+    page,
+  }) => {
+    // Mock the list, then a bulk-delete that gadgetd accepts into its durable
+    // queue (202 queued) because the car is connected. The UI must treat this
+    // as success and communicate the syncing state, never an error.
+    await page.route("**/api/boombox", (r: Route) =>
+      r.fulfill(json(items("Boombox", ["a.wav", "b.wav"]))),
+    );
+    await page.route("**/api/boombox/bulk-delete", (r: Route) =>
+      r.fulfill(json({ state: "queued", job_id: "m-bulk" }, 202)),
+    );
+    await gotoScreen(page, "/boombox", "boombox");
+    await expect(page.locator("[data-testid=boombox-list]")).toBeVisible();
+
+    await page.locator(".bulk-select-all input[type=checkbox]").check();
+    await page.locator("[data-testid=bulk-delete-btn]").click();
+    await page.locator("[data-testid=bulk-confirm-btn]").click();
+
+    await expect(page.locator("[role=status]")).toContainText("syncing to the car");
+  });
+
   test("boombox — deselecting trims the batch to the chosen names", async ({
     page,
   }) => {

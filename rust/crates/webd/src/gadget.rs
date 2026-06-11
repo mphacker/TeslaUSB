@@ -180,33 +180,35 @@ pub(crate) fn delete_request(plan: &DeletePlan) -> Value {
     })
 }
 
-/// Build the `request_mutation` wire request to install a staged file into a
-/// partition (the generic media-install primitive). `source_path` is the
-/// absolute path of a staged source file on the Pi data area that `gadgetd`
-/// re-opens (`O_NOFOLLOW`, regular-file-only) and copies into `rel_path` under
-/// the mounted partition root via temp + atomic rename. `rel_path` must be a
-/// fixed, validated, partition-root-relative destination — never an
-/// attacker-controlled value.
-pub(crate) fn install_request(partition: u8, rel_path: &str, source_path: &str) -> Value {
+/// Build the `enqueue_mutation` request to install a staged file on a partition
+/// via the durable, frictionless write path. Rather than refusing on a
+/// connected host (the old synchronous handoff behaviour), `gadgetd` accepts
+/// this immediately, persists it, and applies it at the next safe window.
+/// `source_path` doubles as `blob_path` so `gadgetd` reclaims (unlinks) the
+/// staged file once the entry reaches a terminal state — `webd` must NOT unlink
+/// it on the success path. `rel_path` must be a fixed, validated,
+/// partition-root-relative destination, never attacker-controlled.
+pub(crate) fn enqueue_install_request(partition: u8, rel_path: &str, source_path: &str) -> Value {
     json!({
-        "cmd": "request_mutation",
+        "cmd": "enqueue_mutation",
         "partition": partition,
         "mutation": { "op": "install_file", "rel_path": rel_path, "source_path": source_path },
+        "blob_path": source_path,
     })
 }
 
-/// Build the `request_mutation` wire request to remove one or more files from a
-/// partition in a SINGLE handoff (the generic media-remove primitive). Uses
-/// `gadgetd`'s regular-file-only, idempotent-on-absent `delete_paths` set form
-/// (not `delete_path`): removing an already-absent asset is a success (a
-/// retried remove is safe), and a directory at a path is refused rather than
-/// recursively deleted. A single handoff for the whole set is deliberate —
-/// every handoff ejects and remounts the car-facing USB, so deleting `N` files
-/// in `N` handoffs would be `N` disconnect cycles. `rel_paths` must be fixed,
-/// validated, partition-root-relative destinations — never attacker-controlled.
-pub(crate) fn remove_request_many(partition: u8, rel_paths: &[String]) -> Value {
+/// Build the `enqueue_mutation` request to remove one or more files in a single
+/// future handoff via the durable write path. Uses `gadgetd`'s regular-file-
+/// only, idempotent-on-absent `delete_paths` set form (not `delete_path`):
+/// removing an already-absent asset is a success (a retried remove is safe),
+/// and a directory at a path is refused rather than recursively deleted. A
+/// single handoff for the whole set is deliberate — every handoff ejects and
+/// remounts the car-facing USB, so deleting `N` files in `N` handoffs would be
+/// `N` disconnect cycles. No `blob_path` (a delete stages nothing). `rel_paths`
+/// must be fixed, validated, partition-root-relative destinations.
+pub(crate) fn enqueue_remove_request_many(partition: u8, rel_paths: &[String]) -> Value {
     json!({
-        "cmd": "request_mutation",
+        "cmd": "enqueue_mutation",
         "partition": partition,
         "mutation": { "op": "delete_paths", "rel_paths": rel_paths },
     })
@@ -292,6 +294,38 @@ pub(crate) fn map_mutation_outcome(resp: &Value) -> MutationOutcome {
             detail: detail(),
         },
         _ => MutationOutcome::BadResponse(format!("unexpected gadgetd response: {resp}")),
+    }
+}
+
+/// The result of an `enqueue_mutation` request (the frictionless write path).
+/// Distinct from [`MutationOutcome`]: enqueue does NOT wait for the handoff, so
+/// there is no done/failed/critical — only accepted-and-durable, rejected-up-
+/// front, or an unparseable reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum QueueOutcome {
+    /// Accepted into the durable queue; will apply at the next safe window.
+    /// Carries the `job_id` the SPA can poll/correlate. → `202`.
+    Queued { job_id: String },
+    /// `gadgetd` rejected the mutation before queueing it — an invalid mutation
+    /// or partition (a client bug) or a full queue (backpressure). → `422`.
+    Rejected(String),
+    /// `gadgetd` returned a reply `webd` could not interpret. → `502`.
+    BadResponse(String),
+}
+
+/// Interpret a `gadgetd` `enqueue_mutation` response into a [`QueueOutcome`].
+pub(crate) fn map_queue_outcome(resp: &Value) -> QueueOutcome {
+    if let Some(err) = resp.get("error").and_then(Value::as_str) {
+        return QueueOutcome::Rejected(err.to_owned());
+    }
+    match (
+        resp.get("job_id").and_then(Value::as_str),
+        resp.get("state").and_then(Value::as_str),
+    ) {
+        (Some(job_id), Some("queued")) => QueueOutcome::Queued {
+            job_id: job_id.to_owned(),
+        },
+        _ => QueueOutcome::BadResponse(format!("unexpected gadgetd enqueue response: {resp}")),
     }
 }
 
@@ -461,8 +495,9 @@ mod stub_client {
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
     use super::{
-        DeleteRefusal, MutationOutcome, install_request, map_mutation_outcome, map_status,
-        plan_car_delete, remove_request_many,
+        DeleteRefusal, MutationOutcome, QueueOutcome, enqueue_install_request,
+        enqueue_remove_request_many, map_mutation_outcome, map_queue_outcome, map_status,
+        plan_car_delete,
     };
     use serde_json::json;
 
@@ -696,41 +731,50 @@ mod tests {
     }
 
     #[test]
-    fn install_request_carries_install_file_op() {
-        let req = install_request(2, "LockChime.wav", "/data/cache/media-staging/x.wav");
-        assert_eq!(req["cmd"], "request_mutation");
+    fn enqueue_install_request_carries_blob_path_for_reclaim() {
+        let req = enqueue_install_request(2, "LockChime.wav", "/data/teslausb/stage/x.wav");
+        assert_eq!(req["cmd"], "enqueue_mutation");
         assert_eq!(req["partition"], 2);
         assert_eq!(req["mutation"]["op"], "install_file");
-        assert_eq!(req["mutation"]["rel_path"], "LockChime.wav");
+        assert_eq!(req["mutation"]["source_path"], "/data/teslausb/stage/x.wav");
+        // blob_path mirrors source_path so gadgetd unlinks the staged file.
+        assert_eq!(req["blob_path"], "/data/teslausb/stage/x.wav");
+    }
+
+    #[test]
+    fn enqueue_remove_request_many_has_no_blob_path() {
+        let req = enqueue_remove_request_many(2, &["Music/a.mp3".to_owned()]);
+        assert_eq!(req["cmd"], "enqueue_mutation");
+        assert_eq!(req["mutation"]["op"], "delete_paths");
+        assert!(req.get("blob_path").is_none(), "a delete stages no blob");
+    }
+
+    #[test]
+    fn maps_queued_enqueue_response() {
+        let resp = json!({ "job_id": "m-7", "state": "queued" });
         assert_eq!(
-            req["mutation"]["source_path"],
-            "/data/cache/media-staging/x.wav"
+            map_queue_outcome(&resp),
+            QueueOutcome::Queued {
+                job_id: "m-7".to_owned()
+            }
         );
     }
 
     #[test]
-    fn remove_request_many_single_path_is_a_one_element_set() {
-        // The idempotent, file-only `delete_paths` set form (not `delete_path`),
-        // so removing an absent single-slot asset is a success and a directory
-        // is refused rather than recursively deleted.
-        let req = remove_request_many(2, &["LockChime.wav".to_owned()]);
-        assert_eq!(req["cmd"], "request_mutation");
-        assert_eq!(req["partition"], 2);
-        assert_eq!(req["mutation"]["op"], "delete_paths");
-        let paths = req["mutation"]["rel_paths"].as_array().unwrap();
-        assert_eq!(paths.len(), 1);
-        assert_eq!(paths[0], "LockChime.wav");
+    fn maps_enqueue_error_to_rejected() {
+        let resp = json!({ "error": "invalid mutation: empty path" });
+        assert!(matches!(
+            map_queue_outcome(&resp),
+            QueueOutcome::Rejected(_)
+        ));
     }
 
     #[test]
-    fn remove_request_many_carries_all_paths_in_one_mutation() {
-        let req = remove_request_many(2, &["Boombox/a.wav".to_owned(), "Boombox/b.mp3".to_owned()]);
-        assert_eq!(req["cmd"], "request_mutation");
-        assert_eq!(req["partition"], 2);
-        assert_eq!(req["mutation"]["op"], "delete_paths");
-        let paths = req["mutation"]["rel_paths"].as_array().unwrap();
-        assert_eq!(paths.len(), 2);
-        assert_eq!(paths[0], "Boombox/a.wav");
-        assert_eq!(paths[1], "Boombox/b.mp3");
+    fn maps_unparseable_enqueue_response_to_bad_response() {
+        let resp = json!({ "state": "weird" });
+        assert!(matches!(
+            map_queue_outcome(&resp),
+            QueueOutcome::BadResponse(_)
+        ));
     }
 }

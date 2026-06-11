@@ -12,7 +12,7 @@
 
 import { useEffect, useRef, useState } from "preact/hooks";
 import type { RefObject } from "preact";
-import { ApiError } from "../api/client";
+import { ApiError, isQueued } from "../api/client";
 import type { MediaItem, MediaList } from "../api/types";
 
 export type { MediaItem };
@@ -80,16 +80,22 @@ export function fmtBytes(n: number | null | undefined): string {
 interface UseMediaCategoryOptions {
   /** `GET` function: returns `Promise<MediaList>`. */
   fetchList: (signal?: AbortSignal) => Promise<MediaList>;
-  /** `POST` install function. */
-  install: (file: File | Blob, signal?: AbortSignal) => Promise<unknown>;
-  /** `DELETE` remove function. */
-  remove: (name: string, signal?: AbortSignal) => Promise<unknown>;
+  /** `POST` install function. Resolves with the mutation result (`state`). */
+  install: (
+    file: File | Blob,
+    signal?: AbortSignal,
+  ) => Promise<{ state?: string }>;
+  /** `DELETE` remove function. Resolves with the mutation result (`state`). */
+  remove: (name: string, signal?: AbortSignal) => Promise<{ state?: string }>;
   /**
    * `POST /bulk-delete` function. Optional: a category that supplies it gets
    * the multi-select + "Delete selected" affordances; one without it keeps
    * single-row remove only.
    */
-  bulkDelete?: (names: string[], signal?: AbortSignal) => Promise<unknown>;
+  bulkDelete?: (
+    names: string[],
+    signal?: AbortSignal,
+  ) => Promise<{ state?: string }>;
 }
 
 export interface UseMediaCategory {
@@ -201,11 +207,15 @@ export function useMediaCategory({
     const ac = new AbortController();
     uploadAbortRef.current = ac;
     try {
-      await install(selectedFile, ac.signal);
+      const res = await install(selectedFile, ac.signal);
       const name = selectedFile.name;
       setSelectedFile(null);
       if (fileInputRef.current) fileInputRef.current.value = "";
-      setNotice(`Installed "${name}".`);
+      setNotice(
+        isQueued(res)
+          ? `Saved "${name}" — syncing to the car.`
+          : `Installed "${name}".`,
+      );
       const refetchCtrl = new AbortController();
       listAbortRef.current?.abort();
       listAbortRef.current = refetchCtrl;
@@ -236,9 +246,13 @@ export function useMediaCategory({
     const ac = new AbortController();
     removeAbortRef.current = ac;
     try {
-      await remove(name, ac.signal);
+      const res = await remove(name, ac.signal);
       setConfirmRemoveName(null);
-      setNotice(`Removed "${name}".`);
+      setNotice(
+        isQueued(res)
+          ? `Removing "${name}" — syncing to the car.`
+          : `Removed "${name}".`,
+      );
       const refetchCtrl = new AbortController();
       listAbortRef.current?.abort();
       listAbortRef.current = refetchCtrl;
@@ -301,13 +315,18 @@ export function useMediaCategory({
     const ac = new AbortController();
     bulkAbortRef.current = ac;
     try {
-      await bulkDelete(names, ac.signal);
+      const res = await bulkDelete(names, ac.signal);
       setConfirmBulk(false);
       setSelected(new Set());
+      const queued = isQueued(res);
       setNotice(
         names.length === 1
-          ? `Removed "${names[0]}".`
-          : `Removed ${names.length} items.`,
+          ? queued
+            ? `Removing "${names[0]}" — syncing to the car.`
+            : `Removed "${names[0]}".`
+          : queued
+            ? `Removing ${names.length} items — syncing to the car.`
+            : `Removed ${names.length} items.`,
       );
       const refetchCtrl = new AbortController();
       listAbortRef.current?.abort();

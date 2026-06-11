@@ -392,14 +392,56 @@ fn stage_upload(dir: &std::path::Path, bytes: &[u8]) -> std::io::Result<tempfile
     Ok(tmp)
 }
 
-/// Generic p2-media install primitive: stage `bytes`, hand the staged path to
-/// `gadgetd` as an `install_file` mutation at the fixed `rel_path`, and bracket
-/// the round-trip with `job_status` events under the given `kind`.
+/// Stage `bytes` like [`stage_upload`], but DETACH the temp guard so the file
+/// is NOT unlinked when it drops: ownership passes to `gadgetd`'s durable
+/// mutation queue, which reclaims (unlinks) the blob after the queued entry
+/// reaches a terminal state. Returns the absolute `(path, source_path)` of the
+/// fsynced blob (`source_path` is the UTF-8 form handed to `gadgetd`). The
+/// caller MUST unlink `path` itself on any outcome where `gadgetd` did NOT
+/// accept the mutation (rejected / bad reply / transport fault), otherwise the
+/// blob leaks in the staging dir.
+fn stage_upload_persistent(
+    dir: &std::path::Path,
+    bytes: &[u8],
+) -> std::io::Result<(std::path::PathBuf, String)> {
+    let tmp = stage_upload(dir, bytes)?;
+    // `keep()` disarms the drop-unlink and yields the durable path.
+    let (_file, path) = tmp.keep().map_err(|e| e.error)?;
+    if let Some(source_path) = path.to_str() {
+        let source_path = source_path.to_owned();
+        Ok((path, source_path))
+    } else {
+        // A non-UTF-8 staging path can't be handed to gadgetd; don't leak it.
+        let _ = std::fs::remove_file(&path);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "staged path is not valid UTF-8",
+        ))
+    }
+}
+
+/// The disposition of an `enqueue_mutation` round-trip, surfaced from the
+/// blocking task so the async caller can build the right HTTP response.
+enum EnqueueResult {
+    /// `gadgetd` answered; `outcome` distinguishes queued / rejected / bad-reply.
+    Outcome(gadget::QueueOutcome),
+    /// The `gadgetd` socket round-trip failed (unreachable / protocol).
+    Transport(TransportError),
+    /// Staging the upload to a durable blob failed before any `gadgetd` call.
+    StagingFailed(String),
+}
+
+/// Generic p2-media install primitive (the frictionless write path): stage
+/// `bytes` to a DURABLE blob, hand the staged path to `gadgetd` as a queued
+/// `install_file` mutation at the fixed `rel_path`, and bracket the round-trip
+/// with `job_status` events under the given `kind`.
 ///
-/// The staged file is created and unlinked entirely inside the blocking task,
-/// so it is present for the whole `gadgetd` read and is always cleaned up — on
-/// success, gadget failure, transport error, or a cancelled HTTP request (a
-/// `spawn_blocking` task runs to completion regardless of its `JoinHandle`).
+/// Unlike the legacy synchronous handoff, `gadgetd` accepts the mutation into
+/// its durable queue and answers `202 {state:"queued"}` immediately — it never
+/// hard-fails because the car is connected. The change is applied automatically
+/// at the next safe window. `gadgetd` owns and reclaims the staged blob on a
+/// terminal state; `webd` only unlinks it when `gadgetd` did NOT accept the
+/// mutation (rejected / bad reply / transport fault), so nothing leaks.
 ///
 /// To add another media feature, validate + read the upload bytes in a thin
 /// handler, then call `run_install` with that feature's `kind`, `partition`,
@@ -419,63 +461,57 @@ pub(crate) async fn run_install(
     let staging = state.media.staging_dir();
 
     let join = tokio::task::spawn_blocking(move || {
-        let tmp = match stage_upload(&staging, &bytes) {
-            Ok(tmp) => tmp,
+        // Stage to a durable blob gadgetd reads at apply time (it reclaims it).
+        let (path, source_path) = match stage_upload_persistent(&staging, &bytes) {
+            Ok(pair) => pair,
             Err(err) => {
                 let detail = format!("staging failed: {err}");
                 jobs.publish_job(job_failed(job_id, kind, detail.clone()));
-                return Err(detail);
+                return EnqueueResult::StagingFailed(detail);
             }
         };
-        let Some(source_path) = tmp.path().to_str().map(str::to_owned) else {
-            let detail = "staged path is not valid UTF-8".to_owned();
-            jobs.publish_job(job_failed(job_id, kind, detail.clone()));
-            return Err(detail);
-        };
-        let request = gadget::install_request(partition, &rel_path, &source_path);
-        let result = client.call(request);
-        match &result {
+        let request = gadget::enqueue_install_request(partition, &rel_path, &source_path);
+        match client.call(request) {
             Ok(resp) => {
-                jobs.publish_job(job_for_outcome(
-                    job_id,
-                    kind,
-                    &gadget::map_mutation_outcome(resp),
-                ));
+                let outcome = gadget::map_queue_outcome(&resp);
+                // gadgetd only takes ownership of the blob when it accepts the
+                // mutation; on any other outcome webd must unlink it.
+                if !matches!(outcome, gadget::QueueOutcome::Queued { .. }) {
+                    let _ = std::fs::remove_file(&path);
+                }
+                jobs.publish_job(job_for_queue_outcome(job_id, kind, &outcome));
+                EnqueueResult::Outcome(outcome)
             }
             Err(transport) => {
+                let _ = std::fs::remove_file(&path);
                 jobs.publish_job(job_failed(
                     job_id,
                     kind,
                     format!("gadgetd transport: {transport:?}"),
                 ));
+                EnqueueResult::Transport(transport)
             }
         }
-        // `tmp` drops here, unlinking the staged file on every path.
-        Ok(result)
     })
     .await;
 
-    let resp = match join {
-        Ok(Ok(Ok(resp))) => resp,
-        Ok(Ok(Err(transport))) => return Err(transport_to_error(transport)),
-        Ok(Err(detail)) => {
-            return Err(ApiError::status(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "staging_failed",
-                detail,
-            ));
-        }
+    match join {
+        Ok(EnqueueResult::Outcome(outcome)) => queue_outcome_to_response(&outcome),
+        Ok(EnqueueResult::Transport(transport)) => Err(transport_to_error(transport)),
+        Ok(EnqueueResult::StagingFailed(detail)) => Err(ApiError::status(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "staging_failed",
+            detail,
+        )),
         Err(_) => {
             state.jobs.publish_job(job_failed(
                 job_id,
                 kind,
                 "blocking task join failed".to_owned(),
             ));
-            return Err(ApiError::Internal);
+            Err(ApiError::Internal)
         }
-    };
-
-    outcome_to_response(&gadget::map_mutation_outcome(&resp))
+    }
 }
 
 /// Generic p2-media remove primitive: hand `gadgetd` a `delete_paths` mutation
@@ -490,12 +526,15 @@ pub(crate) async fn run_remove(
     run_remove_many(state, kind, partition, vec![rel_path]).await
 }
 
-/// Generic p2-media bulk-remove primitive: hand `gadgetd` ONE `delete_paths`
-/// mutation for the whole `rel_paths` set and bracket the round-trip with
-/// `job_status` events under `kind`. A single handoff for the batch is
-/// deliberate — every handoff ejects and remounts the car-facing USB, so
-/// deleting `N` files in `N` handoffs would be `N` disconnect cycles. Same
-/// regular-file-only, idempotent-on-absent semantics as [`run_remove`].
+/// Generic p2-media bulk-remove primitive (the frictionless write path): hand
+/// `gadgetd` ONE queued `delete_paths` mutation for the whole `rel_paths` set
+/// and bracket the round-trip with `job_status` events under `kind`. A single
+/// handoff for the batch is deliberate — every handoff ejects and remounts the
+/// car-facing USB, so deleting `N` files in `N` handoffs would be `N`
+/// disconnect cycles. `gadgetd` accepts the mutation into its durable queue and
+/// answers `202 {state:"queued"}` immediately; it never hard-fails on a
+/// connected car. Same regular-file-only, idempotent-on-absent semantics as
+/// [`run_remove`].
 ///
 /// `rel_paths` must be non-empty and already sanitised/validated by the caller
 /// (see [`crate::media_upload::plan_bulk_delete`]); this primitive does not
@@ -511,44 +550,43 @@ pub(crate) async fn run_remove_many(
 
     let client = state.gadget.clone();
     let jobs = state.jobs.clone();
-    let request = gadget::remove_request_many(partition, &rel_paths);
+    let request = gadget::enqueue_remove_request_many(partition, &rel_paths);
 
-    let join = tokio::task::spawn_blocking(move || {
-        let result = client.call(request);
-        match &result {
-            Ok(resp) => {
-                jobs.publish_job(job_for_outcome(
-                    job_id,
-                    kind,
-                    &gadget::map_mutation_outcome(resp),
-                ));
-            }
-            Err(transport) => {
-                jobs.publish_job(job_failed(
-                    job_id,
-                    kind,
-                    format!("gadgetd transport: {transport:?}"),
-                ));
-            }
+    let join = tokio::task::spawn_blocking(move || match client.call(request) {
+        Ok(resp) => {
+            let outcome = gadget::map_queue_outcome(&resp);
+            jobs.publish_job(job_for_queue_outcome(job_id, kind, &outcome));
+            EnqueueResult::Outcome(outcome)
         }
-        result
+        Err(transport) => {
+            jobs.publish_job(job_failed(
+                job_id,
+                kind,
+                format!("gadgetd transport: {transport:?}"),
+            ));
+            EnqueueResult::Transport(transport)
+        }
     })
     .await;
 
-    let resp = match join {
-        Ok(Ok(resp)) => resp,
-        Ok(Err(transport)) => return Err(transport_to_error(transport)),
+    match join {
+        Ok(EnqueueResult::Outcome(outcome)) => queue_outcome_to_response(&outcome),
+        Ok(EnqueueResult::Transport(transport)) => Err(transport_to_error(transport)),
+        // A remove stages no blob, so StagingFailed never occurs here.
+        Ok(EnqueueResult::StagingFailed(detail)) => Err(ApiError::status(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "staging_failed",
+            detail,
+        )),
         Err(_) => {
             state.jobs.publish_job(job_failed(
                 job_id,
                 kind,
                 "blocking task join failed".to_owned(),
             ));
-            return Err(ApiError::Internal);
+            Err(ApiError::Internal)
         }
-    };
-
-    outcome_to_response(&gadget::map_mutation_outcome(&resp))
+    }
 }
 /// (contract D2 §2.5/§3). A new subscriber first receives a burst of the
 /// currently-running jobs, then live events as they are published.
@@ -652,6 +690,66 @@ fn job_for_outcome(job_id: u64, kind: &str, outcome: &MutationOutcome) -> JobSta
             detail: Some(msg.clone()),
             handoff_id: None,
         },
+    }
+}
+
+/// Map an `enqueue_mutation` outcome to its `job_status` update. A queued
+/// mutation is terminal for the `webd` job (the change is durably saved); the
+/// SPA shows "saved — syncing to the car" rather than blocking on the handoff.
+fn job_for_queue_outcome(job_id: u64, kind: &str, outcome: &gadget::QueueOutcome) -> JobStatus {
+    match outcome {
+        gadget::QueueOutcome::Queued { job_id: gadget_job } => JobStatus {
+            job_id,
+            kind: kind.to_owned(),
+            state: JobState::Queued,
+            progress: None,
+            detail: Some(format!(
+                "saved as {gadget_job}; will sync to the car at the next safe window"
+            )),
+            handoff_id: None,
+        },
+        gadget::QueueOutcome::Rejected(reason) => JobStatus {
+            job_id,
+            kind: kind.to_owned(),
+            state: JobState::Refused,
+            progress: None,
+            detail: Some(reason.clone()),
+            handoff_id: None,
+        },
+        gadget::QueueOutcome::BadResponse(msg) => JobStatus {
+            job_id,
+            kind: kind.to_owned(),
+            state: JobState::Failed,
+            progress: None,
+            detail: Some(msg.clone()),
+            handoff_id: None,
+        },
+    }
+}
+
+/// Map an `enqueue_mutation` outcome to its HTTP response: accepted → `202`
+/// `{state:"queued", job_id}`; rejected (invalid mutation / full queue) → `422`;
+/// an unparseable `gadgetd` reply → `502`. A queued mutation is NOT an error —
+/// it is the frictionless success path that never surfaces a transient-busy
+/// `409` to the user.
+fn queue_outcome_to_response(
+    outcome: &gadget::QueueOutcome,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    match outcome {
+        gadget::QueueOutcome::Queued { job_id } => Ok((
+            StatusCode::ACCEPTED,
+            Json(json!({ "state": "queued", "job_id": job_id })),
+        )),
+        gadget::QueueOutcome::Rejected(reason) => Err(ApiError::status(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "refused",
+            reason.clone(),
+        )),
+        gadget::QueueOutcome::BadResponse(msg) => Err(ApiError::status(
+            StatusCode::BAD_GATEWAY,
+            "gadgetd_protocol",
+            msg.clone(),
+        )),
     }
 }
 

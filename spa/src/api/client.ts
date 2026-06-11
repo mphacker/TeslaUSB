@@ -121,14 +121,7 @@ async function bulkDelete(
     JSON.stringify({ names }),
     "application/json",
   );
-  if (!res || res.state !== "done") {
-    throw new ApiError(
-      502,
-      "gadgetd_protocol",
-      `unexpected bulk-delete state: ${res?.state ?? "<none>"}`,
-    );
-  }
-  return res;
+  return assertAccepted(res, "bulk-delete");
 }
 
 /** Terminal result of a successful car-delete handoff (`200 {handoff_id, state}`). */
@@ -139,14 +132,52 @@ export interface DeleteClipResult {
 }
 
 /**
- * Terminal result of a successful lock-chime install/remove handoff
- * (`200 {handoff_id, state:"done"}`). Both routes block on the gadgetd
- * eject-handoff and return the terminal state synchronously, exactly like the
- * clip-delete mutation.
+ * Assert a media mutation response reached a webd-accepted state. The
+ * frictionless write path means webd either applies the change synchronously
+ * (`state:"done"`) or — far more often, because the car is usually connected —
+ * accepts it into gadgetd's durable mutation queue and answers `202
+ * {state:"queued", job_id}`. BOTH are success from the UI's point of view:
+ * "done" is already-applied, "queued" is saved-and-syncing. Any other shape is
+ * an unexpected protocol state. Returns the response so callers can chain.
+ */
+function assertAccepted<T extends { state?: string }>(
+  res: T | undefined,
+  verb: string,
+): T {
+  if (!res || (res.state !== "done" && res.state !== "queued")) {
+    throw new ApiError(
+      502,
+      "gadgetd_protocol",
+      `unexpected ${verb} state: ${res?.state ?? "<none>"}`,
+    );
+  }
+  return res;
+}
+
+/**
+ * True when a media mutation was accepted into gadgetd's durable queue
+ * (`202 {state:"queued"}`) rather than applied synchronously. The UI uses this
+ * to show "saved — syncing to the car" instead of "done".
+ */
+export function isQueued(
+  res: { state?: string } | null | undefined,
+): boolean {
+  return res?.state === "queued";
+}
+
+/**
+ * Result of a successful lock-chime install/remove. With the frictionless write
+ * path the change is normally accepted into gadgetd's durable queue and
+ * answered `202 {state:"queued", job_id}` (saved-and-syncing); on the rare
+ * synchronous path it is `200 {handoff_id, state:"done"}` (already applied).
  */
 export interface ChimeHandoffResult {
-  handoff_id: string;
+  /** Present only on the synchronous `"done"` path. */
+  handoff_id?: string;
+  /** `"done"` (applied synchronously) or `"queued"` (accepted into the durable queue, a 202). */
   state: string;
+  /** gadgetd queue entry id; present only on the `"queued"` path. */
+  job_id?: string;
 }
 
 /** The single lock-chime slot id on the p2 MEDIA partition (B-1 is single-slot). */
@@ -289,14 +320,7 @@ export const api = {
       signal,
       form,
     );
-    if (!res || res.state !== "done") {
-      throw new ApiError(
-        502,
-        "gadgetd_protocol",
-        `unexpected install state: ${res?.state ?? "<none>"}`,
-      );
-    }
-    return res;
+    return assertAccepted(res, "install");
   },
 
   /**
@@ -312,14 +336,7 @@ export const api = {
       `/api/chimes/${LOCK_CHIME_ID}`,
       signal,
     );
-    if (!res || res.state !== "done") {
-      throw new ApiError(
-        502,
-        "gadgetd_protocol",
-        `unexpected remove state: ${res?.state ?? "<none>"}`,
-      );
-    }
-    return res;
+    return assertAccepted(res, "remove");
   },
 
   // ── Toybox media categories (GET = catalog read; POST/DELETE = gadgetd handoff) ──
@@ -341,14 +358,7 @@ export const api = {
       signal,
       form,
     );
-    if (!res || res.state !== "done") {
-      throw new ApiError(
-        502,
-        "gadgetd_protocol",
-        `unexpected install state: ${res?.state ?? "<none>"}`,
-      );
-    }
-    return res;
+    return assertAccepted(res, "install");
   },
 
   /** Remove a boombox horn sound by file name (`DELETE /api/boombox/:name`). */
@@ -361,14 +371,7 @@ export const api = {
       `/api/boombox/${encodeURIComponent(name)}`,
       signal,
     );
-    if (!res || res.state !== "done") {
-      throw new ApiError(
-        502,
-        "gadgetd_protocol",
-        `unexpected remove state: ${res?.state ?? "<none>"}`,
-      );
-    }
-    return res;
+    return assertAccepted(res, "remove");
   },
 
   /** List installed music files (`GET /api/music`). */
@@ -387,14 +390,7 @@ export const api = {
       signal,
       form,
     );
-    if (!res || res.state !== "done") {
-      throw new ApiError(
-        502,
-        "gadgetd_protocol",
-        `unexpected install state: ${res?.state ?? "<none>"}`,
-      );
-    }
-    return res;
+    return assertAccepted(res, "install");
   },
 
   /** Remove a music file by name (`DELETE /api/music/:name`). */
@@ -407,14 +403,7 @@ export const api = {
       `/api/music/${encodeURIComponent(name)}`,
       signal,
     );
-    if (!res || res.state !== "done") {
-      throw new ApiError(
-        502,
-        "gadgetd_protocol",
-        `unexpected remove state: ${res?.state ?? "<none>"}`,
-      );
-    }
-    return res;
+    return assertAccepted(res, "remove");
   },
 
   /** List installed light shows (`GET /api/lightshows`, excludes wraps). */
@@ -434,14 +423,7 @@ export const api = {
       signal,
       form,
     );
-    if (!res || res.state !== "done") {
-      throw new ApiError(
-        502,
-        "gadgetd_protocol",
-        `unexpected install state: ${res?.state ?? "<none>"}`,
-      );
-    }
-    return res;
+    return assertAccepted(res, "install");
   },
 
   /** Remove a light show file by name (`DELETE /api/lightshows/:name`). */
@@ -454,14 +436,7 @@ export const api = {
       `/api/lightshows/${encodeURIComponent(name)}`,
       signal,
     );
-    if (!res || res.state !== "done") {
-      throw new ApiError(
-        502,
-        "gadgetd_protocol",
-        `unexpected remove state: ${res?.state ?? "<none>"}`,
-      );
-    }
-    return res;
+    return assertAccepted(res, "remove");
   },
 
   /** List installed license plate images (`GET /api/plates`). */
@@ -480,14 +455,7 @@ export const api = {
       signal,
       form,
     );
-    if (!res || res.state !== "done") {
-      throw new ApiError(
-        502,
-        "gadgetd_protocol",
-        `unexpected install state: ${res?.state ?? "<none>"}`,
-      );
-    }
-    return res;
+    return assertAccepted(res, "install");
   },
 
   /** Remove a license plate image by name (`DELETE /api/plates/:name`). */
@@ -500,14 +468,7 @@ export const api = {
       `/api/plates/${encodeURIComponent(name)}`,
       signal,
     );
-    if (!res || res.state !== "done") {
-      throw new ApiError(
-        502,
-        "gadgetd_protocol",
-        `unexpected remove state: ${res?.state ?? "<none>"}`,
-      );
-    }
-    return res;
+    return assertAccepted(res, "remove");
   },
 
   /** List installed wrap images (`GET /api/wraps`). */
@@ -526,14 +487,7 @@ export const api = {
       signal,
       form,
     );
-    if (!res || res.state !== "done") {
-      throw new ApiError(
-        502,
-        "gadgetd_protocol",
-        `unexpected install state: ${res?.state ?? "<none>"}`,
-      );
-    }
-    return res;
+    return assertAccepted(res, "install");
   },
 
   /** Remove a wrap image by name (`DELETE /api/wraps/:name`). */
@@ -546,14 +500,7 @@ export const api = {
       `/api/wraps/${encodeURIComponent(name)}`,
       signal,
     );
-    if (!res || res.state !== "done") {
-      throw new ApiError(
-        502,
-        "gadgetd_protocol",
-        `unexpected remove state: ${res?.state ?? "<none>"}`,
-      );
-    }
-    return res;
+    return assertAccepted(res, "remove");
   },
 
   /**

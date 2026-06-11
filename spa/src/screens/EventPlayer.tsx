@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { Icon } from "../components/Icon";
 import { api, ApiError } from "../api/client";
-import type { Clip, EventItem } from "../api/types";
+import type { Angle, Clip, EventItem } from "../api/types";
 import { HudController, type HudElements } from "../player/hud-controller";
 import "../styles/player.css";
 
@@ -92,6 +92,20 @@ function clipSize(clip: Clip | null): string {
   if (!clip) return "\u2014";
   const bytes = clip.angles.reduce((n, a) => n + (a.size_bytes ?? 0), 0);
   return `${(bytes / 1_000_000).toFixed(2)} MB`;
+}
+
+/** The one `view_kind` webd's stream/export handlers actually serve: the
+ *  Pi-side archive copy of a clip angle. MUST match webd `media.rs`
+ *  (`VIEW_ARCHIVE`). */
+const VIEW_ARCHIVE = "archive";
+
+/** An angle is playable iff webd will stream it. Live `ro_usb` angles (a clip
+ *  still on the car's USB, not yet archived) `404` on stream — raw exFAT
+ *  byte-range streaming is a deferred seam — so we must not point a `<video>`
+ *  at them. Any unknown kind is treated as not-yet-playable: a safe default
+ *  that never fires a doomed request and respects `view_kind` being opaque. */
+function isStreamableAngle(angle: Angle | undefined): boolean {
+  return angle?.view_kind === VIEW_ARCHIVE;
 }
 
 function errMessage(err: unknown): string {
@@ -255,7 +269,14 @@ export function EventPlayer() {
   const deleteAbortRef = useRef<AbortController | null>(null);
 
   const currentEvent = events && events.length ? events[index] : undefined;
-  const streamUrl = clip ? api.streamUrl(clip.id, camera) : "";
+  const currentAngle = clip?.angles.find((a) => a.camera === camera);
+  // Only build a stream URL for an angle webd will actually serve; pointing the
+  // <video> at a non-archive (ro_usb) angle 404s and logs a console error.
+  const streamUrl =
+    clip && isStreamableAngle(currentAngle) ? api.streamUrl(clip.id, camera) : "";
+  // A clip is playable when any angle is archive-backed. ro_usb-only clips are
+  // still live on the car's USB and have nothing webd can stream or export yet.
+  const clipPlayable = !!clip && clip.angles.some(isStreamableAngle);
 
   // ── Mount: seed HUD toggle from localStorage + load the event playlist. ──
   useEffect(() => {
@@ -364,13 +385,15 @@ export function EventPlayer() {
 
   const switchCamera = (cam: CameraDef) => {
     if (!clip) return;
-    if (!clip.angles.some((a) => a.camera === cam.key)) return;
+    if (!clip.angles.some((a) => a.camera === cam.key && isStreamableAngle(a)))
+      return;
     if (cam.key === camera) return;
     setCamera(cam.key);
   };
 
   const cameraAvailable = (cam: CameraDef): boolean =>
-    !!clip && clip.angles.some((a) => a.camera === cam.key);
+    !!clip &&
+    clip.angles.some((a) => a.camera === cam.key && isStreamableAngle(a));
 
   // ── Playlist navigation: step through the loaded events. The clip/stream/HUD
   //    effects all key off `currentEvent`, so flipping the index re-resolves the
@@ -465,6 +488,16 @@ export function EventPlayer() {
         >
           Your browser does not support the video tag.
         </video>
+        {clip && !clipPlayable && (
+          <div class="video-unavailable-overlay" data-testid="video-unarchived">
+            <Icon name="hard-drive" class="video-unavailable-icon" />
+            <p class="video-unavailable-title">Not yet archived</p>
+            <p class="video-unavailable-detail">
+              This clip is still on the car's USB drive. Playback and download
+              become available once it's archived to the device.
+            </p>
+          </div>
+        )}
       </div>
 
       {/* Top overlay with location and info */}
@@ -611,13 +644,13 @@ export function EventPlayer() {
           </div>
         ))}
 
-        {/* Download all angles (ZIP export) */}
+        {/* Download all angles (ZIP export) — only when archive-backed. */}
         <a
-          class={`camera-option download-option${clip ? "" : " disabled"}`}
+          class={`camera-option download-option${clipPlayable ? "" : " disabled"}`}
           id="downloadButton"
-          href={clip ? api.exportUrl(clip.id) : undefined}
+          href={clipPlayable && clip ? api.exportUrl(clip.id) : undefined}
           download
-          aria-disabled={clip ? "false" : "true"}
+          aria-disabled={clipPlayable ? "false" : "true"}
         >
           <Icon name="download" class="camera-icon" />
           <div class="camera-label">Download All</div>

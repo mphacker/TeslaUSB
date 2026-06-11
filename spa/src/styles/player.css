@@ -47,6 +47,42 @@
   transform: translateZ(0);
 }
 
+/* "Not yet archived" state — shown over the (empty) video element when the
+   clip is still live on the car's USB and webd has no archive angle to stream. */
+.event-player-container .video-unavailable-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  padding: 1.5rem;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.82);
+  pointer-events: none;
+}
+
+.event-player-container .video-unavailable-icon {
+  width: 48px;
+  height: 48px;
+  opacity: 0.7;
+}
+
+.event-player-container .video-unavailable-title {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.event-player-container .video-unavailable-detail {
+  margin: 0;
+  max-width: 32ch;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.6);
+}
+
 /* iOS-specific fixes to prevent native video controls from hiding overlays */
 .event-player-container .main-video::-webkit-media-controls-panel {
   display: flex !important;

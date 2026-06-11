@@ -199,6 +199,44 @@ pub(crate) struct DayTripCount {
     pub distance_m: f64,
 }
 
+/// One `{severity, count}` row of `events_by_severity` in `GET /api/analytics`.
+/// `severity` is the indexd ordinal (1=info, 2=warning, 3=critical).
+#[derive(Debug, Serialize)]
+pub(crate) struct SeverityCount {
+    /// `events.severity` ordinal.
+    pub severity: i64,
+    /// Number of events at this severity.
+    pub count: i64,
+}
+
+/// Per-folder-class footage aggregate (`video_stats.by_folder_class`).
+#[derive(Debug, Serialize)]
+pub(crate) struct FolderClassStat {
+    /// `clips.folder_class` (e.g. `RecentClips`, `SavedClips`, `SentryClips`).
+    pub folder_class: String,
+    /// Number of distinct clips in this folder class.
+    pub clip_count: i64,
+    /// Number of camera-angle files across those clips.
+    pub file_count: i64,
+    /// Total bytes across those angle files (`SUM(angles.size_bytes)`).
+    pub size_bytes: i64,
+}
+
+/// Footage aggregates over `clips` ⋈ `angles` (`GET /api/analytics`).
+/// The catalog-derived parity of v1's storage-analytics video/folder section
+/// (computed from indexed `size_bytes`, not a live filesystem walk).
+#[derive(Debug, Serialize)]
+pub(crate) struct VideoStats {
+    /// Total distinct clips.
+    pub total_clips: i64,
+    /// Total camera-angle files.
+    pub total_files: i64,
+    /// Total bytes across all angle files.
+    pub total_bytes: i64,
+    /// Breakdown by folder class, ordered by class name.
+    pub by_folder_class: Vec<FolderClassStat>,
+}
+
 /// Basic catalog aggregates (`GET /api/analytics`).
 #[derive(Debug, Serialize)]
 pub(crate) struct AnalyticsDto {
@@ -212,6 +250,18 @@ pub(crate) struct AnalyticsDto {
     pub events_by_type: Vec<EventTypeCount>,
     /// Trip counts + distance grouped by day, most recent first.
     pub trips_by_day: Vec<DayTripCount>,
+    /// `SUM(trips.ended_at - trips.started_at)`, seconds.
+    pub total_drive_time_s: i64,
+    /// `COUNT(events WHERE severity >= 2)` — warnings + critical.
+    pub warning_event_count: i64,
+    /// `AVG(trip_points.speed)`, m/s (`None` when no speed samples exist).
+    pub avg_speed_mps: Option<f64>,
+    /// `MAX(trip_points.speed)`, m/s (`None` when no speed samples exist).
+    pub max_speed_mps: Option<f64>,
+    /// Event counts grouped by severity ordinal, ascending.
+    pub events_by_severity: Vec<SeverityCount>,
+    /// Footage aggregates over `clips` ⋈ `angles`.
+    pub video_stats: VideoStats,
 }
 
 /// One raw `prefs` row (`GET /api/settings`). Returned verbatim — `webd` does

@@ -6,7 +6,8 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::dto::{
     AnalyticsDto, AngleDto, Bbox, ClipDto, DaySummary, DayTripCount, EventDto, EventTypeCount,
-    InstalledChimeDto, MediaItemDto, PrefDto, TripDetailDto, TripDto, TripPointDto,
+    FolderClassStat, InstalledChimeDto, MediaItemDto, PrefDto, SeverityCount, TripDetailDto,
+    TripDto, TripPointDto, VideoStats,
 };
 use crate::polyline;
 
@@ -203,12 +204,85 @@ pub(crate) fn analytics(conn: &Connection) -> Result<AnalyticsDto, rusqlite::Err
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
+    let total_drive_time_s: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(ended_at - started_at), 0) FROM trips",
+        [],
+        |r| r.get(0),
+    )?;
+    let warning_event_count: i64 =
+        conn.query_row("SELECT COUNT(*) FROM events WHERE severity >= 2", [], |r| {
+            r.get(0)
+        })?;
+    // `AVG`/`MAX` over an all-NULL (or empty) column yield SQL NULL → `None`.
+    let (avg_speed_mps, max_speed_mps): (Option<f64>, Option<f64>) = conn.query_row(
+        "SELECT AVG(speed), MAX(speed) FROM trip_points WHERE speed IS NOT NULL",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+
+    let mut by_sev = conn
+        .prepare("SELECT severity, COUNT(*) FROM events GROUP BY severity ORDER BY severity ASC")?;
+    let events_by_severity = by_sev
+        .query_map([], |row| {
+            Ok(SeverityCount {
+                severity: row.get(0)?,
+                count: row.get(1)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let video_stats = video_stats(conn)?;
+
     Ok(AnalyticsDto {
         total_trips,
         total_distance_m,
         total_events,
         events_by_type,
         trips_by_day,
+        total_drive_time_s,
+        warning_event_count,
+        avg_speed_mps,
+        max_speed_mps,
+        events_by_severity,
+        video_stats,
+    })
+}
+
+/// Footage aggregates over `clips` ⋈ `angles` — totals plus a per-folder-class
+/// breakdown, all derived from indexed `size_bytes` (read-only; no filesystem
+/// walk). A clip with no angle rows still counts toward `total_clips` and its
+/// folder class, contributing zero files/bytes (LEFT JOIN; `COUNT(a.id)` and
+/// `SUM(a.size_bytes)` ignore the NULL angle).
+fn video_stats(conn: &Connection) -> Result<VideoStats, rusqlite::Error> {
+    let (total_clips, total_files, total_bytes): (i64, i64, i64) = conn.query_row(
+        "SELECT COUNT(DISTINCT c.id), COUNT(a.id), COALESCE(SUM(a.size_bytes), 0) \
+         FROM clips c LEFT JOIN angles a ON a.clip_id = c.id",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+
+    let mut by_class = conn.prepare(
+        "SELECT c.folder_class, COUNT(DISTINCT c.id), COUNT(a.id), \
+                COALESCE(SUM(a.size_bytes), 0) \
+         FROM clips c LEFT JOIN angles a ON a.clip_id = c.id \
+         GROUP BY c.folder_class ORDER BY c.folder_class ASC",
+    )?;
+    let by_folder_class = by_class
+        .query_map([], |row| {
+            Ok(FolderClassStat {
+                folder_class: row.get(0)?,
+                clip_count: row.get(1)?,
+                file_count: row.get(2)?,
+                size_bytes: row.get(3)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(VideoStats {
+        total_clips,
+        total_files,
+        total_bytes,
+        by_folder_class,
     })
 }
 

@@ -115,6 +115,25 @@ export interface DayTripCount {
   distance_m: number;
 }
 
+export interface SeverityCount {
+  severity: number;
+  count: number;
+}
+
+export interface FolderClassStat {
+  folder_class: string;
+  clip_count: number;
+  file_count: number;
+  size_bytes: number;
+}
+
+export interface VideoStats {
+  total_clips: number;
+  total_files: number;
+  total_bytes: number;
+  by_folder_class: FolderClassStat[];
+}
+
 /** `GET /api/analytics`. */
 export interface Analytics {
   total_trips: number;
@@ -122,6 +141,13 @@ export interface Analytics {
   total_events: number;
   events_by_type: EventTypeCount[];
   trips_by_day: DayTripCount[];
+  // Extended aggregates (older webd builds may omit these — treat as absent).
+  total_drive_time_s?: number;
+  warning_event_count?: number;
+  avg_speed_mps?: number | null;
+  max_speed_mps?: number | null;
+  events_by_severity?: SeverityCount[];
+  video_stats?: VideoStats;
 }
 
 /** `GET /api/settings` raw pref row. */

@@ -153,29 +153,45 @@ test.describe("analytics UAT", () => {
       "Storage Analytics Dashboard",
     );
 
-    // (b) Storage-analytics half is the legacy DEGRADED state (by design — webd
-    //     serves no storage/partition/video/folder data). Honest copy, no
-    //     fabricated numbers.
+    // (b) Storage-analytics half is the legacy DEGRADED state for the metrics
+    //     that genuinely come from the storage probe (drive-usage, partition,
+    //     recording-estimate) — those live on the Storage page, not here.
     const degraded = page.locator("[data-testid=storage-degraded]");
     await expect(degraded).toBeVisible();
     await expect(degraded).toContainText("Storage analytics unavailable");
     // The genuine-read-failure alert is NOT shown (the read succeeded).
     await expect(page.locator("[data-testid=analytics-unavailable]")).toHaveCount(0);
 
-    // (c) Driving Statistics — LIVE from /api/analytics (seed: 30556.3 m / 3
-    //     trips / 3 events → 19.0 mi). Fields webd can't serve show the "—".
+    // (c) Driving Statistics — LIVE from /api/analytics. Seed: 30556.3 m / 3
+    //     trips / 3 events → 19.0 mi; drive time 0.5+0.6+0.7 h = 6480 s →
+    //     "1h 48m"; speeds avg 17.375 m/s → 38.9 mph, max 36 m/s → 80.5 mph;
+    //     2 of 3 events are sev≥2; events/100mi = 3·100·1609.344/30556.3 = 15.8.
     const ds = page.locator("[data-testid=driving-stats]");
     await expect(ds).toBeVisible();
     await expect(page.locator("#dsTotalDist")).toHaveText("19.0 mi");
     await expect(page.locator("#dsTripCount")).toHaveText("3");
     await expect(page.locator("#dsEventCount")).toHaveText("3");
-    // webd-absent telemetry fields render the legacy em-dash placeholder.
-    await expect(page.locator("#dsTotalTime")).toHaveText(EM_DASH);
-    await expect(page.locator("#dsAvgSpeed")).toHaveText(EM_DASH);
-    await expect(page.locator("#dsMaxSpeed")).toHaveText(EM_DASH);
+    await expect(page.locator("#dsTotalTime")).toHaveText("1h 48m");
+    await expect(page.locator("#dsAvgSpeed")).toHaveText("38.9 mph");
+    await expect(page.locator("#dsMaxSpeed")).toHaveText("80.5 mph");
+    await expect(page.locator("#dsWarnCount")).toHaveText("2");
+    await expect(page.locator("#dsEvPer100")).toHaveText("15.8");
+    // FSD usage is not aggregated by webd → still the legacy em-dash.
     await expect(page.locator("#dsFsdPct")).toHaveText(EM_DASH);
-    await expect(page.locator("#dsWarnCount")).toHaveText(EM_DASH);
-    await expect(page.locator("#dsEvPer100")).toHaveText(EM_DASH);
+
+    // (c2) Video Statistics — LIVE footage aggregates. Seed: 6 clips × 4 angles
+    //      = 24 files; per-angle bytes 1.0–1.3 MB → 27.6 MB total; three folder
+    //      classes (Recent/Saved/Sentry), each 2 clips / 8 files / 9.2 MB.
+    const totals = page.locator("[data-testid=video-totals]");
+    await expect(totals).toBeVisible();
+    await expect(page.locator("#vsTotalClips")).toHaveText("6");
+    await expect(page.locator("#vsTotalFiles")).toHaveText("24");
+    await expect(page.locator("#vsTotalBytes")).toHaveText("27.6 MB");
+    const savedRow = page.locator("[data-testid=folder-table] tr[data-folder=SavedClips]");
+    await expect(savedRow).toContainText("Saved Clips");
+    await expect(savedRow.locator(".number-cell").nth(0)).toHaveText("2");
+    await expect(savedRow.locator(".number-cell").nth(1)).toHaveText("8");
+    await expect(savedRow.locator(".number-cell").nth(2)).toHaveText("9.2 MB");
 
     // (d) Charts: both <canvas> elements present and the loading placeholder gone.
     await expect(page.locator("[data-testid=charts-loading]")).toHaveCount(0);

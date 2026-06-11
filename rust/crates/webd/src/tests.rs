@@ -313,6 +313,39 @@ async fn analytics_aggregates() {
     assert_eq!(body["total_distance_m"], 1234.5);
     assert_eq!(body["events_by_type"].as_array().unwrap().len(), 3);
     assert_eq!(body["trips_by_day"].as_array().unwrap().len(), 2);
+
+    // Drive time: trip1 (1200-1000=200) + trip2 (5100-5000=100) = 300s.
+    assert_eq!(body["total_drive_time_s"], 300);
+    // Warnings/critical: two sev-2 events, one sev-1 → 2.
+    assert_eq!(body["warning_event_count"], 2);
+    // Speeds from trip_points (10.0, 12.0 m/s).
+    assert_eq!(body["avg_speed_mps"], 11.0);
+    assert_eq!(body["max_speed_mps"], 12.0);
+
+    // Severity breakdown ascending: {1:1, 2:2}.
+    let by_sev = body["events_by_severity"].as_array().unwrap();
+    assert_eq!(by_sev.len(), 2);
+    assert_eq!(by_sev[0]["severity"], 1);
+    assert_eq!(by_sev[0]["count"], 1);
+    assert_eq!(by_sev[1]["severity"], 2);
+    assert_eq!(by_sev[1]["count"], 2);
+
+    // Footage: 2 clips, 3 angle files, 1111+2222+3333 = 6666 bytes.
+    let vs = &body["video_stats"];
+    assert_eq!(vs["total_clips"], 2);
+    assert_eq!(vs["total_files"], 3);
+    assert_eq!(vs["total_bytes"], 6666);
+    let by_class = vs["by_folder_class"].as_array().unwrap();
+    assert_eq!(by_class.len(), 2);
+    // Ordered by class name ASC: SavedClips, SentryClips.
+    assert_eq!(by_class[0]["folder_class"], "SavedClips");
+    assert_eq!(by_class[0]["clip_count"], 1);
+    assert_eq!(by_class[0]["file_count"], 2);
+    assert_eq!(by_class[0]["size_bytes"], 3333);
+    assert_eq!(by_class[1]["folder_class"], "SentryClips");
+    assert_eq!(by_class[1]["clip_count"], 1);
+    assert_eq!(by_class[1]["file_count"], 1);
+    assert_eq!(by_class[1]["size_bytes"], 3333);
 }
 
 #[tokio::test]

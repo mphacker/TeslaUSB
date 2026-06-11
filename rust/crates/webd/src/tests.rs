@@ -25,7 +25,8 @@ use tempfile::TempDir;
 use tower::ServiceExt;
 
 use crate::gadget::{GadgetClient, TransportError};
-use crate::{Catalog, MediaConfig, build_router, router_with_gadget};
+use crate::scheduler::SchedulerClient;
+use crate::{Catalog, MediaConfig, build_router, router_with_clients, router_with_gadget};
 
 /// A live fixture: a seeded catalog + its router. `_dir` keeps the temp files
 /// alive for the duration of the test (handlers open the DB per request).
@@ -2092,4 +2093,312 @@ async fn get_wraps_degrades_on_v1_catalog() {
     let (status, body) = get_json(&app, "/api/wraps").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["items"].as_array().unwrap().len(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Chime-scheduler proxy (`/api/chime-scheduler/*`) — webd is a pure forwarder
+// to schedulerd. These tests inject a MockScheduler via `router_with_clients`
+// and assert the request shape webd forwards + the response/error mapping.
+// ---------------------------------------------------------------------------
+
+/// A canned schedulerd reply for the mock.
+enum SchedReply {
+    /// Return this JSON value (a success body or an `{error:{..}}` envelope).
+    Json(Value),
+    /// Simulate the socket being unreachable.
+    Unavailable,
+    /// Simulate an unreadable/garbled reply.
+    Protocol,
+}
+
+/// A mock [`SchedulerClient`] that records the last forwarded request and, when
+/// a `staged_path` is present, whether that file existed and was non-empty at
+/// the instant of the call (proving webd stages the upload before the handoff).
+struct MockScheduler {
+    reply: SchedReply,
+    last: Arc<Mutex<Option<Value>>>,
+    staged_existed: Arc<Mutex<Option<bool>>>,
+}
+
+impl SchedulerClient for MockScheduler {
+    fn call(&self, request: Value) -> Result<Value, TransportError> {
+        if let Some(src) = request["staged_path"].as_str() {
+            let ok = std::fs::metadata(src).map(|m| m.len() > 0).unwrap_or(false);
+            *self.staged_existed.lock().unwrap() = Some(ok);
+        }
+        *self.last.lock().unwrap() = Some(request);
+        match &self.reply {
+            SchedReply::Json(v) => Ok(v.clone()),
+            SchedReply::Unavailable => Err(TransportError::Unavailable("socket down".to_owned())),
+            SchedReply::Protocol => Err(TransportError::Protocol("garbled".to_owned())),
+        }
+    }
+}
+
+/// A scheduler fixture: an empty catalog + a router wired to [`MockScheduler`].
+/// `last` captures the request forwarded to schedulerd.
+struct SchedFixture {
+    _dir: TempDir,
+    app: Router,
+    last: Arc<Mutex<Option<Value>>>,
+    staged_existed: Arc<Mutex<Option<bool>>>,
+}
+
+fn sched_fixture(reply: SchedReply) -> SchedFixture {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("catalog.db");
+    seed(&db_path);
+
+    let static_dir = dir.path().join("static");
+    std::fs::create_dir_all(&static_dir).unwrap();
+    std::fs::write(static_dir.join("index.html"), "<!doctype html>shell").unwrap();
+
+    let catalog = Catalog::open(&db_path).unwrap();
+    let media = MediaConfig::new(dir.path().join("archive"), dir.path().join("cache"));
+    // The gadget client is unused on the scheduler routes; point it at a dead
+    // socket so an accidental call fails loudly rather than silently passing.
+    let gadget_sock = dir.path().join("gadgetd.sock");
+    let gadget = crate::default_gadget_client(gadget_sock);
+
+    let last = Arc::new(Mutex::new(None));
+    let staged_existed = Arc::new(Mutex::new(None));
+    let scheduler: Arc<dyn SchedulerClient> = Arc::new(MockScheduler {
+        reply,
+        last: Arc::clone(&last),
+        staged_existed: Arc::clone(&staged_existed),
+    });
+    let app = router_with_clients(catalog, static_dir, media, gadget, scheduler);
+    SchedFixture {
+        _dir: dir,
+        app,
+        last,
+        staged_existed,
+    }
+}
+
+/// Issue a PUT with a JSON body and return `(status, parsed-json)`.
+async fn put_json(app: &Router, uri: &str, body: Value) -> (StatusCode, Value) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(uri)
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, value)
+}
+
+#[tokio::test]
+async fn chime_scheduler_snapshot_relays_schedulerd_json() {
+    let snap = json!({
+        "schedules": [{ "id": "s-1", "name": "Holidays" }],
+        "groups": [],
+        "randomMode": { "enabled": false },
+        "library": [{ "filename": "Jingle.wav" }],
+    });
+    let fx = sched_fixture(SchedReply::Json(snap.clone()));
+    let (status, body) = get_json(&fx.app, "/api/chime-scheduler").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, snap);
+    // webd forwarded a bare `snapshot` command, no extra fields.
+    let req = fx.last.lock().unwrap().clone().unwrap();
+    assert_eq!(req["cmd"], "snapshot");
+}
+
+#[tokio::test]
+async fn chime_scheduler_add_schedule_is_201_and_forwards_input() {
+    let fx = sched_fixture(SchedReply::Json(json!({ "id": "s-9", "name": "Weekday" })));
+    let input = json!({ "name": "Weekday", "kind": "weekly", "days": [1, 2, 3] });
+    let (status, body) = post_json(&fx.app, "/api/chime-scheduler/schedules", input.clone()).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["id"], "s-9");
+    let req = fx.last.lock().unwrap().clone().unwrap();
+    assert_eq!(req["cmd"], "add_schedule");
+    assert_eq!(req["input"], input);
+}
+
+#[tokio::test]
+async fn chime_scheduler_validation_error_maps_to_422_with_relayed_code() {
+    // schedulerd rejects bad input with a runtime code; webd relays code+message
+    // and maps an unknown code to 422 (the conservative validation default).
+    let fx = sched_fixture(SchedReply::Json(json!({
+        "error": { "code": "bad_weekday", "message": "weekday out of range" }
+    })));
+    let (status, body) = post_json(
+        &fx.app,
+        "/api/chime-scheduler/schedules",
+        json!({ "name": "x", "days": [9] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["code"], "bad_weekday");
+    assert_eq!(body["error"]["message"], "weekday out of range");
+}
+
+#[tokio::test]
+async fn chime_scheduler_not_found_maps_to_404() {
+    let fx = sched_fixture(SchedReply::Json(json!({
+        "error": { "code": "not_found", "message": "no such schedule" }
+    })));
+    let (status, body) = delete_json(&fx.app, "/api/chime-scheduler/schedules/nope").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "not_found");
+    let req = fx.last.lock().unwrap().clone().unwrap();
+    assert_eq!(req["cmd"], "delete_schedule");
+    assert_eq!(req["id"], "nope");
+}
+
+#[tokio::test]
+async fn chime_scheduler_update_schedule_forwards_id_and_input() {
+    let fx = sched_fixture(SchedReply::Json(json!({ "id": "s-1", "name": "Renamed" })));
+    let input = json!({ "name": "Renamed" });
+    let (status, _) = put_json(&fx.app, "/api/chime-scheduler/schedules/s-1", input.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    let req = fx.last.lock().unwrap().clone().unwrap();
+    assert_eq!(req["cmd"], "update_schedule");
+    assert_eq!(req["id"], "s-1");
+    assert_eq!(req["input"], input);
+}
+
+#[tokio::test]
+async fn chime_scheduler_set_random_mode_forwards_mode() {
+    let fx = sched_fixture(SchedReply::Json(
+        json!({ "enabled": true, "groupId": "g-1" }),
+    ));
+    let mode = json!({ "enabled": true, "groupId": "g-1" });
+    let (status, _) = put_json(&fx.app, "/api/chime-scheduler/random-mode", mode.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    let req = fx.last.lock().unwrap().clone().unwrap();
+    assert_eq!(req["cmd"], "set_random_mode");
+    assert_eq!(req["mode"], mode);
+}
+
+#[tokio::test]
+async fn chime_scheduler_group_crud_forwards_commands() {
+    let fx = sched_fixture(SchedReply::Json(json!({ "id": "g-1" })));
+    let (status, _) = post_json(
+        &fx.app,
+        "/api/chime-scheduler/groups",
+        json!({ "name": "Festive", "members": ["a.wav"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(fx.last.lock().unwrap().clone().unwrap()["cmd"], "add_group");
+
+    let (status, _) = delete_json(&fx.app, "/api/chime-scheduler/groups/g-1").await;
+    assert_eq!(status, StatusCode::OK);
+    let req = fx.last.lock().unwrap().clone().unwrap();
+    assert_eq!(req["cmd"], "delete_group");
+    assert_eq!(req["id"], "g-1");
+}
+
+#[tokio::test]
+async fn chime_scheduler_library_list_relays() {
+    let fx = sched_fixture(SchedReply::Json(json!({
+        "items": [{ "filename": "Jingle.wav" }, { "filename": "Horn.wav" }]
+    })));
+    let (status, body) = get_json(&fx.app, "/api/chime-scheduler/library").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["items"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        fx.last.lock().unwrap().clone().unwrap()["cmd"],
+        "list_library"
+    );
+}
+
+/// POST a multipart body to the library upload route and return `(status, json)`.
+async fn post_library(app: &Router, body: Vec<u8>) -> (StatusCode, Value) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/chime-scheduler/library")
+                .header(
+                    axum::http::header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={BOUNDARY}"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, value)
+}
+
+#[tokio::test]
+async fn chime_scheduler_library_upload_stages_then_forwards_add_library_file() {
+    let fx = sched_fixture(SchedReply::Json(json!({ "filename": "chime.wav" })));
+    let (status, body) = post_library(&fx.app, multipart_body(&[("file", &sample_wav(64))])).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["filename"], "chime.wav");
+
+    // schedulerd saw an `add_library_file` carrying a staged path that existed
+    // and was non-empty at call time, plus the multipart filename.
+    let req = fx.last.lock().unwrap().clone().unwrap();
+    assert_eq!(req["cmd"], "add_library_file");
+    assert!(req["staged_path"].is_string());
+    assert_eq!(req["filename"], "chime.wav");
+    assert_eq!(*fx.staged_existed.lock().unwrap(), Some(true));
+
+    // webd cleans up its temp staging copy after the forward (schedulerd adopts
+    // on success); the staged path must no longer exist.
+    let staged = req["staged_path"].as_str().unwrap();
+    assert!(
+        !std::path::Path::new(staged).exists(),
+        "temp must be cleaned"
+    );
+}
+
+#[tokio::test]
+async fn chime_scheduler_library_upload_non_wav_is_422_before_forward() {
+    let fx = sched_fixture(SchedReply::Json(json!({ "filename": "x" })));
+    let (status, body) = post_library(&fx.app, multipart_body(&[("file", b"not a wav")])).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["code"], "invalid_wav");
+    assert!(
+        fx.last.lock().unwrap().is_none(),
+        "schedulerd not contacted"
+    );
+}
+
+#[tokio::test]
+async fn chime_scheduler_library_delete_forwards_filename() {
+    let fx = sched_fixture(SchedReply::Json(json!({ "ok": true })));
+    let (status, _) = delete_json(&fx.app, "/api/chime-scheduler/library/Horn.wav").await;
+    assert_eq!(status, StatusCode::OK);
+    let req = fx.last.lock().unwrap().clone().unwrap();
+    assert_eq!(req["cmd"], "delete_library_file");
+    assert_eq!(req["filename"], "Horn.wav");
+}
+
+#[tokio::test]
+async fn chime_scheduler_unavailable_maps_to_503() {
+    let fx = sched_fixture(SchedReply::Unavailable);
+    let (status, body) = get_json(&fx.app, "/api/chime-scheduler").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"]["code"], "scheduler_unavailable");
+}
+
+#[tokio::test]
+async fn chime_scheduler_protocol_error_maps_to_502() {
+    let fx = sched_fixture(SchedReply::Protocol);
+    let (status, body) = get_json(&fx.app, "/api/chime-scheduler").await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(body["error"]["code"], "scheduler_protocol");
 }

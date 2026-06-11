@@ -13,6 +13,9 @@
 //!                           exhaust RAM).
 //!   * `WEBD_GADGETD_SOCK` — the `gadgetd` control socket for the car-delete
 //!                           handoff (default `/run/teslausb/gadgetd.sock`).
+//!   * `WEBD_SCHEDULERD_SOCK` — the `schedulerd` control socket for the chime
+//!                           scheduler proxy (default
+//!                           `/run/teslausb/schedulerd.sock`).
 //!
 //! `WEBD_BIND` MUST be a LAN/AP address, never a public-internet interface
 //! (SPEC.md §7, webd.md §3.1). The default `127.0.0.1` is a safe dev default; on

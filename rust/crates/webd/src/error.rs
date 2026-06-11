@@ -32,6 +32,18 @@ pub(crate) enum ApiError {
         /// Human-readable message (safe to surface; never a raw DB error).
         message: String,
     },
+    /// An error relayed from an upstream daemon (e.g. `schedulerd`) whose machine
+    /// `code` is a runtime string from that daemon's `{error:{code,message}}`
+    /// envelope, not a compile-time constant. The status is decided by the
+    /// proxying handler.
+    Upstream {
+        /// The HTTP status to emit.
+        status: StatusCode,
+        /// Machine-readable code as reported by the upstream daemon.
+        code: String,
+        /// Human-readable message reported by the upstream daemon.
+        message: String,
+    },
     /// `500` — an unexpected internal failure (DB error, task join). The
     /// detail is kept server-side and never serialized.
     Internal,
@@ -58,6 +70,15 @@ impl ApiError {
             message: message.into(),
         }
     }
+
+    /// An error relayed from an upstream daemon (runtime `code` string).
+    pub(crate) fn upstream(status: StatusCode, code: String, message: String) -> Self {
+        Self::Upstream {
+            status,
+            code,
+            message,
+        }
+    }
 }
 
 /// The serialized body shape: `{"error": {"code", "message"}}`.
@@ -68,27 +89,35 @@ struct ErrorBody {
 
 #[derive(Serialize)]
 struct ErrorDetail {
-    code: &'static str,
+    code: std::borrow::Cow<'static, str>,
     message: String,
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let (status, code, message) = match self {
-            Self::BadRequest { code, message } => (StatusCode::BAD_REQUEST, code, message),
+        use std::borrow::Cow;
+        let (status, code, message): (StatusCode, Cow<'static, str>, String) = match self {
+            Self::BadRequest { code, message } => {
+                (StatusCode::BAD_REQUEST, Cow::Borrowed(code), message)
+            }
             Self::NotFound => (
                 StatusCode::NOT_FOUND,
-                "not_found",
+                Cow::Borrowed("not_found"),
                 "resource not found".to_owned(),
             ),
             Self::Status {
                 status,
                 code,
                 message,
-            } => (status, code, message),
+            } => (status, Cow::Borrowed(code), message),
+            Self::Upstream {
+                status,
+                code,
+                message,
+            } => (status, Cow::Owned(code), message),
             Self::Internal => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "internal",
+                Cow::Borrowed("internal"),
                 "internal server error".to_owned(),
             ),
         };

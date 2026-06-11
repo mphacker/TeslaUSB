@@ -31,6 +31,7 @@
 
 mod boombox;
 mod catalog;
+mod chime_scheduler;
 mod chimes;
 mod dto;
 mod error;
@@ -46,6 +47,7 @@ mod polyline;
 mod query;
 mod range;
 mod route;
+mod scheduler;
 mod sysinfo;
 mod wraps;
 
@@ -77,6 +79,7 @@ struct AppState {
     export_sem: Arc<Semaphore>,
     sys: SysHandle,
     gadget: Arc<dyn gadget::GadgetClient>,
+    scheduler: Arc<dyn scheduler::SchedulerClient>,
     jobs: jobs::JobHub,
 }
 
@@ -128,12 +131,35 @@ fn default_gadget_client(gadget_sock: PathBuf) -> Arc<dyn gadget::GadgetClient> 
 }
 
 /// Assemble the router over an explicit `gadgetd` client (the injection seam used
-/// by [`build_router`] and the handler tests).
+/// by [`build_router`] and the handler tests). The `schedulerd` client defaults
+/// to the platform client over the configured socket path.
 fn router_with_gadget(
     catalog: Catalog,
     static_dir: PathBuf,
     media: MediaConfig,
     gadget: Arc<dyn gadget::GadgetClient>,
+) -> Router {
+    let scheduler = scheduler::default_client(default_scheduler_sock());
+    router_with_clients(catalog, static_dir, media, gadget, scheduler)
+}
+
+/// The default `schedulerd` control-socket path (overridable via
+/// `WEBD_SCHEDULERD_SOCK`).
+fn default_scheduler_sock() -> PathBuf {
+    std::env::var_os("WEBD_SCHEDULERD_SOCK").map_or_else(
+        || PathBuf::from("/run/teslausb/schedulerd.sock"),
+        PathBuf::from,
+    )
+}
+
+/// Assemble the router over explicit `gadgetd` AND `schedulerd` clients — the
+/// injection seam used by the chime-scheduler handler tests.
+fn router_with_clients(
+    catalog: Catalog,
+    static_dir: PathBuf,
+    media: MediaConfig,
+    gadget: Arc<dyn gadget::GadgetClient>,
+    scheduler: Arc<dyn scheduler::SchedulerClient>,
 ) -> Router {
     let sys = SysHandle {
         probe: Arc::new(sysinfo::LinuxProbe),
@@ -147,6 +173,7 @@ fn router_with_gadget(
         export_sem: Arc::new(Semaphore::new(MAX_CONCURRENT_EXPORTS)),
         sys,
         gadget,
+        scheduler,
         jobs: jobs::JobHub::new(),
     };
     route::router(state, static_dir)

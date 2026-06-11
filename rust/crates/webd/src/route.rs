@@ -124,6 +124,7 @@ pub(crate) fn router(state: AppState, static_dir: PathBuf) -> Router {
         .route("/jobs/failed", get(jobs_failed))
         .route("/analytics", get(analytics))
         .route("/settings", get(settings))
+        .merge(crate::chime_scheduler::routes())
         .merge(crate::health::routes())
         .fallback(api_not_found)
         .with_state(state);

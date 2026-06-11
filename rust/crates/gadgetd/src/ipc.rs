@@ -12,12 +12,12 @@
 //! - `handoff_status` — last/current handoff record.
 
 use std::io::{self, Read, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::json;
@@ -33,6 +33,15 @@ const MAX_FRAME: u32 = 1 << 20;
 const CONN_TIMEOUT: Duration = Duration::from_secs(15);
 /// mtime sampling interval for the save-active guard.
 const SAVE_SAMPLE: Duration = Duration::from_millis(500);
+/// How often the serve loop re-checks that its control socket path still exists.
+/// A peer unit sharing the runtime dir can unlink it (the reason both units now
+/// set `RuntimeDirectoryPreserve=yes`); if it ever vanishes anyway we re-bind so
+/// the write path heals itself instead of "listening into the void".
+const SOCKET_HEALTH_INTERVAL: Duration = Duration::from_secs(2);
+/// Backoff between non-blocking accept polls when no connection is pending. Adds
+/// at most this much latency to picking up a new handoff request — negligible
+/// against a multi-second handoff, and the cost of self-healing the socket.
+const ACCEPT_POLL: Duration = Duration::from_millis(100);
 
 /// A wire request (`cmd`-tagged JSON).
 #[derive(Debug, Deserialize)]
@@ -96,6 +105,35 @@ fn write_frame(stream: &mut impl Write, payload: &[u8]) -> io::Result<()> {
     stream.flush()
 }
 
+/// Bind (or re-bind) the control socket: clear any stale file, bind, tighten
+/// perms to 0o660, log. Factored out so the serve loop can re-bind if the socket
+/// path is later unlinked out from under us.
+fn bind_listener(socket_path: &Path) -> io::Result<UnixListener> {
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    // A stale socket file from a prior run would make bind fail with EADDRINUSE.
+    match std::fs::remove_file(socket_path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let listener = UnixListener::bind(socket_path)?;
+    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o660))?;
+    println!("gadgetd serve: listening on {}", socket_path.display());
+    Ok(listener)
+}
+
+/// True iff the control socket path still exists AND is a socket. A peer service
+/// sharing the runtime dir can unlink it on stop; the kernel keeps our existing
+/// listener fd alive (so `ss` still shows us `LISTENing`) but new clients get
+/// ENOENT on connect. Detecting the vanished path lets us re-bind.
+fn socket_path_healthy(socket_path: &Path) -> bool {
+    std::fs::symlink_metadata(socket_path)
+        .map(|m| m.file_type().is_socket())
+        .unwrap_or(false)
+}
+
 /// Bring up the control socket and serve until the listener errors.
 ///
 /// # Errors
@@ -110,18 +148,8 @@ pub(crate) fn serve(
     // Handoff crash-recovery BEFORE serving (never touches gadget bring-up).
     recover_interrupted_handoff(&cfg, &runtime_root);
 
-    if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    // A stale socket file from a prior run would make bind fail with EADDRINUSE.
-    match std::fs::remove_file(socket_path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
-    }
-    let listener = UnixListener::bind(socket_path)?;
-    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o660))?;
-    println!("gadgetd serve: listening on {}", socket_path.display());
+    let mut listener = bind_listener(socket_path)?;
+    listener.set_nonblocking(true)?;
 
     let state = Arc::new(ServeState {
         cfg,
@@ -132,9 +160,13 @@ pub(crate) fn serve(
         next_id: AtomicU64::new(1),
     });
 
-    for conn in listener.incoming() {
-        match conn {
-            Ok(stream) => {
+    let mut last_health = Instant::now();
+    loop {
+        match listener.accept() {
+            Ok((stream, _addr)) => {
+                // handle_conn relies on SO_RCVTIMEO/SO_SNDTIMEO, not non-blocking
+                // semantics, so the accept'd stream must be blocking.
+                stream.set_nonblocking(false)?;
                 let st = Arc::clone(&state);
                 std::thread::spawn(move || {
                     if let Err(e) = handle_conn(&stream, &st) {
@@ -142,10 +174,32 @@ pub(crate) fn serve(
                     }
                 });
             }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(ACCEPT_POLL);
+            }
             Err(e) => eprintln!("gadgetd serve: accept error: {e}"),
         }
+
+        // Self-heal: if our socket path was unlinked (e.g. a peer unit sharing
+        // the runtime dir tore it down), re-bind so the write path recovers
+        // instead of silently listening on an orphaned inode.
+        if last_health.elapsed() >= SOCKET_HEALTH_INTERVAL {
+            last_health = Instant::now();
+            if !socket_path_healthy(socket_path) {
+                eprintln!(
+                    "gadgetd serve: control socket {} vanished; re-binding",
+                    socket_path.display()
+                );
+                match bind_listener(socket_path) {
+                    Ok(l) => {
+                        l.set_nonblocking(true)?;
+                        listener = l;
+                    }
+                    Err(e) => eprintln!("gadgetd serve: re-bind failed: {e}"),
+                }
+            }
+        }
     }
-    Ok(())
 }
 
 /// On startup, reconcile an interrupted handoff on BOTH LUNs independently. Each
@@ -388,5 +442,79 @@ mod tests {
     fn parses_gadget_status() {
         let req: Request = serde_json::from_slice(br#"{"cmd":"gadget_status"}"#).expect("parse");
         assert!(matches!(req, Request::GadgetStatus));
+    }
+
+    use super::{bind_listener, socket_path_healthy};
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+
+    /// Unique scratch dir under the system temp dir (no tempfile dev-dep).
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("gadgetd-test-{tag}-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        dir
+    }
+
+    #[test]
+    fn bind_listener_creates_socket_with_0660() {
+        let dir = scratch_dir("bind");
+        let sock = dir.join("gadgetd.sock");
+        let listener = bind_listener(&sock).expect("bind");
+        let meta = std::fs::symlink_metadata(&sock).expect("stat");
+        assert!(meta.file_type().is_socket(), "path should be a socket");
+        assert_eq!(meta.permissions().mode() & 0o777, 0o660);
+        assert!(socket_path_healthy(&sock));
+        drop(listener);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn bind_listener_replaces_stale_socket() {
+        let dir = scratch_dir("stale");
+        let sock = dir.join("gadgetd.sock");
+        let first = bind_listener(&sock).expect("first bind");
+        // A second bind over the live path must succeed by clearing the stale file
+        // (the EADDRINUSE-avoidance path), proving re-bind is idempotent.
+        let second = bind_listener(&sock).expect("re-bind over existing");
+        assert!(socket_path_healthy(&sock));
+        drop(first);
+        drop(second);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn socket_path_healthy_false_when_missing_or_wrong_type() {
+        let dir = scratch_dir("healthy");
+        let missing = dir.join("nope.sock");
+        assert!(!socket_path_healthy(&missing), "missing path is unhealthy");
+        // A regular file at the path is NOT a healthy socket.
+        let regular = dir.join("regular");
+        std::fs::write(&regular, b"x").expect("write");
+        assert!(
+            !socket_path_healthy(&regular),
+            "regular file is not a socket"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rebind_recovers_after_socket_unlinked() {
+        // Reproduces the RuntimeDirectory bug: a peer unlinks our live socket. The
+        // first listener keeps its fd, but the path is gone (unhealthy). bind_listener
+        // restores a fresh, healthy socket at the same path.
+        let dir = scratch_dir("rebind");
+        let sock = dir.join("gadgetd.sock");
+        let orphaned = bind_listener(&sock).expect("initial bind");
+        std::fs::remove_file(&sock).expect("simulate peer unlink");
+        assert!(!socket_path_healthy(&sock), "socket path gone after unlink");
+        let healed = bind_listener(&sock).expect("re-bind");
+        assert!(socket_path_healthy(&sock), "socket restored after re-bind");
+        drop(orphaned);
+        drop(healed);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -21,5 +21,9 @@
 //! gated and is built in a later slice, exactly like `uploadd`/`retentiond`.
 //! Everything in this crate is host-unit-tested.
 
+pub mod library;
 pub mod model;
 pub mod store;
+
+#[cfg(unix)]
+pub mod ipc;

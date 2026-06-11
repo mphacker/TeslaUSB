@@ -14,5 +14,6 @@
 //!   iterator plus H.264 emulation-prevention strip; SEI payload
 //!   framing + Tesla protobuf demarshal.
 
+pub mod chime;
 pub mod fs;
 pub mod sei;

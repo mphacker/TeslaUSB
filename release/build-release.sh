@@ -40,7 +40,7 @@ ROOT="$(cd "${HERE}/.." && pwd)"
 GENERATOR="${HERE}/generate-manifest.sh"
 VERIFIER="${ROOT}/setup-lib/verify-release.sh"
 DEFAULT_TRIPLE='aarch64-unknown-linux-gnu'
-SERVICES='gadgetd scannerd indexd webd uploadd retentiond wifid'
+SERVICES='gadgetd scannerd indexd webd uploadd retentiond wifid schedulerd'
 
 br__log() { printf '[build-release] %s\n' "$*" >&2; }
 br__die() { local code="$1"; shift; br__log "ERROR: $*"; exit "$code"; }
@@ -113,9 +113,9 @@ rustup target add aarch64-unknown-linux-gnu
 export CARGO_TARGET_DIR=/cargo-target
 export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
 export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
-cargo build --release --target aarch64-unknown-linux-gnu -p gadgetd -p scannerd -p indexd -p webd -p uploadd -p retentiond -p wifid
+cargo build --release --target aarch64-unknown-linux-gnu -p gadgetd -p scannerd -p indexd -p webd -p uploadd -p retentiond -p wifid -p schedulerd
 mkdir -p /out/bin
-for b in gadgetd scannerd indexd webd uploadd retentiond wifid; do
+for b in gadgetd scannerd indexd webd uploadd retentiond wifid schedulerd; do
   src=/cargo-target/aarch64-unknown-linux-gnu/release/$b
   aarch64-linux-gnu-readelf -h "$src" | grep -qE "Machine:.*AArch64"
   install -m0755 "$src" /out/bin/$b

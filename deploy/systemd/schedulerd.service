@@ -1,0 +1,54 @@
+# TeslaUSB B-1 — schedulerd: the lock-chime scheduler state owner. It holds the
+# validated schedule/group/library state, persists it atomically to a JSON
+# document, and serves it to webd over a Unix control socket
+# (/run/teslausb/schedulerd.sock). webd is a pure proxy — it owns no schedule
+# state — so this daemon must be up for the chime-scheduler UI to function.
+#
+# Scope split (schedulerd.md / SPEC.md): `serve` only OWNS and SERVES the state.
+# The per-minute enforcement tick (evaluating the active chime) and the gadgetd
+# activation enqueue that swaps LockChime.wav on the MEDIA partition are a later,
+# hardware/IPC-gated slice. This unit therefore never writes the car-facing LUN;
+# it only reads/writes its own state document + chime library under /data.
+#
+# /run/teslausb is SHARED with gadgetd-control.service and scannerd.service (all
+# bind sockets there). systemd does NOT reference-count RuntimeDirectory across
+# units, so without RuntimeDirectoryPreserve=yes a restart of THIS unit would
+# tear down /run/teslausb and unlink the peers' live sockets (the HIGH-sev bug
+# fixed for gadgetd-control/scannerd). PRESERVE keeps the shared dir intact.
+#
+# Hardening note: cgroup MemoryMax / dedicated User= / sandboxing are
+# device-calibrated in migration M5 / Task 7.4c. The OOM order (SPEC.md §7) is
+# encoded via OOMScoreAdjust — schedulerd is disposable (UI-adjacent, no
+# recording/footage role): losing it only makes the scheduler UI show
+# "unavailable" until restart, never risks footage.
+#
+# Install: copy to /etc/systemd/system/schedulerd.service, then
+#   systemctl daemon-reload && systemctl enable --now schedulerd.service
+[Unit]
+Description=TeslaUSB schedulerd (lock-chime scheduler state owner + control socket)
+Documentation=https://github.com/mphacker/TeslaUSB
+# Needs /data (its JSON state document + chime library live under /data/teslausb).
+RequiresMountsFor=/data/teslausb
+After=local-fs.target
+
+[Service]
+Type=simple
+# State document, chime library, and control socket. These match webd's defaults
+# (WEBD_SCHEDULERD_SOCK defaults to /run/teslausb/schedulerd.sock) so webd reaches
+# schedulerd with no extra configuration.
+Environment=SCHEDULERD_STATE=/data/teslausb/chime-schedules.json
+Environment=SCHEDULERD_LIBRARY_DIR=/data/teslausb/chimes
+Environment=SCHEDULERD_SOCKET=/run/teslausb/schedulerd.sock
+ExecStart=/usr/local/bin/schedulerd serve
+Restart=on-failure
+RestartSec=5s
+OOMScoreAdjust=500
+SyslogIdentifier=schedulerd
+# Shared socket dir — see header. Create root-owned 0750; do NOT tear down on
+# restart (peers bind sockets in the same dir).
+RuntimeDirectory=teslausb
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+
+[Install]
+WantedBy=multi-user.target

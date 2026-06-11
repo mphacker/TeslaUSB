@@ -475,6 +475,19 @@ test.describe("event-player UAT", () => {
     expect(ct).toBeLessThan(2.4);
   });
 
+  // ── Legacy v1 deep link: /videos/event/<clip> must resolve to the Event
+  //    player via webd's SPA fallback + the client router prefix alias. ──
+  test("legacy route — /videos/event/<clip> lands on the event player", async ({
+    page,
+  }) => {
+    await page.goto("/videos/event/2024-06-01_07-18-00", { waitUntil: "load" });
+    await expect(page.locator("[data-screen=event-player]")).toBeVisible();
+    await expect(page.locator("#mainVideo")).toHaveAttribute(
+      "src",
+      /\/api\/clips\/\d+\/stream/,
+    );
+  });
+
   // ── Gate 3 (read-only): only whitelisted GET; switched camera streams; the
   //    archive control stays inert; opening + cancelling the Delete confirm
   //    fires NO mutation ──────────────────────────────────────────────────

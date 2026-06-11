@@ -113,6 +113,28 @@ export function Shell({
     setTheme(next);
   };
 
+  // ── Follow the OS color-scheme while the user hasn't made an explicit choice
+  //    (parity with v1 main.js): if localStorage has no "theme", an OS switch
+  //    flips the app too. A manual toggle writes localStorage and opts out. ──
+  useEffect(() => {
+    const mql = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = (e: MediaQueryListEvent) => {
+      let stored: string | null = null;
+      try {
+        stored = localStorage.getItem("theme");
+      } catch {
+        /* storage unavailable — treat as no explicit choice */
+      }
+      if (stored) return; // user picked a theme; don't override it
+      const root = document.documentElement;
+      if (e.matches) root.setAttribute("data-theme", "dark");
+      else root.removeAttribute("data-theme");
+      setTheme(e.matches ? "dark" : "light");
+    };
+    mql.addEventListener("change", onChange);
+    return () => mql.removeEventListener("change", onChange);
+  }, []);
+
   return (
     <>
       <header class="top-bar">
@@ -144,7 +166,7 @@ export function Shell({
             onClick={toggleTheme}
             aria-label="Toggle dark mode"
           >
-            <Icon name="moon" id="theme-icon-svg" />
+            <Icon name={theme === "dark" ? "sun" : "moon"} id="theme-icon-svg" />
           </button>
         </div>
       </header>

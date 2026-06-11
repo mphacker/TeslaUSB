@@ -203,6 +203,25 @@ test.describe("media (lock chimes) UAT", () => {
     await expect(page.locator("[data-testid=library-empty]")).toBeVisible();
   });
 
+  // ── Legacy direct route: /lock_chimes (v1's lock-chimes URL) must resolve to
+  //    the Media lock-chimes screen via webd's SPA fallback + the client router
+  //    alias, so old bookmarks don't dead-end. ──
+  test("legacy route — /lock_chimes lands on the lock-chimes screen", async ({
+    page,
+  }) => {
+    await page.goto("/lock_chimes", { waitUntil: "load" });
+    await expect(page.locator(".container[data-screen=media]")).toBeVisible();
+    await page.waitForFunction(() => {
+      const h = (
+        window as unknown as { __TESLAUSB_MEDIA_HOOKS__?: { screen: string } }
+      ).__TESLAUSB_MEDIA_HOOKS__;
+      return !!h && h.screen === "lock-chimes";
+    });
+    await expect(page.locator(".container[data-screen=media] h2")).toHaveText(
+      "Lock Chimes",
+    );
+  });
+
   // ── Gate 2: wiring proof — the served HTML runs the freshly-built bundle ─
   test("wiring — served HTML runs the built bundle and the media module ran", async ({
     page,

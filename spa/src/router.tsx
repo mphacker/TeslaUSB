@@ -64,6 +64,10 @@ export const ROUTES: Route[] = [
   { path: "/settings", active: "settings", screen: MediaHub, title: "Settings" },
   { path: "/storage", active: "settings", screen: StorageHealth, title: "Storage" },
   { path: "/failed-jobs", active: "settings", screen: FailedJobs, title: "Failed jobs" },
+  // Legacy v1 direct routes kept as aliases so old bookmarks / deep links don't
+  // dead-end: /lock_chimes → the Media (lock-chimes) screen, /jobs → Failed jobs.
+  { path: "/lock_chimes", active: "media", screen: Media, title: "Lock chimes" },
+  { path: "/jobs", active: "settings", screen: FailedJobs, title: "Jobs" },
 ];
 
 /** Strip a trailing slash (except for root) so `/media/` matches `/media`. */
@@ -79,6 +83,10 @@ function matchRoute(pathname: string): { active: NavKey; screen: ComponentType }
   const p = normalizePath(pathname);
   const hit = ROUTES.find((r) => r.path === p);
   if (hit) return { active: hit.active, screen: hit.screen };
+  // Legacy v1 event-player deep link: /videos/event/<clip…> → the Event player.
+  if (p === "/videos/event" || p.startsWith("/videos/event/")) {
+    return { active: "map", screen: EventPlayer };
+  }
   // Unknown in-app path → a client-side placeholder (no hard 404 page).
   return { active: "map", screen: () => <ComingSoon title="Not found" /> };
 }

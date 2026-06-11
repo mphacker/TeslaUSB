@@ -13,7 +13,8 @@ use crate::AppState;
 use crate::dto::MediaListDto;
 use crate::error::ApiError;
 use crate::media_upload::{
-    check_extension, read_file_upload, sanitise_filename, validate_png_magic,
+    BulkDeleteRequest, check_extension, plan_bulk_delete, read_file_upload, sanitise_filename,
+    validate_png_magic,
 };
 
 const PARTITION_MEDIA: u8 = 2;
@@ -56,4 +57,15 @@ pub(crate) async fn remove_plate(
     let name = sanitise_filename(&name)?;
     let rel_path = format!("{PLATES_DIR}/{name}");
     crate::route::run_remove(state, "plate_remove", PARTITION_MEDIA, rel_path).await
+}
+
+/// `POST /api/plates/bulk-delete` — remove several license-plate images in ONE
+/// `gadgetd` handoff. Body: `{ "names": ["plate.png", …] }`. Each name rebuilds
+/// `LicensePlate/<name>`.
+pub(crate) async fn bulk_delete_plates(
+    State(state): State<AppState>,
+    Json(req): Json<BulkDeleteRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let rel_paths = plan_bulk_delete(PLATES_DIR, &req.names)?;
+    crate::route::run_remove_many(state, "plate_remove", PARTITION_MEDIA, rel_paths).await
 }

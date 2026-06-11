@@ -13,7 +13,9 @@ use serde_json::Value;
 use crate::AppState;
 use crate::dto::MediaListDto;
 use crate::error::ApiError;
-use crate::media_upload::{check_extension, read_file_upload, sanitise_filename};
+use crate::media_upload::{
+    BulkDeleteRequest, check_extension, plan_bulk_delete, read_file_upload, sanitise_filename,
+};
 
 /// MEDIA (p2) gadgetd partition index.
 const PARTITION_MEDIA: u8 = 2;
@@ -74,4 +76,16 @@ pub(crate) async fn remove_boombox(
     let name = sanitise_filename(&name)?;
     let rel_path = format!("{BOOMBOX_DIR}/{name}");
     crate::route::run_remove(state, "boombox_remove", PARTITION_MEDIA, rel_path).await
+}
+
+/// `POST /api/boombox/bulk-delete` — remove several boombox sounds in ONE
+/// `gadgetd` handoff. Body: `{ "names": ["horn.wav", …] }`. Each name is a bare
+/// file name; the handler rebuilds `Boombox/<name>`, so a client can never
+/// address a file outside this category.
+pub(crate) async fn bulk_delete_boombox(
+    State(state): State<AppState>,
+    Json(req): Json<BulkDeleteRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let rel_paths = plan_bulk_delete(BOOMBOX_DIR, &req.names)?;
+    crate::route::run_remove_many(state, "boombox_remove", PARTITION_MEDIA, rel_paths).await
 }

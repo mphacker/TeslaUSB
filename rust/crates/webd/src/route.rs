@@ -74,12 +74,17 @@ pub(crate) fn router(state: AppState, static_dir: PathBuf) -> Router {
         )
         .route("/boombox/{name}", delete(crate::boombox::remove_boombox))
         .route(
+            "/boombox/bulk-delete",
+            post(crate::boombox::bulk_delete_boombox),
+        )
+        .route(
             "/music",
             get(crate::music::list_music)
                 .post(crate::music::install_music)
                 .layer(DefaultBodyLimit::max(crate::music::MUSIC_BODY_LIMIT)),
         )
         .route("/music/{name}", delete(crate::music::remove_music))
+        .route("/music/bulk-delete", post(crate::music::bulk_delete_music))
         .route(
             "/lightshows",
             get(crate::lightshows::list_lightshows)
@@ -93,6 +98,10 @@ pub(crate) fn router(state: AppState, static_dir: PathBuf) -> Router {
             delete(crate::lightshows::remove_lightshow),
         )
         .route(
+            "/lightshows/bulk-delete",
+            post(crate::lightshows::bulk_delete_lightshows),
+        )
+        .route(
             "/plates",
             get(crate::plates::list_plates)
                 .post(crate::plates::install_plate)
@@ -100,12 +109,17 @@ pub(crate) fn router(state: AppState, static_dir: PathBuf) -> Router {
         )
         .route("/plates/{name}", delete(crate::plates::remove_plate))
         .route(
+            "/plates/bulk-delete",
+            post(crate::plates::bulk_delete_plates),
+        )
+        .route(
             "/wraps",
             get(crate::wraps::list_wraps)
                 .post(crate::wraps::install_wrap)
                 .layer(DefaultBodyLimit::max(crate::wraps::WRAPS_BODY_LIMIT)),
         )
         .route("/wraps/{name}", delete(crate::wraps::remove_wrap))
+        .route("/wraps/bulk-delete", post(crate::wraps::bulk_delete_wraps))
         .route("/jobs", get(jobs_stream))
         .route("/jobs/failed", get(jobs_failed))
         .route("/analytics", get(analytics))
@@ -473,12 +487,31 @@ pub(crate) async fn run_remove(
     partition: u8,
     rel_path: String,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
+    run_remove_many(state, kind, partition, vec![rel_path]).await
+}
+
+/// Generic p2-media bulk-remove primitive: hand `gadgetd` ONE `delete_paths`
+/// mutation for the whole `rel_paths` set and bracket the round-trip with
+/// `job_status` events under `kind`. A single handoff for the batch is
+/// deliberate — every handoff ejects and remounts the car-facing USB, so
+/// deleting `N` files in `N` handoffs would be `N` disconnect cycles. Same
+/// regular-file-only, idempotent-on-absent semantics as [`run_remove`].
+///
+/// `rel_paths` must be non-empty and already sanitised/validated by the caller
+/// (see [`crate::media_upload::plan_bulk_delete`]); this primitive does not
+/// re-validate path safety.
+pub(crate) async fn run_remove_many(
+    state: AppState,
+    kind: &'static str,
+    partition: u8,
+    rel_paths: Vec<String>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
     let job_id = state.jobs.next_job_id();
     state.jobs.publish_job(JobStatus::running(job_id, kind));
 
     let client = state.gadget.clone();
     let jobs = state.jobs.clone();
-    let request = gadget::remove_request(partition, &rel_path);
+    let request = gadget::remove_request_many(partition, &rel_paths);
 
     let join = tokio::task::spawn_blocking(move || {
         let result = client.call(request);

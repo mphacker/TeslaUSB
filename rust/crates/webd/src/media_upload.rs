@@ -5,8 +5,57 @@
 
 use axum::extract::Multipart;
 use axum::http::StatusCode;
+use serde::Deserialize;
 
 use crate::error::ApiError;
+
+/// Maximum number of files accepted in one bulk-delete request. A single
+/// `gadgetd` `delete_paths` handoff carries the whole set; this bound keeps the
+/// request (and the resulting mutation) sane on a small appliance.
+pub(crate) const MAX_BULK_DELETE: usize = 100;
+
+/// Request body for the bulk-delete endpoints (`POST /api/<category>/bulk-delete`).
+///
+/// Each entry is a bare file name (e.g. `horn.wav`), never a path — the handler
+/// reconstructs the partition-relative path under the category directory, so a
+/// client can never address a file outside its own category.
+#[derive(Debug, Deserialize)]
+pub(crate) struct BulkDeleteRequest {
+    /// The bare file names to delete.
+    pub names: Vec<String>,
+}
+
+/// Sanitise a batch of bare file names into partition-root-relative paths under
+/// `dir` (e.g. `Boombox/horn.wav`). Rejects an empty batch (`400 empty_batch`),
+/// an over-cap batch (`422 batch_too_large`), and any individual name that
+/// fails [`sanitise_filename`] (path traversal, non-ASCII, embedded separators
+/// — those collapse to the last component, which is then validated). Duplicate
+/// names are de-duplicated so the resulting `delete_paths` set is minimal.
+pub(crate) fn plan_bulk_delete(dir: &str, names: &[String]) -> Result<Vec<String>, ApiError> {
+    if names.is_empty() {
+        return Err(ApiError::status(
+            StatusCode::BAD_REQUEST,
+            "empty_batch",
+            "expected at least one file name".to_owned(),
+        ));
+    }
+    if names.len() > MAX_BULK_DELETE {
+        return Err(ApiError::status(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "batch_too_large",
+            format!("at most {MAX_BULK_DELETE} files may be deleted at once"),
+        ));
+    }
+    let mut rel_paths: Vec<String> = Vec::with_capacity(names.len());
+    for raw in names {
+        let name = sanitise_filename(raw)?;
+        let rel_path = format!("{dir}/{name}");
+        if !rel_paths.contains(&rel_path) {
+            rel_paths.push(rel_path);
+        }
+    }
+    Ok(rel_paths)
+}
 
 /// Read a single `file` multipart field, enforcing an incremental byte cap.
 ///
@@ -228,5 +277,36 @@ mod tests {
     #[test]
     fn png_magic_rejected_for_non_png() {
         assert!(validate_png_magic(b"JFIF").is_err());
+    }
+
+    #[test]
+    fn plan_bulk_delete_maps_and_dedupes() {
+        let paths =
+            super::plan_bulk_delete("Boombox", &["a.wav".to_owned(), "a.wav".to_owned()]).unwrap();
+        assert_eq!(paths, vec!["Boombox/a.wav".to_owned()]);
+
+        let paths =
+            super::plan_bulk_delete("Music", &["x.mp3".to_owned(), "y.flac".to_owned()]).unwrap();
+        assert_eq!(
+            paths,
+            vec!["Music/x.mp3".to_owned(), "Music/y.flac".to_owned()]
+        );
+    }
+
+    #[test]
+    fn plan_bulk_delete_rejects_empty_and_oversize() {
+        assert!(super::plan_bulk_delete("Boombox", &[]).is_err());
+        let many: Vec<String> = (0..=super::MAX_BULK_DELETE)
+            .map(|i| format!("f{i}.wav"))
+            .collect();
+        assert!(super::plan_bulk_delete("Boombox", &many).is_err());
+    }
+
+    #[test]
+    fn plan_bulk_delete_rejects_bad_name() {
+        assert!(super::plan_bulk_delete("Boombox", &["..".to_owned()]).is_err());
+        // An embedded path collapses to its last component (never escapes `dir`).
+        let paths = super::plan_bulk_delete("Boombox", &["../../etc/horn.wav".to_owned()]).unwrap();
+        assert_eq!(paths, vec!["Boombox/horn.wav".to_owned()]);
     }
 }

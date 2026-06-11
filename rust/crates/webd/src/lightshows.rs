@@ -16,7 +16,9 @@ use serde_json::Value;
 use crate::AppState;
 use crate::dto::MediaListDto;
 use crate::error::ApiError;
-use crate::media_upload::{check_extension, read_file_upload, sanitise_filename};
+use crate::media_upload::{
+    BulkDeleteRequest, check_extension, plan_bulk_delete, read_file_upload, sanitise_filename,
+};
 
 const PARTITION_MEDIA: u8 = 2;
 const LIGHTSHOW_DIR: &str = "LightShow";
@@ -79,4 +81,16 @@ pub(crate) async fn remove_lightshow(
     let name = sanitise_filename(&name)?;
     let rel_path = format!("{LIGHTSHOW_DIR}/{name}");
     crate::route::run_remove(state, "lightshow_remove", PARTITION_MEDIA, rel_path).await
+}
+
+/// `POST /api/lightshows/bulk-delete` — remove several light-show files in ONE
+/// `gadgetd` handoff. Body: `{ "names": ["show.fseq", …] }`. Each name rebuilds
+/// `LightShow/<name>`; wraps (under `LightShow/wraps/`) are unreachable here
+/// because a sanitised name has no path component.
+pub(crate) async fn bulk_delete_lightshows(
+    State(state): State<AppState>,
+    Json(req): Json<BulkDeleteRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let rel_paths = plan_bulk_delete(LIGHTSHOW_DIR, &req.names)?;
+    crate::route::run_remove_many(state, "lightshow_remove", PARTITION_MEDIA, rel_paths).await
 }

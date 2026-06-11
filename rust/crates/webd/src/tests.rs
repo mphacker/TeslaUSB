@@ -1668,6 +1668,114 @@ async fn remove_chime_unknown_id_is_404() {
     assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");
 }
 
+/// POST a JSON body and return `(status, parsed-json)`.
+async fn post_json(app: &Router, uri: &str, body: Value) -> (StatusCode, Value) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(uri)
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, value)
+}
+
+#[tokio::test]
+async fn bulk_delete_boombox_sends_one_handoff_with_all_paths() {
+    let fx = delete_fixture(Reply::Json(
+        json!({ "handoff_id": "h-bulk", "result": "done" }),
+    ));
+    let (status, body) = post_json(
+        &fx.app,
+        "/api/boombox/bulk-delete",
+        json!({ "names": ["horn.wav", "airhorn.mp3"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["state"], "done");
+    assert_eq!(body["handoff_id"], "h-bulk");
+
+    // gadgetd saw exactly ONE request carrying BOTH derived paths (one
+    // eject/remount for the batch, not one per file).
+    let req = fx.last.lock().unwrap().clone().unwrap();
+    assert_eq!(req["partition"], 2);
+    assert_eq!(req["mutation"]["op"], "delete_paths");
+    let paths = req["mutation"]["rel_paths"].as_array().unwrap();
+    assert_eq!(paths.len(), 2);
+    assert_eq!(paths[0], "Boombox/horn.wav");
+    assert_eq!(paths[1], "Boombox/airhorn.mp3");
+}
+
+#[tokio::test]
+async fn bulk_delete_wraps_rebuilds_wraps_subdir() {
+    let fx = delete_fixture(Reply::Json(
+        json!({ "handoff_id": "h-w", "result": "done" }),
+    ));
+    let (status, _) = post_json(
+        &fx.app,
+        "/api/wraps/bulk-delete",
+        json!({ "names": ["cyber.png"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let req = fx.last.lock().unwrap().clone().unwrap();
+    let paths = req["mutation"]["rel_paths"].as_array().unwrap();
+    assert_eq!(paths[0], "LightShow/wraps/cyber.png");
+}
+
+#[tokio::test]
+async fn bulk_delete_dedupes_repeated_names() {
+    let fx = delete_fixture(Reply::Json(
+        json!({ "handoff_id": "h-d", "result": "done" }),
+    ));
+    let (status, _) = post_json(
+        &fx.app,
+        "/api/music/bulk-delete",
+        json!({ "names": ["a.mp3", "a.mp3", "b.flac"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let req = fx.last.lock().unwrap().clone().unwrap();
+    let paths = req["mutation"]["rel_paths"].as_array().unwrap();
+    assert_eq!(paths.len(), 2, "duplicate name collapsed to one path");
+    assert_eq!(paths[0], "Music/a.mp3");
+    assert_eq!(paths[1], "Music/b.flac");
+}
+
+#[tokio::test]
+async fn bulk_delete_empty_batch_is_400_before_handoff() {
+    let fx = delete_fixture(Reply::Json(json!({ "result": "done" })));
+    let (status, body) =
+        post_json(&fx.app, "/api/plates/bulk-delete", json!({ "names": [] })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "empty_batch");
+    assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");
+}
+
+#[tokio::test]
+async fn bulk_delete_traversal_name_is_refused_before_handoff() {
+    let fx = delete_fixture(Reply::Json(json!({ "result": "done" })));
+    let (status, body) = post_json(
+        &fx.app,
+        "/api/lightshows/bulk-delete",
+        json!({ "names": ["ok.fseq", ".."] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["code"], "invalid_filename");
+    assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");
+}
+
 /// Build a read-only app router over the catalog at `db_path` (no gadgetd
 /// contact). Shared by the `GET /api/chimes` tests.
 fn ro_app(dir: &TempDir, db_path: &std::path::Path) -> Router {

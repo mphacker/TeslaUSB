@@ -13,7 +13,8 @@ use crate::AppState;
 use crate::dto::MediaListDto;
 use crate::error::ApiError;
 use crate::media_upload::{
-    check_extension, read_file_upload, sanitise_filename, validate_png_magic,
+    BulkDeleteRequest, check_extension, plan_bulk_delete, read_file_upload, sanitise_filename,
+    validate_png_magic,
 };
 
 const PARTITION_MEDIA: u8 = 2;
@@ -56,4 +57,15 @@ pub(crate) async fn remove_wrap(
     let name = sanitise_filename(&name)?;
     let rel_path = format!("{WRAPS_DIR}/{name}");
     crate::route::run_remove(state, "wrap_remove", PARTITION_MEDIA, rel_path).await
+}
+
+/// `POST /api/wraps/bulk-delete` — remove several wrap images in ONE `gadgetd`
+/// handoff. Body: `{ "names": ["wrap.png", …] }`. Each name rebuilds
+/// `LightShow/wraps/<name>`.
+pub(crate) async fn bulk_delete_wraps(
+    State(state): State<AppState>,
+    Json(req): Json<BulkDeleteRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let rel_paths = plan_bulk_delete(WRAPS_DIR, &req.names)?;
+    crate::route::run_remove_many(state, "wrap_remove", PARTITION_MEDIA, rel_paths).await
 }

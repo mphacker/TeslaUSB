@@ -17,7 +17,9 @@ use serde_json::Value;
 use crate::AppState;
 use crate::dto::MediaListDto;
 use crate::error::ApiError;
-use crate::media_upload::{check_extension, read_file_upload, sanitise_filename};
+use crate::media_upload::{
+    BulkDeleteRequest, check_extension, plan_bulk_delete, read_file_upload, sanitise_filename,
+};
 
 const PARTITION_MEDIA: u8 = 2;
 const MUSIC_DIR: &str = "Music";
@@ -59,4 +61,16 @@ pub(crate) async fn remove_music(
     let name = sanitise_filename(&name)?;
     let rel_path = format!("{MUSIC_DIR}/{name}");
     crate::route::run_remove(state, "music_remove", PARTITION_MEDIA, rel_path).await
+}
+
+/// `POST /api/music/bulk-delete` — remove several top-level music files in ONE
+/// `gadgetd` handoff. Body: `{ "names": ["track.mp3", …] }`. Each name rebuilds
+/// `Music/<name>`; as with the single delete, only top-level files are
+/// addressable (sub-path removal is via the Samba share).
+pub(crate) async fn bulk_delete_music(
+    State(state): State<AppState>,
+    Json(req): Json<BulkDeleteRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let rel_paths = plan_bulk_delete(MUSIC_DIR, &req.names)?;
+    crate::route::run_remove_many(state, "music_remove", PARTITION_MEDIA, rel_paths).await
 }

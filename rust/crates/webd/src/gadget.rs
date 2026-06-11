@@ -195,17 +195,20 @@ pub(crate) fn install_request(partition: u8, rel_path: &str, source_path: &str) 
     })
 }
 
-/// Build the `request_mutation` wire request to remove a single file from a
-/// partition (the generic media-remove primitive). Uses `gadgetd`'s
-/// regular-file-only, idempotent-on-absent `delete_paths` set form (with a
-/// one-element set) rather than `delete_path`: removing an already-absent
-/// single-slot asset is a success (a retried remove is safe), and a directory
-/// at `rel_path` is refused rather than recursively deleted.
-pub(crate) fn remove_request(partition: u8, rel_path: &str) -> Value {
+/// Build the `request_mutation` wire request to remove one or more files from a
+/// partition in a SINGLE handoff (the generic media-remove primitive). Uses
+/// `gadgetd`'s regular-file-only, idempotent-on-absent `delete_paths` set form
+/// (not `delete_path`): removing an already-absent asset is a success (a
+/// retried remove is safe), and a directory at a path is refused rather than
+/// recursively deleted. A single handoff for the whole set is deliberate —
+/// every handoff ejects and remounts the car-facing USB, so deleting `N` files
+/// in `N` handoffs would be `N` disconnect cycles. `rel_paths` must be fixed,
+/// validated, partition-root-relative destinations — never attacker-controlled.
+pub(crate) fn remove_request_many(partition: u8, rel_paths: &[String]) -> Value {
     json!({
         "cmd": "request_mutation",
         "partition": partition,
-        "mutation": { "op": "delete_paths", "rel_paths": [rel_path] },
+        "mutation": { "op": "delete_paths", "rel_paths": rel_paths },
     })
 }
 
@@ -459,7 +462,7 @@ mod stub_client {
 mod tests {
     use super::{
         DeleteRefusal, MutationOutcome, install_request, map_mutation_outcome, map_status,
-        plan_car_delete, remove_request,
+        plan_car_delete, remove_request_many,
     };
     use serde_json::json;
 
@@ -706,16 +709,28 @@ mod tests {
     }
 
     #[test]
-    fn remove_request_uses_single_element_delete_paths() {
+    fn remove_request_many_single_path_is_a_one_element_set() {
         // The idempotent, file-only `delete_paths` set form (not `delete_path`),
         // so removing an absent single-slot asset is a success and a directory
         // is refused rather than recursively deleted.
-        let req = remove_request(2, "LockChime.wav");
+        let req = remove_request_many(2, &["LockChime.wav".to_owned()]);
         assert_eq!(req["cmd"], "request_mutation");
         assert_eq!(req["partition"], 2);
         assert_eq!(req["mutation"]["op"], "delete_paths");
         let paths = req["mutation"]["rel_paths"].as_array().unwrap();
         assert_eq!(paths.len(), 1);
         assert_eq!(paths[0], "LockChime.wav");
+    }
+
+    #[test]
+    fn remove_request_many_carries_all_paths_in_one_mutation() {
+        let req = remove_request_many(2, &["Boombox/a.wav".to_owned(), "Boombox/b.mp3".to_owned()]);
+        assert_eq!(req["cmd"], "request_mutation");
+        assert_eq!(req["partition"], 2);
+        assert_eq!(req["mutation"]["op"], "delete_paths");
+        let paths = req["mutation"]["rel_paths"].as_array().unwrap();
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0], "Boombox/a.wav");
+        assert_eq!(paths[1], "Boombox/b.mp3");
     }
 }

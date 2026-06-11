@@ -1,0 +1,38 @@
+# schedulerd — lock-chime scheduler daemon (docs/specs, complaint A3).
+#
+# Owns the chime library index, the schedule/group state (versioned JSON on
+# rootfs, atomic write), and — at the live wiring stage — a per-minute tick
+# that evaluates teslausb-core::chime and enqueues a gadgetd activation when the
+# resolved chime differs from what is active. The Task deliverable in this lane
+# is the host-tested library core; the UDS serve loop + gadgetd activation is
+# hardware/IPC-gated, mirroring uploadd/retentiond.
+[package]
+name = "schedulerd"
+description = "TeslaUSB B-1 lock-chime scheduler: chime library + schedule/group state owner and rule-evaluation driver."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The pure rule engine + calendar/holiday math lives in the shared core.
+teslausb-core = { path = "../teslausb-core" }
+# Versioned JSON state (schedules, groups, random mode) + the wire DTOs the
+# webd proxy forwards verbatim.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Typed library errors at the lib boundary (SPEC.md §7).
+thiserror = "1"
+
+[[bin]]
+name = "schedulerd"
+path = "src/main.rs"
+
+[lib]
+name = "schedulerd"
+path = "src/lib.rs"
+
+[lints]
+workspace = true

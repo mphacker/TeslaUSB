@@ -150,6 +150,46 @@ pub fn weekday_of(year: i32, month: u8, day: u8) -> Weekday {
     }
 }
 
+/// Convert a Unix timestamp (seconds since the epoch) plus a fixed local-time
+/// offset into a [`CivilTime`]. Pure integer date math (Howard Hinnant's
+/// `civil_from_days`); no `chrono`, no syscalls. The driving daemon supplies
+/// the local UTC offset in seconds (e.g. `-8*3600` for PST); DST handling is
+/// the caller's concern when it computes that offset. The `doe`/`doy`/`yoe`
+/// bindings are the canonical names from Hinnant's algorithm, kept verbatim.
+#[allow(clippy::similar_names)]
+#[must_use]
+pub fn civil_from_unix(unix_secs: i64, tz_offset_secs: i32) -> CivilTime {
+    let local = unix_secs + i64::from(tz_offset_secs);
+    let days = local.div_euclid(86_400);
+    let secs_of_day = local.rem_euclid(86_400);
+    let hour = u8::try_from(secs_of_day / 3600).unwrap_or(0);
+    let minute = u8::try_from((secs_of_day % 3600) / 60).unwrap_or(0);
+
+    // civil_from_days: days since 1970-01-01 -> (year, month, day).
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let year_civil = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let day = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let month_num = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let year = year_civil + i64::from(month_num <= 2);
+
+    let year_i32 = i32::try_from(year).unwrap_or(1970);
+    let month = u8::try_from(month_num).unwrap_or(1);
+    let day_u8 = u8::try_from(day).unwrap_or(1);
+    CivilTime {
+        year: year_i32,
+        month,
+        day: day_u8,
+        weekday: weekday_of(year_i32, month, day_u8),
+        hour,
+        minute,
+    }
+}
+
 /// The fixed set of US holidays the v1 scheduler offered. Each resolves to a
 /// `(month, day)` for a given year via [`Holiday::date_in_year`]; floating
 /// holidays (nth-weekday rules) and Easter (Computus) are computed, fixed-date
@@ -886,5 +926,26 @@ mod tests {
         // Feb 2026: 3rd Monday = 16; last Monday of May 2026 = 25.
         assert_eq!(nth_weekday(2026, 2, Weekday::Monday, 3), 16);
         assert_eq!(last_weekday(2026, 5, Weekday::Monday), 25);
+    }
+
+    #[test]
+    fn civil_from_unix_epoch_and_offsets() {
+        // 1970-01-01T00:00:00Z is a Thursday.
+        let t = civil_from_unix(0, 0);
+        assert_eq!((t.year, t.month, t.day), (1970, 1, 1));
+        assert_eq!(t.weekday, Weekday::Thursday);
+        assert_eq!((t.hour, t.minute), (0, 0));
+
+        // 2026-01-01T12:34:00Z.
+        // 56 years from 1970 incl. 14 leap days: compute the known instant.
+        let secs = 1_767_270_840_i64; // 2026-01-01T12:34:00Z
+        let t = civil_from_unix(secs, 0);
+        assert_eq!((t.year, t.month, t.day), (2026, 1, 1));
+        assert_eq!((t.hour, t.minute), (12, 34));
+        assert_eq!(t.weekday, Weekday::Thursday);
+
+        // A negative tz offset can roll the civil date back across midnight.
+        let t = civil_from_unix(secs, -13 * 3600);
+        assert_eq!((t.year, t.month, t.day), (2025, 12, 31));
     }
 }

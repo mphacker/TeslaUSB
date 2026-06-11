@@ -84,6 +84,12 @@ interface UseMediaCategoryOptions {
   install: (file: File | Blob, signal?: AbortSignal) => Promise<unknown>;
   /** `DELETE` remove function. */
   remove: (name: string, signal?: AbortSignal) => Promise<unknown>;
+  /**
+   * `POST /bulk-delete` function. Optional: a category that supplies it gets
+   * the multi-select + "Delete selected" affordances; one without it keeps
+   * single-row remove only.
+   */
+  bulkDelete?: (names: string[], signal?: AbortSignal) => Promise<unknown>;
 }
 
 export interface UseMediaCategory {
@@ -98,12 +104,24 @@ export interface UseMediaCategory {
   confirmRemoveName: string | null;
   removing: boolean;
   removeFail: MediaFailure | null;
+  // Bulk select / delete (only meaningful when `bulkDelete` was supplied)
+  bulkEnabled: boolean;
+  selected: ReadonlySet<string>;
+  confirmBulk: boolean;
+  bulkDeleting: boolean;
+  bulkFail: MediaFailure | null;
   // Handlers
   onFileChange: (e: Event) => void;
   onUploadSubmit: (e: Event) => void;
   onRequestRemove: (name: string) => void;
   onCancelRemove: () => void;
   onConfirmRemove: () => void;
+  toggleSelect: (name: string) => void;
+  selectAll: () => void;
+  clearSelection: () => void;
+  onRequestBulkDelete: () => void;
+  onCancelBulkDelete: () => void;
+  onConfirmBulkDelete: () => void;
   refetch: () => void;
   clearNotice: () => void;
 }
@@ -112,6 +130,7 @@ export function useMediaCategory({
   fetchList,
   install,
   remove,
+  bulkDelete,
 }: UseMediaCategoryOptions): UseMediaCategory {
   const [state, setState] = useState<LoadState>({ tag: "loading" });
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -124,15 +143,28 @@ export function useMediaCategory({
   );
   const [removing, setRemoving] = useState(false);
   const [removeFail, setRemoveFail] = useState<MediaFailure | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  const [confirmBulk, setConfirmBulk] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [bulkFail, setBulkFail] = useState<MediaFailure | null>(null);
 
   const uploadAbortRef = useRef<AbortController | null>(null);
   const removeAbortRef = useRef<AbortController | null>(null);
+  const bulkAbortRef = useRef<AbortController | null>(null);
   const listAbortRef = useRef<AbortController | null>(null);
 
   function doFetch(signal?: AbortSignal) {
     fetchList(signal)
       .then((ml: MediaList) => {
         setState({ tag: "ready", items: ml.items });
+        // Drop any selections that no longer exist after a refresh.
+        setSelected((prev) => {
+          if (prev.size === 0) return prev;
+          const names = new Set(ml.items.map((i) => i.name));
+          const next = new Set<string>();
+          for (const n of prev) if (names.has(n)) next.add(n);
+          return next;
+        });
       })
       .catch(() => {
         if (!signal?.aborted) setState({ tag: "error" });
@@ -148,6 +180,7 @@ export function useMediaCategory({
       listAbortRef.current = null;
       uploadAbortRef.current?.abort();
       removeAbortRef.current?.abort();
+      bulkAbortRef.current?.abort();
     };
   }, []);
 
@@ -227,6 +260,68 @@ export function useMediaCategory({
     doFetch(ctrl.signal);
   }
 
+  function toggleSelect(name: string) {
+    setBulkFail(null);
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  }
+
+  function selectAll() {
+    setBulkFail(null);
+    setSelected(
+      state.tag === "ready"
+        ? new Set(state.items.map((i) => i.name))
+        : new Set(),
+    );
+  }
+
+  function clearSelection() {
+    setSelected(new Set());
+  }
+
+  function onRequestBulkDelete() {
+    if (selected.size === 0) return;
+    setConfirmBulk(true);
+    setBulkFail(null);
+  }
+
+  function onCancelBulkDelete() {
+    setConfirmBulk(false);
+  }
+
+  async function onConfirmBulkDelete() {
+    if (!bulkDelete || bulkDeleting || selected.size === 0) return;
+    setBulkDeleting(true);
+    setBulkFail(null);
+    const names = [...selected];
+    const ac = new AbortController();
+    bulkAbortRef.current = ac;
+    try {
+      await bulkDelete(names, ac.signal);
+      setConfirmBulk(false);
+      setSelected(new Set());
+      setNotice(
+        names.length === 1
+          ? `Removed "${names[0]}".`
+          : `Removed ${names.length} items.`,
+      );
+      const refetchCtrl = new AbortController();
+      listAbortRef.current?.abort();
+      listAbortRef.current = refetchCtrl;
+      doFetch(refetchCtrl.signal);
+    } catch (err) {
+      if (ac.signal.aborted) return;
+      setBulkFail(classifyMediaFailure(err));
+    } finally {
+      if (bulkAbortRef.current === ac) bulkAbortRef.current = null;
+      setBulkDeleting(false);
+    }
+  }
+
   return {
     state,
     fileInputRef,
@@ -237,11 +332,22 @@ export function useMediaCategory({
     confirmRemoveName,
     removing,
     removeFail,
+    bulkEnabled: bulkDelete != null,
+    selected,
+    confirmBulk,
+    bulkDeleting,
+    bulkFail,
     onFileChange,
     onUploadSubmit,
     onRequestRemove,
     onCancelRemove,
     onConfirmRemove,
+    toggleSelect,
+    selectAll,
+    clearSelection,
+    onRequestBulkDelete,
+    onCancelBulkDelete,
+    onConfirmBulkDelete,
     refetch,
     clearNotice: () => setNotice(null),
   };

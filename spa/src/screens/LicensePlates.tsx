@@ -1,5 +1,6 @@
 import { Icon } from "../components/Icon";
 import { MediaPills } from "../components/MediaPills";
+import { BulkDeleteBar } from "../components/BulkDeleteBar";
 import { useScreenHook } from "../components/screenHook";
 import { api } from "../api/client";
 import { fmtBytes, useMediaCategory } from "../hooks/useMediaCategory";
@@ -19,6 +20,7 @@ export function LicensePlates() {
     fetchList: api.plates,
     install: api.installPlate,
     remove: api.removePlate,
+    bulkDelete: api.bulkDeletePlates,
   });
 
   return (
@@ -143,47 +145,66 @@ export function LicensePlates() {
           </div>
         )}
         {cat.state.tag === "ready" && (
-          <table class="license-plates-table" style="table-layout: fixed;">
-            <thead>
-              <tr>
-                <th style="width: 42%;">Filename</th>
-                <th style="width: 18%;">Size</th>
-                <th style="width: 40%;">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {cat.state.items.length === 0 ? (
+          <>
+            <BulkDeleteBar cat={cat} noun="plates" />
+            <table class="license-plates-table" style="table-layout: fixed;">
+              <thead>
                 <tr>
-                  <td colSpan={3}>
-                    <div
-                      class="license-plates-empty"
-                      data-testid="license-plates-empty"
-                    >
-                      <Icon name="image" class="license-plates-empty-icon" />
-                      <p>No custom license plates installed yet.</p>
-                    </div>
-                  </td>
+                  {cat.state.items.length > 0 && (
+                    <th style="width: 6%;" aria-label="Select"></th>
+                  )}
+                  <th style="width: 42%;">Filename</th>
+                  <th style="width: 18%;">Size</th>
+                  <th style="width: 40%;">Actions</th>
                 </tr>
-              ) : (
-                cat.state.items.map((item) => (
-                  <tr key={item.rel_path}>
-                    <td>{item.name}</td>
-                    <td>{fmtBytes(item.size_bytes)}</td>
-                    <td>
-                      <button
-                        class="action-btn"
-                        onClick={() => cat.onRequestRemove(item.name)}
-                        disabled={cat.removing}
-                        aria-label={`Remove ${item.name}`}
+              </thead>
+              <tbody>
+                {cat.state.items.length === 0 ? (
+                  <tr>
+                    <td colSpan={3}>
+                      <div
+                        class="license-plates-empty"
+                        data-testid="license-plates-empty"
                       >
-                        Remove
-                      </button>
+                        <Icon name="image" class="license-plates-empty-icon" />
+                        <p>No custom license plates installed yet.</p>
+                      </div>
                     </td>
                   </tr>
-                ))
-              )}
-            </tbody>
-          </table>
+                ) : (
+                  cat.state.items.map((item) => {
+                    const checked = cat.selected.has(item.name);
+                    return (
+                      <tr key={item.rel_path} class={checked ? "media-row-selected" : undefined}>
+                        <td>
+                          <input
+                            type="checkbox"
+                            class="bulk-row-check"
+                            checked={checked}
+                            onChange={() => cat.toggleSelect(item.name)}
+                            disabled={cat.bulkDeleting}
+                            aria-label={`Select ${item.name}`}
+                          />
+                        </td>
+                        <td>{item.name}</td>
+                        <td>{fmtBytes(item.size_bytes)}</td>
+                        <td>
+                          <button
+                            class="action-btn"
+                            onClick={() => cat.onRequestRemove(item.name)}
+                            disabled={cat.removing}
+                            aria-label={`Remove ${item.name}`}
+                          >
+                            Remove
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </>
         )}
       </div>
     </div>

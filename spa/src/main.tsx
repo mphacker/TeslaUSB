@@ -4,6 +4,7 @@ import "leaflet.markercluster/dist/MarkerCluster.css";
 import "leaflet.markercluster/dist/MarkerCluster.Default.css";
 import "./styles/hub.css";
 import "./styles/mapping.css";
+import "./styles/bulk-delete.css";
 import { Router } from "./router";
 
 // Replaced at build time by Vite's `define` — a unique id per build used by the

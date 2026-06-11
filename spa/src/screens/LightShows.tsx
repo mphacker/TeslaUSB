@@ -1,5 +1,6 @@
 import { Icon } from "../components/Icon";
 import { MediaPills } from "../components/MediaPills";
+import { BulkDeleteBar } from "../components/BulkDeleteBar";
 import { useScreenHook } from "../components/screenHook";
 import { api } from "../api/client";
 import { fmtBytes, useMediaCategory } from "../hooks/useMediaCategory";
@@ -19,6 +20,7 @@ export function LightShows() {
     fetchList: api.lightshows,
     install: api.installLightshow,
     remove: api.removeLightshow,
+    bulkDelete: api.bulkDeleteLightshows,
   });
 
   return (
@@ -128,44 +130,63 @@ export function LightShows() {
           </div>
         )}
         {cat.state.tag === "ready" && (
-          <table class="light-shows-video-table">
-            <thead>
-              <tr>
-                <th class="show-name-column">Show Name</th>
-                <th class="show-files-column">Size</th>
-                <th class="show-actions-column">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {cat.state.items.length === 0 ? (
+          <>
+            <BulkDeleteBar cat={cat} noun="shows" />
+            <table class="light-shows-video-table">
+              <thead>
                 <tr>
-                  <td colSpan={3}>
-                    <div class="light-shows-empty" data-testid="light-shows-empty">
-                      <Icon name="sparkles" class="empty-icon" />
-                      <p>No light show files installed yet.</p>
-                    </div>
-                  </td>
+                  {cat.state.items.length > 0 && (
+                    <th class="bulk-check-col" aria-label="Select"></th>
+                  )}
+                  <th class="show-name-column">Show Name</th>
+                  <th class="show-files-column">Size</th>
+                  <th class="show-actions-column">Actions</th>
                 </tr>
-              ) : (
-                cat.state.items.map((item) => (
-                  <tr key={item.rel_path}>
-                    <td>{item.name}</td>
-                    <td>{fmtBytes(item.size_bytes)}</td>
-                    <td>
-                      <button
-                        class="action-btn"
-                        onClick={() => cat.onRequestRemove(item.name)}
-                        disabled={cat.removing}
-                        aria-label={`Remove ${item.name}`}
-                      >
-                        Remove
-                      </button>
+              </thead>
+              <tbody>
+                {cat.state.items.length === 0 ? (
+                  <tr>
+                    <td colSpan={3}>
+                      <div class="light-shows-empty" data-testid="light-shows-empty">
+                        <Icon name="sparkles" class="empty-icon" />
+                        <p>No light show files installed yet.</p>
+                      </div>
                     </td>
                   </tr>
-                ))
-              )}
-            </tbody>
-          </table>
+                ) : (
+                  cat.state.items.map((item) => {
+                    const checked = cat.selected.has(item.name);
+                    return (
+                      <tr key={item.rel_path} class={checked ? "media-row-selected" : undefined}>
+                        <td>
+                          <input
+                            type="checkbox"
+                            class="bulk-row-check"
+                            checked={checked}
+                            onChange={() => cat.toggleSelect(item.name)}
+                            disabled={cat.bulkDeleting}
+                            aria-label={`Select ${item.name}`}
+                          />
+                        </td>
+                        <td>{item.name}</td>
+                        <td>{fmtBytes(item.size_bytes)}</td>
+                        <td>
+                          <button
+                            class="action-btn"
+                            onClick={() => cat.onRequestRemove(item.name)}
+                            disabled={cat.removing}
+                            aria-label={`Remove ${item.name}`}
+                          >
+                            Remove
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </>
         )}
       </div>
     </div>

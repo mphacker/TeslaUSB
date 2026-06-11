@@ -1,0 +1,61 @@
+/*
+ * Bulk-select / bulk-delete affordances shared by the toybox media screens
+ * (Boombox, Music, Light Shows, License Plates, Wraps). Rendered by
+ * `BulkDeleteBar` plus the per-row checkbox column each screen adds. Styling
+ * leans on the carried-over legacy CSS custom properties (`--accent-error`,
+ * `--border-input`, …) so light / dark / high-contrast themes all follow.
+ */
+
+.bulk-delete-bar {
+  margin: 12px 0 8px 0;
+}
+
+.bulk-delete-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-input);
+  border-radius: 6px;
+  background: var(--form-input-bg);
+}
+
+.bulk-select-all {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: var(--text-primary);
+  cursor: pointer;
+  min-height: 44px;
+}
+
+.bulk-select-all input[type="checkbox"],
+.bulk-row-check {
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+  accent-color: var(--accent, #3b82f6);
+}
+
+/* Destructive action button (delete-selected, confirm-remove). */
+.action-btn.danger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #fff;
+  background: var(--accent-error, #dc2626);
+  border-color: var(--accent-error, #dc2626);
+}
+
+.action-btn.danger:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* Highlight a row whose checkbox is checked. */
+.media-row-selected {
+  background: var(--row-selected-bg, rgba(59, 130, 246, 0.12));
+}

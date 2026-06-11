@@ -1,5 +1,6 @@
 import { Icon } from "../components/Icon";
 import { MediaPills } from "../components/MediaPills";
+import { BulkDeleteBar } from "../components/BulkDeleteBar";
 import { useScreenHook } from "../components/screenHook";
 import { api } from "../api/client";
 import { fmtBytes, useMediaCategory } from "../hooks/useMediaCategory";
@@ -21,6 +22,7 @@ export function Boombox() {
     fetchList: api.boombox,
     install: api.installBoombox,
     remove: api.removeBoombox,
+    bulkDelete: api.bulkDeleteBoombox,
   });
 
   return (
@@ -167,33 +169,50 @@ export function Boombox() {
         </div>
       )}
       {cat.state.tag === "ready" && cat.state.items.length > 0 && (
-        <table class="settings-table" data-testid="boombox-list">
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Size</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {cat.state.items.map((item) => (
-              <tr key={item.rel_path}>
-                <td>{item.name}</td>
-                <td>{fmtBytes(item.size_bytes)}</td>
-                <td>
-                  <button
-                    class="action-btn"
-                    onClick={() => cat.onRequestRemove(item.name)}
-                    disabled={cat.removing}
-                    aria-label={`Remove ${item.name}`}
-                  >
-                    Remove
-                  </button>
-                </td>
+        <>
+          <BulkDeleteBar cat={cat} noun="sounds" />
+          <table class="settings-table" data-testid="boombox-list">
+            <thead>
+              <tr>
+                <th class="bulk-check-col" aria-label="Select"></th>
+                <th>Name</th>
+                <th>Size</th>
+                <th>Actions</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {cat.state.items.map((item) => {
+                const checked = cat.selected.has(item.name);
+                return (
+                  <tr key={item.rel_path} class={checked ? "media-row-selected" : undefined}>
+                    <td>
+                      <input
+                        type="checkbox"
+                        class="bulk-row-check"
+                        checked={checked}
+                        onChange={() => cat.toggleSelect(item.name)}
+                        disabled={cat.bulkDeleting}
+                        aria-label={`Select ${item.name}`}
+                      />
+                    </td>
+                    <td>{item.name}</td>
+                    <td>{fmtBytes(item.size_bytes)}</td>
+                    <td>
+                      <button
+                        class="action-btn"
+                        onClick={() => cat.onRequestRemove(item.name)}
+                        disabled={cat.removing}
+                        aria-label={`Remove ${item.name}`}
+                      >
+                        Remove
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </>
       )}
     </div>
   );

@@ -57,14 +57,19 @@ async function request<T>(
   path: string,
   signal?: AbortSignal,
   reqBody?: BodyInit,
+  contentType?: string,
 ): Promise<T> {
   let resp: Response;
   try {
     resp = await fetch(path, {
       method,
       // NOTE: never set Content-Type for a FormData body — the browser must
-      // supply the multipart boundary itself, so we only declare Accept.
-      headers: { Accept: "application/json" },
+      // supply the multipart boundary itself. A JSON body, however, needs an
+      // explicit `application/json` so axum's `Json<T>` extractor accepts it.
+      headers: {
+        Accept: "application/json",
+        ...(contentType ? { "Content-Type": contentType } : {}),
+      },
       credentials: "same-origin",
       signal,
       ...(reqBody !== undefined ? { body: reqBody } : {}),
@@ -95,6 +100,35 @@ async function request<T>(
 
 function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   return request<T>("GET", path, signal);
+}
+
+/**
+ * `POST <path>` a bulk-delete batch as `{ names: [...] }` JSON and assert the
+ * gadgetd handoff reached its terminal `done` state. Shared by every media
+ * category's `bulkDelete*` method — the route refactor made all five endpoints
+ * (`/api/<cat>/bulk-delete`) accept the identical body and return the same
+ * `MediaHandoffResult`.
+ */
+async function bulkDelete(
+  path: string,
+  names: string[],
+  signal?: AbortSignal,
+): Promise<MediaHandoffResult> {
+  const res = await request<MediaHandoffResult>(
+    "POST",
+    path,
+    signal,
+    JSON.stringify({ names }),
+    "application/json",
+  );
+  if (!res || res.state !== "done") {
+    throw new ApiError(
+      502,
+      "gadgetd_protocol",
+      `unexpected bulk-delete state: ${res?.state ?? "<none>"}`,
+    );
+  }
+  return res;
 }
 
 /** Terminal result of a successful car-delete handoff (`200 {handoff_id, state}`). */
@@ -521,6 +555,23 @@ export const api = {
     }
     return res;
   },
+
+  /**
+   * Bulk-delete media in ONE gadgetd handoff (`POST /api/<cat>/bulk-delete`,
+   * body `{ names }`). A single eject/remount cycle removes the whole batch,
+   * unlike calling `remove*` N times. Each `bulkDelete*` returns the terminal
+   * `MediaHandoffResult` of that handoff.
+   */
+  bulkDeleteBoombox: (names: string[], signal?: AbortSignal) =>
+    bulkDelete("/api/boombox/bulk-delete", names, signal),
+  bulkDeleteMusic: (names: string[], signal?: AbortSignal) =>
+    bulkDelete("/api/music/bulk-delete", names, signal),
+  bulkDeleteLightshows: (names: string[], signal?: AbortSignal) =>
+    bulkDelete("/api/lightshows/bulk-delete", names, signal),
+  bulkDeletePlates: (names: string[], signal?: AbortSignal) =>
+    bulkDelete("/api/plates/bulk-delete", names, signal),
+  bulkDeleteWraps: (names: string[], signal?: AbortSignal) =>
+    bulkDelete("/api/wraps/bulk-delete", names, signal),
 };
 
 export type Api = typeof api;

@@ -95,6 +95,45 @@
   font-size: 0.85em;
 }
 
+.event-player-container .event-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.event-player-container .event-nav-btn {
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  line-height: 1;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.event-player-container .event-nav-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.event-player-container .event-nav-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.event-player-container .event-nav-pos {
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 0.85em;
+  font-variant-numeric: tabular-nums;
+  min-width: 38px;
+  text-align: center;
+}
+
 /* Tesla HUD Overlay - Top center like native Tesla viewer */
 .event-player-container .tesla-hud {
   position: absolute;

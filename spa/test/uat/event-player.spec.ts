@@ -742,4 +742,44 @@ test.describe("event-player UAT", () => {
     await expect(location).toHaveText("Harsh braking");
     await expect(video).toHaveAttribute("src", /\/api\/clips\/2\/stream/);
   });
+
+  // ── Gate 8: playlist nav — prev/next step through the loaded events,
+  //    clamped at the ends, with a live position indicator. Each step
+  //    re-resolves the clip and reloads the stream. ──
+  test("playlist nav — prev/next walk the event playlist", async ({ page }) => {
+    const location = page.locator(".event-location");
+    const video = page.locator("#mainVideo");
+    const pos = page.locator("[data-testid=event-nav-pos]");
+    const prev = page.locator("[data-testid=event-nav-prev]");
+    const next = page.locator("[data-testid=event-nav-next]");
+
+    await page.goto("/events", { waitUntil: "load" });
+    await expect(page.locator("[data-screen=event-player]")).toBeVisible();
+
+    // Start: top of a 3-event playlist; prev disabled, next enabled.
+    await expect(pos).toHaveText("1 / 3");
+    await expect(location).toHaveText("Harsh braking");
+    await expect(prev).toBeDisabled();
+    await expect(next).toBeEnabled();
+
+    // Next → event 2 (clip 3); the stream actually reloads.
+    await next.click();
+    await expect(pos).toHaveText("2 / 3");
+    await expect(location).toHaveText("Hard acceleration");
+    await expect(video).toHaveAttribute("src", /\/api\/clips\/3\/stream/);
+
+    // Next → event 3 (clip 4); now at the end, next disabled.
+    await next.click();
+    await expect(pos).toHaveText("3 / 3");
+    await expect(location).toHaveText("Sentry event");
+    await expect(video).toHaveAttribute("src", /\/api\/clips\/4\/stream/);
+    await expect(next).toBeDisabled();
+    await expect(prev).toBeEnabled();
+
+    // Prev → back to event 2.
+    await prev.click();
+    await expect(pos).toHaveText("2 / 3");
+    await expect(location).toHaveText("Hard acceleration");
+    await expect(video).toHaveAttribute("src", /\/api\/clips\/3\/stream/);
+  });
 });

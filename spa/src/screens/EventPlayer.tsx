@@ -372,6 +372,15 @@ export function EventPlayer() {
   const cameraAvailable = (cam: CameraDef): boolean =>
     !!clip && clip.angles.some((a) => a.camera === cam.key);
 
+  // ── Playlist navigation: step through the loaded events. The clip/stream/HUD
+  //    effects all key off `currentEvent`, so flipping the index re-resolves the
+  //    clip and reloads the video — no extra plumbing needed. ──
+  const eventCount = events ? events.length : 0;
+  const canPrev = index > 0;
+  const canNext = index < eventCount - 1;
+  const goPrev = () => setIndex((i) => Math.max(0, i - 1));
+  const goNext = () => setIndex((i) => Math.min(eventCount - 1, i + 1));
+
   // ── Keep `index` in range as the list shrinks (e.g. after a delete). When the
   //    last clip is removed the list goes empty and `currentEvent` becomes
   //    undefined; the stream URL collapses to "" and the player shows empty. ──
@@ -465,6 +474,33 @@ export function EventPlayer() {
           <div class="event-datetime">
             {currentEvent ? fmtDateTime(currentEvent.t) : "\u2014"}
           </div>
+          {eventCount > 1 && (
+            <div class="event-nav" data-testid="event-nav">
+              <button
+                type="button"
+                class="event-nav-btn"
+                data-testid="event-nav-prev"
+                onClick={goPrev}
+                disabled={!canPrev}
+                aria-label="Previous event"
+              >
+                {"\u2039"}
+              </button>
+              <span class="event-nav-pos" data-testid="event-nav-pos">
+                {index + 1} / {eventCount}
+              </span>
+              <button
+                type="button"
+                class="event-nav-btn"
+                data-testid="event-nav-next"
+                onClick={goNext}
+                disabled={!canNext}
+                aria-label="Next event"
+              >
+                {"\u203A"}
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Tesla HUD with SEI data */}

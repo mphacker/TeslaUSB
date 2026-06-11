@@ -31,11 +31,6 @@
 //! delete-after-install (or install-after-delete) of the same path resolve to
 //! the single latest intent.
 
-// Slice 1 of the frictionless-writes epic: this is the pure, unit-tested queue
-// core. The `ipc` drain-worker + `enqueue_mutation` command that consume these
-// items land in the next slice; until then they are intentionally unwired.
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -43,7 +38,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::handoff::Mutation;
+use crate::handoff::{MAX_DELETE_PATHS, Mutation};
 
 /// Hard cap on live (non-terminal) queue entries. An `enqueue` past this is
 /// refused with a real error so a runaway producer cannot fill the data fs with
@@ -278,9 +273,14 @@ impl MutationQueue {
         let mut applies = Vec::new();
         if !delete_paths.is_empty() {
             delete_paths.sort();
-            applies.push(Mutation::DeletePaths {
-                rel_paths: delete_paths,
-            });
+            // The drain worker applies each entry directly (bypassing
+            // `Mutation::validate`), so the synthesized batches must already
+            // honor the per-op cap: chunk into `DeletePaths` of <= MAX_DELETE_PATHS.
+            for chunk in delete_paths.chunks(MAX_DELETE_PATHS) {
+                applies.push(Mutation::DeletePaths {
+                    rel_paths: chunk.to_vec(),
+                });
+            }
         }
         applies.extend(installs);
 
@@ -315,6 +315,23 @@ impl MutationQueue {
     /// reclaimed) so it does not grow unbounded.
     pub(crate) fn prune_terminal(&mut self) {
         self.entries.retain(|e| !e.state.is_terminal());
+    }
+
+    /// Crash-recovery: flip any entry left `Applying` by an interrupted handoff
+    /// back to `Queued` so the drain worker retries it. Safe because the handoff
+    /// is idempotent at the desired-state level (crash-recovery re-presents the
+    /// LUN, and re-applying an already-applied install/delete is a no-op-or-same
+    /// outcome). Returns how many entries were requeued. Call once on startup,
+    /// right after [`load`].
+    pub(crate) fn requeue_inflight(&mut self) -> usize {
+        let mut requeued = 0;
+        for entry in &mut self.entries {
+            if entry.state == MutationState::Applying {
+                entry.state = MutationState::Queued;
+                requeued += 1;
+            }
+        }
+        requeued
     }
 
     /// Load a queue from its JSON journal, or an empty queue if absent/corrupt.
@@ -599,5 +616,61 @@ mod tests {
         let path = std::env::temp_dir().join("gqtest-does-not-exist-xyz.json");
         let q = MutationQueue::load(&path);
         assert_eq!(q.live_len(), 0);
+    }
+
+    #[test]
+    fn deletes_chunk_to_the_handoff_cap() {
+        // More distinct deletes than a single DeletePaths may carry must split
+        // into multiple batched ops, each within MAX_DELETE_PATHS.
+        let mut q = MutationQueue::default();
+        let total = MAX_DELETE_PATHS + 5;
+        for i in 0..total {
+            q.enqueue(2, delete(&format!("Music/{i:03}.mp3")), None, None)
+                .unwrap();
+        }
+        let plan = q.plan_batch(2);
+        assert_eq!(plan.applies.len(), 2, "splits into two DeletePaths chunks");
+        let mut seen = 0;
+        for m in &plan.applies {
+            match m {
+                Mutation::DeletePaths { rel_paths } => {
+                    assert!(rel_paths.len() <= MAX_DELETE_PATHS);
+                    seen += rel_paths.len();
+                }
+                other => panic!("expected DeletePaths, got {other:?}"),
+            }
+        }
+        assert_eq!(seen, total, "every path is covered exactly once");
+        assert_eq!(plan.apply_seqs.len(), total);
+    }
+
+    #[test]
+    fn requeue_inflight_resets_interrupted_applies() {
+        let mut q = MutationQueue::default();
+        q.enqueue(
+            2,
+            install("LockChime.wav", "/s/x"),
+            Some("/s/x".into()),
+            None,
+        )
+        .unwrap();
+        q.enqueue(2, delete("Music/y.mp3"), None, None).unwrap();
+        q.set_state(&[1, 2], MutationState::Applying);
+        assert_eq!(q.requeue_inflight(), 2);
+        assert!(q.entries().iter().all(|e| e.state == MutationState::Queued));
+        // Idempotent: nothing left applying on a second call.
+        assert_eq!(q.requeue_inflight(), 0);
+    }
+
+    #[test]
+    fn requeue_inflight_leaves_terminal_entries_alone() {
+        let mut q = MutationQueue::default();
+        q.enqueue(2, delete("Music/a.mp3"), None, None).unwrap();
+        q.enqueue(2, delete("Music/b.mp3"), None, None).unwrap();
+        q.set_state(&[1], MutationState::Applied);
+        q.set_state(&[2], MutationState::Applying);
+        assert_eq!(q.requeue_inflight(), 1);
+        assert_eq!(q.find("m-1").unwrap().state, MutationState::Applied);
+        assert_eq!(q.find("m-2").unwrap().state, MutationState::Queued);
     }
 }

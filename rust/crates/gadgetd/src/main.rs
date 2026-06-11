@@ -58,6 +58,10 @@ const DEFAULT_SOCKET: &str = "/run/teslausb/gadgetd.sock";
 /// Runtime root for per-handoff mount dirs.
 #[cfg(unix)]
 const DEFAULT_RUNTIME_ROOT: &str = "/run/teslausb/handoff";
+/// Durable mutation-queue journal (persists across restarts on the data area,
+/// alongside the backing images — NOT under /run, which is tmpfs).
+#[cfg(unix)]
+const DEFAULT_QUEUE_JOURNAL: &str = "/data/teslausb/gadgetd/queue.json";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -103,6 +107,8 @@ fn cmd_serve(args: &[String], cfg: GadgetConfig) -> Result<(), String> {
     let socket =
         opt_flag(args, "--socket")?.map_or_else(|| PathBuf::from(DEFAULT_SOCKET), PathBuf::from);
     let runtime_root = PathBuf::from(DEFAULT_RUNTIME_ROOT);
+    let queue_journal = opt_flag(args, "--queue-journal")?
+        .map_or_else(|| PathBuf::from(DEFAULT_QUEUE_JOURNAL), PathBuf::from);
     if allow_hot {
         eprintln!(
             "gadgetd serve: --allow-hot-handoff is set; handoffs may eject while the \
@@ -110,7 +116,7 @@ fn cmd_serve(args: &[String], cfg: GadgetConfig) -> Result<(), String> {
              is measured (SPEC.md §9)."
         );
     }
-    ipc::serve(cfg, runtime_root, &socket, allow_hot).map_err(|e| e.to_string())
+    ipc::serve(cfg, runtime_root, &socket, allow_hot, queue_journal).map_err(|e| e.to_string())
 }
 
 #[cfg(not(unix))]

@@ -26,6 +26,7 @@ use crate::config::{self, GadgetConfig};
 use crate::exec::{self, LiveLun, MtimeSaveGuard};
 use crate::handoff::{self, HandoffOutcome, ImageMutator, LunControl, Mutation, Partition};
 use crate::mutate::LoopMutator;
+use crate::queue::{MutationQueue, MutationState};
 
 /// Maximum accepted frame size (a handful of small JSON fields).
 const MAX_FRAME: u32 = 1 << 20;
@@ -42,6 +43,10 @@ const SOCKET_HEALTH_INTERVAL: Duration = Duration::from_secs(2);
 /// at most this much latency to picking up a new handoff request — negligible
 /// against a multi-second handoff, and the cost of self-healing the socket.
 const ACCEPT_POLL: Duration = Duration::from_millis(100);
+/// How often the background drain worker wakes to look for queued mutations to
+/// apply at the next safe window. Sub-second so an enqueue that lands during an
+/// idle period applies promptly, but cheap enough to poll continuously.
+const DRAIN_POLL: Duration = Duration::from_secs(1);
 
 /// A wire request (`cmd`-tagged JSON).
 #[derive(Debug, Deserialize)]
@@ -49,13 +54,36 @@ const ACCEPT_POLL: Duration = Duration::from_millis(100);
 enum Request {
     /// Read-only gadget + handoff status.
     GadgetStatus,
-    /// Request a serialized mutation handoff.
+    /// Request a serialized mutation handoff (legacy synchronous path: refuses
+    /// when the host is enumerated or a save is active; kept for compatibility).
     #[serde(rename = "request_mutation")]
     Mutate {
         /// Target partition (1 = `TeslaCam`, 2 = media).
         partition: u8,
         /// The validated mutation to apply.
         mutation: Mutation,
+    },
+    /// Accept a validated mutation into the durable queue and return immediately.
+    /// The mutation is persisted and applied automatically at the next safe
+    /// window by the drain worker — it never hard-fails on a connected host.
+    EnqueueMutation {
+        /// Target partition (1 = `TeslaCam`, 2 = media).
+        partition: u8,
+        /// The mutation to enqueue (validated here before it is accepted).
+        mutation: Mutation,
+        /// Absolute path of the persistent staged blob backing an `InstallFile`
+        /// (root-owned; reclaimed by the daemon once the entry is terminal).
+        #[serde(default)]
+        blob_path: Option<String>,
+        /// Optional caller dedupe key; a repeat enqueue with a live key is a
+        /// no-op returning the existing job id.
+        #[serde(default)]
+        idempotency_key: Option<String>,
+    },
+    /// Poll the lifecycle state of a queued mutation by its job id.
+    QueueStatus {
+        /// The `job_id` returned by a previous `enqueue_mutation`.
+        job_id: String,
     },
     /// Poll the record for a prior handoff id.
     HandoffStatus {
@@ -81,6 +109,11 @@ struct ServeState {
     record: Mutex<Option<HandoffRecord>>,
     handoff_lock: Mutex<()>,
     next_id: AtomicU64,
+    /// Durable, coalescing queue of pending mutations (the frictionless-writes
+    /// path). `gadgetd` is the single writer to the image, so it owns this state.
+    queue: Mutex<MutationQueue>,
+    /// JSON journal backing `queue` (atomically rewritten on every transition).
+    queue_path: PathBuf,
 }
 
 /// Read a length-prefixed frame (4-byte LE length, then the payload).
@@ -144,12 +177,24 @@ pub(crate) fn serve(
     runtime_root: PathBuf,
     socket_path: &Path,
     allow_hot: bool,
+    queue_path: PathBuf,
 ) -> io::Result<()> {
     // Handoff crash-recovery BEFORE serving (never touches gadget bring-up).
     recover_interrupted_handoff(&cfg, &runtime_root);
 
     let mut listener = bind_listener(socket_path)?;
     listener.set_nonblocking(true)?;
+
+    // Load the durable queue and recover any mutation interrupted mid-handoff
+    // (flip Applying -> Queued so the drain worker retries it).
+    let mut queue = MutationQueue::load(&queue_path);
+    let requeued = queue.requeue_inflight();
+    if requeued > 0 {
+        println!("gadgetd serve: requeued {requeued} mutation(s) interrupted by a prior exit");
+        if let Err(e) = queue.persist(&queue_path) {
+            eprintln!("gadgetd serve: persisting requeued state failed: {e}");
+        }
+    }
 
     let state = Arc::new(ServeState {
         cfg,
@@ -158,7 +203,15 @@ pub(crate) fn serve(
         record: Mutex::new(None),
         handoff_lock: Mutex::new(()),
         next_id: AtomicU64::new(1),
+        queue: Mutex::new(queue),
+        queue_path,
     });
+
+    // Background drain worker: applies queued mutations at safe windows.
+    {
+        let st = Arc::clone(&state);
+        std::thread::spawn(move || drain_worker(&st));
+    }
 
     let mut last_health = Instant::now();
     loop {
@@ -277,6 +330,13 @@ fn dispatch(req: Request, state: &ServeState) -> serde_json::Value {
             partition,
             mutation,
         } => request_mutation(state, partition, &mutation),
+        Request::EnqueueMutation {
+            partition,
+            mutation,
+            blob_path,
+            idempotency_key,
+        } => enqueue_mutation(state, partition, mutation, blob_path, idempotency_key),
+        Request::QueueStatus { job_id } => queue_status(state, &job_id),
         Request::HandoffStatus { handoff_id } => handoff_status(state, &handoff_id),
     }
 }
@@ -285,6 +345,7 @@ fn gadget_status(state: &ServeState) -> serde_json::Value {
     let status = exec::read_status(&state.cfg);
     let record = state.record.lock().ok().and_then(|r| r.clone());
     let handoff_active = state.handoff_lock.try_lock().is_err();
+    let (pending, applying) = queue_counts(state);
     json!({
         "present": status.present,
         "bound": status.bound_udc.is_some(),
@@ -293,9 +354,28 @@ fn gadget_status(state: &ServeState) -> serde_json::Value {
         "lun_file": status.lun_file,
         "media_lun_file": status.media_lun_file,
         "handoff_active": handoff_active,
+        "pending_mutations": pending,
+        "applying_mutations": applying,
         "last_result": record.as_ref().and_then(|r| r.result.clone()),
         "last_handoff_id": record.as_ref().map(|r| r.id.clone()),
     })
+}
+
+/// (pending = queued, applying = in-flight) counts for status reporting.
+fn queue_counts(state: &ServeState) -> (usize, usize) {
+    let Ok(q) = state.queue.lock() else {
+        return (0, 0);
+    };
+    let mut pending = 0;
+    let mut applying = 0;
+    for entry in q.entries() {
+        match entry.state {
+            MutationState::Queued => pending += 1,
+            MutationState::Applying => applying += 1,
+            _ => {}
+        }
+    }
+    (pending, applying)
 }
 
 fn handoff_status(state: &ServeState, handoff_id: &str) -> serde_json::Value {
@@ -364,6 +444,230 @@ fn request_mutation(state: &ServeState, partition: u8, mutation: &Mutation) -> s
 fn set_record(state: &ServeState, rec: HandoffRecord) {
     if let Ok(mut r) = state.record.lock() {
         *r = Some(rec);
+    }
+}
+
+/// Accept a validated mutation into the durable queue. This NEVER hard-fails on
+/// a busy/connected host — that is the whole point. It refuses only when the
+/// mutation is itself invalid (a real client bug, surfaced as an error) or the
+/// queue is full (backpressure). On success it returns `{job_id, state}`.
+fn enqueue_mutation(
+    state: &ServeState,
+    partition: u8,
+    mutation: Mutation,
+    blob_path: Option<String>,
+    idempotency_key: Option<String>,
+) -> serde_json::Value {
+    // Validate the partition and the mutation up front so only well-formed,
+    // appliable work ever enters the queue (the drain worker trusts entries).
+    if let Err(e) = Partition::from_u8(partition) {
+        return json!({ "error": format!("invalid partition: {e}") });
+    }
+    if let Err(e) = mutation.validate() {
+        return json!({ "error": format!("invalid mutation: {e}") });
+    }
+
+    let Ok(mut queue) = state.queue.lock() else {
+        return json!({ "error": "queue unavailable" });
+    };
+    match queue.enqueue(partition, mutation, blob_path, idempotency_key) {
+        Ok(job_id) => {
+            // Persist before returning so the accepted work is durable. A persist
+            // failure is logged but still reported as queued: the entry is in the
+            // live queue and will be applied + persisted on its next transition;
+            // the only exposure is loss across an immediate crash, which is rare
+            // and far better UX than rejecting a valid upload.
+            if let Err(e) = queue.persist(&state.queue_path) {
+                eprintln!(
+                    "gadgetd queue: enqueue persist failed (will retry on next transition): {e}"
+                );
+            }
+            json!({ "job_id": job_id, "state": "queued" })
+        }
+        Err(e) => json!({ "error": e }),
+    }
+}
+
+/// Report the lifecycle state of a queued mutation. A pruned (terminal, swept)
+/// entry reads as `applied` — once gone from the journal it has been applied or
+/// superseded, never lost.
+fn queue_status(state: &ServeState, job_id: &str) -> serde_json::Value {
+    let Ok(queue) = state.queue.lock() else {
+        return json!({ "error": "queue unavailable" });
+    };
+    match queue.find(job_id) {
+        Some(entry) => json!({
+            "job_id": entry.id,
+            "partition": entry.partition,
+            "state": entry.state,
+        }),
+        None => json!({ "job_id": job_id, "state": "applied" }),
+    }
+}
+
+/// Background loop: at a steady cadence, apply any queued mutations that can be
+/// applied right now. All the safety gating (gadget bound, host not mid-save,
+/// hot-handoff policy) is enforced inside [`handoff::run_handoff`]; a refusal
+/// here is transient and simply leaves the work queued for the next tick.
+fn drain_worker(state: &ServeState) {
+    loop {
+        std::thread::sleep(DRAIN_POLL);
+        drain_once(state);
+    }
+}
+
+fn drain_once(state: &ServeState) {
+    let partitions = match state.queue.lock() {
+        Ok(q) => q.pending_partitions(),
+        Err(_) => return,
+    };
+    for partition in partitions {
+        apply_partition(state, partition);
+    }
+}
+
+/// Reconcile and apply the pending work for one partition in a single idle
+/// window (one handoff lock hold). Coalesced entries are retired first; the
+/// winning batch is then applied, with a transient refusal leaving everything
+/// queued for a later retry.
+fn apply_partition(state: &ServeState, partition_u8: u8) {
+    let Ok(partition) = Partition::from_u8(partition_u8) else {
+        return;
+    };
+    let plan = match state.queue.lock() {
+        Ok(q) => q.plan_batch(partition_u8),
+        Err(_) => return,
+    };
+    if plan.is_empty() {
+        return;
+    }
+
+    // Entries superseded by a later same-path mutation never apply — retire them
+    // up front so their staged blobs are reclaimed even if the apply waits.
+    if !plan.coalesced_seqs.is_empty() {
+        retire_seqs(state, &plan.coalesced_seqs, MutationState::Coalesced);
+    }
+    if plan.applies.is_empty() {
+        return;
+    }
+
+    // Defensive: the synthesized batch must still be valid (queue chunks deletes
+    // to the cap; installs were validated at enqueue). A violation is a logic
+    // bug, not a transient condition — fail those entries rather than spin.
+    for mutation in &plan.applies {
+        if let Err(e) = mutation.validate() {
+            eprintln!("gadgetd drain: batched mutation failed validation ({e}); failing it");
+            retire_seqs(state, &plan.apply_seqs, MutationState::FailedFatal);
+            return;
+        }
+    }
+
+    // One handoff lock for the whole window. If a legacy direct request holds it,
+    // skip this tick and retry — never block the worker on a foreign handoff.
+    let Ok(_guard) = state.handoff_lock.try_lock() else {
+        return;
+    };
+
+    // Mark Applying and persist BEFORE touching the LUN: a crash mid-handoff is
+    // then recovered by requeue_inflight on the next start.
+    mark_and_persist(state, &plan.apply_seqs, MutationState::Applying);
+
+    let lun_index = partition.lun_index();
+    let image = state.cfg.image_for_lun(lun_index).to_path_buf();
+    let lun = LiveLun::for_lun(state.cfg.clone(), lun_index);
+    let guard = MtimeSaveGuard::new(image.clone(), SAVE_SAMPLE);
+    let mutator = LoopMutator::new(image, state.runtime_root.clone());
+
+    let mut transient = false;
+    let mut fatal: Option<String> = None;
+    for mutation in &plan.applies {
+        let id = format!("h-{}", state.next_id.fetch_add(1, Ordering::SeqCst));
+        set_record(
+            state,
+            HandoffRecord {
+                id: id.clone(),
+                phase: "queued".to_owned(),
+                ..Default::default()
+            },
+        );
+        let outcome = handoff::run_handoff(
+            &lun,
+            &guard,
+            &mutator,
+            partition,
+            mutation,
+            state.allow_hot,
+            |phase| update_phase(state, phase.as_str()),
+        );
+        finalize_record(state, &id, &outcome);
+        match outcome {
+            HandoffOutcome::Done => {}
+            HandoffOutcome::Refused(reason) => {
+                // Not the mutation's fault (gadget unbound / host enumerated with
+                // hot handoff off / a save in progress). Leave it queued.
+                eprintln!("gadgetd drain: handoff deferred, will retry ({reason})");
+                transient = true;
+                break;
+            }
+            HandoffOutcome::Failed(detail) => {
+                fatal = Some(detail);
+                break;
+            }
+            HandoffOutcome::CriticalFault(detail) => {
+                fatal = Some(format!("critical_fault: {detail}"));
+                break;
+            }
+        }
+    }
+
+    if transient {
+        mark_and_persist(state, &plan.apply_seqs, MutationState::Queued);
+    } else if let Some(detail) = fatal {
+        eprintln!("gadgetd drain: batch apply failed ({detail}); marking failed_fatal");
+        retire_seqs(state, &plan.apply_seqs, MutationState::FailedFatal);
+    } else {
+        retire_seqs(state, &plan.apply_seqs, MutationState::Applied);
+    }
+}
+
+/// Set a non-terminal state and persist. Used for Applying (pre-handoff) and the
+/// transient Applying->Queued revert.
+fn mark_and_persist(state: &ServeState, seqs: &[u64], new_state: MutationState) {
+    if let Ok(mut queue) = state.queue.lock() {
+        queue.set_state(seqs, new_state);
+        if let Err(e) = queue.persist(&state.queue_path) {
+            eprintln!("gadgetd queue: state persist failed: {e}");
+        }
+    }
+}
+
+/// Move `seqs` to a terminal state, persist, then — only after a durable
+/// persist — reclaim their staged blobs and prune. Reclaiming strictly after
+/// persist guarantees a crash re-applies from the still-present blob instead of
+/// losing it.
+fn retire_seqs(state: &ServeState, seqs: &[u64], terminal: MutationState) {
+    let mut blobs = Vec::new();
+    if let Ok(mut queue) = state.queue.lock() {
+        queue.set_state(seqs, terminal);
+        match queue.persist(&state.queue_path) {
+            Ok(()) => {
+                blobs = queue.reclaimable_blobs(seqs);
+                queue.prune_terminal();
+                if let Err(e) = queue.persist(&state.queue_path) {
+                    eprintln!("gadgetd queue: persist after prune failed: {e}");
+                }
+            }
+            Err(e) => {
+                eprintln!("gadgetd queue: terminal persist failed, not reclaiming blobs: {e}");
+            }
+        }
+    }
+    for blob in blobs {
+        match std::fs::remove_file(&blob) {
+            Ok(()) => {}
+            Err(ref e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => eprintln!("gadgetd queue: blob reclaim failed for {blob}: {e}"),
+        }
     }
 }
 
@@ -442,6 +746,60 @@ mod tests {
     fn parses_gadget_status() {
         let req: Request = serde_json::from_slice(br#"{"cmd":"gadget_status"}"#).expect("parse");
         assert!(matches!(req, Request::GadgetStatus));
+    }
+
+    #[test]
+    fn parses_enqueue_mutation_with_blob_and_key() {
+        let raw = br#"{"cmd":"enqueue_mutation","partition":2,"mutation":{"op":"install_file","rel_path":"LockChime.wav","source_path":"/stage/abc.wav"},"blob_path":"/stage/abc.wav","idempotency_key":"k-1"}"#;
+        let req: Request = serde_json::from_slice(raw).expect("parse");
+        match req {
+            Request::EnqueueMutation {
+                partition,
+                mutation,
+                blob_path,
+                idempotency_key,
+            } => {
+                assert_eq!(partition, 2);
+                assert_eq!(
+                    mutation,
+                    Mutation::InstallFile {
+                        rel_path: "LockChime.wav".to_owned(),
+                        source_path: "/stage/abc.wav".to_owned(),
+                    }
+                );
+                assert_eq!(blob_path.as_deref(), Some("/stage/abc.wav"));
+                assert_eq!(idempotency_key.as_deref(), Some("k-1"));
+            }
+            other => panic!("expected enqueue_mutation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_enqueue_mutation_without_optionals() {
+        // blob_path / idempotency_key default to None when omitted.
+        let raw = br#"{"cmd":"enqueue_mutation","partition":2,"mutation":{"op":"delete_path","rel_path":"Music/x.mp3"}}"#;
+        let req: Request = serde_json::from_slice(raw).expect("parse");
+        match req {
+            Request::EnqueueMutation {
+                blob_path,
+                idempotency_key,
+                ..
+            } => {
+                assert!(blob_path.is_none());
+                assert!(idempotency_key.is_none());
+            }
+            other => panic!("expected enqueue_mutation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_queue_status() {
+        let raw = br#"{"cmd":"queue_status","job_id":"m-7"}"#;
+        let req: Request = serde_json::from_slice(raw).expect("parse");
+        match req {
+            Request::QueueStatus { job_id } => assert_eq!(job_id, "m-7"),
+            other => panic!("expected queue_status, got {other:?}"),
+        }
     }
 
     use super::{bind_listener, socket_path_healthy};

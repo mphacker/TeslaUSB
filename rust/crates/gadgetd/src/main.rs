@@ -36,6 +36,7 @@ mod ipc;
 #[cfg(unix)]
 mod mutate;
 mod provision;
+mod queue;
 
 use std::path::PathBuf;
 use std::process::ExitCode;

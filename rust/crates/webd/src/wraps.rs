@@ -14,7 +14,7 @@ use crate::dto::MediaListDto;
 use crate::error::ApiError;
 use crate::media_upload::{
     BulkDeleteRequest, check_extension, plan_bulk_delete, read_file_upload, sanitise_filename,
-    validate_png_magic,
+    validate_png_magic, validate_wrap_dimensions,
 };
 
 const PARTITION_MEDIA: u8 = 2;
@@ -36,6 +36,9 @@ pub(crate) async fn list_wraps(
 
 /// `POST /api/wraps` — install a wrap PNG at
 /// `LightShow/wraps/<sanitised_filename>`.
+///
+/// Enforces v1 parity before any gadget round-trip: PNG magic and both sides
+/// within `512..=1024` pixels.
 pub(crate) async fn install_wrap(
     State(state): State<AppState>,
     multipart: Multipart,
@@ -44,6 +47,7 @@ pub(crate) async fn install_wrap(
     let name = sanitise_filename(&raw_name)?;
     check_extension(&name, &["png"])?;
     validate_png_magic(&bytes)?;
+    validate_wrap_dimensions(&bytes)?;
 
     let rel_path = format!("{WRAPS_DIR}/{name}");
     crate::route::run_install(state, "wrap_install", PARTITION_MEDIA, rel_path, bytes).await

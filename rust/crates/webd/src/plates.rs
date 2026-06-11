@@ -14,7 +14,7 @@ use crate::dto::MediaListDto;
 use crate::error::ApiError;
 use crate::media_upload::{
     BulkDeleteRequest, check_extension, plan_bulk_delete, read_file_upload, sanitise_filename,
-    validate_png_magic,
+    validate_plate_dimensions, validate_plate_filename, validate_png_magic,
 };
 
 const PARTITION_MEDIA: u8 = 2;
@@ -36,6 +36,9 @@ pub(crate) async fn list_plates(
 
 /// `POST /api/plates` — install a license plate PNG at
 /// `LicensePlate/<sanitised_filename>`.
+///
+/// Enforces v1 parity rules before any gadget round-trip: PNG magic, a 1-12
+/// alphanumeric filename, and exact `420x75` (NA) or `492x75` (EU) dimensions.
 pub(crate) async fn install_plate(
     State(state): State<AppState>,
     multipart: Multipart,
@@ -43,7 +46,9 @@ pub(crate) async fn install_plate(
     let (raw_name, bytes) = read_file_upload(multipart, "file", PLATES_MAX_BYTES).await?;
     let name = sanitise_filename(&raw_name)?;
     check_extension(&name, &["png"])?;
+    validate_plate_filename(&name)?;
     validate_png_magic(&bytes)?;
+    validate_plate_dimensions(&bytes)?;
 
     let rel_path = format!("{PLATES_DIR}/{name}");
     crate::route::run_install(state, "plate_install", PARTITION_MEDIA, rel_path, bytes).await

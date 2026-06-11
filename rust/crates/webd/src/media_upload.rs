@@ -211,6 +211,117 @@ pub(crate) fn validate_png_magic(bytes: &[u8]) -> Result<(), ApiError> {
     }
 }
 
+/// Parse a PNG's pixel dimensions from its `IHDR` chunk.
+///
+/// A PNG file is an 8-byte signature followed by chunks; the first chunk is
+/// always `IHDR`, whose 13-byte data block begins with the width and height as
+/// big-endian `u32`s. The layout is fixed by the spec
+/// (<https://www.w3.org/TR/png/#11IHDR>): width at byte offset 16, height at 20.
+/// This reads only the header — it does not decode pixels.
+///
+/// Returns `Err(422 invalid_png)` if the buffer is too short, lacks the magic,
+/// or the first chunk is not `IHDR`.
+pub(crate) fn png_dimensions(bytes: &[u8]) -> Result<(u32, u32), ApiError> {
+    validate_png_magic(bytes)?;
+    let invalid = || {
+        ApiError::status(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_png",
+            "PNG is missing a valid IHDR header chunk".to_owned(),
+        )
+    };
+    // 8 (signature) + 4 (chunk length) + 4 (chunk type "IHDR") + 8 (w+h).
+    if bytes.get(12..16) != Some(b"IHDR") {
+        return Err(invalid());
+    }
+    let w_bytes: [u8; 4] = bytes
+        .get(16..20)
+        .ok_or_else(invalid)?
+        .try_into()
+        .map_err(|_| invalid())?;
+    let h_bytes: [u8; 4] = bytes
+        .get(20..24)
+        .ok_or_else(invalid)?
+        .try_into()
+        .map_err(|_| invalid())?;
+    let width = u32::from_be_bytes(w_bytes);
+    let height = u32::from_be_bytes(h_bytes);
+    if width == 0 || height == 0 {
+        return Err(ApiError::status(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_png",
+            "PNG reports a zero width or height".to_owned(),
+        ));
+    }
+    Ok((width, height))
+}
+
+/// Accepted license-plate pixel dimensions (v1 parity): North America
+/// `420×75` or Europe/Italy `492×75`. Tesla renders the plate at a fixed
+/// aspect, so off-size images are rejected rather than silently stretched.
+const PLATE_DIMENSIONS: &[(u32, u32)] = &[(420, 75), (492, 75)];
+
+/// Validate that a license-plate PNG is exactly one of the accepted sizes.
+///
+/// Returns `Err(422 invalid_dimensions)` otherwise.
+pub(crate) fn validate_plate_dimensions(bytes: &[u8]) -> Result<(), ApiError> {
+    let (w, h) = png_dimensions(bytes)?;
+    if PLATE_DIMENSIONS.contains(&(w, h)) {
+        return Ok(());
+    }
+    Err(ApiError::status(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "invalid_dimensions",
+        format!("license plate must be 420x75 (North America) or 492x75 (Europe); got {w}x{h}"),
+    ))
+}
+
+/// Inclusive pixel bound for wrap images (v1 parity): each side in `512..=1024`.
+const WRAP_MIN: u32 = 512;
+const WRAP_MAX: u32 = 1024;
+
+/// Validate that a wrap PNG has both sides within `512..=1024` pixels.
+///
+/// Returns `Err(422 invalid_dimensions)` otherwise.
+pub(crate) fn validate_wrap_dimensions(bytes: &[u8]) -> Result<(), ApiError> {
+    let (w, h) = png_dimensions(bytes)?;
+    if (WRAP_MIN..=WRAP_MAX).contains(&w) && (WRAP_MIN..=WRAP_MAX).contains(&h) {
+        return Ok(());
+    }
+    Err(ApiError::status(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "invalid_dimensions",
+        format!(
+            "wrap image must be between {WRAP_MIN}x{WRAP_MIN} and {WRAP_MAX}x{WRAP_MAX} pixels; got {w}x{h}"
+        ),
+    ))
+}
+
+/// Validate a license-plate base filename against v1's rule: at most 12
+/// characters, ASCII letters and digits only (no spaces, dashes, underscores,
+/// or dots). The `.png` extension is excluded from the count and check — pass
+/// the already-`sanitise_filename`d name; this strips a single trailing
+/// `.png`/`.PNG` before validating.
+///
+/// Returns `Err(422 invalid_filename)` otherwise.
+pub(crate) fn validate_plate_filename(name: &str) -> Result<(), ApiError> {
+    let stem = name
+        .strip_suffix(".png")
+        .or_else(|| name.strip_suffix(".PNG"))
+        .unwrap_or(name);
+    let ok =
+        !stem.is_empty() && stem.len() <= 12 && stem.chars().all(|c| c.is_ascii_alphanumeric());
+    if ok {
+        return Ok(());
+    }
+    Err(ApiError::status(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "invalid_filename",
+        "license-plate name must be 1-12 letters or digits only (no spaces, dashes, or underscores)"
+            .to_owned(),
+    ))
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -277,6 +388,78 @@ mod tests {
     #[test]
     fn png_magic_rejected_for_non_png() {
         assert!(validate_png_magic(b"JFIF").is_err());
+    }
+
+    /// Build a minimal PNG header: 8-byte signature + IHDR length/type + the
+    /// width/height big-endian u32s (the remaining IHDR fields are irrelevant
+    /// to `png_dimensions`, which only reads the header).
+    fn png_header(w: u32, h: u32) -> Vec<u8> {
+        let mut data = b"\x89PNG\r\n\x1a\n".to_vec();
+        data.extend_from_slice(&13u32.to_be_bytes()); // IHDR data length
+        data.extend_from_slice(b"IHDR");
+        data.extend_from_slice(&w.to_be_bytes());
+        data.extend_from_slice(&h.to_be_bytes());
+        data.extend_from_slice(&[8, 6, 0, 0, 0]); // bit depth, colour type, …
+        data
+    }
+
+    #[test]
+    fn png_dimensions_reads_ihdr() {
+        let (w, h) = super::png_dimensions(&png_header(420, 75)).unwrap();
+        assert_eq!((w, h), (420, 75));
+    }
+
+    #[test]
+    fn png_dimensions_rejects_short_or_zero() {
+        // Too short to hold an IHDR.
+        assert!(super::png_dimensions(b"\x89PNG\r\n\x1a\n").is_err());
+        // Zero dimension.
+        assert!(super::png_dimensions(&png_header(0, 75)).is_err());
+        // Wrong first chunk type.
+        let mut bad = png_header(420, 75);
+        bad.splice(12..16, *b"gAMA");
+        assert!(super::png_dimensions(&bad).is_err());
+    }
+
+    #[test]
+    fn plate_dimensions_accepts_na_and_eu() {
+        super::validate_plate_dimensions(&png_header(420, 75)).unwrap();
+        super::validate_plate_dimensions(&png_header(492, 75)).unwrap();
+    }
+
+    #[test]
+    fn plate_dimensions_rejects_other_sizes() {
+        assert!(super::validate_plate_dimensions(&png_header(512, 512)).is_err());
+        assert!(super::validate_plate_dimensions(&png_header(420, 76)).is_err());
+    }
+
+    #[test]
+    fn wrap_dimensions_accepts_in_range() {
+        super::validate_wrap_dimensions(&png_header(512, 512)).unwrap();
+        super::validate_wrap_dimensions(&png_header(1024, 1024)).unwrap();
+        super::validate_wrap_dimensions(&png_header(800, 600)).unwrap();
+    }
+
+    #[test]
+    fn wrap_dimensions_rejects_out_of_range() {
+        assert!(super::validate_wrap_dimensions(&png_header(511, 512)).is_err());
+        assert!(super::validate_wrap_dimensions(&png_header(1025, 1024)).is_err());
+        assert!(super::validate_wrap_dimensions(&png_header(420, 75)).is_err());
+    }
+
+    #[test]
+    fn plate_filename_enforces_v1_rule() {
+        super::validate_plate_filename("ABC123.png").unwrap();
+        super::validate_plate_filename("plate1").unwrap();
+        // 12 chars exactly (stem), excluding extension.
+        super::validate_plate_filename("ABCDEFGH1234.png").unwrap();
+        // 13 chars → too long.
+        assert!(super::validate_plate_filename("ABCDEFGH12345.png").is_err());
+        // Dashes / underscores / spaces are forbidden.
+        assert!(super::validate_plate_filename("my-plate.png").is_err());
+        assert!(super::validate_plate_filename("my_plate.png").is_err());
+        assert!(super::validate_plate_filename("my plate.png").is_err());
+        assert!(super::validate_plate_filename(".png").is_err());
     }
 
     #[test]

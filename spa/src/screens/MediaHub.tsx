@@ -46,6 +46,7 @@ function prefBool(prefs: Pref[] | null, key: string): boolean {
 const METRIC_TILES = [
   { id: "metric-load", label: "Load (1m / 5m / 15m)" },
   { id: "metric-cpu", label: "CPU" },
+  { id: "metric-temp", label: "CPU temp" },
   { id: "metric-mem", label: "Memory" },
   { id: "metric-swap", label: "Swap" },
   { id: "metric-sd", label: "SD Card I/O" },
@@ -166,6 +167,18 @@ function metricFor(
       return memTile(m.mem, "");
     case "metric-swap":
       return memTile(m.swap, "none");
+    case "metric-temp":
+      return m.cpu_temp_c != null && Number.isFinite(m.cpu_temp_c)
+        ? {
+            value: `${m.cpu_temp_c.toFixed(1)} \u00b0C`,
+            detail:
+              m.cpu_temp_c >= 80
+                ? "throttling"
+                : m.cpu_temp_c >= 70
+                  ? "warm"
+                  : "",
+          }
+        : { value: "—", detail: "" };
     default:
       // CPU, SD Card I/O, USB I/O — webd does not sample these yet.
       return { value: "—", detail: "" };

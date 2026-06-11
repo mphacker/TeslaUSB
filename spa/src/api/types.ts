@@ -189,6 +189,8 @@ export interface SystemMetrics {
   load: LoadAvg | null;
   mem: MemStat | null;
   swap: MemStat | null;
+  /** SoC temperature in °C (one decimal), or null when no sensor is exposed. */
+  cpu_temp_c: number | null;
   updated_at: number | null;
 }
 

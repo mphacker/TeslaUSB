@@ -105,6 +105,21 @@ function formatUpdated(epoch: number | null | undefined): string {
   return new Date(epoch * 1000).toLocaleTimeString();
 }
 
+/** SoC temperature → "47.2 °C" (or em-dash when no sensor). */
+function formatTemp(c: number | null | undefined): string {
+  if (c == null || !Number.isFinite(c)) return DASH;
+  return `${c.toFixed(1)} \u00b0C`;
+}
+
+/** Coarse thermal band for the detail line. The Pi soft-throttles around 80 °C
+ *  and hard-throttles at 85 °C, so warn well below that. */
+function tempBand(c: number | null | undefined): string {
+  if (c == null || !Number.isFinite(c)) return "\u00a0";
+  if (c >= 80) return "Throttling";
+  if (c >= 70) return "Warm";
+  return "Nominal";
+}
+
 /** Severity → human label + the CSS modifier suffix used by the badge/dot. */
 const SEV_LABEL: Record<string, string> = {
   ok: "Healthy",
@@ -402,6 +417,11 @@ export function StorageHealth() {
                 : DASH}
             </span>
             <span class="storage-metric-detail">{"\u00a0"}</span>
+          </div>
+          <div class="storage-metric" id="storage-metric-temp">
+            <span class="storage-metric-label">CPU temperature</span>
+            <span class="storage-metric-value">{formatTemp(metrics?.cpu_temp_c)}</span>
+            <span class="storage-metric-detail">{tempBand(metrics?.cpu_temp_c)}</span>
           </div>
           <div class="storage-metric" id="storage-metric-uptime">
             <span class="storage-metric-label">Uptime</span>

@@ -78,6 +78,7 @@ const METRICS_FIXTURE = {
   load: { one: 0.15, five: 0.22, fifteen: 0.18 },
   mem: { total_bytes: 512 * MIB, available_bytes: 256 * MIB, used_pct: 50 },
   swap: null,
+  cpu_temp_c: 47.2,
   updated_at: 1700000000,
 };
 
@@ -215,6 +216,12 @@ test.describe("storage health UAT", () => {
     );
     await expect(page.locator("#storage-metric-uptime .storage-metric-value")).toHaveText(
       "up 1d 10h 17m",
+    );
+    await expect(page.locator("#storage-metric-temp .storage-metric-value")).toHaveText(
+      "47.2 \u00b0C",
+    );
+    await expect(page.locator("#storage-metric-temp .storage-metric-detail")).toHaveText(
+      "Nominal",
     );
 
     // Retention headroom — governor is null ⇒ degraded note (no fabricated figure).

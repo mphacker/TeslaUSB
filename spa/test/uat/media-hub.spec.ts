@@ -55,6 +55,7 @@ const METRICS_FIXTURE = {
   load: { one: 0.15, five: 0.22, fifteen: 0.18 },
   mem: { total_bytes: 536870912, available_bytes: 268435456, used_pct: 50 },
   swap: null,
+  cpu_temp_c: 47.2,
   updated_at: 1700000000,
 };
 const STORAGE_FIXTURE = {
@@ -195,7 +196,7 @@ test.describe("settings dashboard UAT", () => {
     const lm = page.locator("#live-metrics-section");
     await expect(lm).toHaveAttribute("open", "");
     const tiles = page.locator("#live-metrics-grid .metric-tile");
-    await expect(tiles).toHaveCount(6);
+    await expect(tiles).toHaveCount(7);
     await expect(page.locator("#metric-load .metric-value")).toHaveText(
       "0.15 / 0.22 / 0.18",
     );
@@ -204,6 +205,7 @@ test.describe("settings dashboard UAT", () => {
       "256 MB / 512 MB",
     );
     await expect(page.locator("#metric-cpu .metric-value")).toHaveText("—");
+    await expect(page.locator("#metric-temp .metric-value")).toHaveText("47.2 \u00b0C");
     await expect(page.locator("#metric-swap .metric-value")).toHaveText("—");
     await expect(page.locator("#live-metrics-foot")).toContainText("Updated");
     await expect(page.locator("#live-metrics-uptime")).toHaveText("up 1d 10h 17m");

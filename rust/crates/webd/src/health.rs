@@ -56,6 +56,7 @@ async fn system_metrics(State(state): State<AppState>) -> Json<SystemMetrics> {
             load: None,
             mem: None,
             swap: None,
+            cpu_temp_c: None,
             updated_at: now,
         });
     Json(out)

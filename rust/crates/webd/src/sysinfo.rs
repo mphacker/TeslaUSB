@@ -130,6 +130,12 @@ pub trait SystemProbe: Send + Sync {
     fn udc_state(&self) -> Option<String>;
     /// The [`MountInfo`] of the filesystem that `path` lives on.
     fn mount_for(&self, path: &Path) -> Option<MountInfo>;
+    /// `SoC` temperature in milli-degrees Celsius (e.g. `47000` = 47.0 °C), read
+    /// from `/sys/class/thermal/thermal_zone0/temp`; `None` when no thermal zone
+    /// is exposed (e.g. the non-Linux build host or a board without a sensor).
+    fn cpu_temp_millic(&self) -> Option<i64> {
+        None
+    }
 }
 
 /// Paths `webd` probes: the Pi-side data/archive root whose ext4 filesystem
@@ -220,8 +226,8 @@ impl MemDto {
 }
 
 /// `GET /api/system/metrics`: the Live-Metrics tiles `webd` can read honestly
-/// (`load`, `mem`, `swap`, `uptime`). CPU-percent and per-device I/O need
-/// sampling deltas and are left to a later slice (the SPA shows `—`).
+/// (`load`, `mem`, `swap`, `uptime`, `cpu_temp`). CPU-percent and per-device I/O
+/// need sampling deltas and are left to a later slice (the SPA shows `—`).
 #[derive(Debug, Serialize)]
 pub struct SystemMetrics {
     /// Seconds since boot, or `null`.
@@ -232,6 +238,10 @@ pub struct SystemMetrics {
     pub mem: Option<MemDto>,
     /// Swap tile, or `null` when no swap is configured.
     pub swap: Option<MemDto>,
+    /// `SoC` temperature in degrees Celsius (one decimal), or `null` when no
+    /// thermal sensor is exposed. A first-class tile on a fanless Pi appliance
+    /// where thermal throttling is a real failure mode.
+    pub cpu_temp_c: Option<f64>,
     /// When this snapshot was taken (epoch seconds), or `null`.
     pub updated_at: Option<u64>,
 }
@@ -468,8 +478,15 @@ pub fn system_metrics(probe: &dyn SystemProbe, now: Option<u64>) -> SystemMetric
         load,
         mem,
         swap,
+        cpu_temp_c: probe.cpu_temp_millic().map(millic_to_celsius),
         updated_at: now,
     }
+}
+
+/// Convert milli-degrees Celsius (as the kernel reports thermal-zone temps) to
+/// whole degrees with one decimal place. Pure, so it is host-testable.
+fn millic_to_celsius(millic: i64) -> f64 {
+    (millic as f64 / 100.0).round() / 10.0
 }
 
 /// Find the mounted filesystem whose mount point is the longest prefix of
@@ -609,6 +626,11 @@ impl SystemProbe for LinuxProbe {
         let mounts = self.proc_file("mounts")?;
         parse_best_mount(&mounts, path)
     }
+
+    fn cpu_temp_millic(&self) -> Option<i64> {
+        let raw = std::fs::read_to_string("/sys/class/thermal/thermal_zone0/temp").ok()?;
+        raw.trim().parse::<i64>().ok()
+    }
 }
 
 #[cfg(unix)]
@@ -656,6 +678,7 @@ mod tests {
         writable: bool,
         udc: Option<String>,
         mount: Option<MountInfo>,
+        cpu_temp: Option<i64>,
     }
 
     impl SystemProbe for FakeProbe {
@@ -673,6 +696,9 @@ mod tests {
         }
         fn mount_for(&self, _path: &Path) -> Option<MountInfo> {
             self.mount.clone()
+        }
+        fn cpu_temp_millic(&self) -> Option<i64> {
+            self.cpu_temp
         }
     }
 
@@ -738,6 +764,7 @@ mod tests {
         );
         let probe = FakeProbe {
             proc,
+            cpu_temp: Some(47239),
             ..FakeProbe::default()
         };
         let m = system_metrics(&probe, Some(42));
@@ -751,6 +778,22 @@ mod tests {
         let swap = m.swap.expect("swap");
         assert_eq!(swap.total_bytes, 102_400 * 1024);
         assert_eq!(m.updated_at, Some(42));
+        // 47239 milli-°C rounds to 47.2 °C.
+        assert!((m.cpu_temp_c.expect("cpu_temp") - 47.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cpu_temp_absent_when_no_sensor() {
+        let m = system_metrics(&FakeProbe::default(), None);
+        assert!(m.cpu_temp_c.is_none());
+    }
+
+    #[test]
+    fn millic_to_celsius_rounds_to_one_decimal() {
+        assert!((millic_to_celsius(47000) - 47.0).abs() < 1e-9);
+        assert!((millic_to_celsius(47239) - 47.2).abs() < 1e-9);
+        assert!((millic_to_celsius(47250) - 47.3).abs() < 1e-9);
+        assert!((millic_to_celsius(0) - 0.0).abs() < 1e-9);
     }
 
     #[test]

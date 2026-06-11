@@ -711,4 +711,35 @@ test.describe("event-player UAT", () => {
     await testInfo.attach(`event-player-hud-${viewport}.png`, { path: hudShot, contentType: "image/png" });
     console.log(`[uat][screenshot:event-player-hud:${viewport}] ${hudShot}`);
   });
+
+  // ── Gate 7: deep-link — `?event=` / `?clip=` start the playlist on a
+  //    specific moment (the map→video hand-off target). Falls back to the
+  //    top of the playlist when the param is absent or unmatched. ──
+  test("deep-link — ?event= and ?clip= select the starting playlist entry", async ({
+    page,
+  }) => {
+    const location = page.locator(".event-location");
+    const video = page.locator("#mainVideo");
+
+    // Default (no param) → top of the playlist: event 1 (clip 2).
+    await page.goto("/events", { waitUntil: "load" });
+    await expect(page.locator("[data-screen=event-player]")).toBeVisible();
+    await expect(location).toHaveText("Harsh braking");
+    await expect(video).toHaveAttribute("src", /\/api\/clips\/2\/stream/);
+
+    // ?event=2 → the hard-acceleration event (clip 3), NOT index 0.
+    await page.goto("/events?event=2", { waitUntil: "load" });
+    await expect(location).toHaveText("Hard acceleration");
+    await expect(video).toHaveAttribute("src", /\/api\/clips\/3\/stream/);
+
+    // ?clip=4 → first event on that clip: the trip-less sentry event (clip 4).
+    await page.goto("/events?clip=4", { waitUntil: "load" });
+    await expect(location).toHaveText("Sentry event");
+    await expect(video).toHaveAttribute("src", /\/api\/clips\/4\/stream/);
+
+    // Unmatched id → graceful fallback to the top of the playlist.
+    await page.goto("/events?event=99999", { waitUntil: "load" });
+    await expect(location).toHaveText("Harsh braking");
+    await expect(video).toHaveAttribute("src", /\/api\/clips\/2\/stream/);
+  });
 });

@@ -599,6 +599,30 @@ body.mapping-active .main-content {
 .st-dot.fsd { background: var(--mapping-event-fsd); }
 .st-dot.trip { background: var(--mapping-accent-primary); }
 .st-card { flex: 1; min-width: 0; }
+.st-card-link {
+    display: block;
+    text-decoration: none;
+    color: inherit;
+    cursor: pointer;
+    border-radius: 6px;
+    padding: 4px 6px;
+    margin: -4px -6px;
+    transition: background 0.12s ease;
+}
+.st-card-link:hover,
+.st-card-link:focus-visible {
+    background: var(--mapping-hover, rgba(127, 127, 127, 0.12));
+    outline: none;
+}
+.st-card-link .st-type { color: var(--mapping-accent-primary, var(--text-primary)); }
+.map-watch-link {
+    display: inline-block;
+    margin-top: 6px;
+    font-weight: 600;
+    color: var(--mapping-accent-primary, #1d6fe0);
+    text-decoration: none;
+}
+.map-watch-link:hover { text-decoration: underline; }
 .st-type { font-weight: 600; font-size: 13px; color: var(--text-primary); }
 .st-date { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
 .st-meta { font-size: 11px; color: var(--text-muted, var(--text-secondary)); margin-top: 4px; }

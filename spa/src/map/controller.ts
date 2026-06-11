@@ -58,6 +58,8 @@ export interface MapEvent {
   description: string;
   /** epoch seconds */
   t: number;
+  /** Playable clip id, when the event has video. Drives the popup deep-link. */
+  clipId?: number | null;
 }
 
 interface RenderInput {
@@ -281,8 +283,12 @@ export class TripMapController {
       });
       const safeType = escapeHtml(ev.type || "").replace(/_/g, " ");
       const safeDesc = escapeHtml(ev.description || "");
+      const watchLink =
+        ev.clipId != null
+          ? `<br><a class="map-watch-link" href="/events?event=${ev.id}">▶ Watch video</a>`
+          : "";
       marker.bindPopup(
-        `<strong>${safeType}</strong><br>${fmtLocalTime(ev.t)}<br>${safeDesc}`,
+        `<strong>${safeType}</strong><br>${fmtLocalTime(ev.t)}<br>${safeDesc}${watchLink}`,
       );
       this.eventCluster.addLayer(marker);
       bounds.push([ev.lat, ev.lon]);

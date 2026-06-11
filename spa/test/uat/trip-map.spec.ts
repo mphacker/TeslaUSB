@@ -504,4 +504,33 @@ test.describe("trip map UAT", () => {
     });
     console.log(`[uat][screenshot:tripmap:${testInfo.project.name}] ${shot}`);
   });
+
+  // ── Gate: map→video hand-off — event cards in the side panel deep-link into
+  //    the event player at that exact event (the core v1 sentry-timeline →
+  //    player gesture). Every seeded event has a clip, so all render as links. ─
+  test("map→video — panel event cards deep-link into the player", async ({
+    page,
+  }) => {
+    await gotoMap(page);
+    await page.locator("#btnVideos").click();
+    await expect(page.locator("#videoPanel")).toHaveClass(/open/);
+
+    const vpEvents = page.locator("[data-testid=vp-events]");
+    // All 3 seeded events carry a clip_id ⇒ all 3 are navigable links.
+    await expect(vpEvents.locator("a.st-card-link")).toHaveCount(3);
+
+    // The first event (harsh_braking, id 1, clip 2) links to its player moment.
+    const link = page.locator("[data-testid=vp-event-link-1]");
+    await expect(link).toHaveAttribute("href", "/events?event=1");
+
+    // Clicking it routes (push-state, no reload) to the player on that event.
+    await link.click();
+    await expect(page).toHaveURL(/\/events\?event=1$/);
+    await expect(page.locator("[data-screen=event-player]")).toBeVisible();
+    await expect(page.locator(".event-location")).toHaveText("Harsh braking");
+    await expect(page.locator("#mainVideo")).toHaveAttribute(
+      "src",
+      /\/api\/clips\/2\/stream/,
+    );
+  });
 });

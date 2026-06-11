@@ -208,6 +208,31 @@ function eventSeekSeconds(
   return Math.max(0, (canonicalMs - target.offset_ms) / 1000);
 }
 
+/** Pick the starting playlist index from the URL deep-link. Supports
+ *  `?event=<id>` (exact event match) and `?clip=<id>` (first event on that
+ *  clip) so the trip-map and other screens can hand off to a specific moment.
+ *  Falls back to 0 (top of the playlist) when absent or unmatched. */
+function initialIndex(playable: EventItem[]): number {
+  if (typeof window === "undefined") return 0;
+  let params: URLSearchParams;
+  try {
+    params = new URLSearchParams(window.location.search);
+  } catch {
+    return 0;
+  }
+  const eventId = Number(params.get("event"));
+  if (Number.isFinite(eventId) && params.get("event")) {
+    const i = playable.findIndex((e) => e.id === eventId);
+    if (i >= 0) return i;
+  }
+  const clipId = Number(params.get("clip"));
+  if (Number.isFinite(clipId) && params.get("clip")) {
+    const i = playable.findIndex((e) => e.clip_id === clipId);
+    if (i >= 0) return i;
+  }
+  return 0;
+}
+
 export function EventPlayer() {
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -246,7 +271,7 @@ export function EventPlayer() {
         // The player only lists events that have a playable clip.
         const playable = page.items.filter((e) => e.clip_id != null);
         setEvents(playable);
-        setIndex(0);
+        setIndex(initialIndex(playable));
       } catch (err) {
         if (ac.signal.aborted) return;
         setError(errMessage(err));

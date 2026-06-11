@@ -199,6 +199,7 @@ export function TripMap() {
               lon: ev.lon,
               description: ev.description ?? "",
               t: ev.t,
+              clipId: ev.clip_id ?? null,
             });
           }
         }
@@ -453,10 +454,9 @@ function EventsTab({
           {events.length} Event{events.length !== 1 ? "s" : ""}
         </strong>
       </div>
-      {events.map((ev) => (
-        <div class="st-event" key={ev.id}>
-          <span class={`st-dot ${eventDotClass(ev.type)}`} />
-          <div class="st-card">
+      {events.map((ev) => {
+        const inner = (
+          <>
             <div class="st-type">{ev.type.replace(/_/g, " ")}</div>
             <div class="st-date">{fmtClock(ev.t)}</div>
             <div class="st-meta">
@@ -469,9 +469,26 @@ function EventsTab({
                 ? ` \u00B7 ${severityLabel(ev.severity)}`
                 : ""}
             </div>
+          </>
+        );
+        return (
+          <div class="st-event" key={ev.id}>
+            <span class={`st-dot ${eventDotClass(ev.type)}`} />
+            {ev.clip_id != null ? (
+              <a
+                class="st-card st-card-link"
+                href={`/events?event=${ev.id}`}
+                data-testid={`vp-event-link-${ev.id}`}
+                aria-label={`Watch ${ev.type.replace(/_/g, " ")} event`}
+              >
+                {inner}
+              </a>
+            ) : (
+              <div class="st-card">{inner}</div>
+            )}
           </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

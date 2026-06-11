@@ -244,6 +244,13 @@ test.describe("trip map UAT", () => {
     await expect(vpEvents).toContainText("harsh braking");
     await expect(vpEvents).toContainText("hard acceleration");
     await expect(vpEvents).toContainText("sentry");
+    // Severity is an indexd ordinal (1=info, 2=warning, 3=critical) rendered as
+    // its LABEL — never as a fabricated speed. Regression guard: the two sev=2
+    // events read "warning" and the sev=1 sentry reads "info", and no event row
+    // shows a bogus "<n> mph"/"<n> kph" minted from the severity ordinal.
+    await expect(vpEvents).toContainText("warning");
+    await expect(vpEvents).toContainText("info");
+    await expect(vpEvents).not.toContainText(/\b\d+\s*(mph|kph)\b/);
     // Trips tab → the 3 seeded trips for the day, labelled by id.
     await page.locator("#vpTabTrips").click();
     const vpTrips = page.locator("[data-testid=vp-trips]");

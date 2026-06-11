@@ -450,6 +450,31 @@ test.describe("event-player UAT", () => {
     }
   });
 
+  // ── Gate 2b: the player honors the event's front_frame_offset_ms — it seeks
+  //    to the event moment on load instead of always starting at 0. The first
+  //    playable seeded event (harsh_braking, clip 2) has front_frame_offset=1500
+  //    and all angles start at offset_ms=0, so the front cam must land at ~1.5s.
+  test("event-offset seek — loads at front_frame_offset_ms, not 0", async ({
+    page,
+  }) => {
+    await gotoPlayerHudOff(page);
+    // Wait for metadata + the one-shot seek to settle near the event moment.
+    await page.waitForFunction(
+      () => {
+        const el = document.getElementById("mainVideo") as HTMLVideoElement | null;
+        return !!el && el.readyState >= 1 && el.duration > 0 && el.currentTime > 1.0;
+      },
+      undefined,
+      { timeout: 15_000 },
+    );
+    const ct = await page
+      .locator("#mainVideo")
+      .evaluate((el: HTMLVideoElement) => el.currentTime);
+    // 1.5s ± tolerance for keyframe snapping; the key assertion is "not 0".
+    expect(ct, `currentTime=${ct} should be near the 1.5s event offset`).toBeGreaterThan(1.0);
+    expect(ct).toBeLessThan(2.4);
+  });
+
   // ── Gate 3 (read-only): only whitelisted GET; switched camera streams; the
   //    archive control stays inert; opening + cancelling the Delete confirm
   //    fires NO mutation ──────────────────────────────────────────────────

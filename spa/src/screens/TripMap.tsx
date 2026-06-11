@@ -3,7 +3,7 @@ import { Icon } from "../components/Icon";
 import { api, ApiError } from "../api/client";
 import type { Clip, DaySummary, EventItem, Trip, TripDetail } from "../api/types";
 import { TripMapController, type MapEvent, type MapTrip } from "../map/controller";
-import { activeSpeedBuckets, formatDisplaySpeed, type SpeedUnit } from "../map/speed";
+import { activeSpeedBuckets, type SpeedUnit } from "../map/speed";
 
 const METERS_PER_MILE = 1609.344;
 
@@ -29,6 +29,21 @@ function eventDotClass(type: string): string {
       return "fsd";
     default:
       return "trip";
+  }
+}
+
+/** Map the indexd-derived severity ordinal (1=info, 2=warning, 3=critical) to
+ *  its label. `severity` is NOT a speed — it has no units. */
+function severityLabel(severity: number | null): string | null {
+  switch (severity) {
+    case 1:
+      return "info";
+    case 2:
+      return "warning";
+    case 3:
+      return "critical";
+    default:
+      return null;
   }
 }
 
@@ -414,7 +429,7 @@ export function TripMap() {
         </div>
         <div class="video-panel-list" id="vpList">
           {panelTab === "events" && (
-            <EventsTab events={panelEvents} unit={unit} />
+            <EventsTab events={panelEvents} />
           )}
           {panelTab === "trips" && <TripsTab trips={panelTrips} />}
           {panelTab === "clips" && <ClipsTab clips={panelClips} />}
@@ -426,10 +441,8 @@ export function TripMap() {
 
 function EventsTab({
   events,
-  unit,
 }: {
   events: EventItem[] | null;
-  unit: SpeedUnit;
 }) {
   if (events === null) return <div class="vp-loading">Loading events…</div>;
   if (events.length === 0) return <div class="vp-empty">No events</div>;
@@ -452,8 +465,8 @@ function EventsTab({
               {ev.lat != null && ev.lon != null
                 ? ` \u00B7 ${ev.lat.toFixed(4)}, ${ev.lon.toFixed(4)}`
                 : ""}
-              {ev.type === "speed_limit_exceeded" && ev.severity != null
-                ? ` \u00B7 ${formatDisplaySpeed(ev.severity, unit)} ${unit}`
+              {severityLabel(ev.severity)
+                ? ` \u00B7 ${severityLabel(ev.severity)}`
                 : ""}
             </div>
           </div>

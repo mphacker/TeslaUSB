@@ -189,6 +189,25 @@ function classifyDeleteFailure(err: unknown): DeleteFailure {
   };
 }
 
+/** Seconds into the *currently selected camera's* video where the event moment
+ *  falls. The event's `front_frame_offset_ms` is relative to the FRONT cam's
+ *  own start; each angle starts at its `offset_ms` within the clip, so the
+ *  event's clip-canonical position is `front.offset_ms + front_frame_offset_ms`
+ *  and the seek target for any camera is that minus the camera's own
+ *  `offset_ms`. Returns 0 when there's no offset to honor (start of clip). */
+function eventSeekSeconds(
+  clip: Clip | null,
+  ev: EventItem | undefined,
+  camera: string,
+): number {
+  if (!clip || !ev || ev.front_frame_offset_ms == null) return 0;
+  const front = clip.angles.find((a) => a.camera === "front");
+  const target = clip.angles.find((a) => a.camera === camera);
+  if (!front || !target) return 0;
+  const canonicalMs = front.offset_ms + ev.front_frame_offset_ms;
+  return Math.max(0, (canonicalMs - target.offset_ms) / 1000);
+}
+
 export function EventPlayer() {
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -285,6 +304,28 @@ export function EventPlayer() {
     if (!ctrl || !streamUrl || !hudOn) return;
     void ctrl.loadTelemetry(streamUrl);
   }, [streamUrl, hudOn]);
+
+  // ── Seek to the event moment once the (re)loaded video has metadata. Without
+  //    this the player always started at 0 and ignored front_frame_offset_ms,
+  //    so events buried mid-clip never showed at the event. Keyed on streamUrl
+  //    (which changes with clip AND camera) plus the event id. ──
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !streamUrl) return;
+    const target = eventSeekSeconds(clip, currentEvent, camera);
+    if (target <= 0) return;
+    const seek = () => {
+      const dur = video.duration;
+      video.currentTime =
+        Number.isFinite(dur) && dur > 0 ? Math.min(target, dur) : target;
+    };
+    if (video.readyState >= 1 /* HAVE_METADATA */) {
+      seek();
+    } else {
+      video.addEventListener("loadedmetadata", seek, { once: true });
+      return () => video.removeEventListener("loadedmetadata", seek);
+    }
+  }, [streamUrl, currentEvent?.id, camera, clip?.id]);
 
   const onToggleHud = (e: Event) => {
     const on = (e.target as HTMLInputElement).checked;

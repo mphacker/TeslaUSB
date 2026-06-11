@@ -42,11 +42,17 @@ Wants=gadgetd.service
 
 [Service]
 Type=simple
-# /run/teslausb holds the control socket; RuntimeDirectory creates and tears it
-# down with the service. scannerd serve tightens it to 0o750 and the socket to
-# 0o660 (filesystem-permission authz; ADR 0001).
+# /run/teslausb holds the control socket; RuntimeDirectory creates it. PRESERVE:
+# the dir is SHARED with gadgetd-control.service (the write-authority daemon also
+# binds gadgetd.sock here). systemd does NOT reference-count RuntimeDirectory
+# across units, so without Preserve=yes a `systemctl restart scannerd` tears down
+# /run/teslausb and unlinks gadgetd's live socket, silently killing the webd->
+# gadgetd write path. Preserve=yes keeps the shared dir intact across our stop.
+# scannerd serve tightens it to 0o750 and the socket to 0o660 (filesystem-
+# permission authz; ADR 0001).
 RuntimeDirectory=teslausb
 RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
 # Serve the IPC socket; persistent tracker + per-pass produce. Both backing
 # images are opened READ-ONLY. The two-LUN layout splits the legacy combined
 # disk.img into teslacam.img (dashcam, logical slot 0) and media.img (MEDIA,

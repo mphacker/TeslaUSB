@@ -27,8 +27,15 @@ OOMScoreAdjust=-1000
 # (SPEC.md §9). Enable the flag only for bench validation, never on the car.
 ExecStart=/usr/local/bin/gadgetd serve --image /data/teslausb/teslacam.img --media-image /data/teslausb/media.img
 # Create /run/teslausb (socket + per-handoff working dirs), root-owned, mode 0750.
+# PRESERVE: /run/teslausb is SHARED with scannerd.service (both bind sockets
+# here). systemd does NOT reference-count RuntimeDirectory across units, so
+# without this a `systemctl restart scannerd` would tear down /run/teslausb and
+# unlink THIS daemon's live gadgetd.sock — leaving gadgetd LISTENing on an
+# orphaned inode while webd's connect() fails with ENOENT (the write path dies
+# silently). Preserve=yes keeps the dir across any peer service stop/restart.
 RuntimeDirectory=teslausb
 RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
 # A serve/socket failure must not be fatal to the system; just restart serving.
 Restart=always
 RestartSec=2

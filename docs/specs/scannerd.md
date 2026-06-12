@@ -14,9 +14,12 @@ for files that are provably **stable**.
 
 ## 2. Responsibilities
 
-1. **Raw traversal:** parse the MBR, locate p1 (TeslaCam) and p2 (media), walk
-   the exFAT directory tree and cluster chains by reading bytes directly. No
-   kernel exFAT mount.
+1. **Raw traversal:** read the two backing image files (`teslacam.img`=lun.0,
+   `media.img`=lun.1) — parse each MBR, locate its single exFAT partition, and
+   walk the directory tree and cluster chains by reading bytes directly. No
+   kernel exFAT mount of the *live* TeslaCam volume. (scannerd produces the
+   **catalog/metadata** for both volumes; media *byte* reads are served by webd
+   over gadgetd's RO `media.img` mount, not by scannerd — see §2.6 / ADR-0003.)
 2. **Concurrency tolerance (stability gating):** the car may be writing
    concurrently. Only emit a clip/file as "ready" when its **directory entry +
    cluster chain + MP4 box tail (moov/`mdat` completeness)** are **stable across
@@ -35,13 +38,28 @@ for files that are provably **stable**.
 5. **Emit** parser output to `indexd` (records: file identity, timestamps,
    partition, clip grouping, SEI sample stream, event hints) over a local IPC /
    queue. `scannerd` derives nothing about trips/events — it only produces facts.
+6. **Live-clip content-read fallback (`ReadFile`, lun.0 only — planned/deferrable).**
+   In addition to metadata, optionally serve **TeslaCam clip bytes on demand** for
+   the trip-map player when a clip is **not yet in the Pi-side ext4 archive**.
+   Resolve `{ path }` on `teslacam.img` through the same raw `MBR → exFAT →
+   FAT-chain` walk and return the requested `[offset, offset+len)` window, no-mount
+   and stability-aware (catalog-`stable` clips only, clamped to
+   `valid_data_length`, identity-fenced, `410` on change). Map playback is
+   **archive-first**, so this fallback can be built *after* the archive loop is
+   proven. **Media bytes are NOT served here** — music/boombox/lightshow audio,
+   wrap/plate thumbnails, and the Active Lock Chime player are served by `webd`
+   reading through `gadgetd`'s read-only loop-mount of the static `media.img`
+   (simpler, proven). See
+   [`contracts/scannerd-readfile.md`](./contracts/scannerd-readfile.md) and
+   [`ADR-0003`](../adr/0003-media-read-path.md).
 
 ## 3. Non-responsibilities
 
 - No writes, ever. No mount, ever (RW or RO of the live Tesla FS).
 - No trip/event derivation, no DB schema ownership (that is `indexd`).
 - No transcoding, no thumbnail generation of full video (thumbnails, if any, are
-  cheap keyframe stills produced downstream and capped).
+  cheap keyframe stills produced downstream and capped). `ReadFile` returns raw
+  bytes only; any resize/transcode is a downstream concern.
 
 ## 4. Consistency model
 
@@ -74,7 +92,9 @@ for files that are provably **stable**.
 ## 7. Boundaries
 
 **ALWAYS** read raw; gate on cross-scan stability; stream within the memory cap;
-honor I/O priority so car writes win.
+honor I/O priority so car writes win. For `ReadFile`, **jail** the requested path
+inside the named partition (reject `..`/absolute escapes), cap the byte window, and
+stream — never load a whole file.
 **ASK FIRST** before adding any snapshot mechanism beyond the short-lived raw
 snapshot, or before changing the stability heuristic.
 **NEVER** mount the Tesla FS; never write to it; never use dm-thin or an

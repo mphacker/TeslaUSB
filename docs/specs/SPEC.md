@@ -54,8 +54,9 @@ If the drive disappears mid-write or returns I/O errors, the car latches the USB
 port off and ONLY a vehicle VBUS power-cycle recovers it. No Pi-side software
 recovers a latched port. Therefore:
 
-1. The car-facing LUN is a **kernel-owned block device** (`usb_f_mass_storage`,
-   configfs/libcomposite) backed by an **image file** (`file=disk.img`). **Zero
+1. The car-facing LUNs are **kernel-owned block devices** (`usb_f_mass_storage`,
+   configfs/libcomposite) backed by **image files** (`lun.0`←`teslacam.img`,
+   `lun.1`←`media.img`). **Zero
    userspace in the write path.** A Pi crash/OOM/reboot looks like a clean
    unplug, never EIO.
 2. The Pi **never** mounts the Tesla filesystem read-write while the car owns it.
@@ -82,17 +83,33 @@ Chosen optimum from the options table in `docs/plan.md`, updated per operator
 decisions: **S1 (image-file LUN) + A (full-Rust app) + O1 (existing Pi OS,
 cleaned in place + hardened).**
 
-- **Storage / gadget (S1):** kernel `usb_f_mass_storage`, `file=<disk.img>` on
-  the existing ext4 data area. Inside the image: **MBR + 2 partitions**
-  (TeslaCam exFAT + media exFAT) — the car reads chimes/lightshows/boombox/music
-  only from a partition of the same physical device it records to
-  (hardware-proven).
-- **Reads (R1):** a conservative Rust **raw exFAT/MP4/SEI parser** that
-  `pread()`s the image/loop and never mounts; trusts only files whose dir entry +
-  cluster chain + MP4 tail are stable across scans. Optional short-lived
-  **raw-parser-over-snapshot** for explicit playback/export — never an unbounded
-  snapshot, **never dm-thin under the live LUN** (rejected: pool-full → EIO →
-  latch).
+- **Storage / gadget (S1, 2-image):** kernel `usb_f_mass_storage` on the
+  existing ext4 data area, presenting **two LUNs backed by two image files**:
+  `lun.0` ← `teslacam.img` (`TESLACAM` exFAT, sacred — the car writes it
+  continuously) and `lun.1` ← `media.img` (`MEDIA` exFAT, read-only to the car
+  via `ro=1`). Each image is MBR + a single exFAT partition, fully
+  `fallocate`d. A media write cycles **`lun.1` only**; `lun.0` is never touched.
+  (The car reads chimes/lightshows/boombox/music/wraps/plates from `lun.1`; that
+  Tesla scans a *second* LUN is the gating hardware spike — see §9 #1 and
+  [`usb-io-and-archiving-architecture.md`](./usb-io-and-archiving-architecture.md).
+  The live device still runs an older single `disk.img`; the 2-image migration
+  is operator + spike gated.)
+- **Reads (two simplest-fit paths — [`ADR-0003`](../adr/0003-media-read-path.md)):**
+  - **Live TeslaCam (`lun.0`):** a conservative Rust **raw exFAT/MP4/SEI parser**
+    (`scannerd`) that `pread()`s the image and **never mounts**; trusts only
+    files whose dir entry + cluster chain + MP4 tail are stable across scans.
+    Map playback is **archive-first** (serve the ext4 archive copy); the
+    not-yet-archived recent window is a bounded, best-effort raw read
+    (stable-only, clamped to `valid_data_length`, identity-fenced, `410` on
+    change). **Never** a kernel mount of the live car-written volume; **never**
+    dm-thin under the live LUN (pool-full → EIO → latch).
+  - **Static media (`lun.1`):** a `gadgetd`-owned **persistent read-only kernel
+    loop-mount** of `media.img`, read via `std::fs`. `media.img` is static
+    outside the (rare, Pi-only) handoff window, so the RO mount is
+    cache-coherent. A media handoff drains in-flight reads (read-lease),
+    unmounts RO, mutates RW, re-mounts RO. This serves media audio, wrap/plate
+    thumbnails, and the Active Lock Chime player — no custom byte-server, no SD
+    shadow copy.
 - **Writes:** Rust **eject-handoff mutator**, car-state-aware, never during saves.
 - **App layer (A — full Rust):** small cooperating binaries (§4). UI rebuilt as a
   small **static SPA** that achieves **visual parity** with today.
@@ -103,9 +120,9 @@ cleaned in place + hardened).**
 
 ```mermaid
 flowchart LR
-  Car[(Tesla car)] -- USB writes/reads --> LUN[gadgetd: kernel usb_f_mass_storage\nfile=disk.img]
-  LUN -- backs --> IMG[disk.img: MBR + TeslaCam exFAT + media exFAT]
-  IMG -. raw pread .-> scannerd[scannerd: raw exFAT/MP4/SEI parser R1]
+  Car[(Tesla car)] -- USB writes lun.0 / reads lun.1 --> LUN[gadgetd: kernel usb_f_mass_storage\nlun.0=teslacam.img, lun.1=media.img ro=1]
+  LUN -- backs --> IMG[teslacam.img: MBR + TESLACAM exFAT;\nmedia.img: MBR + MEDIA exFAT]
+  IMG -. raw pread lun.0 .-> scannerd[scannerd: raw exFAT/MP4/SEI parser R1]
   scannerd --> indexd[indexd: SEI -> SQLite WAL]
   indexd --> DB[(SQLite: trips/events/clips)]
   webd[webd: axum REST/SSE + static SPA] --> DB
@@ -229,15 +246,20 @@ today). The car-facing drive is a single **image file** on that same filesystem;
 the archive and index are **directories on the Linux side, outside the image**.
 
 ```
-/srv/teslausb/
-  disk.img                 # the car-facing LUN (fixed/preallocated size).
-                           #   Internally: MBR + p1 TeslaCam(exFAT) + p2 media(exFAT).
-                           #   The ONLY thing the car can see.
-  archive/                 # Pi-side ARCHIVE — NOT inside disk.img, car cannot see it
+/data/teslausb/
+  teslacam.img             # lun.0 — the SACRED car-write LUN (fixed/fallocated).
+                           #   Internally: MBR + single TESLACAM exFAT partition.
+                           #   The car writes this continuously; never ejected.
+  media.img                # lun.1 — the MEDIA LUN (fixed/fallocated), ro=1 to car.
+                           #   Internally: MBR + single MEDIA exFAT partition.
+                           #   Holds chimes library + active LockChime.wav,
+                           #   boombox/music/lightshows/wraps/plates.
+                           #   gadgetd owns a persistent RO loop-mount for reads;
+                           #   a media write cycles ONLY this LUN (eject-handoff).
+  archive/                 # Pi-side ARCHIVE — NOT inside any image; car cannot see it
     SavedClips/<ts>/...    #   mirrors Tesla naming (tesla-usb-contract.md §4)
     SentryClips/<ts>/...
     RecentClips/<ts>-<cam>.mp4
-  media/                   # staging for p2 media features (chimes/boombox/lightshow/music)
 /var/lib/teslausb/
   index.sqlite3            # SQLite (WAL) catalog of trips/events/clips + archive
 /run/teslausb/*.sock       # local IPC sockets
@@ -245,25 +267,28 @@ the archive and index are **directories on the Linux side, outside the image**.
 
 Key consequences:
 - **Archived videos are stored in `…/archive/` on the Linux ext4 filesystem**,
-  separate from `disk.img`. `webd` serves playback from there; `indexd` catalogs
-  it; `uploadd` uploads from there. The car never sees the archive.
-- `disk.img` is **fixed-size**, so a growing archive cannot corrupt the LUN — but
-  it shares free space with the host ext4, so `retentiond`'s quota MUST keep the
-  ext4 healthily free (so SQLite/WAL and operations never run out of space).
-- **`disk.img` sizing is a provisioning decision (flag, not yet fixed).** On a
-  finite card the budget must close: `card_total ≥ disk.img (fully fallocated)
-  + OS/root + archive budget + all reserves` ([`storage.md` §2](./storage.md)).
-  `disk.img` splits into **p1 (dashcam, large)** + **p2 (media, small —
-  chimes/boombox/lightshow/music are MB-scale)**. Bigger `disk.img` = more car
-  buffer but less Pi archive room; the split and absolute size are chosen at
-  provisioning per card capacity and **measured on hardware** (§9), not hard-coded
-  here. M3 ([`migration.md`](./migration.md)) must confirm enough free space
-  exists post-cleanup before creating it.
+  separate from both images. `webd` serves clip playback from there; `indexd`
+  catalogs it; `uploadd` uploads from there. The car never sees the archive.
+- Both images are **fixed-size/fallocated**, so a growing archive cannot corrupt
+  a LUN — but they share free space with the host ext4, so `retentiond`'s quota
+  MUST keep the ext4 healthily free (so SQLite/WAL and operations never run out
+  of space).
+- **Image sizing is a provisioning decision (flag, not yet fixed).** On a finite
+  card the budget must close: `card_total ≥ teslacam.img + media.img (both fully
+  fallocated) + OS/root + archive budget + all reserves`
+  ([`storage.md` §2](./storage.md)). `teslacam.img` is the large dashcam buffer;
+  `media.img` is small (chimes/boombox/lightshow/music/wraps/plates are MB-scale).
+  Bigger `teslacam.img` = more car buffer but less Pi archive room; sizes are
+  chosen at provisioning per card capacity and **measured on hardware** (§9), not
+  hard-coded here. M3 ([`migration.md`](./migration.md)) must confirm enough free
+  space exists post-cleanup before creating them, and the single→2-image
+  migration runbook lives in
+  [`usb-io-and-archiving-architecture.md`](./usb-io-and-archiving-architecture.md).
 - A future reflash (S2) could promote `archive/` and the index to their own
   physical partition; until then "Pi-side archive **directory**" is the precise
   term — not "archive partition".
 
-**Keeping the card from filling is a safety function.** Because `disk.img` is
+**Keeping the card from filling is a safety function.** Because the images are
 fixed/preallocated, the car's incoming video never grows ext4 — **our** archive +
 index + WAL + staging + logs are the unbounded consumers. A continuous **space
 governor** ([`storage.md`](./storage.md)) watches free space/inodes, holds an
@@ -365,11 +390,12 @@ backlog of risk-named spikes, PASS/FAIL/INCONCLUSIVE outcomes, and the agile fee
 That doc is binding: do not start a long buildout on any unknown below until its
 gating spike PASSes with captured parameters.
 
-1. Tesla acceptance of **one image-file LUN with MBR + 2 partitions** (chimes/
-   lightshow read from p2). Prove first. **[2026-06-08: MECHANISM PASS, gate still
-   OPEN — `usb_f_mass_storage`+`file=disk.img` enumerates and round-trips R/W on a
-   real USB host (bench); car acceptance of MBR+2-exFAT / p2 media read is car-only
-   and unconfirmed. See [`hardware-first-development.md` §5.1](./hardware-first-development.md).]**
+1. Tesla acceptance of **two image-file LUNs** (`lun.0`=TESLACAM the car writes,
+   `lun.1`=MEDIA read-only the car reads chimes/lightshow/etc from). Prove first.
+   **[2026-06-08: single-LUN MECHANISM PASS, 2-LUN gate still OPEN —
+   `usb_f_mass_storage`+`file=` enumerates and round-trips R/W on a
+   real USB host (bench); car acceptance of a SECOND read-only media LUN is
+   car-only and unconfirmed. See [`hardware-first-development.md` §5.1](./hardware-first-development.md).]**
 2. **Clean eject + rebind** behavior — soft-eject treated as benign (no latch);
    re-insert resumes recording in ~2 s; measure mid-write disappearance tolerance.
 3. **Raw exFAT parsing + clip-stability detection while the car writes** — no
@@ -385,10 +411,10 @@ gating spike PASSes with captured parameters.
    range** (incl. any HW4/Cybertruck clips, which could ship a different codec or
    SEI layout); a "download to view" fallback only where a browser can't decode a
    clip's codec.
-8. **`disk.img` sizing + space-budget closure on the real card** — pick the
-   absolute size and p1/p2 split, fully `fallocate` it, and verify
-   `card_total ≥ disk.img + OS + archive budget + reserves` holds with healthy
-   headroom (§6.1, [`storage.md` §2](./storage.md)).
+8. **Image sizing + space-budget closure on the real card** — pick the absolute
+   sizes of `teslacam.img` + `media.img`, fully `fallocate` them, and verify
+   `card_total ≥ teslacam.img + media.img + OS + archive budget + reserves`
+   holds with healthy headroom (§6.1, [`storage.md` §2](./storage.md)).
 
 ---
 
@@ -399,9 +425,12 @@ gating spike PASSes with captured parameters.
 - Keep `gadgetd` the only critical service; cap memory on everything else.
 - Do Pi-side writes via the eject-handoff; never mount the Tesla FS RW while the
   car owns it; never mutate during an active save.
+- Read media via the `gadgetd`-owned **read-only** loop-mount of the static
+  `media.img`, and live TeslaCam clips via raw `pread` (never mounting the
+  car-written `teslacam.img`) — [`ADR-0003`](../adr/0003-media-read-path.md).
 - Parse SEI once at index time; render the HUD client-side; never transcode.
 - Keep SQLite/derived state on the Pi-side ext4 filesystem (outside the car's
-  `disk.img` LUN); treat it as rebuildable.
+  image-file LUNs); treat it as rebuildable.
 - Deploy/migrate only via the hardware-test skill, reversibly, with backups
   first and SSH/WiFi/boot protected.
 - Verify UI changes with Playwright (perf + console + screenshot + wiring).

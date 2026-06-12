@@ -17,6 +17,12 @@ exFAT → FAT chain → MP4 → H.264 SEI` — and never mounting the Tesla
 filesystem, so it can never interfere with the car's writes (the **#1
 invariant**, SPEC.md §2).
 
+> **Path update (2026-06-12, non-substantive):** the single `disk.img` is
+> superseded by the two-image model — `lun.0` ← `/data/teslausb/teslacam.img`
+> and `lun.1` ← `/data/teslausb/media.img` (see `usb-io-and-archiving-architecture.md`
+> and ADR-0003). Everywhere this ADR says `disk.img`, read "the raw backing
+> image(s)"; the seam decision below is unchanged.
+
 The specs split this work across two daemons:
 
 - **`scannerd`** (docs/specs/scannerd.md §2.5) parses the raw bytes,

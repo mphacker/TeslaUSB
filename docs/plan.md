@@ -1,5 +1,94 @@
 # PLAN — TeslaUSB most-reliable architecture (4-model synthesis)
 
+## 🧭 NORTH STAR & LOCKED MEDIA READ/WRITE CONTRACT (2026-06-12)
+
+> **Read this before proposing ANY media/storage change.** This section was
+> added after repeated architectural drift. It is the operator-confirmed,
+> non-negotiable framing. If a design conflicts with anything here, the design
+> is wrong — not this section.
+
+**The goal in one sentence:** be **v1** — same features, capabilities, and
+look-and-feel — **re-implemented in Rust**, and *more efficient* (lower CPU,
+lower I/O, lower memory) and overall *better* than v1. We are not inventing a
+new product or a novel media architecture. When in doubt, do what v1 did, in
+Rust, more efficiently. Do **not** go down clever side-paths that diverge from
+v1 behavior.
+
+**The four media requirements (operator-stated, verbatim intent — LOCKED):**
+
+1. **TeslaCam USB is NEVER disconnected.** The vehicle can always write to it.
+   No media operation, read, or app action may eject, stall, or gate `lun.0`.
+2. **TeslaCam USB must be READABLE for *recorded* (not just archived) clips.**
+   The map/trip viewer must be able to read clips straight off the live
+   TeslaCam image, even before they are copied to the Pi-side ext4 archive.
+3. **Media writes (upload/delete) may momentarily eject the MEDIA USB ONLY.**
+   That brief `lun.1` eject/re-present is expected and fine. It must **never**
+   impact, block, or wait on the TeslaCam USB (`lun.0`).
+4. **ALL media files live IN the IMG (the USB drive), never as files on the
+   SD card.** Music, boombox, lightshows, wraps, plates, the active
+   `LockChime.wav`, **and the lock-chime *library*** all live inside the
+   media image. Nothing media is shadow-copied to `/data` on the SD card.
+
+**The resulting architecture (LOCKED — this is "v1 in Rust, done better"):**
+
+| Concern | Mechanism | Touches TeslaCam? |
+| --- | --- | --- |
+| **Read** TeslaCam clips for the map (recorded + archived) | **Archive-first:** serve the Pi-side ext4 archive copy; for the not-yet-archived recent window, `scannerd` raw `pread` reader (**no mount, no eject**) over `teslacam.img`, best-effort, stable clips only | No |
+| **Read** media (list / play audio / thumbnail source) | **RO kernel loop-mount of `media.img`** (gadgetd-owned, persistent; torn down with read-drain only around a `lun.1` handoff), read via `std::fs` | No |
+| **Write** media (upload/delete) | `gadgetd` eject-handoff on **`lun.1` only** (clears that one LUN's `file`), mutate, re-present | No |
+| **Storage** | Everything the car/app exposes lives **in the IMG**; nothing media on SD | — |
+
+**READ-PATH RECONCILIATION (2026-06-12, Opus + GPT-5.5 + mai).** The read path
+was simplified after an adversarial second-opinion round (operator-mandated
+GPT-5.5 + mai review; see [`ADR-0003`](./adr/0003-media-read-path.md)). Two
+read mechanisms, each the *simplest proven* tool for its volume:
+
+- **Static `media.img` (lun.1) → RO kernel loop-mount.** The Pi is the sole
+  writer and only mutates it inside a `lun.1` handoff window; outside a handoff
+  the image is static, so a read-only kernel mount is cache-coherent and
+  battle-tested. `gadgetd` owns one persistent RO mount; a media handoff
+  drains in-flight reads (a short read-lease), unmounts, mutates RW, re-mounts
+  RO. `webd` serves media audio, wrap/plate thumbnails, and the **Active Lock
+  Chime** player by reading files through that mount with `std::fs` — **no
+  custom exFAT byte-server for media**, no SD shadow copy. This is "use the OS
+  loop, it's proven."
+- **Live `teslacam.img` (lun.0) → raw `pread`, never mounted.** The car writes
+  this exFAT continuously, so a kernel mount would be cache-incoherent and
+  could error under the car's writes. Map playback is **archive-first**: serve
+  the durable ext4 archive copy whenever it exists; only the recent,
+  not-yet-archived window falls back to a **bounded, best-effort** raw read
+  (catalog-`stable` clips only, clamped to `valid_data_length`, identity-fenced,
+  `410 Gone` on change — never wrong bytes). This live fallback may be built
+  *after* the archive loop is running, since archive-first covers the common case.
+
+**EXPLICITLY REJECTED (do not revisit — these caused the drift):**
+
+- ❌ **SD-card shadow copy / gadgetd apply-time cache to `/data`** for the
+  active chime (or any media). Violates requirement #4. The honest source of
+  truth is the bytes in the IMG.
+- ❌ **Loop-mounting the LIVE TeslaCam image (`lun.0`/`teslacam.img`)** — RO or
+  RW — to read it. The car mutates it continuously; a kernel mount is
+  cache-incoherent and risks the write path. `lun.0` reads are always raw
+  `pread`, no mount. (RO loop-mounting the **static `media.img`** is explicitly
+  *allowed* and preferred — see above; the earlier blanket ban applied only to
+  the live car-written volume.)
+- ❌ **A heavyweight content-read seam** (two-RPC handle model, per-slot
+  generation counters bumped every scan, per-chunk exFAT `SetChecksum`
+  re-validation, handoff-edge fencing). Over-engineered for the actual risk.
+  Media uses the loop-mount; the lun.0 live fallback uses a *cheap* identity
+  handle + path jail + bounded length + `410` on change (ADR-0003).
+- ❌ **Any media operation that ejects, stalls, or is gated on `lun.0`/TeslaCam.**
+  Media writes are `lun.1`-only and independent.
+
+**Chime library location (LOCKED 2026-06-12):** the lock-chime *library* (the
+pool of candidate WAVs uploaded/deleted/previewed before one is set active)
+lives **inside `media.img`** — list/preview via the content-read seam, upload/
+delete via the `lun.1` eject-handoff. It is **moving off** the current SD-card
+location (`/data/teslausb/chimes`). Only the active selection is copied to the
+fixed root `LockChime.wav` that Tesla actually consumes.
+
+---
+
 ## PLAIN-ENGLISH SUMMARY (read this first)
 
 **Are we trashing B-1 and starting over? No.** We keep almost all of B-1 and

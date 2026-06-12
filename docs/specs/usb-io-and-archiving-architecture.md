@@ -25,15 +25,68 @@ dashcam-recording gap is wrong.
 
 ---
 
+## 0.1 Media read/write contract (LOCKED 2026-06-12)
+
+The north star is **v1's behavior re-implemented in Rust, more efficiently**
+(lower CPU/I/O/memory). Four operator-stated requirements bind every media
+decision — see also [`plan.md`](../plan.md) "NORTH STAR & LOCKED MEDIA
+READ/WRITE CONTRACT":
+
+1. **TeslaCam (`lun.0`) is never disconnected** — the car can always write; no
+   read/app/media action may eject, stall, or gate it.
+2. **Live TeslaCam clips are readable** (recorded clips for the map, not just
+   the Pi-side ext4 archive) — via the no-mount raw reader.
+3. **Media writes may momentarily eject `lun.1` ONLY** — expected and fine; it
+   must never impact or wait on `lun.0`.
+4. **ALL media files live in the IMG**, never as files on the SD card — music,
+   boombox, lightshows, wraps, plates, active `LockChime.wav`, **and the
+   lock-chime library**. No media shadow copy to `/data`.
+
+**Read paths (two simplest-fit mechanisms — [`ADR-0003`](../adr/0003-media-read-path.md)).**
+Reads of *file bytes* split by volume, each using the simplest proven tool:
+
+- **Media (`lun.1` = static `media.img`):** served by `webd` reading through
+  `gadgetd`'s **persistent read-only kernel loop-mount** of `media.img` with
+  `std::fs` (range-stream like `media.rs`). The Pi is the sole writer and only
+  mutates inside a `lun.1` handoff, so outside that window the RO mount is
+  cache-coherent. A media handoff drains in-flight reads (read-lease), unmounts
+  RO, mutates RW, re-mounts RO. This serves media audio, wrap/plate thumbnails,
+  and the **Active Lock Chime** player — **no custom byte-server, no SD shadow
+  copy.** Enforce `lun.1 ro=1` so the car cannot write exFAT metadata and break
+  the sole-writer premise.
+- **Live TeslaCam clips (`lun.0` = car-written `teslacam.img`):** **archive-first**
+  — serve the Pi-side ext4 archive copy when present; the not-yet-archived
+  recent window uses a **bounded, best-effort** no-mount raw `pread` fallback
+  (catalog-`stable` clips only, clamped to `valid_data_length`, identity-fenced,
+  `410` on change) — the small `ReadFile` seam in
+  [`contracts/scannerd-readfile.md`](./contracts/scannerd-readfile.md), which can
+  be built *after* the archive loop is proven. The live car-written volume is
+  **never** kernel-mounted (cache-incoherent under the car's writes).
+
+**Rejected (caused prior drift, do not revisit):** SD-card shadow copy / gadgetd
+apply-time cache to `/data` (violates #4); loop-mounting the **live** car-written
+image to read it (RO loop-mounting the **static `media.img`** is, by contrast,
+the sanctioned media read path above); a heavyweight content-read seam
+(generation counters / per-chunk checksums — cut as over-engineered, ADR-0003);
+any media op that ejects/stalls/gates `lun.0`.
+
+---
+
 ## 1. Ground truth (as-implemented today)
 
-- **One backing image, one LUN.** `gadgetd` exposes a single
-  `/data/teslausb/disk.img` as `lun.0`: MBR + **p1 `TESLACAM` exFAT** + **p2
-  `MEDIA` exFAT**, fully `fallocate`d. (`gadgetd/src/{provision,handoff}.rs`.)
-- **Reads never eject.** `scannerd` reads the backing image **raw** (`pread`,
+- **Two backing images, two independent LUNs** (migrated 2026-06-11; the
+  earlier single-`disk.img`/2-partition model is retired). `gadgetd` exposes
+  `lun.0` ← `/data/teslausb/teslacam.img` (`TESLACAM` exFAT) and `lun.1` ←
+  `/data/teslausb/media.img` (`MEDIA` exFAT), each MBR + single partition,
+  fully `fallocate`d. A media handoff cycles **`lun.1` only**; `lun.0` is never
+  touched. (`gadgetd/src/{provision,handoff,exec}.rs`.)
+- **Reads never eject.** `scannerd` reads each backing image **raw** (`pread`,
   `MBR → exFAT → FAT → MP4 → H.264 SEI`) and **never mounts** the Tesla filesystem.
   Consistency under concurrent car writes is handled by **stability-gating**, not by
-  a kernel mount. This is the load-bearing fact for archiving (§3).
+  a kernel mount. This is the load-bearing fact for archiving (§3). It yields
+  *metadata* for both volumes; serving media *file bytes* is done by webd over
+  gadgetd's RO `media.img` mount, and the live-clip byte fallback by the small
+  lun.0 `ReadFile` seam (§0.1, ADR-0003).
 - **Only writes eject.** Media install/remove and car-clip delete use the
   **eject-handoff**: soft-eject `lun.0` (clear `lun.0/file`) → loop-mount the target
   partition RW on the Pi → apply validated mutation → `fsync` → unmount → re-present.
@@ -273,6 +326,14 @@ exports it: a concurrent kernel mount can observe stale/inconsistent exFAT metad
 while the car writes through USB, and copying an actively mutated filesystem can
 miss or half-copy clips — both violate the "a Pi crash looks like a clean unplug,
 never corrupt/EIO" model (findings #1, #2). Two acceptable source strategies:
+
+> **Scope note (ADR-0003):** this "never loop-mount" rule targets a volume the
+> **car writes** (the live TeslaCam volume / the legacy single `disk.img`). It
+> does **not** forbid the steady-state RO loop-mount of `media.img`, which the
+> car reads only (`ro=1`) and the Pi is the sole writer of (mutated only inside
+> a `lun.1` handoff). Two read-only viewers of a static exFAT volume are safe;
+> that is the sanctioned media read path. The prohibition here is about the
+> *car-written* image during migration.
 
 - **Preferred — reuse the raw reader.** Copy clips out of the old image with the
   same no-mount raw exFAT reader scannerd already uses (`MBR → exFAT → FAT → file`),

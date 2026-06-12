@@ -23,9 +23,9 @@ use crate::handoff::{ImageMutator, MutateError, Mutation, Partition, validate_re
 const MAX_INSTALL_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Per-phase command timeouts.
-const LOSETUP_TIMEOUT: Duration = Duration::from_secs(5);
-const MOUNT_TIMEOUT: Duration = Duration::from_secs(10);
-const UMOUNT_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const LOSETUP_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const MOUNT_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const UMOUNT_TIMEOUT: Duration = Duration::from_secs(10);
 const SYNC_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Mutates a backing image by loop-mounting it.
@@ -297,7 +297,7 @@ fn losetup_attach(image: &Path) -> io::Result<String> {
 }
 
 /// `losetup -d <loopdev>`.
-fn losetup_detach(loopdev: &str) -> io::Result<()> {
+pub(crate) fn losetup_detach(loopdev: &str) -> io::Result<()> {
     run_with_timeout(
         Command::new("losetup").arg("-d").arg(loopdev),
         LOSETUP_TIMEOUT,
@@ -306,7 +306,7 @@ fn losetup_detach(loopdev: &str) -> io::Result<()> {
 }
 
 /// `losetup -j <image>` → the loop devices currently backing `image`.
-fn losetup_for_image(image: &Path) -> io::Result<Vec<String>> {
+pub(crate) fn losetup_for_image(image: &Path) -> io::Result<Vec<String>> {
     let out = run_with_timeout(
         Command::new("losetup").arg("-j").arg(image),
         LOSETUP_TIMEOUT,
@@ -390,7 +390,7 @@ fn mount_exfat(node: &str, mountpoint: &Path) -> io::Result<()> {
 }
 
 /// `umount <mountpoint>`.
-fn umount(mountpoint: &Path) -> io::Result<()> {
+pub(crate) fn umount(mountpoint: &Path) -> io::Result<()> {
     run_with_timeout(Command::new("umount").arg(mountpoint), UMOUNT_TIMEOUT).map(|_| ())
 }
 
@@ -405,7 +405,7 @@ fn sync_all() {
 }
 
 /// Wait until `path` is a block device or the deadline passes.
-fn wait_for_block(path: &Path, timeout: Duration) -> io::Result<()> {
+pub(crate) fn wait_for_block(path: &Path, timeout: Duration) -> io::Result<()> {
     let deadline = Instant::now() + timeout;
     loop {
         if path.exists() {
@@ -420,7 +420,7 @@ fn wait_for_block(path: &Path, timeout: Duration) -> io::Result<()> {
 
 /// Run `cmd` to completion under `timeout`, killing it on overrun. Returns
 /// stdout on success; maps a non-zero exit or timeout to an error.
-fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> io::Result<Vec<u8>> {
+pub(crate) fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> io::Result<Vec<u8>> {
     use std::process::Stdio;
     let mut child = cmd
         .stdin(Stdio::null())

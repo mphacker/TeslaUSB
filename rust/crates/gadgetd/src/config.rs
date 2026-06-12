@@ -68,7 +68,7 @@ pub(crate) struct GadgetConfig {
     pub(crate) removable: bool,
     /// Whether the media LUN (`lun.1`) is advertised read-only so the car
     /// cannot write media exFAT metadata; `lun.0` is always read-write
-    /// because the TeslaCam records to it.
+    /// because the `TeslaCam` records to it.
     pub(crate) media_read_only: bool,
     /// Disable Force-Unit-Access. **Keep `false`** so host flushes are durable
     /// across an abrupt Pi crash (proven on the bench, 2026-06-08).
@@ -197,8 +197,22 @@ pub(crate) fn plan_bring_up(cfg: &GadgetConfig, udc_name: &str) -> Vec<ConfigfsO
 
     // lun.0 (TeslaCam) is auto-created with the function instance; lun.1 (MEDIA)
     // must be explicitly `mkdir`-ed. Both are described BEFORE the UDC bind.
-    push_lun_ops(&mut ops, cfg, &lun0, cfg.teslacam_image.as_path(), false, false);
-    push_lun_ops(&mut ops, cfg, &lun1, cfg.media_image.as_path(), true, cfg.media_read_only);
+    push_lun_ops(
+        &mut ops,
+        cfg,
+        &lun0,
+        cfg.teslacam_image.as_path(),
+        false,
+        false,
+    );
+    push_lun_ops(
+        &mut ops,
+        cfg,
+        &lun1,
+        cfg.media_image.as_path(),
+        true,
+        cfg.media_read_only,
+    );
 
     ops.push(ConfigfsOp::Symlink {
         target: func,

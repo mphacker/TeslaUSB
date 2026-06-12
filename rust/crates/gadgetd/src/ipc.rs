@@ -25,6 +25,7 @@ use serde_json::json;
 use crate::config::{self, GadgetConfig};
 use crate::exec::{self, LiveLun, MtimeSaveGuard};
 use crate::handoff::{self, HandoffOutcome, ImageMutator, LunControl, Mutation, Partition};
+use crate::mediamount::MediaRoMount;
 use crate::mutate::LoopMutator;
 use crate::queue::{MutationQueue, MutationState};
 
@@ -114,6 +115,9 @@ struct ServeState {
     queue: Mutex<MutationQueue>,
     /// JSON journal backing `queue` (atomically rewritten on every transition).
     queue_path: PathBuf,
+    /// Persistent read-only mount of the media image for the web read path. Its
+    /// gate is suspended/resumed around media (P2) handoffs.
+    media_ro: Arc<MediaRoMount>,
 }
 
 /// Read a length-prefixed frame (4-byte LE length, then the payload).
@@ -180,7 +184,19 @@ pub(crate) fn serve(
     queue_path: PathBuf,
 ) -> io::Result<()> {
     // Handoff crash-recovery BEFORE serving (never touches gadget bring-up).
+    // This clears any stale loop/mount on the media image, so the persistent
+    // read-only mount below starts from a clean slate.
     recover_interrupted_handoff(&cfg, &runtime_root);
+
+    // Establish the persistent read-only media mount (best-effort: a failure
+    // only degrades the web read path — it must never block serving, gadget
+    // bring-up, or a TeslaCam handoff).
+    let media_ro = Arc::new(MediaRoMount::new(
+        cfg.image_for_lun(config::MEDIA_LUN).to_path_buf(),
+    ));
+    if let Err(e) = media_ro.ensure_mounted() {
+        eprintln!("gadgetd serve: media RO mount unavailable at startup: {e}");
+    }
 
     let mut listener = bind_listener(socket_path)?;
     listener.set_nonblocking(true)?;
@@ -205,6 +221,7 @@ pub(crate) fn serve(
         next_id: AtomicU64::new(1),
         queue: Mutex::new(queue),
         queue_path,
+        media_ro,
     });
 
     // Background drain worker: applies queued mutations at safe windows.
@@ -346,6 +363,7 @@ fn gadget_status(state: &ServeState) -> serde_json::Value {
     let record = state.record.lock().ok().and_then(|r| r.clone());
     let handoff_active = state.handoff_lock.try_lock().is_err();
     let (pending, applying) = queue_counts(state);
+    let (media_ro_mounted, media_ro_path, media_ro_error) = state.media_ro.health_snapshot();
     json!({
         "present": status.present,
         "bound": status.bound_udc.is_some(),
@@ -356,6 +374,9 @@ fn gadget_status(state: &ServeState) -> serde_json::Value {
         "handoff_active": handoff_active,
         "pending_mutations": pending,
         "applying_mutations": applying,
+        "media_ro_mounted": media_ro_mounted,
+        "media_ro_path": media_ro_path,
+        "media_ro_error": media_ro_error,
         "last_result": record.as_ref().and_then(|r| r.result.clone()),
         "last_handoff_id": record.as_ref().map(|r| r.id.clone()),
     })
@@ -424,6 +445,7 @@ fn request_mutation(state: &ServeState, partition: u8, mutation: &Mutation) -> s
         &lun,
         &guard,
         &mutator,
+        state.media_ro.as_ref(),
         partition,
         mutation,
         state.allow_hot,
@@ -594,6 +616,7 @@ fn apply_partition(state: &ServeState, partition_u8: u8) {
             &lun,
             &guard,
             &mutator,
+            state.media_ro.as_ref(),
             partition,
             mutation,
             state.allow_hot,

@@ -228,6 +228,18 @@ pub(crate) trait LunControl {
     fn represent(&self) -> std::io::Result<()>;
 }
 
+/// Coordinates the persistent read-only media mount around a media (P2) handoff.
+/// Suspend must release the RO mount BEFORE the RW mutate; resume re-establishes
+/// it AFTER re-present. Only ever invoked for P2 (media); P1/TeslaCam never has
+/// a Pi-side RO mount.
+pub(crate) trait ReadMountGate {
+    /// Tear down the RO media mount so the RW mutate can loop-mount the image.
+    /// Ok if already absent. Err => caller must refuse (avoid a double mount).
+    fn suspend(&self) -> std::io::Result<()>;
+    /// Re-establish the RO media mount after re-present. Best-effort.
+    fn resume(&self) -> std::io::Result<()>;
+}
+
 /// Heuristic detector for "the car is mid-save" (live impl samples image mtime).
 pub(crate) trait SaveGuard {
     /// Best-effort: did the backing image see writes inside the quiet window?
@@ -268,10 +280,15 @@ pub(crate) trait ImageMutator {
 ///
 /// Serialization (never two concurrent handoffs) is the caller's responsibility
 /// (a `try_lock` on the handoff mutex); this function assumes exclusive access.
+// The four injected seams (`lun`/`guard`/`mutator`/`gate`) plus the policy
+// flag and progress sink are a cohesive set; bundling them into a struct would
+// add indirection without improving clarity.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_handoff(
     lun: &dyn LunControl,
     guard: &dyn SaveGuard,
     mutator: &dyn ImageMutator,
+    gate: &dyn ReadMountGate,
     partition: Partition,
     mutation: &Mutation,
     allow_hot: bool,
@@ -300,6 +317,32 @@ pub(crate) fn run_handoff(
         Err(e) => return HandoffOutcome::Refused(format!("save-guard failed: {e}")),
     }
 
+    if partition == Partition::P2 {
+        if let Err(e) = gate.suspend() {
+            return HandoffOutcome::Refused(format!("media_ro_suspend_failed: {e}"));
+        }
+    }
+
+    let outcome = run_handoff_core(lun, mutator, partition, mutation, &mut progress);
+
+    if partition == Partition::P2
+        && matches!(outcome, HandoffOutcome::Done | HandoffOutcome::Failed(_))
+    {
+        if let Err(e) = gate.resume() {
+            eprintln!("gadgetd handoff: media RO resume failed: {e}");
+        }
+    }
+
+    outcome
+}
+
+fn run_handoff_core(
+    lun: &dyn LunControl,
+    mutator: &dyn ImageMutator,
+    partition: Partition,
+    mutation: &Mutation,
+    progress: &mut impl FnMut(HandoffPhase),
+) -> HandoffOutcome {
     // --- Eject (from here the image is ours; the LUN must end re-presented
     //     unless the mutate path cannot prove it released the image) ---
     progress(HandoffPhase::Ejecting);
@@ -320,9 +363,9 @@ pub(crate) fn run_handoff(
     // --- Mount + mutate (self-cleaning) ---
     progress(HandoffPhase::Applying);
     match mutator.apply(partition, mutation) {
-        Ok(()) => represent_after(lun, &mut progress, HandoffOutcome::Done),
+        Ok(()) => represent_after(lun, progress, HandoffOutcome::Done),
         Err(me) if me.image_released => {
-            represent_after(lun, &mut progress, HandoffOutcome::Failed(me.detail))
+            represent_after(lun, progress, HandoffOutcome::Failed(me.detail))
         }
         Err(me) => HandoffOutcome::CriticalFault(format!(
             "mutate failed and image NOT released ({}); LUN left ejected to \
@@ -356,9 +399,9 @@ fn represent_after(
 mod tests {
     use super::{
         HandoffOutcome, HandoffPhase, ImageMutator, LunControl, MutateError, Mutation, Partition,
-        SaveGuard, run_handoff, validate_rel_path,
+        ReadMountGate, SaveGuard, run_handoff, validate_rel_path,
     };
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
     #[test]
     fn partition_from_u8_only_accepts_1_and_2() {
@@ -473,6 +516,43 @@ mod tests {
         }
     }
 
+    struct NoopGate;
+    impl ReadMountGate for NoopGate {
+        fn suspend(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn resume(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct RecordingGate {
+        suspends: Cell<u32>,
+        resumes: Cell<u32>,
+        suspend_err: bool,
+        resume_err: bool,
+    }
+    impl ReadMountGate for RecordingGate {
+        fn suspend(&self) -> std::io::Result<()> {
+            self.suspends.set(self.suspends.get() + 1);
+            if self.suspend_err {
+                Err(std::io::Error::other("suspend boom"))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn resume(&self) -> std::io::Result<()> {
+            self.resumes.set(self.resumes.get() + 1);
+            if self.resume_err {
+                Err(std::io::Error::other("resume boom"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
     struct FakeMutator {
         result: RefCell<Option<Result<(), MutateError>>>,
     }
@@ -513,6 +593,7 @@ mod tests {
             &lun,
             &FakeGuard(false),
             &FakeMutator::ok(),
+            &NoopGate,
             Partition::P1,
             &del(),
             false,
@@ -530,6 +611,7 @@ mod tests {
             &lun,
             &FakeGuard(false),
             &FakeMutator::ok(),
+            &NoopGate,
             Partition::P1,
             &del(),
             true,
@@ -550,6 +632,7 @@ mod tests {
             &lun,
             &FakeGuard(false),
             &FakeMutator::ok(),
+            &NoopGate,
             Partition::P1,
             &del(),
             false,
@@ -570,6 +653,7 @@ mod tests {
             &lun,
             &FakeGuard(false),
             &FakeMutator::ok(),
+            &NoopGate,
             Partition::P1,
             &del(),
             true,
@@ -585,6 +669,7 @@ mod tests {
             &lun,
             &FakeGuard(true),
             &FakeMutator::ok(),
+            &NoopGate,
             Partition::P1,
             &del(),
             false,
@@ -601,6 +686,7 @@ mod tests {
             &lun,
             &FakeGuard(false),
             &FakeMutator::err(true),
+            &NoopGate,
             Partition::P1,
             &del(),
             false,
@@ -618,6 +704,7 @@ mod tests {
             &lun,
             &FakeGuard(false),
             &FakeMutator::err(false),
+            &NoopGate,
             Partition::P1,
             &del(),
             false,
@@ -640,6 +727,7 @@ mod tests {
             &lun,
             &FakeGuard(false),
             &FakeMutator::ok(),
+            &NoopGate,
             Partition::P1,
             &del(),
             false,
@@ -656,6 +744,7 @@ mod tests {
             &lun,
             &FakeGuard(false),
             &FakeMutator::ok(),
+            &NoopGate,
             Partition::P1,
             &del(),
             false,
@@ -665,5 +754,128 @@ mod tests {
             *seen.borrow(),
             ["ejecting", "applying", "representing", "done"]
         );
+    }
+
+    #[test]
+    fn p1_handoff_never_uses_media_gate() {
+        let lun = FakeLun::ok();
+        let gate = RecordingGate {
+            suspends: Cell::new(0),
+            resumes: Cell::new(0),
+            suspend_err: false,
+            resume_err: false,
+        };
+        let outcome = run_handoff(
+            &lun,
+            &FakeGuard(false),
+            &FakeMutator::ok(),
+            &gate,
+            Partition::P1,
+            &del(),
+            false,
+            |_| {},
+        );
+        assert_eq!(outcome, HandoffOutcome::Done);
+        assert_eq!(gate.suspends.get(), 0);
+        assert_eq!(gate.resumes.get(), 0);
+    }
+
+    #[test]
+    fn p2_success_suspends_and_resumes() {
+        let lun = FakeLun::ok();
+        let gate = RecordingGate {
+            suspends: Cell::new(0),
+            resumes: Cell::new(0),
+            suspend_err: false,
+            resume_err: false,
+        };
+        let outcome = run_handoff(
+            &lun,
+            &FakeGuard(false),
+            &FakeMutator::ok(),
+            &gate,
+            Partition::P2,
+            &del(),
+            false,
+            |_| {},
+        );
+        assert_eq!(outcome, HandoffOutcome::Done);
+        assert_eq!(gate.suspends.get(), 1);
+        assert_eq!(gate.resumes.get(), 1);
+        assert_eq!(*lun.events.borrow(), ["eject", "represent"]);
+    }
+
+    #[test]
+    fn p2_suspend_error_refuses_before_eject() {
+        let lun = FakeLun::ok();
+        let gate = RecordingGate {
+            suspends: Cell::new(0),
+            resumes: Cell::new(0),
+            suspend_err: true,
+            resume_err: false,
+        };
+        let outcome = run_handoff(
+            &lun,
+            &FakeGuard(false),
+            &FakeMutator::ok(),
+            &gate,
+            Partition::P2,
+            &del(),
+            false,
+            |_| {},
+        );
+        assert!(
+            matches!(outcome, HandoffOutcome::Refused(msg) if msg.contains("media_ro_suspend_failed"))
+        );
+        assert_eq!(gate.suspends.get(), 1);
+        assert_eq!(gate.resumes.get(), 0);
+        assert!(lun.events.borrow().is_empty());
+    }
+
+    #[test]
+    fn p2_resume_error_does_not_change_done_outcome() {
+        let lun = FakeLun::ok();
+        let gate = RecordingGate {
+            suspends: Cell::new(0),
+            resumes: Cell::new(0),
+            suspend_err: false,
+            resume_err: true,
+        };
+        let outcome = run_handoff(
+            &lun,
+            &FakeGuard(false),
+            &FakeMutator::ok(),
+            &gate,
+            Partition::P2,
+            &del(),
+            false,
+            |_| {},
+        );
+        assert_eq!(outcome, HandoffOutcome::Done);
+        assert_eq!(gate.resumes.get(), 1);
+    }
+
+    #[test]
+    fn p2_critical_fault_skips_resume() {
+        let lun = FakeLun::ok();
+        let gate = RecordingGate {
+            suspends: Cell::new(0),
+            resumes: Cell::new(0),
+            suspend_err: false,
+            resume_err: false,
+        };
+        let outcome = run_handoff(
+            &lun,
+            &FakeGuard(false),
+            &FakeMutator::err(false),
+            &gate,
+            Partition::P2,
+            &del(),
+            false,
+            |_| {},
+        );
+        assert!(matches!(outcome, HandoffOutcome::CriticalFault(_)));
+        assert_eq!(gate.suspends.get(), 1);
+        assert_eq!(gate.resumes.get(), 0);
     }
 }

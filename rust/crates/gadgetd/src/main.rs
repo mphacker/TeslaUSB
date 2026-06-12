@@ -34,6 +34,8 @@ mod handoff;
 #[cfg(unix)]
 mod ipc;
 #[cfg(unix)]
+mod mediamount;
+#[cfg(unix)]
 mod mutate;
 mod provision;
 mod queue;

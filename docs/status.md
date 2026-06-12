@@ -56,12 +56,27 @@ every daemon at once). Get reads + a safe handoff lock proven before feature wor
   startup `ro` verify/log, optional CLI override for the C1 spike, and exFAT
   integrity/repair on `media.img` is now solely Pi-side.)**
 - [ ] **F3 · gadgetd RO loop-mount of `media.img`** — persistent, gadgetd-owned;
-  exposes a media-root path for `webd` to read via `std::fs`.
+  exposes a media-root path (`/run/teslausb/media-ro`) for `webd` to read via
+  `std::fs`. **(impl + unit tests DONE & bench-green 2026-06-12: new
+  `mediamount.rs` (`losetup -rfP` + `mount -o ro`, idempotent `ensure_mounted`,
+  fail-closed `suspend`/`resume` that refuse to stack on an image with a live
+  loop — never-double-mount); a `ReadMountGate` trait injected into
+  `run_handoff` suspends the RO mount before a P2 RW mutate and resumes after
+  re-present (P1/TeslaCam never touched); suspend-fail ⇒ `Refused` before eject,
+  resume-fail ⇒ degraded (surfaced via new `gadget_status` `media_ro_*` fields),
+  not a fault. Reviewed by GPT-5.5 — its Critical (startup double-mount after a
+  failed cleanup) is fixed by the loop-presence guard. `cargo test -p gadgetd
+  --bins` 82 passed + clippy clean in podman. Full mount lifecycle needs real
+  loop devices, and the `webd` read handlers that consume the path are separate
+  gated items, so live enforcement lands with F1 — gated:F1+C1.)**
 - [ ] **F4 · Handoff read-drain / quiesce** — a read-lease so an in-flight media
   read is drained/blocked before a `lun.1` RW mutate; RO mount torn down and
   rebuilt around the handoff (GPT-5.5 #5). Extends the existing handoff state
   machine; "never two writers / never wrong bytes" outranks "always give the
-  drive back".
+  drive back". **(partial: the RO-mount suspend/resume-around-mutate half landed
+  with F3 — the regression-prevention piece. The remaining work, draining
+  in-flight `webd` reader fds, is deferred until the `webd` media read handlers
+  exist — there are no readers to drain yet.)**
 - [ ] **F5 · gadgetd eject-handoff write path (lun.1 only)** — install/delete via
   losetup→mount RW→mutate→sync→umount→re-present, cycling **only** `lun.1`.
   **(partial: handoff mechanism + atomic install + `create_dir_all` parent fix

@@ -66,8 +66,10 @@ pub(crate) struct GadgetConfig {
     pub(crate) media_image: PathBuf,
     /// Whether the LUNs advertise as removable (Tesla expects removable).
     pub(crate) removable: bool,
-    /// Whether the LUNs are read-only.
-    pub(crate) read_only: bool,
+    /// Whether the media LUN (`lun.1`) is advertised read-only so the car
+    /// cannot write media exFAT metadata; `lun.0` is always read-write
+    /// because the TeslaCam records to it.
+    pub(crate) media_read_only: bool,
     /// Disable Force-Unit-Access. **Keep `false`** so host flushes are durable
     /// across an abrupt Pi crash (proven on the bench, 2026-06-08).
     pub(crate) nofua: bool,
@@ -94,7 +96,7 @@ impl GadgetConfig {
             teslacam_image,
             media_image,
             removable: true,
-            read_only: false,
+            media_read_only: true,
             nofua: false,
             stall: true,
         }
@@ -195,8 +197,8 @@ pub(crate) fn plan_bring_up(cfg: &GadgetConfig, udc_name: &str) -> Vec<ConfigfsO
 
     // lun.0 (TeslaCam) is auto-created with the function instance; lun.1 (MEDIA)
     // must be explicitly `mkdir`-ed. Both are described BEFORE the UDC bind.
-    push_lun_ops(&mut ops, cfg, &lun0, cfg.teslacam_image.as_path(), false);
-    push_lun_ops(&mut ops, cfg, &lun1, cfg.media_image.as_path(), true);
+    push_lun_ops(&mut ops, cfg, &lun0, cfg.teslacam_image.as_path(), false, false);
+    push_lun_ops(&mut ops, cfg, &lun1, cfg.media_image.as_path(), true, cfg.media_read_only);
 
     ops.push(ConfigfsOp::Symlink {
         target: func,
@@ -218,6 +220,7 @@ fn push_lun_ops(
     lun: &std::path::Path,
     image: &std::path::Path,
     mkdir_first: bool,
+    read_only: bool,
 ) {
     if mkdir_first {
         ops.push(ConfigfsOp::Mkdir(lun.to_path_buf()));
@@ -228,7 +231,7 @@ fn push_lun_ops(
     ));
     ops.push(ConfigfsOp::Write(
         lun.join("ro"),
-        GadgetConfig::bool_attr(cfg.read_only),
+        GadgetConfig::bool_attr(read_only),
     ));
     ops.push(ConfigfsOp::Write(
         lun.join("nofua"),
@@ -376,6 +379,28 @@ mod tests {
                 "{lun} must be 0 (FUA honoured)"
             );
         }
+    }
+
+    #[test]
+    fn bring_up_marks_media_lun_read_only() {
+        let ops = plan_bring_up(&test_cfg("/cfgroot"), "udc0");
+        let expected = GadgetConfig::bool_attr(true);
+        let ro = ops.iter().find_map(|op| match op {
+            ConfigfsOp::Write(p, v) if p.ends_with("lun.1/ro") => Some(v),
+            _ => None,
+        });
+        assert_eq!(ro, Some(&expected));
+    }
+
+    #[test]
+    fn bring_up_keeps_teslacam_lun_writable() {
+        let ops = plan_bring_up(&test_cfg("/cfgroot"), "udc0");
+        let expected = GadgetConfig::bool_attr(false);
+        let ro = ops.iter().find_map(|op| match op {
+            ConfigfsOp::Write(p, v) if p.ends_with("lun.0/ro") => Some(v),
+            _ => None,
+        });
+        assert_eq!(ro, Some(&expected));
     }
 
     #[test]

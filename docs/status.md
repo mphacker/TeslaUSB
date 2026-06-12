@@ -48,6 +48,13 @@ every daemon at once). Get reads + a safe handoff lock proven before feature wor
   host-built/bench-validated, **not yet run on the live device**. **(C, gated:C1 spike)**
 - [ ] **F2 · Enforce `lun.1 ro=1`** in gadgetd configfs so the car cannot write
   media exFAT metadata (makes the RO-mount sole-writer premise true — GPT-5.5 #9).
+  **(planner + unit tests DONE & bench-green 2026-06-12: per-LUN `ro` in
+  `config.rs` — `lun.0` rw so the car keeps recording, `lun.1 ro=1`; `cargo test
+  -p gadgetd` 76 passed in podman. `ro` is set once at bring-up and persists across
+  the eject-handoff. Live enforcement takes effect at the next gadget bring-up, so
+  it lands with F1 migration — gated:F1+C1. Follow-ups logged from GPT-5.5 review:
+  startup `ro` verify/log, optional CLI override for the C1 spike, and exFAT
+  integrity/repair on `media.img` is now solely Pi-side.)**
 - [ ] **F3 · gadgetd RO loop-mount of `media.img`** — persistent, gadgetd-owned;
   exposes a media-root path for `webd` to read via `std::fs`.
 - [ ] **F4 · Handoff read-drain / quiesce** — a read-lease so an in-flight media

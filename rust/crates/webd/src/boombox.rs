@@ -66,12 +66,16 @@ pub(crate) async fn install_boombox(
         })?;
     }
 
-    // Capacity: at most BOOMBOX_MAX_FILES sounds total. A re-upload of an
-    // existing name is a replace (net count unchanged), so it is permitted
-    // even at capacity; a brand-new name at capacity is rejected before any
-    // gadgetd handoff. The name comparison is exact (case-sensitive) to match
-    // how p2 stores and addresses files (see `BOOMBOX_DIR` note above): a
-    // differently-cased name (`c.mp3` vs `C.MP3`) is a distinct file, so
+    // Capacity: at most BOOMBOX_MAX_FILES sounds total. A re-upload of the same
+    // destination path is a replace (net count unchanged), so it is permitted
+    // even at capacity; a brand-new path at capacity is rejected before any
+    // gadgetd handoff. The dedupe identity is the full destination `rel_path`,
+    // not the bare file name: `list_boombox` returns every row under `Boombox/%`
+    // (including any nested `Boombox/sub/<name>`), so matching on name alone
+    // could let a root-level upload masquerade as a replace of a same-named
+    // nested file and bypass the cap. The comparison is exact (case-sensitive)
+    // to match how p2 stores and addresses files (see `BOOMBOX_DIR` note above):
+    // a differently-cased path (`c.mp3` vs `C.MP3`) is a distinct file, so
     // treating it as a replace would let the library grow past the cap.
     //
     // The count is read from the catalog, which trails an in-flight install by
@@ -80,9 +84,10 @@ pub(crate) async fn install_boombox(
     // single-operator appliance whose UI installs one file at a time and each
     // install briefly ejects the USB drive, so uploads are effectively
     // serialised in practice.
+    let rel_path = format!("{BOOMBOX_DIR}/{name}");
     let existing =
         crate::route::read(state.catalog.clone(), crate::query::list_boombox).await?;
-    let is_replace = existing.iter().any(|item| item.name == name);
+    let is_replace = existing.iter().any(|item| item.rel_path == rel_path);
     if !is_replace && existing.len() >= BOOMBOX_MAX_FILES {
         return Err(ApiError::status(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -93,7 +98,6 @@ pub(crate) async fn install_boombox(
         ));
     }
 
-    let rel_path = format!("{BOOMBOX_DIR}/{name}");
     crate::route::run_install(state, "boombox_install", PARTITION_MEDIA, rel_path, bytes).await
 }
 

@@ -39,10 +39,10 @@ test -p webd` = **221 passed, 0 failed**; 11 wrap tests; zero new clippy warning
   comparison + added regression test `wraps_nested_same_name_is_not_a_replace_at_capacity`.
   GPT-5.5's optional suggestion to also filter the *count* to root-level only was
   declined: counting all `Wraps/%` rows is conservative (can only reject earlier,
-  never bypass) and simpler. ⚠️ **Follow-up:** the shipped Boombox cap (`d480067`,
-  boombox.rs) has the same name-vs-rel_path pattern (`item.name == name`); it is
-  flat in practice but should get the same `rel_path` fix for consistency — flag to
-  operator before re-touching a committed lane.
+  never bypass) and simpler. The shipped Boombox cap (`d480067`) had the same
+  name-vs-`rel_path` pattern; it was fixed in the same way (`b7a4cae`'s follow-up
+  commit) with its own `boombox_nested_same_name_is_not_a_replace_at_capacity`
+  regression test for consistency.
 
 **Next item to start:** open. `chimelib-to-img` (move chime library into `media.img`,
 requirement #4) is NOT cleanly autonomous — its acceptance needs the gadgetd lun.1

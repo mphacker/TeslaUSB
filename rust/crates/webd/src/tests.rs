@@ -2372,6 +2372,32 @@ async fn boombox_case_variant_rejected_when_full() {
 }
 
 #[tokio::test]
+async fn boombox_nested_same_name_is_not_a_replace_at_capacity() {
+    // A nested `Boombox/old/e.mp3` shares the bare name `e.mp3` with the
+    // incoming root-level upload but is a DISTINCT destination path. At capacity
+    // it must NOT be treated as a replace (which would bypass the cap).
+    let fx = boombox_fixture(
+        Reply::Json(json!({ "state": "queued", "job_id": "m-1" })),
+        &[
+            ("slot1", "Boombox/a.wav", "a.wav", 1),
+            ("slot1", "Boombox/b.wav", "b.wav", 1),
+            ("slot1", "Boombox/c.mp3", "c.mp3", 1),
+            ("slot1", "Boombox/d.mp3", "d.mp3", 1),
+            ("slot1", "Boombox/old/e.mp3", "e.mp3", 1),
+        ],
+    );
+    let (status, body) = post_boombox(
+        &fx.app,
+        multipart_body_with_filename("e.mp3", &[("file", b"ID3\x03\x00\x00\x00\x00\x00\x00audio")]),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["code"], "boombox_full");
+    assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");
+}
+
+#[tokio::test]
 async fn boombox_upload_under_cap_reaches_gadgetd() {
     let fx = boombox_fixture(
         Reply::Json(json!({ "state": "queued", "job_id": "m-1" })),

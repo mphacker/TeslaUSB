@@ -25,8 +25,18 @@ import type {
  */
 
 const RANDOM = "RANDOM";
+const POLL_INTERVAL_MS = 2000;
+const POLL_MAX_MS = 45000;
 
 type Status = "loading" | "ready" | "error";
+
+type PendingUpload = {
+  filename: string;
+  bytes: number;
+  token: number;
+};
+
+type LibraryRow = LibraryEntry & { pending?: boolean; phase?: "syncing" | "waiting" };
 
 /** A blank schedule form (weekly, enabled, 9:00). */
 function blankSchedule(): ScheduleInput {
@@ -88,13 +98,11 @@ function describeSchedule(s: StoredSchedule): string {
   }
 }
 
-/** Props: a parent-bumped nonce that forces a snapshot refetch (e.g. after the
- * top "Upload New Chime" panel adds a file to the library). */
 interface ChimeSchedulerProps {
-  refreshKey?: number;
+  pendingUpload?: PendingUpload | null;
 }
 
-export function ChimeScheduler({ refreshKey }: ChimeSchedulerProps = {}) {
+export function ChimeScheduler({ pendingUpload }: ChimeSchedulerProps = {}) {
   const [status, setStatus] = useState<Status>("loading");
   const [snap, setSnap] = useState<SchedulerSnapshot | null>(null);
 
@@ -120,18 +128,25 @@ export function ChimeScheduler({ refreshKey }: ChimeSchedulerProps = {}) {
   const [libError, setLibError] = useState<string | null>(null);
   const [libNotice, setLibNotice] = useState<string | null>(null);
   const [activating, setActivating] = useState<string | null>(null);
+  const [pending, setPending] = useState<{
+    filename: string;
+    bytes: number;
+    token: number;
+    phase: "syncing" | "waiting";
+  } | null>(null);
 
-  const reload = (signal?: AbortSignal) =>
-    api
-      .scheduler(signal)
-      .then((s) => {
-        setSnap(s);
-        setRandomGroup(s.randomMode.groupId ?? "");
-        setStatus("ready");
-      })
-      .catch(() => {
-        if (!signal?.aborted) setStatus("error");
-      });
+  const reload = async (signal?: AbortSignal): Promise<SchedulerSnapshot | null> => {
+    try {
+      const s = await api.scheduler(signal);
+      setSnap(s);
+      setRandomGroup(s.randomMode.groupId ?? "");
+      setStatus("ready");
+      return s;
+    } catch {
+      if (!signal?.aborted) setStatus("error");
+      return null;
+    }
+  };
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -139,14 +154,87 @@ export function ChimeScheduler({ refreshKey }: ChimeSchedulerProps = {}) {
     return () => ctrl.abort();
   }, []);
 
-  // Re-fetch when the parent signals a library change (e.g. a new upload from
-  // the top "Upload New Chime" panel) so the table reflects it immediately.
   useEffect(() => {
-    if (refreshKey === undefined) return;
+    if (!pendingUpload) {
+      setPending(null);
+      return;
+    }
+
+    let cancelled = false;
     const ctrl = new AbortController();
-    void reload(ctrl.signal);
-    return () => ctrl.abort();
-  }, [refreshKey]);
+    let pollId: ReturnType<typeof setTimeout> | null = null;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    const startedAt = Date.now();
+
+    const stopPolling = () => {
+      if (pollId) clearTimeout(pollId);
+      if (timeoutId) clearTimeout(timeoutId);
+      pollId = null;
+      timeoutId = null;
+    };
+
+    const matchPending = (snapshot: SchedulerSnapshot) =>
+      // Convergence key = filename + EXACT byte size. Known trade-off: the
+      // catalog exposes no content hash, so re-uploading a *different* WAV with
+      // the same name AND byte-identical length confirms early against the stale
+      // row. Harmless — the verbatim overwrite still lands the new bytes at the
+      // same path; only the "confirmed" notice is slightly premature. Using the
+      // `modified` mtime instead would trade this for browser-vs-Pi clock-skew
+      // false-negatives (annoying timeouts), so we accept the cosmetic race.
+      snapshot.library.some(
+        (entry) =>
+          entry.filename === pendingUpload.filename && entry.bytes === pendingUpload.bytes,
+      );
+
+    const runReload = async () => {
+      if (cancelled) return;
+      const snapshot = await reload(ctrl.signal);
+      if (!snapshot || cancelled) return;
+      const matched = matchPending(snapshot);
+      if (matched) {
+        stopPolling();
+        if (!cancelled) {
+          setPending(null);
+          setLibNotice(`“${pendingUpload.filename}” added to your chime library.`);
+        }
+        return;
+      }
+      if (Date.now() - startedAt < POLL_MAX_MS) {
+        pollId = setTimeout(() => {
+          void runReload();
+        }, POLL_INTERVAL_MS);
+      }
+    };
+
+    setPending({
+      filename: pendingUpload.filename,
+      bytes: pendingUpload.bytes,
+      token: pendingUpload.token,
+      phase: "syncing",
+    });
+    setLibError(null);
+    setLibNotice(null);
+
+    void runReload();
+    timeoutId = setTimeout(() => {
+      if (cancelled) return;
+      // Bounded: stop polling AND abort any in-flight GET so a slow Pi response
+      // can't race the "waiting" state or a manual Refresh-now after timeout.
+      ctrl.abort();
+      stopPolling();
+      setPending((current) =>
+        current && current.token === pendingUpload.token
+          ? { ...current, phase: "waiting" }
+          : current,
+      );
+    }, POLL_MAX_MS);
+
+    return () => {
+      cancelled = true;
+      ctrl.abort();
+      stopPolling();
+    };
+  }, [pendingUpload?.token]);
 
   // ── Schedule form handlers ──
   function resetScheduleForm() {
@@ -312,6 +400,19 @@ export function ChimeScheduler({ refreshKey }: ChimeSchedulerProps = {}) {
     }
   }
 
+  async function refreshPendingNow() {
+    if (!pending) return;
+    const snapshot = await reload();
+    if (!snapshot) return;
+    const matched = snapshot.library.some(
+      (entry) => entry.filename === pending.filename && entry.bytes === pending.bytes,
+    );
+    if (matched) {
+      setPending(null);
+      setLibNotice(`“${pending.filename}” added to your chime library.`);
+    }
+  }
+
   // ── Render ──
   if (status === "loading") {
     return (
@@ -330,6 +431,33 @@ export function ChimeScheduler({ refreshKey }: ChimeSchedulerProps = {}) {
   }
 
   const { schedules, groups, randomMode, library, menus } = snap;
+  // Plain computation (not a hook): this runs after the early returns above, so a
+  // useMemo here would violate the rules of hooks (conditional hook call).
+  const displayLibrary: LibraryRow[] = (() => {
+    const rows = library.filter((entry) => {
+      if (!pending) return true;
+      return !(entry.filename === pending.filename && entry.bytes !== pending.bytes);
+    });
+    const unique: LibraryRow[] = [];
+    const seen = new Set<string>();
+    for (const entry of rows) {
+      if (seen.has(entry.filename)) continue;
+      seen.add(entry.filename);
+      unique.push(entry);
+    }
+    const hasMatch = unique.some(
+      (entry) => entry.filename === pending?.filename && entry.bytes === pending?.bytes,
+    );
+    if (pending && !hasMatch) {
+      unique.unshift({
+        filename: pending.filename,
+        bytes: pending.bytes,
+        pending: true,
+        phase: pending.phase,
+      });
+    }
+    return unique;
+  })();
   const isRecurring = sForm.scheduleType === "recurring";
   const showTime =
     sForm.scheduleType === "weekly" || sForm.scheduleType === "date";
@@ -840,7 +968,7 @@ export function ChimeScheduler({ refreshKey }: ChimeSchedulerProps = {}) {
             </p>
           )}
 
-          {library.length === 0 ? (
+          {displayLibrary.length === 0 ? (
             <p class="media-pending" data-testid="library-empty">
               The chime library is empty. Upload a WAV with “Upload New Chime”
               above and it will appear here.
@@ -856,51 +984,79 @@ export function ChimeScheduler({ refreshKey }: ChimeSchedulerProps = {}) {
                 </tr>
               </thead>
               <tbody>
-                {library.map((c: LibraryEntry) => (
-                  <tr key={c.filename} data-testid="library-row">
-                    <td class="chime-cell-name">{c.filename}</td>
-                    <td>{Math.max(1, Math.round(c.bytes / 1024))} KB</td>
-                    <td>
-                      <span class="chime-status-valid">Valid</span>
-                    </td>
-                    <td>
-                      <div class="chime-row-actions">
-                        <audio
-                          controls
-                          preload="none"
-                          data-testid="library-audio"
-                          src={api.libraryAudioUrl(c.filename)}
-                        />
-                        <div class="chime-row-buttons">
-                          <a
-                            class="action-btn"
-                            data-testid="library-download"
-                            href={api.libraryDownloadUrl(c.filename)}
-                          >
-                            Download
-                          </a>
-                          <button
-                            type="button"
-                            class="action-btn primary"
-                            data-testid="library-set-active"
-                            disabled={activating === c.filename}
-                            onClick={() => void setActiveChime(c.filename)}
-                          >
-                            {activating === c.filename ? "Syncing…" : "Set Active"}
-                          </button>
-                          <button
-                            type="button"
-                            class="action-btn danger"
-                            data-testid="library-delete"
-                            onClick={() => void removeLibraryChime(c.filename)}
-                          >
-                            Delete
-                          </button>
+                {displayLibrary.map((c) => {
+                  const pendingRow = Boolean((c as LibraryRow).pending);
+                  const statusLabel = pendingRow
+                    ? c.phase === "waiting"
+                      ? "Waiting for media scan…"
+                      : "Syncing…"
+                    : "Valid";
+                  const pendingStatusTestId = pendingRow ? "library-pending-status" : undefined;
+                  return (
+                    <tr
+                      key={c.filename}
+                      data-testid={pendingRow ? "library-row library-row-pending" : "library-row"}
+                    >
+                      <td class="chime-cell-name">{c.filename}</td>
+                      <td>{Math.max(1, Math.round(c.bytes / 1024))} KB</td>
+                      <td data-testid={pendingStatusTestId}>
+                        <span class={pendingRow ? "chime-status-pending" : "chime-status-valid"}>
+                          {statusLabel}
+                        </span>
+                      </td>
+                      <td>
+                        <div class="chime-row-actions">
+                          <audio
+                            controls={!pendingRow}
+                            preload="none"
+                            data-testid="library-audio"
+                            src={api.libraryAudioUrl(c.filename)}
+                            aria-disabled={pendingRow ? "true" : undefined}
+                          />
+                          <div class="chime-row-buttons">
+                            <a
+                              class="action-btn"
+                              data-testid="library-download"
+                              href={pendingRow ? undefined : api.libraryDownloadUrl(c.filename)}
+                              aria-disabled={pendingRow ? "true" : undefined}
+                              onClick={pendingRow ? (e: Event) => e.preventDefault() : undefined}
+                            >
+                              Download
+                            </a>
+                            <button
+                              type="button"
+                              class="action-btn primary"
+                              data-testid="library-set-active"
+                              disabled={pendingRow || activating === c.filename}
+                              onClick={() => void setActiveChime(c.filename)}
+                            >
+                              {activating === c.filename ? "Syncing…" : "Set Active"}
+                            </button>
+                            <button
+                              type="button"
+                              class="action-btn danger"
+                              data-testid="library-delete"
+                              disabled={pendingRow}
+                              onClick={() => void removeLibraryChime(c.filename)}
+                            >
+                              Delete
+                            </button>
+                          </div>
+                          {pendingRow && c.phase === "waiting" && (
+                            <button
+                              type="button"
+                              class="action-btn"
+                              data-testid="library-refresh-now"
+                              onClick={() => void refreshPendingNow()}
+                            >
+                              Refresh now
+                            </button>
+                          )}
                         </div>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           )}

@@ -128,7 +128,12 @@ interface Captured {
 
 /** Install the stateful scheduler mock. Returns the live snapshot + captured
  *  request payloads so each test can assert the exact wire shape it provoked. */
-async function installScheduler(page: Page, initial: Snapshot = emptySnapshot()) {
+async function installScheduler(
+  page: Page,
+  initial: Snapshot = emptySnapshot(),
+  onUpload?: (entry: LibEntry, snap: Snapshot) => void,
+  onGet?: (snap: Snapshot, readCount: number) => void,
+) {
   const snap: Snapshot = JSON.parse(JSON.stringify(initial));
   const cap: Captured = {
     schedulePost: [],
@@ -142,11 +147,14 @@ async function installScheduler(page: Page, initial: Snapshot = emptySnapshot())
     libraryActivate: [],
   };
   let seq = 0;
+  let getCount = 0;
   const tail = (url: string) => decodeURIComponent(url.split("?")[0].split("/").pop() ?? "");
 
   // Snapshot read (exact path only).
   await page.route("**/api/chime-scheduler", (route) => {
     if (route.request().method() !== "GET") return route.continue();
+    getCount += 1;
+    onGet?.(snap, getCount);
     return json200(route, snap);
   });
 
@@ -218,16 +226,36 @@ async function installScheduler(page: Page, initial: Snapshot = emptySnapshot())
     return json200(route, snap.randomMode);
   });
 
+  function extractMultipartBytes(body: Buffer | null): number {
+    if (!body) return 0;
+    const text = body.toString("binary");
+    const match = text.match(/filename="([^"]+)"\r\nContent-Type:[^\r\n]*\r\n\r\n([\s\S]*?)\r\n--/);
+    return match ? Buffer.from(match[2], "binary").length : 0;
+  }
+
   // Library upload (POST multipart).
   await page.route("**/api/chime-scheduler/library", (route) => {
     if (route.request().method() !== "POST") return route.continue();
-    const post = route.request().postData() ?? "";
-    const match = post.match(/filename="([^"]+)"/);
-    const filename = match ? match[1] : `chime-${++seq}.wav`;
+    const post = route.request().postDataBuffer() ?? Buffer.alloc(0);
+    const match = post.toString("binary").match(/filename="([^"]+)"/);
+    const rawName = match ? match[1] : `chime-${++seq}.wav`;
+    // Mirror webd's sanitise_filename: last path component, then trim. The
+    // catalog reports this transformed name, so a client that keyed on the raw
+    // File.name would never converge on hardware — keep the mock faithful so
+    // that regression is caught here, not in the field.
+    const filename = (rawName.split(/[\\/]/).pop() ?? rawName).trim();
+    const bytes = extractMultipartBytes(post);
     cap.libraryPost.push(filename);
-    const entry = { filename, bytes: 4096 };
-    snap.library.push(entry);
-    return json200(route, entry);
+    const entry = { filename, bytes };
+    // Hardware answers 202 {state:"queued", job_id} with NO filename/bytes — the
+    // file lands in the catalog only on a later scannerd-driven snapshot. Drive
+    // that lag through the `onGet`/`onUpload` callbacks, never a synchronous push.
+    onUpload?.(entry, snap);
+    return route.fulfill({
+      status: 202,
+      contentType: "application/json",
+      body: JSON.stringify({ state: "queued", job_id: `job-${++seq}` }),
+    });
   });
 
   // Library item (DELETE).
@@ -504,12 +532,33 @@ test.describe("chime scheduler UAT (A3b)", () => {
     page,
     probe,
   }) => {
-    const { cap } = await installScheduler(page, populatedSnapshot());
+    await page.clock.install({ time: new Date("2024-01-01T00:00:00Z") });
+    let uploaded = false;
+    let postUploadReads = 0;
+    let uploadedBytes = 0;
+    const { cap, snap } = await installScheduler(
+      page,
+      populatedSnapshot(),
+      (entry) => {
+        uploaded = true;
+        uploadedBytes = entry.bytes;
+        postUploadReads = 0;
+      },
+      (current) => {
+        if (!uploaded) return;
+        postUploadReads += 1;
+        if (postUploadReads <= 2) {
+          current.library = current.library.filter((entry) => entry.filename !== "NewChime.wav");
+          return;
+        }
+        if (!current.library.some((entry) => entry.filename === "NewChime.wav")) {
+          current.library.push({ filename: "NewChime.wav", bytes: uploadedBytes });
+        }
+      },
+    );
     await gotoScheduler(page);
 
-    await expect(page.locator("[data-testid=library-row]")).toHaveCount(2);
-    // v1 parity: a single uploader (the top "Upload New Chime" panel) feeds the
-    // library; there is no in-table uploader.
+    await expect(page.locator("[data-testid~=library-row]")).toHaveCount(2);
     await page.locator("[data-testid=chime-file-input]").setInputFiles({
       name: "NewChime.wav",
       mimeType: "audio/wav",
@@ -518,12 +567,219 @@ test.describe("chime scheduler UAT (A3b)", () => {
     await page.locator("[data-testid=chime-upload-submit]").click();
 
     await expect(page.locator("[data-testid=chime-notice]")).toContainText(
-      "Added NewChime.wav",
+      "Upload accepted — syncing “NewChime.wav”",
     );
-    // refreshKey bump → embedded scheduler refetches and shows the new row.
-    await expect(page.locator("[data-testid=library-row]")).toHaveCount(3);
+    await expect(page.locator("[data-testid~=library-row-pending]")).toHaveCount(1);
+    await expect(page.locator("[data-testid=library-pending-status]")).toContainText("Syncing…");
+    await expect(page.locator("[data-testid=library-set-active]").first()).toBeDisabled();
+
+    await page.clock.fastForward(4000);
+
+    await expect(page.locator("[data-testid~=library-row-pending]")).toHaveCount(0);
+    await expect(page.locator("[data-testid=library-notice]")).toContainText(
+      "added to your chime library",
+    );
     await expect(page.locator("[data-testid=library-table]")).toContainText("NewChime.wav");
     expect(cap.libraryPost).toEqual(["NewChime.wav"]);
+    expect(snap.library.some((entry) => entry.filename === "NewChime.wav" && entry.bytes === uploadedBytes)).toBe(true);
+    assertCleanConsole(probe);
+  });
+
+  test("catalog lag — pending row syncs after bounded polling and shows a notice", async ({
+    page,
+    probe,
+  }) => {
+    await page.clock.install({ time: new Date("2024-01-01T00:00:00Z") });
+    const uploadBytes = 768;
+    const actualUploadBytes = wavBuffer(uploadBytes).length;
+    let uploaded = false;
+    let postUploadReads = 0;
+    const { cap } = await installScheduler(
+      page,
+      populatedSnapshot(),
+      () => {
+        uploaded = true;
+        postUploadReads = 0;
+      },
+      (current) => {
+        if (!uploaded) return;
+        postUploadReads += 1;
+        if (postUploadReads <= 2) {
+          current.library = current.library.filter((entry) => entry.filename !== "LagChime.wav");
+          return;
+        }
+        if (!current.library.some((entry) => entry.filename === "LagChime.wav")) {
+          current.library.push({ filename: "LagChime.wav", bytes: actualUploadBytes });
+        }
+      },
+    );
+    await gotoScheduler(page);
+
+    await page.locator("[data-testid=chime-file-input]").setInputFiles({
+      name: "LagChime.wav",
+      mimeType: "audio/wav",
+      buffer: wavBuffer(uploadBytes),
+    });
+    await page.locator("[data-testid=chime-upload-submit]").click();
+
+    await expect(page.locator("[data-testid=chime-notice]")).toContainText("Upload accepted — syncing");
+    await expect(page.locator("[data-testid~=library-row-pending]")).toHaveCount(1);
+    await expect(page.locator("[data-testid=library-pending-status]")).toContainText("Syncing…");
+    await expect(page.locator("[data-testid=library-set-active]").first()).toBeDisabled();
+    await expect(page.locator("[data-testid=library-delete]").first()).toBeDisabled();
+
+    await page.clock.fastForward(4000);
+
+    await expect(page.locator("[data-testid~=library-row-pending]")).toHaveCount(0);
+    await expect(page.locator("[data-testid=library-notice]")).toContainText("added to your chime library");
+    expect(cap.libraryPost).toEqual(["LagChime.wav"]);
+    assertCleanConsole(probe);
+  });
+
+  test("padded filename — client mirrors webd's trim so a space-padded upload still converges", async ({
+    page,
+    probe,
+  }) => {
+    await page.clock.install({ time: new Date("2024-01-01T00:00:00Z") });
+    const dataLen = 640;
+    const actualUploadBytes = wavBuffer(dataLen).length;
+    let uploaded = false;
+    let postUploadReads = 0;
+    const { cap } = await installScheduler(
+      page,
+      populatedSnapshot(),
+      () => {
+        uploaded = true;
+        postUploadReads = 0;
+      },
+      (current) => {
+        if (!uploaded) return;
+        postUploadReads += 1;
+        if (postUploadReads <= 2) {
+          current.library = current.library.filter((entry) => entry.filename !== "Padded.wav");
+          return;
+        }
+        if (!current.library.some((entry) => entry.filename === "Padded.wav")) {
+          current.library.push({ filename: "Padded.wav", bytes: actualUploadBytes });
+        }
+      },
+    );
+    await gotoScheduler(page);
+
+    await page.locator("[data-testid=chime-file-input]").setInputFiles({
+      name: "  Padded.wav  ",
+      mimeType: "audio/wav",
+      buffer: wavBuffer(dataLen),
+    });
+    await page.locator("[data-testid=chime-upload-submit]").click();
+
+    // The notice and the pending row both key off the trimmed catalog name.
+    await expect(page.locator("[data-testid=chime-notice]")).toContainText(
+      "Upload accepted — syncing “Padded.wav”",
+    );
+    await expect(page.locator("[data-testid~=library-row-pending]")).toHaveCount(1);
+
+    await page.clock.fastForward(4000);
+
+    await expect(page.locator("[data-testid~=library-row-pending]")).toHaveCount(0);
+    await expect(page.locator("[data-testid=library-notice]")).toContainText(
+      "added to your chime library",
+    );
+    expect(cap.libraryPost).toEqual(["Padded.wav"]);
+    assertCleanConsole(probe);
+  });
+
+  test("same-name reupload — stale same-name row is suppressed and the new bytes win", async ({
+    page,
+    probe,
+  }) => {
+    await page.clock.install({ time: new Date("2024-01-01T00:00:00Z") });
+    const oldBytes = 2048;
+    const newBytes = 4096;
+    const oldUploadedBytes = wavBuffer(oldBytes).length;
+    const newUploadedBytes = wavBuffer(newBytes).length;
+    let uploaded = false;
+    let postUploadReads = 0;
+    const { snap } = await installScheduler(
+      page,
+      { ...populatedSnapshot(), library: [{ filename: "Sparkle.wav", bytes: oldBytes }, { filename: "Chime2.wav", bytes: 4096 }] },
+      () => {
+        uploaded = true;
+        postUploadReads = 0;
+      },
+      (current) => {
+        if (!uploaded) return;
+        postUploadReads += 1;
+        current.library = current.library.filter((entry) => entry.filename !== "Sparkle.wav");
+        if (postUploadReads <= 2) {
+          current.library.unshift({ filename: "Sparkle.wav", bytes: oldUploadedBytes });
+          return;
+        }
+        current.library.unshift({ filename: "Sparkle.wav", bytes: newUploadedBytes });
+      },
+    );
+    await gotoScheduler(page);
+
+    await page.locator("[data-testid=chime-file-input]").setInputFiles({
+      name: "Sparkle.wav",
+      mimeType: "audio/wav",
+      buffer: wavBuffer(newBytes),
+    });
+    await page.locator("[data-testid=chime-upload-submit]").click();
+
+    await expect(page.locator("[data-testid~=library-row-pending]")).toHaveCount(1);
+    await expect(page.locator("[data-testid~=library-row]")).toHaveCount(2);
+    await expect(page.locator("[data-testid=library-pending-status]")).toContainText("Syncing…");
+    await expect(page.locator("[data-testid=library-table]")).toContainText("Sparkle.wav");
+    await expect(page.locator("[data-testid=library-table]")).not.toContainText("2 KB");
+
+    await page.clock.fastForward(4000);
+
+    await expect(page.locator("[data-testid~=library-row-pending]")).toHaveCount(0);
+    await expect(page.locator("[data-testid=library-notice]")).toContainText("added to your chime library");
+    expect(snap.library.filter((entry) => entry.filename === "Sparkle.wav")).toHaveLength(1);
+    expect(snap.library.find((entry) => entry.filename === "Sparkle.wav")?.bytes).toBe(
+      newUploadedBytes,
+    );
+    assertCleanConsole(probe);
+  });
+
+  test("timeout — when the catalog never catches up, the row shows waiting and refresh now", async ({
+    page,
+    probe,
+  }) => {
+    await page.clock.install({ time: new Date("2024-01-01T00:00:00Z") });
+    const uploadBytes = 1024;
+    let uploaded = false;
+    let postUploadReads = 0;
+    await installScheduler(
+      page,
+      populatedSnapshot(),
+      () => {
+        uploaded = true;
+        postUploadReads = 0;
+      },
+      (current) => {
+        if (!uploaded) return;
+        postUploadReads += 1;
+        current.library = current.library.filter((entry) => entry.filename !== "TimeoutChime.wav");
+      },
+    );
+    await gotoScheduler(page);
+
+    await page.locator("[data-testid=chime-file-input]").setInputFiles({
+      name: "TimeoutChime.wav",
+      mimeType: "audio/wav",
+      buffer: wavBuffer(uploadBytes),
+    });
+    await page.locator("[data-testid=chime-upload-submit]").click();
+
+    await expect(page.locator("[data-testid~=library-row-pending]")).toHaveCount(1);
+    await page.clock.fastForward(45001);
+
+    await expect(page.locator("[data-testid=library-pending-status]")).toContainText("Waiting for media scan…");
+    await expect(page.locator("[data-testid=library-refresh-now]")).toBeVisible();
+    await expect(page.locator("[data-testid=library-error]")).toHaveCount(0);
     assertCleanConsole(probe);
   });
 

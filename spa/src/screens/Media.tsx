@@ -49,6 +49,18 @@ function buildId(): string {
   );
 }
 
+/**
+ * Mirror webd's `sanitise_filename` (media_upload.rs): take the last path
+ * component, then trim surrounding whitespace. webd stores — and the media
+ * catalog therefore reports — this transformed name, so the pending-row
+ * convergence key must match it (not the raw `File.name`) or a space-padded
+ * upload would never converge on hardware. Rejected names (non-ASCII, etc.)
+ * never reach here: `uploadLibraryChime` throws on the 422 first.
+ */
+function catalogChimeName(raw: string): string {
+  return (raw.split(/[\\/]/).pop() ?? raw).trim();
+}
+
 /** A lock-chime byte count → compact human string (KB for the sub-1-MiB chimes). */
 function chimeSize(n: number | null | undefined): string {
   if (n == null || !Number.isFinite(n) || n < 0) return DASH;
@@ -218,9 +230,11 @@ export function Media() {
   const [uploading, setUploading] = useState(false);
   const [uploadFail, setUploadFail] = useState<ChimeFailure | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  // Bumped after a successful library upload so the child <ChimeScheduler/>
-  // refetches and shows the new chime in its library table.
-  const [libraryRefresh, setLibraryRefresh] = useState(0);
+  const [pendingUpload, setPendingUpload] = useState<{
+    filename: string;
+    bytes: number;
+    token: number;
+  } | null>(null);
 
   const uploadAbortRef = useRef<AbortController | null>(null);
 
@@ -282,14 +296,16 @@ export function Media() {
     const ac = new AbortController();
     uploadAbortRef.current = ac;
     try {
+      // The 202 response carries no filename/size — use the client-known file
+      // identity so the pending-row match works on real hardware (not just the
+      // mock). The catalog reports webd's sanitised name, so mirror that
+      // transform here. Capture before resetUpload() clears selectedFile.
+      const name = catalogChimeName(selectedFile.name);
+      const bytes = selectedFile.size;
       await api.uploadLibraryChime(selectedFile, ac.signal);
-      const name = selectedFile.name;
       resetUpload();
-      setNotice(
-        `Added ${name} to your chime library. Use “Set Active” below to make it the car’s lock chime.`,
-      );
-      // Surface the new row in the library table immediately.
-      setLibraryRefresh((n) => n + 1);
+      setPendingUpload((prev) => ({ filename: name, bytes, token: (prev?.token ?? 0) + 1 }));
+      setNotice(`Upload accepted — syncing “${name}” to your chime library below…`);
     } catch (err) {
       if (ac.signal.aborted) return; // silent: user/unmount cancelled
       setUploadFail(classifyChimeFailure(err));
@@ -431,7 +447,7 @@ export function Media() {
       </details>
 
       {/* ── Chime Scheduler · Random Groups · Library ── (live: schedulerd via webd) */}
-      <ChimeScheduler refreshKey={libraryRefresh} />
+      <ChimeScheduler pendingUpload={pendingUpload} />
 
 
     </div>

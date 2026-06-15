@@ -12,6 +12,50 @@
 > [`adr/`](./adr/) (locked architecture, incl. [`ADR-0003`](./adr/0003-media-read-path.md)
 > media read path).
 
+## ⏯️ Resume here — CHIME LIBRARY AUTO-REFRESH AFTER UPLOAD LIVE (2026-06-15)
+
+**Operator requirement (locked, now satisfied):** after uploading a chime, the
+**Chime Library** table must auto-refresh with clear confirmation — no manual
+page reload. Previously the user had to reload to see the new chime.
+
+✅ **Shipped + proven live on `cybertruckusb.local` (see `files/hw-results.md`
+"Chime Library auto-refresh after upload" + screenshots
+`files/hw-chime-autorefresh-{desktop-1280,mobile-375}.png`):**
+- **Frontend-only design (D+A):** on upload success the Media screen records a
+  `pendingUpload = {filename, bytes, token}` from the **client-known** file
+  identity (`selectedFile.name`/`.size`) — the upload's `202 {state:"queued",
+  job_id}` carries no filename/size. ChimeScheduler shows an optimistic
+  "Syncing…" pending row and **bounded-polls** the snapshot (2 s interval, 45 s
+  cap) until a catalog row matches **filename + EXACT byte size**, then clears the
+  row and shows an "added to your chime library" notice. On timeout → "Waiting for
+  media scan…" + a **Refresh now** button.
+- **Filename parity:** the pending-row key mirrors webd `sanitise_filename`
+  (basename + trim) so a space-padded upload still converges on hardware.
+- **Convergence key = filename + exact byte size** (verbatim copy ⇒ uploaded
+  `File.size` == catalog `size_bytes`), which also defeats the same-name-reupload
+  false-positive (a same-name/different-size stale row is suppressed). Documented
+  trade-off: same-name + byte-identical-length different content confirms early
+  (cosmetic only; correct bytes still land).
+- **Abortable polling:** unmount/new-upload/timeout all `AbortController.abort()`
+  the in-flight GET; no setState-after-unmount.
+- **Verified:** 34 Playwright UAT (incl. catalog-lag, same-name, padded-name,
+  timeout) green; build clean. **Live:** upload → 202 → "Syncing…" → converged at
+  **~22.7 s** (scannerd) with **no manual reload**, pending row cleared, table
+  lists the chime, **0 console errors/warnings**, screenshots @375 + @1280.
+- **Reviews:** two GPT-5.5 adversarial cycles reconciled (filename-trim,
+  timeout-abort, mock-202 faithfulness fixed; same-name/same-size accepted as
+  documented trade-off). **Deploy:** SPA-static-only (no Rust binary) under the
+  hardware-test dead-man wrapper; snapshot `spa.b1-backup-20260615-175603`; wlan0
+  + SSH intact; webd active; system `degraded` only from the benign stock
+  `rpi-zram-writeback.timer` (pre-existing).
+
+**Remaining for full §4.5/§1.1 parity:** mp3→WAV transcode + multi-file + 5 s/
+normalize on upload; chime rename; event-driven scannerd rescan (systemic, would
+shorten the ~22 s convergence across all categories); per-`job_id` status
+endpoint.
+
+---
+
 ## ⏯️ Resume here — CHIMES-ON-MEDIA + IMMEDIATE SET-ACTIVE LIVE (2026-06-15)
 
 **Operator requirement (locked, now satisfied):** upload a lock chime → it lands

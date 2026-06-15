@@ -20,7 +20,6 @@ import type {
   EventItem,
   GadgetStatus,
   GroupInput,
-  LibraryEntry,
   MediaHandoffResult,
   MediaList,
   Page,
@@ -589,19 +588,27 @@ export const api = {
       "application/json",
     ),
 
-  /** Upload a WAV into the chime library (`POST /api/chime-scheduler/library`, multipart `file`). */
+  /**
+   * Upload a WAV into the chime library (`POST /api/chime-scheduler/library`,
+   * multipart `file`). Like every frictionless write, webd accepts the file into
+   * gadgetd's durable queue and answers `202 {state:"queued", job_id}` — the
+   * response carries NO filename/size, so callers must use the client-known file
+   * identity (name + size) for any follow-up matching. Throws on abort or an
+   * unexpected protocol state.
+   */
   uploadLibraryChime: async (
     file: File | Blob,
     signal?: AbortSignal,
-  ): Promise<LibraryEntry> => {
+  ): Promise<ChimeHandoffResult> => {
     const form = new FormData();
     form.append("file", file, "name" in file ? file.name : "chime.wav");
-    return request<LibraryEntry>(
+    const res = await request<ChimeHandoffResult>(
       "POST",
       "/api/chime-scheduler/library",
       signal,
       form,
     );
+    return assertAccepted(res, "upload");
   },
 
   /** Remove a library chime by filename (`DELETE /api/chime-scheduler/library/:filename`). */

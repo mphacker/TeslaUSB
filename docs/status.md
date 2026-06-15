@@ -14,12 +14,11 @@
 
 ## ⏯️ Resume here — in-flight work (2026-06-15 19:05 ET)
 
-**Last committed:** `ae10a3b` (local branch `mhackermsft/b1-clean`, **not pushed**).
-Latest working-tree change (uncommitted as this note is written, committed alongside
-it): `feat-wrap-caps` (§4.9 Wrap name + count caps). Prior commits: `ae10a3b`
-(docs: wrap dimension bound → 512×512–1024×1024), `d480067` (§4.7 Boombox ≤5-file
-cap), `3dbf452` (§4.9 Wraps/Plates `<img>` thumbnails), `b1b9bc1` (§4.6/4.7/4.8
-in-browser audio), `687579c` (chime-library hardening).
+**Last committed:** `2edd4bd` (local branch `mhackermsft/b1-clean`, **not pushed**).
+Recent commits: `2edd4bd` (Boombox cap replace check → full `rel_path`), `b7a4cae`
+(§4.9 Wrap name + count caps), `ae10a3b` (docs: wrap dimension bound →
+512×512–1024×1024), `d480067` (§4.7 Boombox ≤5-file cap), `3dbf452` (§4.9 Wraps/Plates
+`<img>` thumbnails), `b1b9bc1` (§4.6/4.7/4.8 in-browser audio).
 
 **`feat-wrap-caps` — DONE (§4.9 wrap filename rule + ≤10 count cap).** `POST
 /api/wraps` now rejects (a) a filename whose stem (excluding `.png`) is empty, >32
@@ -44,15 +43,18 @@ test -p webd` = **221 passed, 0 failed**; 11 wrap tests; zero new clippy warning
   commit) with its own `boombox_nested_same_name_is_not_a_replace_at_capacity`
   regression test for consistency.
 
-**Next item to start:** open. `chimelib-to-img` (move chime library into `media.img`,
-requirement #4) is NOT cleanly autonomous — its acceptance needs the gadgetd lun.1
-eject-handoff write path (F5-gated) + a hardware deploy (Tier-C), and it retargets
-library serving to the `/api/media/content` seam (so wiring the current library
-endpoint now is rework). Music §4.6 nested-folder browse is deferred (read-only tree
-would be reworked when gated folder write-ops §4.6:290 land — do them together).
-Remaining clean autonomous lanes are thin; candidates: §4.9 Tracked-plate list
-(privacy/redaction, not started, larger new feature); the Boombox `rel_path`
-follow-up above. Confirm with operator before starting a gated/Tier-C migration.
+**Next item to start:** open — and the genuinely-clean autonomous (non-hardware,
+non-gated) backend lanes are now essentially exhausted. This session shipped the
+last of the pure-logic validation lanes (Boombox + Wrap caps, both `cargo`-verified
+and GPT-5.5-reviewed) and ticked §1 `TeslaTrackMode` recognition (scannerd logic
+green). What remains in the list below is one of: (a) **live-hardware foundation**
+(Phase 0 F1–F6, operator-run via `hardware-test`); (b) **gated backends** (SMB §2,
+cloud sync §4.14, WiFi §4.16 — need their daemon serve loops); or (c) **new
+full-stack features** that need a webd route **+ SPA screen + Playwright** (LightShow
+"set active" §4.10:324, Tracked-plate list §4.9:344, Chime rename §4.5:278). Each (c)
+is a multi-surface lane — pick ONE and run the full Opus→mai→GPT-5.5→Playwright loop.
+`chimelib-to-img` (req #4) stays NOT autonomous (needs F5 write path + hardware).
+Confirm direction with the operator before starting a gated/Tier-C migration.
 
 **Earlier (committed `b1b9bc1`): `feat-media-audio` (§4.6/4.7/4.8
 in-browser audio playback).** Native `<audio controls preload="none">` per row on
@@ -107,7 +109,24 @@ LightShows}.tsx`, `spa/src/styles/{music,boombox,light-shows}.css`,
 
 ---
 
-## Phase 0 — Foundation slice (DO FIRST; everything below depends on it)
+## Phase 0 — Foundation slice (live-hardware; the end-to-end backbone)
+
+These six items (F1–F6) are the **live-device** foundation: the 2-image migration,
+the two-LUN gadget, the RO loop-mount read path, and the eject-handoff write path.
+**They can only be completed on the physical Pi (and, for the LUN-acceptance question,
+in the car) via the `hardware-test` skill — they are operator/hardware-gated (`(C)`,
+`gated:C1`) and are NOT started autonomously.** F2/F3 logic is already built and
+bench-green in podman; F1 (the migration that flips the live device from single
+`disk.img` to two LUNs) is the unlock, and it needs the operator to run it on the box.
+
+> **Why feature work proceeds ahead of this:** "DO FIRST" is the *end-to-end* ordering
+> — a feature is only **(proven)** once it runs against the real two-LUN device. But
+> the backend/SPA logic for most features does **not** depend on the migration and is
+> deliberately built and verified in isolation now (`cargo test` for logic, Playwright
+> for UI), so it is ready to be re-proven end-to-end the moment F1 lands. Items that
+> genuinely cannot be exercised without the foundation are tagged `gated:F#`. This is
+> the agreed sequencing per the GPT-5.5/mai reviews — get the logic correct and tested
+> in parallel, then land the single hardware foundation slice and re-verify on-device.
 
 Sequenced as a single vertical slice per the GPT-5.5/mai reviews (do **not** wire
 every daemon at once). Get reads + a safe handoff lock proven before feature work.
@@ -172,8 +191,11 @@ every daemon at once). Get reads + a safe handoff lock proven before feature wor
 - [x] Tesla standard TeslaCam folder names (`RecentClips`/`SavedClips`/
   `SentryClips`) recognized; per-event subfolders + `event.json`/`thumb.png`;
   `<ts>-<camera>.mp4` parsing. **(proven: catalog + bench clips)**
-- [ ] `TeslaCam/TeslaTrackMode/` recognized in folder lists. **(verify in scannerd
-  path allowlist)**
+- [x] `TeslaCam/TeslaTrackMode/` recognized in folder lists. **(DONE — scannerd
+  `Bucket::from_path` maps `teslatrackmode`/`trackclips` → `TeslaTrackMode` (used by the
+  producer at `produce.rs:97`); indexd + retentiond carry the same `FolderClass`. Logic
+  green: `cargo test -p scannerd` = 80 passed incl. bucket roundtrip; retentiond
+  `from_path("TeslaCam/TeslaTrackMode/…")` classification test passes.)**
 - [ ] Media-drive root layout (`LockChime.wav`, `Boombox/`, `Music/`, `LightShow/`,
   `Chimes/`, `Wraps/`, `LicensePlate/`). **(partial: folder set + `Wraps/`
   root-folder fix proven on the single-`disk.img` device; the layout is not
@@ -333,7 +355,7 @@ every daemon at once). Get reads + a safe handoff lock proven before feature wor
   ~10 max; atomic publish. **(DONE — `validate_wrap_filename` (≤32-char stem, charset
   `[A-Za-z0-9_- space]`) + `WRAPS_MAX_FILES=10` count cap with exact `rel_path` replace
   exception, both rejecting `422` pre-handoff; PNG magic + 512–1024 dimension + ≤1 MB still
-  enforced. `cargo test -p webd` = 221 passed incl. 11 wrap tests; GPT-5.5-reviewed: replace
+  enforced. `cargo test -p webd` = 222 passed incl. 11 wrap tests; GPT-5.5-reviewed: replace
   identity fixed from bare name → full `rel_path` so a nested same-named file can't bypass the
   cap, regression test added)**
 - [x] Wrap delete (incl. bulk). **(proven)**

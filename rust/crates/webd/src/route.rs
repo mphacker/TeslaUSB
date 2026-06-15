@@ -53,6 +53,7 @@ pub(crate) fn router(state: AppState, static_dir: PathBuf) -> Router {
         .route("/clips/{id}", get(clip_detail).delete(delete_clip))
         .route("/clips/{id}/stream", get(crate::media::stream))
         .route("/clips/{id}/export", get(crate::media::export))
+        .route("/media/content", get(crate::media::content))
         .route(
             "/clips/{id}/angles/{camera}/download",
             get(crate::media::download),
@@ -125,6 +126,7 @@ pub(crate) fn router(state: AppState, static_dir: PathBuf) -> Router {
         .route("/analytics", get(analytics))
         .route("/settings", get(settings))
         .merge(crate::chime_scheduler::routes())
+        .merge(crate::chime_library::routes())
         .merge(crate::health::routes())
         .fallback(api_not_found)
         .with_state(state);

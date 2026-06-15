@@ -413,7 +413,7 @@ export const api = {
     return assertAccepted(res, "remove");
   },
 
-  /** List installed light shows (`GET /api/lightshows`, excludes wraps). */
+  /** List installed light shows (`GET /api/lightshows`; wraps are a separate category). */
   lightshows: (signal?: AbortSignal) =>
     getJson<MediaList>("/api/lightshows", signal),
 
@@ -626,6 +626,34 @@ export const api = {
       `/api/chime-scheduler/library/${encodeURIComponent(filename)}`,
       signal,
     ),
+
+  /**
+   * Promote a library chime to the car's active `LockChime.wav`
+   * (`POST /api/chime-scheduler/library/:filename/activate`). webd reads the
+   * library file, re-validates the WAV, and routes it through the SAME
+   * `gadgetd` eject-handoff as {@link installChime} — so it returns the same
+   * `202 {state:"queued"}` / `200 {state:"done"}` shape and applies at the next
+   * safe window. Throws on abort.
+   */
+  setActiveChime: async (
+    filename: string,
+    signal?: AbortSignal,
+  ): Promise<ChimeHandoffResult> => {
+    const res = await request<ChimeHandoffResult>(
+      "POST",
+      `/api/chime-scheduler/library/${encodeURIComponent(filename)}/activate`,
+      signal,
+    );
+    return assertAccepted(res, "install");
+  },
+
+  /** Root-relative URL for inline playback of a library chime (`GET …/library/:filename/audio`). */
+  libraryAudioUrl: (filename: string): string =>
+    `/api/chime-scheduler/library/${encodeURIComponent(filename)}/audio`,
+
+  /** Root-relative URL to download a library chime (`GET …/library/:filename/download`). */
+  libraryDownloadUrl: (filename: string): string =>
+    `/api/chime-scheduler/library/${encodeURIComponent(filename)}/download`,
 };
 
 export type Api = typeof api;

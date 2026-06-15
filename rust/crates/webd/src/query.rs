@@ -513,8 +513,8 @@ fn map_event(row: &Row<'_>) -> Result<EventDto, rusqlite::Error> {
 //   3. Return a `Vec<MediaItemDto>` (never `Err` on "table missing" — only real I/O
 //      errors propagate).
 //
-// LightShows excludes the `LightShow/wraps/` subtree (those rows belong to
-// the Wraps category); Wraps targets exactly that subtree.
+// LightShows targets the `LightShow/` subtree; Wraps targets the separate
+// root-level `Wraps/` subtree. The two never overlap on disk.
 
 /// Return `true` iff the `media_entries` table exists in this connection's DB.
 fn media_entries_present(conn: &Connection) -> Result<bool, rusqlite::Error> {
@@ -566,8 +566,8 @@ pub(crate) fn list_music(conn: &Connection) -> Result<Vec<MediaItemDto>, rusqlit
         .collect::<Result<Vec<_>, _>>()
 }
 
-/// `GET /api/lightshows` — files under `LightShow/` on p2, **excluding**
-/// the `LightShow/wraps/` subtree (those belong to [`list_wraps`]).
+/// `GET /api/lightshows` — files under `LightShow/` on p2. Wraps live in the
+/// separate root-level `Wraps/` folder ([`list_wraps`]) and never appear here.
 pub(crate) fn list_lightshows(conn: &Connection) -> Result<Vec<MediaItemDto>, rusqlite::Error> {
     if !media_entries_present(conn)? {
         return Ok(vec![]);
@@ -576,7 +576,6 @@ pub(crate) fn list_lightshows(conn: &Connection) -> Result<Vec<MediaItemDto>, ru
         "SELECT name, rel_path, size_bytes, modified FROM media_entries \
          WHERE partition = 'slot1' \
            AND rel_path LIKE 'LightShow/%' \
-           AND rel_path NOT LIKE 'LightShow/wraps/%' \
          ORDER BY rel_path ASC",
     )?;
     stmt.query_map([], map_media_item)?
@@ -597,14 +596,14 @@ pub(crate) fn list_plates(conn: &Connection) -> Result<Vec<MediaItemDto>, rusqli
         .collect::<Result<Vec<_>, _>>()
 }
 
-/// `GET /api/wraps` — files under `LightShow/wraps/` on p2.
+/// `GET /api/wraps` — files under the root-level `Wraps/` folder on p2.
 pub(crate) fn list_wraps(conn: &Connection) -> Result<Vec<MediaItemDto>, rusqlite::Error> {
     if !media_entries_present(conn)? {
         return Ok(vec![]);
     }
     let mut stmt = conn.prepare(
         "SELECT name, rel_path, size_bytes, modified FROM media_entries \
-         WHERE partition = 'slot1' AND rel_path LIKE 'LightShow/wraps/%' \
+         WHERE partition = 'slot1' AND rel_path LIKE 'Wraps/%' \
          ORDER BY rel_path ASC",
     )?;
     stmt.query_map([], map_media_item)?

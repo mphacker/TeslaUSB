@@ -359,10 +359,11 @@ test.describe("media (lock chimes) UAT", () => {
 
     // The manage surface is a deliberate two-step action, never a native POST:
     // the form does not submit to the server (SPA preventDefault) and there is
-    // no `method=post` form. Two file inputs exist: the active-chime upload and
-    // the scheduler's chime-library upload.
+    // no `method=post` form. v1 parity: a single uploader (the "Upload New
+    // Chime" panel) feeds the library — the scheduler's library section no
+    // longer has its own file input.
     await expect(page.locator("form[method='post' i]")).toHaveCount(0);
-    await expect(page.locator("input[type=file]")).toHaveCount(2);
+    await expect(page.locator("input[type=file]")).toHaveCount(1);
     await expect(page.locator("[data-testid=chime-upload-submit]")).toBeDisabled();
   });
 
@@ -423,22 +424,23 @@ test.describe("media (lock chimes) UAT", () => {
     await expect(page.locator("[data-testid=active-chime-none]")).toHaveCount(0);
   });
 
-  // ── Gate 6: install (upload) success — POST handoff + GET re-fetch ──────
-  test("install — valid WAV uploads via POST /api/chimes and the card refreshes", async ({
+  // ── Gate 6: upload adds to the library — POST library + clean notice ────
+  test("library upload — valid WAV POSTs to the chime library and clears the input", async ({
     page,
     probe,
   }) => {
-    let installedNow: typeof INSTALLED | null = null;
-    const posts: string[] = [];
+    const libraryPosts: string[] = [];
 
+    await page.route("**/api/chime-scheduler/library", (route) => {
+      if (route.request().method() !== "POST") return route.continue();
+      const post = route.request().postData() ?? "";
+      const m = post.match(/filename="([^"]+)"/);
+      const filename = m ? m[1] : "Chime.wav";
+      libraryPosts.push(filename);
+      return jsonRoute(route, 200, { filename, bytes: 4096 });
+    });
     await page.route("**/api/chimes", (route) => {
-      const m = route.request().method();
-      if (m === "GET") return jsonRoute(route, 200, { installed: installedNow });
-      if (m === "POST") {
-        posts.push(route.request().method());
-        installedNow = INSTALLED; // the handoff "installed" it
-        return jsonRoute(route, 200, { handoff_id: "h-install-1", state: "done" });
-      }
+      if (route.request().method() === "GET") return jsonRoute(route, 200, { installed: null });
       return route.continue();
     });
 
@@ -456,87 +458,44 @@ test.describe("media (lock chimes) UAT", () => {
     );
     await expect(page.locator("[data-testid=chime-upload-submit]")).toBeEnabled();
 
-    // Upload → POST fires, success notice shows, card re-fetches the new chime.
+    // Upload → POST hits the LIBRARY endpoint, success notice shows.
     await page.locator("[data-testid=chime-upload-submit]").click();
     await expect(page.locator("[data-testid=chime-notice]")).toContainText(
-      "Installed Chime.wav",
-    );
-    await expect(page.locator("[data-testid=active-chime-name]")).toHaveText(
-      "LockChime.wav",
+      "Added Chime.wav to your chime library",
     );
 
-    // Exactly one POST, and at least two GETs (initial + post-success re-fetch).
-    expect(posts.length, "expected exactly one POST /api/chimes").toBe(1);
-    const gets = probe.requests.filter(
-      (r) => new URL(r.url).pathname === "/api/chimes" && r.method === "GET",
+    // v1 parity: adding to the library does NOT install an active chime, so the
+    // active card stays empty and nothing POSTs to the install endpoint.
+    await expect(page.locator("[data-testid=active-chime-none]")).toBeVisible();
+    const installPosts = probe.requests.filter(
+      (r) => new URL(r.url).pathname === "/api/chimes" && r.method === "POST",
     );
-    expect(gets.length, "expected an initial GET + a re-fetch").toBeGreaterThanOrEqual(2);
+    expect(installPosts.length, "library upload must not POST /api/chimes").toBe(0);
+    expect(libraryPosts, "expected exactly one library POST").toEqual(["Chime.wav"]);
 
     // The input is cleared for the next action, and the JS stayed clean.
     await expect(page.locator("[data-testid=chime-upload-submit]")).toBeDisabled();
     assertCleanConsole(probe);
   });
 
-  // ── Gate 6b: install accepted into the durable queue (202 queued) ───────
-  test("install queued — 202 queued shows the syncing notice, no error", async ({
-    page,
-    probe,
-  }) => {
-    const posts: string[] = [];
-
-    await page.route("**/api/chimes", (route) => {
-      const m = route.request().method();
-      // The car is connected, so gadgetd queues the change instead of applying
-      // it now: the catalog GET keeps reporting "none" until it syncs. The
-      // frictionless path must NEVER surface an error for this.
-      if (m === "GET") return jsonRoute(route, 200, { installed: null });
-      if (m === "POST") {
-        posts.push(m);
-        return jsonRoute(route, 202, { state: "queued", job_id: "m-1" });
-      }
-      return route.continue();
-    });
-
-    await gotoMedia(page);
-    await expect(page.locator("[data-testid=active-chime-none]")).toBeVisible();
-
-    await page.locator("[data-testid=chime-file-input]").setInputFiles({
-      name: "Chime.wav",
-      mimeType: "audio/wav",
-      buffer: wavBuffer({ channels: 2, sampleRate: 48000, dataLen: 512 }),
-    });
-    await expect(page.locator("[data-testid=chime-upload-submit]")).toBeEnabled();
-
-    await page.locator("[data-testid=chime-upload-submit]").click();
-    // Success notice communicates the saved-and-syncing state; NO error banner.
-    await expect(page.locator("[data-testid=chime-notice]")).toContainText(
-      "syncing to the car",
-    );
-    await expect(page.locator("[data-testid=chime-upload-error]")).toHaveCount(0);
-
-    expect(posts.length, "expected exactly one POST /api/chimes").toBe(1);
-    assertCleanConsole(probe);
-  });
-  test("install busy — 409 handoff_busy is retryable, retry then succeeds", async ({
+  test("library upload retry — a transient 503 is retryable, retry then succeeds", async ({
     page,
     probe,
   }) => {
     let attempt = 0;
-    let installedNow: typeof INSTALLED | null = null;
 
-    await page.route("**/api/chimes", (route) => {
-      const m = route.request().method();
-      if (m === "GET") return jsonRoute(route, 200, { installed: installedNow });
-      if (m === "POST") {
-        attempt += 1;
-        if (attempt === 1) {
-          return jsonRoute(route, 409, {
-            error: { code: "handoff_busy", message: "A USB handoff is already in progress." },
-          });
-        }
-        installedNow = INSTALLED;
-        return jsonRoute(route, 200, { handoff_id: "h-install-2", state: "done" });
+    await page.route("**/api/chime-scheduler/library", (route) => {
+      if (route.request().method() !== "POST") return route.continue();
+      attempt += 1;
+      if (attempt === 1) {
+        return jsonRoute(route, 503, {
+          error: { code: "schedulerd_unavailable", message: "The chime service is restarting." },
+        });
       }
+      return jsonRoute(route, 200, { filename: "Chime.wav", bytes: 4096 });
+    });
+    await page.route("**/api/chimes", (route) => {
+      if (route.request().method() === "GET") return jsonRoute(route, 200, { installed: null });
       return route.continue();
     });
 
@@ -548,26 +507,26 @@ test.describe("media (lock chimes) UAT", () => {
     });
     await expect(page.locator("[data-testid=chime-upload-submit]")).toBeEnabled();
 
-    // First attempt → 409 → retryable error banner (not fatal), button live again.
+    // First attempt → 503 → retryable error banner (not fatal), button live again.
     await page.locator("[data-testid=chime-upload-submit]").click();
     const err = page.locator("[data-testid=chime-upload-error]");
     await expect(err).toBeVisible();
     await expect(err).toHaveClass(/\bretryable\b/);
-    await expect(err).toContainText("retry");
+    await expect(err).toContainText("Try again");
     await expect(page.locator("[data-testid=chime-upload-submit]")).toBeEnabled();
 
     // Retry → success.
     await page.locator("[data-testid=chime-upload-submit]").click();
     await expect(page.locator("[data-testid=chime-notice]")).toContainText(
-      "Installed Chime.wav",
+      "Added Chime.wav to your chime library",
     );
     await expect(page.locator("[data-testid=chime-upload-error]")).toHaveCount(0);
-    expect(attempt, "expected two POST attempts (busy, then success)").toBe(2);
+    expect(attempt, "expected two POST attempts (503, then success)").toBe(2);
 
-    // The retry flow deliberately provoked one 409 response; Chromium logs that
+    // The retry flow deliberately provoked one 503 response; Chromium logs that
     // as a resource-load console error. No OTHER console error / warning /
     // pageerror is tolerated.
-    assertCleanConsoleExceptResourceStatus(probe, [409]);
+    assertCleanConsoleExceptResourceStatus(probe, [503]);
   });
 
   // ── Gate 8: client-side WAV validation refuses bad files before any POST ─

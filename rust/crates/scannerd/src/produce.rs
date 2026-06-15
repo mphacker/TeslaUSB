@@ -162,29 +162,29 @@ fn decode_exfat_timestamp(packed: u32) -> Option<String> {
 ///   alphabetically; subdirectories are allowed by the producer but Tesla
 ///   only plays root-level names in practice).
 /// * Music — any file under `Music/` (supports artist/album subdirectories).
-/// * `LightShow` — any file under `LightShow/` **except** the `LightShow/wraps/`
-///   subtree, which belongs to Wraps.
+/// * `LightShow` — any file under `LightShow/`.
 /// * `LicensePlate` — any file under `LicensePlate/`.
-/// * Wraps — any file under `LightShow/wraps/`.
+/// * Wraps — any file under the root-level `Wraps/` folder.
 ///
-/// The LightShow/Wraps disambiguation is done in `webd`'s query layer
-/// (`rel_path LIKE 'LightShow/wraps/%'` vs the broader `LightShow/%` minus
-/// wraps). Producing both under `LightShow/` keeps the scannerd logic simple
-/// and the category filter co-located with its consumers.
+/// Wraps live in their own root-level `Wraps/` folder (the layout Tesla's
+/// Paint Shop reads), so they never overlap the `LightShow/` subtree; the
+/// LightShow/Wraps disambiguation in `webd`'s query layer is a simple
+/// `rel_path LIKE 'Wraps/%'` vs `rel_path LIKE 'LightShow/%'` split.
 fn is_toybox_path(path: &str) -> bool {
     path == LOCK_CHIME_REL_PATH
         || path.starts_with("Boombox/")
         || path.starts_with("Music/")
         || path.starts_with("LightShow/")
         || path.starts_with("LicensePlate/")
+        || path.starts_with("Wraps/")
 }
 
 /// Collect the MEDIA-partition (p2) inventory facts from the full walk.
 ///
 /// Includes:
 /// * `LockChime.wav` at the partition root (exact match).
-/// * All files under `Boombox/`, `Music/`, `LightShow/` (including
-///   `LightShow/wraps/`), and `LicensePlate/`.
+/// * All files under `Boombox/`, `Music/`, `LightShow/`, `LicensePlate/`, and
+///   the root-level `Wraps/` folder.
 ///
 /// Only "complete" entries are collected: both the exFAT set-checksum must
 /// pass AND `valid_data_length == data_length` must hold — a mid-install
@@ -700,22 +700,17 @@ mod tests {
     }
 
     #[test]
-    fn collect_media_finds_lightshow_excludes_wraps_from_lightshow_set() {
-        // Both LightShow and LightShow/wraps files are emitted — the
+    fn collect_media_finds_lightshow_and_root_wraps() {
+        // LightShow files and root-level Wraps files are both emitted; the
         // LightShow/Wraps disambiguation is done in webd's query layer.
         let recs = vec![
             media_record("LightShow/show.fseq", true, MEDIA_PARTITION_SLOT),
-            media_record("LightShow/wraps/mywrap.png", true, MEDIA_PARTITION_SLOT),
+            media_record("Wraps/mywrap.png", true, MEDIA_PARTITION_SLOT),
         ];
         let media = collect_media(&recs);
         assert_eq!(media.len(), 2);
-        // Both are under the LightShow/ prefix in the catalog.
         assert!(media.iter().any(|m| m.rel_path == "LightShow/show.fseq"));
-        assert!(
-            media
-                .iter()
-                .any(|m| m.rel_path == "LightShow/wraps/mywrap.png")
-        );
+        assert!(media.iter().any(|m| m.rel_path == "Wraps/mywrap.png"));
     }
 
     #[test]
@@ -753,7 +748,7 @@ mod tests {
         assert!(is_toybox_path("Music/song.mp3"));
         assert!(is_toybox_path("Music/Artist/Album/track.flac"));
         assert!(is_toybox_path("LightShow/show.fseq"));
-        assert!(is_toybox_path("LightShow/wraps/mywrap.png"));
+        assert!(is_toybox_path("Wraps/mywrap.png"));
         assert!(is_toybox_path("LicensePlate/myplate.png"));
     }
 

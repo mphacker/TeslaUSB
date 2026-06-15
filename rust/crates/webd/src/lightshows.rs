@@ -1,12 +1,9 @@
 //! `GET /api/lightshows` · `POST /api/lightshows` · `DELETE /api/lightshows/:name`
 //!
-//! Light show packages live under `LightShow/` on the MEDIA (p2) partition
-//! (but NOT under `LightShow/wraps/` — that subtree belongs to the Wraps
-//! category). Files are `.fseq`, `.mp3`, or `.wav` (≤ 5 MiB).
-//!
-//! The catalog query (`list_lightshows` in `query.rs`) explicitly excludes
-//! `LightShow/wraps/%` rows, so the GET response never mixes the two
-//! categories even though both live under `LightShow/` on disk.
+//! Light show packages live under `LightShow/` on the MEDIA (p2) partition.
+//! Files are `.fseq`, `.mp3`, or `.wav` (≤ 5 MiB). Wrap images live in a
+//! separate root-level `Wraps/` folder (see [`crate::wraps`]), so the two
+//! categories never overlap on disk.
 
 use axum::Json;
 use axum::extract::{Multipart, Path, State};
@@ -52,17 +49,6 @@ pub(crate) async fn install_lightshow(
     let name = sanitise_filename(&raw_name)?;
     check_extension(&name, LIGHTSHOW_EXTENSIONS)?;
 
-    // Reject attempts to install directly into the wraps subtree via this
-    // endpoint (the name cannot contain a `/` after sanitisation, so this
-    // check is belt-and-suspenders but makes intent explicit).
-    if name.to_ascii_lowercase().starts_with("wraps") {
-        return Err(ApiError::status(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "invalid_filename",
-            "use /api/wraps to install into LightShow/wraps/".to_owned(),
-        ));
-    }
-
     if name.to_ascii_lowercase().ends_with(".wav") {
         crate::chimes::validate_lock_chime_wav(&bytes).map_err(|msg| {
             ApiError::status(StatusCode::UNPROCESSABLE_ENTITY, "invalid_wav", msg)
@@ -85,8 +71,8 @@ pub(crate) async fn remove_lightshow(
 
 /// `POST /api/lightshows/bulk-delete` — remove several light-show files in ONE
 /// `gadgetd` handoff. Body: `{ "names": ["show.fseq", …] }`. Each name rebuilds
-/// `LightShow/<name>`; wraps (under `LightShow/wraps/`) are unreachable here
-/// because a sanitised name has no path component.
+/// `LightShow/<name>`; wraps live in the separate root-level `Wraps/` folder
+/// and are unreachable here.
 pub(crate) async fn bulk_delete_lightshows(
     State(state): State<AppState>,
     Json(req): Json<BulkDeleteRequest>,

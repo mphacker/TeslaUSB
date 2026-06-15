@@ -139,7 +139,7 @@ test.describe("media bulk-delete UAT (A2)", () => {
   test("wraps — image table also exposes the bulk bar and single-handoff delete", async ({
     page,
   }) => {
-    const captured = await mockCategory(page, "wraps", "LightShow/wraps", [
+    const captured = await mockCategory(page, "wraps", "Wraps", [
       "matte_black.png",
       "chrome.png",
     ]);

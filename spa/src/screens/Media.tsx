@@ -218,6 +218,9 @@ export function Media() {
   const [uploading, setUploading] = useState(false);
   const [uploadFail, setUploadFail] = useState<ChimeFailure | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // Bumped after a successful library upload so the child <ChimeScheduler/>
+  // refetches and shows the new chime in its library table.
+  const [libraryRefresh, setLibraryRefresh] = useState(0);
 
   // ── Remove state ──
   const [removePending, setRemovePending] = useState(false);
@@ -286,15 +289,14 @@ export function Media() {
     const ac = new AbortController();
     uploadAbortRef.current = ac;
     try {
-      const res = await api.installChime(selectedFile, ac.signal);
+      await api.uploadLibraryChime(selectedFile, ac.signal);
       const name = selectedFile.name;
       resetUpload();
       setNotice(
-        isQueued(res)
-          ? `Saved ${name} as the active lock chime — syncing to the car.`
-          : `Installed ${name} as the active lock chime.`,
+        `Added ${name} to your chime library. Use “Set Active” below to make it the car’s lock chime.`,
       );
-      await refetch();
+      // Surface the new row in the library table immediately.
+      setLibraryRefresh((n) => n + 1);
     } catch (err) {
       if (ac.signal.aborted) return; // silent: user/unmount cancelled
       setUploadFail(classifyChimeFailure(err));
@@ -416,7 +418,7 @@ export function Media() {
               >
                 {uploading ? (
                   <>
-                    <span class="chime-spinner" aria-hidden="true" /> Installing
+                    <span class="chime-spinner" aria-hidden="true" /> Uploading
                     {"\u2026"}
                   </>
                 ) : (
@@ -428,8 +430,8 @@ export function Media() {
             </div>
             <p class="chime-upload-hint">
               A finished 16-bit PCM WAV — mono or stereo, 44.1 or 48&nbsp;kHz,
-              under 1&nbsp;MB. Installing replaces the active chime and briefly
-              ejects the USB drive from the vehicle.
+              under 1&nbsp;MB. It’s added to your chime library below; use
+              “Set Active” to make it the car’s lock chime.
             </p>
 
             {selectedFile && !validationError && !uploading && !uploadFail && (
@@ -437,8 +439,8 @@ export function Media() {
                 class="chime-upload-selected"
                 data-testid="chime-upload-selected"
               >
-                Ready to install <strong>{selectedFile.name}</strong> (
-                {chimeSize(selectedFile.size)}).
+                Ready to add <strong>{selectedFile.name}</strong> (
+                {chimeSize(selectedFile.size)}) to your library.
               </p>
             )}
 
@@ -476,7 +478,7 @@ export function Media() {
       </details>
 
       {/* ── Chime Scheduler · Random Groups · Library ── (live: schedulerd via webd) */}
-      <ChimeScheduler />
+      <ChimeScheduler refreshKey={libraryRefresh} />
 
       {/* ── Operator-gated remove confirmation (names the chime; no one-click). ── */}
       {removePending && (

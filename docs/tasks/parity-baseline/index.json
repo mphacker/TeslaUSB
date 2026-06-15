@@ -484,7 +484,7 @@
       "route": "/wraps/",
       "bonus": false,
       "shares_page_with": null,
-      "note": "Vehicle wrap gallery (media/LightShow/wraps/*.png).",
+      "note": "Vehicle wrap gallery (media/Wraps/*.png).",
       "viewports": {
         "mobile-375": {
           "width": 375,

@@ -54,6 +54,7 @@ use axum::body::Body;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::header::{
     ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE,
+    RETRY_AFTER, X_CONTENT_TYPE_OPTIONS,
 };
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -82,6 +83,8 @@ pub struct MediaConfig {
     archive_root: Arc<PathBuf>,
     /// Directory the zip export writes its (auto-unlinked) tempfile into.
     cache_dir: Arc<PathBuf>,
+    /// Read-only media mount root used for direct file-byte serving.
+    media_ro_root: Arc<PathBuf>,
 }
 
 impl MediaConfig {
@@ -96,9 +99,12 @@ impl MediaConfig {
     #[must_use]
     pub fn new(archive_root: PathBuf, cache_dir: PathBuf) -> Self {
         let archive_root = std::fs::canonicalize(&archive_root).unwrap_or(archive_root);
+        let media_ro_root = std::env::var_os("WEBD_MEDIA_RO_ROOT")
+            .map_or_else(|| PathBuf::from("/run/teslausb/media-ro"), PathBuf::from);
         Self {
             archive_root: Arc::new(archive_root),
             cache_dir: Arc::new(cache_dir),
+            media_ro_root: Arc::new(media_ro_root),
         }
     }
 
@@ -118,6 +124,20 @@ impl MediaConfig {
     pub(crate) fn staging_dir(&self) -> PathBuf {
         self.cache_dir.join("media-staging")
     }
+
+    /// Inject a specific read-only media mount root for tests.
+    #[must_use]
+    #[allow(dead_code)]
+    pub(crate) fn with_media_ro_root(mut self, root: PathBuf) -> Self {
+        self.media_ro_root = Arc::new(root);
+        self
+    }
+
+    /// The read-only media mount root that backs byte-serving endpoints.
+    #[must_use]
+    pub(crate) fn media_ro_root(&self) -> &Path {
+        self.media_ro_root.as_ref().as_path()
+    }
 }
 
 /// Query string of `GET /api/clips/{id}/stream`.
@@ -125,6 +145,13 @@ impl MediaConfig {
 pub(crate) struct StreamQuery {
     /// Which camera angle to stream; defaults to the front (HUD) camera.
     camera: Option<String>,
+}
+
+/// Query string for `GET|HEAD /api/media/content?path=`.
+#[derive(Deserialize)]
+pub(crate) struct MediaContentQuery {
+    /// Relative path under the read-only `media.img` / `lun.1` mount.
+    path: String,
 }
 
 /// `GET|HEAD /api/clips/{id}/stream?camera=` — range-request mp4 streaming.
@@ -165,6 +192,73 @@ pub(crate) async fn stream(
         }
         RangeDecision::Unsatisfiable => range_not_satisfiable(size, head),
     };
+    Ok(response)
+}
+
+/// `GET|HEAD /api/media/content?path=` — range-stream a media file from the
+/// read-only `media.img` / `lun.1` mount.
+pub(crate) async fn content(
+    State(state): State<AppState>,
+    method: Method,
+    Query(q): Query<MediaContentQuery>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    if q.path.trim().is_empty() {
+        return Err(ApiError::NotFound);
+    }
+
+    let Ok(root) = tokio::fs::canonicalize(state.media.media_ro_root()).await else {
+        return Ok(media_unavailable());
+    };
+
+    let path = match resolve_archive_path(&root, &q.path).await {
+        Resolved::Ok(path) => path,
+        Resolved::Missing | Resolved::Escaped => return Err(ApiError::NotFound),
+    };
+
+    // Stat the canonical path BEFORE opening so a non-regular file
+    // (directory, FIFO, device) is rejected without ever being opened — an
+    // `open` on a FIFO can block, and a device-node open can have side effects.
+    // exFAT (the `media.img` filesystem) cannot hold such nodes, so this is
+    // defence-in-depth, but it keeps the handler correct by construction.
+    let meta = tokio::fs::metadata(&path)
+        .await
+        .map_err(|_| ApiError::NotFound)?;
+    if !meta.is_file() {
+        return Err(ApiError::NotFound);
+    }
+    let size = meta.len();
+
+    let file = tokio::fs::File::open(&path)
+        .await
+        .map_err(|_| ApiError::NotFound)?;
+
+    let head = method == Method::HEAD;
+    let mime = content_type_for(&path);
+
+    let mut response = match decide_range(&headers, size) {
+        RangeDecision::Full => {
+            let body = body_for(head, file, 0, size).await?;
+            build_media_response(StatusCode::OK, mime, size, None, body)
+        }
+        RangeDecision::Satisfiable { start, end } => {
+            let len = end - start + 1;
+            let body = body_for(head, file, start, len).await?;
+            let content_range = format!("bytes {start}-{end}/{size}");
+            build_media_response(
+                StatusCode::PARTIAL_CONTENT,
+                mime,
+                len,
+                Some(content_range),
+                body,
+            )
+        }
+        RangeDecision::Unsatisfiable => range_not_satisfiable(size, head),
+    };
+
+    // These are user-uploaded bytes replayed to a browser; forbid MIME sniffing
+    // so a mislabelled upload cannot be reinterpreted as active content.
+    insert_header(response.headers_mut(), X_CONTENT_TYPE_OPTIONS, "nosniff");
     Ok(response)
 }
 
@@ -384,6 +478,39 @@ async fn body_for(
     }
     let stream = ReaderStream::with_capacity(file.take(len), STREAM_CHUNK);
     Ok(Body::from_stream(stream))
+}
+
+/// Map a media file extension to its HTTP content type.
+pub(crate) fn content_type_for(path: &Path) -> &'static str {
+    let ext = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase);
+
+    match ext.as_deref() {
+        Some("wav") => "audio/wav",
+        Some("mp3") => "audio/mpeg",
+        Some("flac") => "audio/flac",
+        Some("aac") => "audio/aac",
+        Some("m4a") => "audio/mp4",
+        Some("ogg") => "audio/ogg",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some(_) | None => "application/octet-stream",
+    }
+}
+
+/// Return a `503` media-unavailable response with the required JSON body.
+fn media_unavailable() -> Response {
+    let mut response = (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Body::from(r#"{"error":{"code":"media_unavailable","message":"media not mounted"}}"#.to_owned()),
+    )
+        .into_response();
+    let headers = response.headers_mut();
+    insert_header(headers, CONTENT_TYPE, "application/json");
+    insert_header(headers, RETRY_AFTER, "2");
+    response
 }
 
 /// Assemble a `200`/`206` media response with the common headers.

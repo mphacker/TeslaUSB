@@ -434,6 +434,38 @@ fn pattern(len: usize) -> Vec<u8> {
     (0..len).map(|i| u8::try_from(i % 256).unwrap()).collect()
 }
 
+fn media_content_app(files: &[(&str, &[u8])], create_root: bool) -> (TempDir, Router) {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("catalog.db");
+    let mut conn = Connection::open(&db_path).unwrap();
+    conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+    indexd::db::apply_migrations(&mut conn).unwrap();
+
+    std::fs::create_dir_all(dir.path().join("archive")).unwrap();
+    std::fs::create_dir_all(dir.path().join("cache")).unwrap();
+
+    let static_dir = dir.path().join("static");
+    std::fs::create_dir_all(&static_dir).unwrap();
+    std::fs::write(static_dir.join("index.html"), "<!doctype html>shell").unwrap();
+
+    let media_ro = dir.path().join("media-ro");
+    if create_root {
+        std::fs::create_dir_all(&media_ro).unwrap();
+        for (rel, bytes) in files {
+            let path = media_ro.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+    }
+
+    let catalog = Catalog::open(&db_path).unwrap();
+    let media = MediaConfig::new(dir.path().join("archive"), dir.path().join("cache"))
+        .with_media_ro_root(media_ro);
+    let gadget_sock = dir.path().join("gadgetd.sock");
+    let app = build_router(catalog, static_dir, media, gadget_sock);
+    (dir, app)
+}
+
 /// Build the media fixture: a 100-byte `front` + small `back` archive angle on
 /// clip 10, a `ro_usb` angle (must 404), a `..`-traversal and an absolute-path
 /// reinjection angle (both must 404), and a ~1 MiB clip for the streamed proof.
@@ -562,6 +594,159 @@ async fn request(
 
 fn header<'a>(headers: &'a axum::http::HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name).and_then(|v| v.to_str().ok())
+}
+
+#[tokio::test]
+async fn media_content_streams_full_file() {
+    let (dir, app) = media_content_app(&[("Music/song.mp3", &pattern(16))], true);
+    let (status, headers, body) =
+        request(&app, Method::GET, "/api/media/content?path=Music/song.mp3", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(header(&headers, "content-type"), Some("audio/mpeg"));
+    assert_eq!(header(&headers, "content-length"), Some("16"));
+    assert_eq!(header(&headers, "accept-ranges"), Some("bytes"));
+    assert_eq!(header(&headers, "x-content-type-options"), Some("nosniff"));
+    assert_eq!(body.as_slice(), pattern(16).as_slice());
+    let _ = dir;
+}
+
+#[tokio::test]
+async fn media_content_range_returns_206() {
+    let (dir, app) = media_content_app(&[("Music/song.mp3", &pattern(16))], true);
+    let (status, headers, body) = request(
+        &app,
+        Method::GET,
+        "/api/media/content?path=Music/song.mp3",
+        Some("bytes=0-3"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(header(&headers, "content-range"), Some("bytes 0-3/16"));
+    assert_eq!(header(&headers, "content-length"), Some("4"));
+    assert_eq!(body, pattern(16)[0..4]);
+    let _ = dir;
+}
+
+#[tokio::test]
+async fn media_content_head_has_empty_body() {
+    let (dir, app) = media_content_app(&[("Music/song.mp3", &pattern(16))], true);
+    let (status, headers, body) =
+        request(&app, Method::HEAD, "/api/media/content?path=Music/song.mp3", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(header(&headers, "content-length"), Some("16"));
+    assert!(body.is_empty());
+    let _ = dir;
+}
+
+#[tokio::test]
+async fn media_content_traversal_is_404() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("catalog.db");
+    let mut conn = Connection::open(&db_path).unwrap();
+    conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+    indexd::db::apply_migrations(&mut conn).unwrap();
+
+    let static_dir = dir.path().join("static");
+    std::fs::create_dir_all(&static_dir).unwrap();
+    std::fs::write(static_dir.join("index.html"), "<!doctype html>shell").unwrap();
+
+    let media_ro = dir.path().join("media-ro");
+    std::fs::create_dir_all(&media_ro).unwrap();
+    std::fs::write(media_ro.join("LockChime.wav"), b"abc").unwrap();
+
+    let secret = dir.path().join("secret.txt");
+    std::fs::write(&secret, b"secret").unwrap();
+
+    let catalog = Catalog::open(&db_path).unwrap();
+    let media = MediaConfig::new(dir.path().join("archive"), dir.path().join("cache"))
+        .with_media_ro_root(media_ro);
+    let gadget_sock = dir.path().join("gadgetd.sock");
+    let app = build_router(catalog, static_dir, media, gadget_sock);
+
+    let (status, _, _) =
+        request(&app, Method::GET, "/api/media/content?path=../secret.txt", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) =
+        request(&app, Method::GET, "/api/media/content?path=/etc/passwd", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn media_content_missing_file_is_404() {
+    let (dir, app) = media_content_app(&[("Music/song.mp3", &pattern(16))], true);
+    let (status, _, _) =
+        request(&app, Method::GET, "/api/media/content?path=Music/missing.mp3", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let _ = dir;
+}
+
+#[tokio::test]
+async fn media_content_unsatisfiable_range_is_416() {
+    let (dir, app) = media_content_app(&[("Music/song.mp3", &pattern(16))], true);
+    let (status, headers, _) = request(
+        &app,
+        Method::GET,
+        "/api/media/content?path=Music/song.mp3",
+        Some("bytes=100-200"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(header(&headers, "content-range"), Some("bytes */16"));
+    assert_eq!(header(&headers, "x-content-type-options"), Some("nosniff"));
+    let _ = dir;
+}
+
+#[tokio::test]
+async fn media_content_directory_is_404() {
+    // Seeding `Music/song.mp3` creates the `Music/` directory; requesting the
+    // directory itself must be rejected as a non-regular file, not streamed.
+    let (dir, app) = media_content_app(&[("Music/song.mp3", &pattern(16))], true);
+    let (status, _, _) =
+        request(&app, Method::GET, "/api/media/content?path=Music", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let _ = dir;
+}
+
+#[tokio::test]
+async fn media_content_absent_mount_is_503() {
+    let (dir, app) = media_content_app(&[("Music/song.mp3", &pattern(16))], false);
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/media/content?path=Music/song.mp3")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(header(resp.headers(), "retry-after"), Some("2"));
+    assert_eq!(header(resp.headers(), "content-type"), Some("application/json"));
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(body.as_ref(), br#"{"error":{"code":"media_unavailable","message":"media not mounted"}}"#);
+    let _ = dir;
+}
+
+#[test]
+fn content_type_for_maps_extensions() {
+    assert_eq!(super::media::content_type_for(std::path::Path::new("song.wav")), "audio/wav");
+    assert_eq!(super::media::content_type_for(std::path::Path::new("song.mp3")), "audio/mpeg");
+    assert_eq!(super::media::content_type_for(std::path::Path::new("song.flac")), "audio/flac");
+    assert_eq!(super::media::content_type_for(std::path::Path::new("song.aac")), "audio/aac");
+    assert_eq!(super::media::content_type_for(std::path::Path::new("song.m4a")), "audio/mp4");
+    assert_eq!(super::media::content_type_for(std::path::Path::new("song.png")), "image/png");
+    assert_eq!(super::media::content_type_for(std::path::Path::new("song.jpg")), "image/jpeg");
+    assert_eq!(super::media::content_type_for(std::path::Path::new("song.jpeg")), "image/jpeg");
+    assert_eq!(
+        super::media::content_type_for(std::path::Path::new("song.fseq")),
+        "application/octet-stream"
+    );
+    assert_eq!(
+        super::media::content_type_for(std::path::Path::new("song.unknown")),
+        "application/octet-stream"
+    );
+    assert_eq!(super::media::content_type_for(std::path::Path::new("song")), "application/octet-stream");
 }
 
 #[tokio::test]
@@ -1738,7 +1923,7 @@ async fn bulk_delete_wraps_rebuilds_wraps_subdir() {
     assert_eq!(status, StatusCode::ACCEPTED);
     let req = fx.last.lock().unwrap().clone().unwrap();
     let paths = req["mutation"]["rel_paths"].as_array().unwrap();
-    assert_eq!(paths[0], "LightShow/wraps/cyber.png");
+    assert_eq!(paths[0], "Wraps/cyber.png");
 }
 
 #[tokio::test]
@@ -2000,8 +2185,8 @@ async fn get_lightshows_returns_lightshow_files_only() {
             &conn,
             &[
                 ("slot1", "LightShow/show.fseq", "show.fseq", 2_097_152),
-                // Wraps row — must NOT appear in /api/lightshows.
-                ("slot1", "LightShow/wraps/mywrap.png", "mywrap.png", 524_288),
+                // Wraps row (root-level Wraps/) — must NOT appear in /api/lightshows.
+                ("slot1", "Wraps/mywrap.png", "mywrap.png", 524_288),
             ],
         );
     }
@@ -2070,7 +2255,7 @@ async fn get_wraps_returns_wraps_only() {
             &[
                 // LightShow row — must NOT appear in /api/wraps.
                 ("slot1", "LightShow/show.fseq", "show.fseq", 2_097_152),
-                ("slot1", "LightShow/wraps/mywrap.png", "mywrap.png", 524_288),
+                ("slot1", "Wraps/mywrap.png", "mywrap.png", 524_288),
             ],
         );
     }
@@ -2153,6 +2338,9 @@ fn sched_fixture(reply: SchedReply) -> SchedFixture {
     std::fs::create_dir_all(&static_dir).unwrap();
     std::fs::write(static_dir.join("index.html"), "<!doctype html>shell").unwrap();
 
+    let library_dir = dir.path().join("chimes");
+    std::fs::create_dir_all(&library_dir).unwrap();
+
     let catalog = Catalog::open(&db_path).unwrap();
     let media = MediaConfig::new(dir.path().join("archive"), dir.path().join("cache"));
     // The gadget client is unused on the scheduler routes; point it at a dead
@@ -2167,7 +2355,14 @@ fn sched_fixture(reply: SchedReply) -> SchedFixture {
         last: Arc::clone(&last),
         staged_existed: Arc::clone(&staged_existed),
     });
-    let app = router_with_clients(catalog, static_dir, media, gadget, scheduler);
+    let app = router_with_clients(
+        catalog,
+        static_dir,
+        media,
+        gadget,
+        scheduler,
+        library_dir,
+    );
     SchedFixture {
         _dir: dir,
         app,
@@ -2401,4 +2596,205 @@ async fn chime_scheduler_protocol_error_maps_to_502() {
     let (status, body) = get_json(&fx.app, "/api/chime-scheduler").await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert_eq!(body["error"]["code"], "scheduler_protocol");
+}
+
+// ---------------------------------------------------------------------------
+// File-backed chime-library routes (`crate::chime_library`): serve audio,
+// download, and activate (Set Active). schedulerd owns the library dir; these
+// routes only READ it. The gadgetd handoff for activate is mocked.
+// ---------------------------------------------------------------------------
+
+/// GET a path and return `(status, content-type, content-disposition, body)`.
+async fn get_chime_bytes(
+    app: &Router,
+    uri: &str,
+) -> (StatusCode, Option<String>, Option<String>, Vec<u8>) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let header = |name: axum::http::HeaderName| {
+        resp.headers()
+            .get(&name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    };
+    let content_type = header(axum::http::header::CONTENT_TYPE);
+    let disposition = header(axum::http::header::CONTENT_DISPOSITION);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap()
+        .to_vec();
+    (status, content_type, disposition, body)
+}
+
+/// POST with an empty body and return `(status, parsed-json)`.
+async fn post_empty(app: &Router, uri: &str) -> (StatusCode, Value) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, value)
+}
+
+/// A library fixture wired to a mock gadgetd (for activate) plus a real,
+/// writable library dir so tests can seed library files.
+struct LibraryFixture {
+    _dir: TempDir,
+    app: Router,
+    last: Arc<Mutex<Option<Value>>>,
+    library_dir: std::path::PathBuf,
+}
+
+fn library_fixture(gadget_reply: Reply) -> LibraryFixture {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("catalog.db");
+    seed(&db_path);
+
+    let static_dir = dir.path().join("static");
+    std::fs::create_dir_all(&static_dir).unwrap();
+    std::fs::write(static_dir.join("index.html"), "<!doctype html>shell").unwrap();
+
+    let library_dir = dir.path().join("chimes");
+    std::fs::create_dir_all(&library_dir).unwrap();
+
+    let catalog = Catalog::open(&db_path).unwrap();
+    let media = MediaConfig::new(dir.path().join("archive"), dir.path().join("cache"));
+
+    let last = Arc::new(Mutex::new(None));
+    let gadget: Arc<dyn GadgetClient> = Arc::new(MockGadget {
+        reply: gadget_reply,
+        last: Arc::clone(&last),
+    });
+    // schedulerd is unused by the file-backed routes; a dead socket would do,
+    // but a mock keeps an accidental call loud.
+    let scheduler: Arc<dyn SchedulerClient> = Arc::new(MockScheduler {
+        reply: SchedReply::Unavailable,
+        last: Arc::new(Mutex::new(None)),
+        staged_existed: Arc::new(Mutex::new(None)),
+    });
+    let app = router_with_clients(
+        catalog,
+        static_dir,
+        media,
+        gadget,
+        scheduler,
+        library_dir.clone(),
+    );
+    LibraryFixture {
+        _dir: dir,
+        app,
+        last,
+        library_dir,
+    }
+}
+
+#[tokio::test]
+async fn library_audio_serves_wav_bytes_inline() {
+    let fx = library_fixture(Reply::Json(json!({})));
+    let wav = sample_wav(64);
+    std::fs::write(fx.library_dir.join("Horn.wav"), &wav).unwrap();
+
+    let (status, ct, disp, body) =
+        get_chime_bytes(&fx.app, "/api/chime-scheduler/library/Horn.wav/audio").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ct.as_deref(), Some("audio/wav"));
+    assert!(disp.is_none(), "inline audio must not be an attachment");
+    assert_eq!(body, wav);
+}
+
+#[tokio::test]
+async fn library_download_sets_attachment_disposition() {
+    let fx = library_fixture(Reply::Json(json!({})));
+    let wav = sample_wav(64);
+    std::fs::write(fx.library_dir.join("Horn.wav"), &wav).unwrap();
+
+    let (status, ct, disp, body) =
+        get_chime_bytes(&fx.app, "/api/chime-scheduler/library/Horn.wav/download").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ct.as_deref(), Some("audio/wav"));
+    assert_eq!(disp.as_deref(), Some("attachment; filename=\"Horn.wav\""));
+    assert_eq!(body, wav);
+}
+
+#[tokio::test]
+async fn library_audio_missing_file_is_404() {
+    let fx = library_fixture(Reply::Json(json!({})));
+    let (status, ..) = get_chime_bytes(&fx.app, "/api/chime-scheduler/library/Gone.wav/audio").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn library_audio_rejects_traversal() {
+    let fx = library_fixture(Reply::Json(json!({})));
+    // Seed a file OUTSIDE the library dir (in its parent) that a traversal
+    // would target.
+    let outside = fx.library_dir.parent().unwrap().join("secret.wav");
+    std::fs::write(&outside, b"x").unwrap();
+    // `%2e%2e%2f` decodes to `../`; the single-segment filename guard rejects it.
+    let (status, ..) = get_raw(
+        &fx.app,
+        "/api/chime-scheduler/library/%2e%2e%2fsecret.wav/audio",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn library_activate_happy_path_enqueues_lockchime_install() {
+    let fx = library_fixture(Reply::Json(json!({ "job_id": "m-7", "state": "queued" })));
+    std::fs::write(fx.library_dir.join("Horn.wav"), sample_wav(64)).unwrap();
+
+    let (status, body) =
+        post_empty(&fx.app, "/api/chime-scheduler/library/Horn.wav/activate").await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(body["state"], "queued");
+
+    // Routed through the SAME frictionless install primitive: MEDIA partition,
+    // fixed LockChime.wav destination.
+    let req = fx.last.lock().unwrap().clone().unwrap();
+    assert_eq!(req["cmd"], "enqueue_mutation");
+    assert_eq!(req["partition"], 2);
+    assert_eq!(req["mutation"]["op"], "install_file");
+    assert_eq!(req["mutation"]["rel_path"], "LockChime.wav");
+}
+
+#[tokio::test]
+async fn library_activate_missing_file_is_404() {
+    let fx = library_fixture(Reply::Json(json!({ "state": "queued" })));
+    let (status, _) =
+        post_empty(&fx.app, "/api/chime-scheduler/library/Gone.wav/activate").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");
+}
+
+#[tokio::test]
+async fn library_activate_invalid_wav_is_422_before_handoff() {
+    let fx = library_fixture(Reply::Json(json!({ "state": "queued" })));
+    std::fs::write(fx.library_dir.join("Bad.wav"), b"not a real wav").unwrap();
+    let (status, body) =
+        post_empty(&fx.app, "/api/chime-scheduler/library/Bad.wav/activate").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["code"], "invalid_wav");
+    assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");
 }

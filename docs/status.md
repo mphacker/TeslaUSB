@@ -12,6 +12,66 @@
 > [`adr/`](./adr/) (locked architecture, incl. [`ADR-0003`](./adr/0003-media-read-path.md)
 > media read path).
 
+## ⏯️ Resume here — in-flight work (2026-06-15 08:10 ET)
+
+**Last completed & committed:** F2 (`lun.1 ro=1`, `e31f73b`) and **F3** (gadgetd
+persistent RO loop-mount of `media.img` at `/run/teslausb/media-ro` + suspend/
+resume gate around the write-handoff, `edecb14`). Both on local branch
+`mhackermsft/b1-clean` — **nothing pushed**.
+
+**Done & VERIFIED this session (NOT yet committed): `webd` media-content
+range-streaming endpoint** — `GET|HEAD /api/media/content?path=<rel_path>`
+serves bytes from the F3 RO mount via `tokio::fs` (Option A, simple file I/O;
+decided Opus + GPT-5.5). `200`/`206`/`416`, `404` on jail-escape/missing/non-file,
+`503 Retry-After: 2` on absent mount. Files: `rust/crates/webd/src/media.rs`
+(`content` handler + `MediaConfig.media_ro_root` + `content_type_for` +
+`media_unavailable`), `route.rs` (one route line), `tests.rs` (7 new tests).
+- **Verification (podman): `cargo test -p webd` = 210 passed / 0 failed**
+  (9 media_content tests incl. full/206/HEAD/traversal-404/missing-404/dir-404/
+  416/absent-503 + `content_type_for` unit); **`cargo clippy -p webd --all-targets
+  -- -D warnings` = clean.** mai-code-1-flash implemented; verified green on resume.
+- **GPT-5.5 adversarial review: DONE & reconciled.** Applied: stat-before-open
+  (reject non-regular files without opening — Important), `X-Content-Type-Options:
+  nosniff` on media responses (hardening — FYI), and added 416 + directory-404
+  tests (Nit). Re-verified green (210 tests, clippy clean).
+- **REMAINING: operator commit decision (entanglement below), then commit.**
+
+**⚠️ Working-tree entanglement (must resolve before commit):** a SEPARATE,
+pre-existing, **uncommitted** feature also sits dirty in the tree — a *file-backed
+chime-library serve/download/activate* feature: untracked
+`rust/crates/webd/src/chime_library.rs` + edits to `lib.rs`, `query.rs`,
+`lightshows.rs`, `wraps.rs`, the `.merge(crate::chime_library::routes())` line in
+`route.rs`, `get_chime_bytes`/Wraps tests in `tests.rs`, and several `spa/` files
+(`Media.tsx`, `Wraps.tsx`, `LightShows.tsx`, `ChimeScheduler.tsx`, api `client.ts`,
+`media.css`, UAT specs), plus `deploy/systemd/webd.service`,
+`scannerd/src/produce.rs`. This is NOT this session's work and is unreviewed here.
+`media-content` is interleaved with it inside `route.rs` and `tests.rs`, so a clean
+media-content-only commit needs **patch-level staging** (`git add -p`): take all of
+`media.rs`, plus only the `/media/content` route hunk and the `media_content_*`
+test hunks. Do NOT commit or discard the chime-library work without operator say-so.
+
+**Next actions on resume (in order):**
+1. Read `gpt55-media-review` result; reconcile; fix any Critical/Important in the
+   3 media-content files; re-verify in podman.
+2. Decide commit strategy WITH THE OPERATOR (entanglement above) — likely patch-
+   stage media-content only; leave chime-library dirty for its own review.
+3. Tick read-path items below ONLY where end-to-end proven. The endpoint alone
+   does NOT check the 4.5/4.6/4.7/4.8 *playback* boxes — those are UI items needing
+   the SPA wired + a Playwright run. It DOES unblock them (remove gated:F3 where
+   the blocker was purely the read path).
+
+**Open follow-ups (logged in session SQL `todos`, not blocking):**
+- `f3-followup-mount-perms`: harden the F3 RO mount (`ro,nodev,nosuid,noexec,
+  gid=<group>,fmask=0137,dmask=0027`) + add `webd` to that group so it can read
+  the root-created exFAT mount; consider true mountpoint detection for 503-vs-404
+  (deploy/live concern, gated:F1+C1).
+- `f3-followup-installfile-subdir`: mai's reverted `install_file` `create_dir_all`
+  change — needs its own review, likely lands with F5 write-path.
+- F4 read-drain stays deferred: GPT-5.5 confirmed a mid-stream mount teardown
+  failing with EIO + client retry is acceptable — no read-lease required for now.
+
+---
+
 ## Legend
 
 - `[ ]` not done / not yet proven.
@@ -194,9 +254,11 @@ every daemon at once). Get reads + a safe handoff lock proven before feature wor
 
 - [ ] **Active chime card done right:** show the **original library name** it was
   copied from (not "LockChime.wav"), size/duration, and a **player** for the real
-  active sound; **no stray Remove button**. **(gated:F3 — needs RO-mount read of
-  `LockChime.wav`; current card is wrong per operator)**
-- [ ] Play any library chime in-browser (streamed from image via RO mount). **(gated:F3)**
+  active sound; **no stray Remove button**. **(read path READY — `GET
+  /api/media/content?path=LockChime.wav`, backend verified; needs the SPA card
+  rebuild [player + original-name + no-Remove] + Playwright)**
+- [ ] Play any library chime in-browser (streamed from image via RO mount). **(read
+  path READY — `/api/media/content`, backend verified; needs SPA `<audio>` wiring + Playwright)**
 - [ ] Upload chime(s) `.wav` (+`.mp3`→WAV), ≤1 MB & ≤5 s; added to `Chimes/`. **(partial:
   single-file install proven on hw; multi-file + mp3 transcode + 5 s/normalize to verify)**
 - [ ] Delete library chime. **(partial: delete path exists; verify against `Chimes/` in image)**
@@ -214,7 +276,8 @@ every daemon at once). Get reads + a safe handoff lock proven before feature wor
 ### 4.6 Music — `Requirements.md` §4.6
 
 - [ ] Browse library incl. nested folders. **(partial: flat list proven; nested folder browse to verify)**
-- [ ] Play track in-browser (stream from image via RO mount). **(gated:F3)**
+- [ ] Play track in-browser (stream from image via RO mount). **(read path READY —
+  `/api/media/content`, backend verified; needs SPA `<audio>` wiring + Playwright)**
 - [ ] Upload `.mp3/.flac/.wav/.aac/.m4a`, up to **2 GB**, **16 MB chunked** upload. **(gated: chunked-upload backend — Tier-C remainder A1/A2)**
 - [ ] Create folders + move files between folders. **(gated: music folder ops — A1)**
 - [ ] Delete files (and folders). **(partial: bulk delete proven; folder delete to verify)**
@@ -222,7 +285,8 @@ every daemon at once). Get reads + a safe handoff lock proven before feature wor
 
 ### 4.7 Boombox — `Requirements.md` §4.7
 
-- [ ] List/play current sounds. **(partial: list proven; play gated:F3)**
+- [ ] List/play current sounds. **(partial: list proven; play read path READY —
+  `/api/media/content`, backend verified; needs SPA `<audio>` wiring + Playwright)**
 - [ ] Upload `.mp3/.wav`, ≤1 MB each, ≤5 files total (clear rejection). **(partial:
   single upload proven; 5-file cap + size reject to verify)**
 - [x] Delete (incl. bulk). **(bulk-delete A2 proven)**
@@ -230,7 +294,8 @@ every daemon at once). Get reads + a safe handoff lock proven before feature wor
 ### 4.8 Light Shows — `Requirements.md` §4.8
 
 - [x] List shows grouped by name stem (`.fseq` + paired audio). **(proven)**
-- [ ] Play show audio in-browser. **(gated:F3)**
+- [ ] Play show audio in-browser. **(read path READY — `/api/media/content`,
+  backend verified; needs SPA `<audio>` wiring + Playwright)**
 - [ ] Upload `.fseq`/audio single ≤100 MB, or **ZIP ≤500 MB** auto-extracted+flattened. **(gated: ZIP upload backend — Tier-C A1)**
 - [ ] Set active show (`lightshow_active.json`). **(not started)**
 - [x] Delete files/shows (incl. bulk). **(bulk-delete proven)**
@@ -238,13 +303,13 @@ every daemon at once). Get reads + a safe handoff lock proven before feature wor
 ### 4.9 Wraps & License Plates — `Requirements.md` §4.9
 
 - [ ] **Wraps:** list with raw-PNG thumbnails. **(partial: list + ROOT `Wraps/` proven on hw;
-  thumbnail bytes gated:F3)**
+  thumbnail read path READY — `/api/media/content`, backend verified; needs SPA `<img>` wiring + Playwright)**
 - [ ] Wrap upload: `.png` only, ≤1 MB, 64×64–2048×2048, name ≤32 `[A-Za-z0-9_- space]`,
   ~10 max; atomic publish. **(partial: validation + install proven; dimension/name caps to verify)**
 - [x] Wrap delete (incl. bulk). **(proven)**
 - [ ] **Plates (images):** list w/ thumbnails, upload, delete `.png` ≤512 KB,
   exactly 420×75 (NA)/492×75 (EU), name ≤12 alnum, ≤5. **(partial: validation A1 done;
-  thumbnail bytes gated:F3; cropper deferred — A2)**
+  thumbnail read path READY — `/api/media/content`, backend verified; cropper deferred — A2)**
 - [ ] **Tracked-plate list (privacy/redaction):** add/edit/delete (uppercase ≤16,
   label ≤64, notes ≤240, dedupe), bulk delete, redaction toggle. **(not started)**
 

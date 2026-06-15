@@ -31,6 +31,7 @@
 
 mod boombox;
 mod catalog;
+mod chime_library;
 mod chime_scheduler;
 mod chimes;
 mod dto;
@@ -81,6 +82,10 @@ struct AppState {
     gadget: Arc<dyn gadget::GadgetClient>,
     scheduler: Arc<dyn scheduler::SchedulerClient>,
     jobs: jobs::JobHub,
+    /// The `schedulerd`-owned chime library directory (`/data/teslausb/chimes`),
+    /// read **only** by the file-backed library routes in
+    /// [`crate::chime_library`]. `schedulerd` remains its sole writer.
+    chime_library_dir: PathBuf,
 }
 
 /// The read-only system-probe handle carried in [`AppState`] for the
@@ -140,7 +145,14 @@ fn router_with_gadget(
     gadget: Arc<dyn gadget::GadgetClient>,
 ) -> Router {
     let scheduler = scheduler::default_client(default_scheduler_sock());
-    router_with_clients(catalog, static_dir, media, gadget, scheduler)
+    router_with_clients(
+        catalog,
+        static_dir,
+        media,
+        gadget,
+        scheduler,
+        default_chime_library_dir(),
+    )
 }
 
 /// The default `schedulerd` control-socket path (overridable via
@@ -152,6 +164,14 @@ fn default_scheduler_sock() -> PathBuf {
     )
 }
 
+/// The default `schedulerd` chime-library directory (overridable via
+/// `WEBD_CHIME_LIBRARY_DIR`). Must match `schedulerd`'s `SCHEDULERD_LIBRARY_DIR`;
+/// `webd` only ever reads it.
+fn default_chime_library_dir() -> PathBuf {
+    std::env::var_os("WEBD_CHIME_LIBRARY_DIR")
+        .map_or_else(|| PathBuf::from("/data/teslausb/chimes"), PathBuf::from)
+}
+
 /// Assemble the router over explicit `gadgetd` AND `schedulerd` clients — the
 /// injection seam used by the chime-scheduler handler tests.
 fn router_with_clients(
@@ -160,6 +180,7 @@ fn router_with_clients(
     media: MediaConfig,
     gadget: Arc<dyn gadget::GadgetClient>,
     scheduler: Arc<dyn scheduler::SchedulerClient>,
+    chime_library_dir: PathBuf,
 ) -> Router {
     let sys = SysHandle {
         probe: Arc::new(sysinfo::LinuxProbe),
@@ -175,6 +196,7 @@ fn router_with_clients(
         gadget,
         scheduler,
         jobs: jobs::JobHub::new(),
+        chime_library_dir,
     };
     route::router(state, static_dir)
 }

@@ -123,6 +123,7 @@ interface Captured {
   randomMode: { enabled: boolean; groupId?: string | null }[];
   libraryPost: string[];
   libraryDelete: string[];
+  libraryActivate: string[];
 }
 
 /** Install the stateful scheduler mock. Returns the live snapshot + captured
@@ -138,6 +139,7 @@ async function installScheduler(page: Page, initial: Snapshot = emptySnapshot())
     randomMode: [],
     libraryPost: [],
     libraryDelete: [],
+    libraryActivate: [],
   };
   let seq = 0;
   const tail = (url: string) => decodeURIComponent(url.split("?")[0].split("/").pop() ?? "");
@@ -235,6 +237,21 @@ async function installScheduler(page: Page, initial: Snapshot = emptySnapshot())
     cap.libraryDelete.push(filename);
     snap.library = snap.library.filter((c) => c.filename !== filename);
     return json200(route, {});
+  });
+
+  // Library activate (POST .../activate) — "Set Active" promotes a library row
+  // to the car's LockChime.wav via the gadgetd eject-handoff queue (202 queued).
+  await page.route("**/api/chime-scheduler/library/*/activate", (route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    const filename = decodeURIComponent(
+      route.request().url().split("/activate")[0].split("/").pop() ?? "",
+    );
+    cap.libraryActivate.push(filename);
+    return route.fulfill({
+      status: 202,
+      contentType: "application/json",
+      body: JSON.stringify({ state: "queued", job_id: "m-act-1" }),
+    });
   });
 
   return { snap, cap };
@@ -482,21 +499,28 @@ test.describe("chime scheduler UAT (A3b)", () => {
     assertCleanConsole(probe);
   });
 
-  // ── Gate 9: upload a chime into the library ──────────────────────────────
-  test("library upload — adds a WAV and the table refreshes", async ({ page, probe }) => {
+  // ── Gate 9: upload a chime into the library (via the Upload New Chime panel) ─
+  test("library upload — Upload New Chime adds a WAV and the table refreshes", async ({
+    page,
+    probe,
+  }) => {
     const { cap } = await installScheduler(page, populatedSnapshot());
     await gotoScheduler(page);
 
     await expect(page.locator("[data-testid=library-row]")).toHaveCount(2);
-    await page.locator("[data-testid=library-file-input]").setInputFiles({
+    // v1 parity: a single uploader (the top "Upload New Chime" panel) feeds the
+    // library; there is no in-table uploader.
+    await page.locator("[data-testid=chime-file-input]").setInputFiles({
       name: "NewChime.wav",
       mimeType: "audio/wav",
       buffer: wavBuffer(512),
     });
+    await page.locator("[data-testid=chime-upload-submit]").click();
 
-    await expect(page.locator("[data-testid=library-notice]")).toContainText(
+    await expect(page.locator("[data-testid=chime-notice]")).toContainText(
       "Added NewChime.wav",
     );
+    // refreshKey bump → embedded scheduler refetches and shows the new row.
     await expect(page.locator("[data-testid=library-row]")).toHaveCount(3);
     await expect(page.locator("[data-testid=library-table]")).toContainText("NewChime.wav");
     expect(cap.libraryPost).toEqual(["NewChime.wav"]);
@@ -514,6 +538,30 @@ test.describe("chime scheduler UAT (A3b)", () => {
     ).click();
     await expect(page.locator("[data-testid=library-row]")).toHaveCount(1);
     expect(cap.libraryDelete).toEqual(["Sparkle.wav"]);
+    assertCleanConsole(probe);
+  });
+
+  // ── Gate 10b: Set Active promotes a library row (queued gadgetd handoff) ──
+  test("library set active — posts activate by filename and shows a syncing notice", async ({
+    page,
+    probe,
+  }) => {
+    const { cap } = await installScheduler(page, populatedSnapshot());
+    await gotoScheduler(page);
+
+    const firstRow = page.locator("[data-testid=library-row]").first();
+    await expect(firstRow).toContainText("Sparkle.wav");
+    // Each library row exposes the v1 action set: a preview player, a Download
+    // link, Set Active, and Delete.
+    await expect(firstRow.locator("[data-testid=library-audio]")).toHaveCount(1);
+    await expect(firstRow.locator("[data-testid=library-download]")).toHaveAttribute(
+      "href",
+      /\/api\/chime-scheduler\/library\/Sparkle\.wav\/download$/,
+    );
+    await firstRow.locator("[data-testid=library-set-active]").click();
+
+    await expect(page.locator("[data-testid=library-notice]")).toContainText("syncing");
+    expect(cap.libraryActivate).toEqual(["Sparkle.wav"]);
     assertCleanConsole(probe);
   });
 

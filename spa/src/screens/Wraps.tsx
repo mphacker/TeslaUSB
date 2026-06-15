@@ -9,7 +9,8 @@ import "../styles/wraps.css";
 /**
  * Wraps screen (route `/wraps`).
  *
- * Reads `GET /api/wraps` on mount — PNG images under `LightShow/wraps/` on p2.
+ * Reads `GET /api/wraps` on mount — PNG images under the root-level `Wraps/`
+ * folder on p2 (the layout Tesla's Paint Shop reads).
  * Install (POST) and remove (DELETE) route through the gadgetd eject-handoff.
  */
 export function Wraps() {
@@ -39,7 +40,7 @@ export function Wraps() {
         </p>
         <ul>
           <li>
-            <strong>Folder:</strong> <code>/LightShow/wraps</code> at the root
+            <strong>Folder:</strong> <code>/Wraps</code> at the root
             of the media partition
           </li>
           <li>

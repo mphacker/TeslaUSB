@@ -1,6 +1,8 @@
 //! `GET /api/wraps` · `POST /api/wraps` · `DELETE /api/wraps/:name`
 //!
-//! Wrap images live under `LightShow/wraps/` on the MEDIA (p2) partition.
+//! Wrap images live under `Wraps/` at the root of the MEDIA (p2) partition —
+//! the layout Tesla's Paint Shop reads (see `github.com/teslamotors/custom-wraps`:
+//! "Create a folder called `Wraps` at the root level of the drive").
 //! Tesla supports up to 10 wraps; only `.png` files are accepted (≤ 1 MiB).
 //! PNG magic bytes (`\x89PNG\r\n\x1a\n`) are verified before any gadget round-trip.
 
@@ -18,7 +20,7 @@ use crate::media_upload::{
 };
 
 const PARTITION_MEDIA: u8 = 2;
-const WRAPS_DIR: &str = "LightShow/wraps";
+const WRAPS_DIR: &str = "Wraps";
 
 /// Maximum accepted wrap image size (1 MiB).
 const WRAPS_MAX_BYTES: usize = 1024 * 1024;
@@ -35,7 +37,7 @@ pub(crate) async fn list_wraps(
 }
 
 /// `POST /api/wraps` — install a wrap PNG at
-/// `LightShow/wraps/<sanitised_filename>`.
+/// `Wraps/<sanitised_filename>`.
 ///
 /// Enforces v1 parity before any gadget round-trip: PNG magic and both sides
 /// within `512..=1024` pixels.
@@ -65,7 +67,7 @@ pub(crate) async fn remove_wrap(
 
 /// `POST /api/wraps/bulk-delete` — remove several wrap images in ONE `gadgetd`
 /// handoff. Body: `{ "names": ["wrap.png", …] }`. Each name rebuilds
-/// `LightShow/wraps/<name>`.
+/// `Wraps/<name>`.
 pub(crate) async fn bulk_delete_wraps(
     State(state): State<AppState>,
     Json(req): Json<BulkDeleteRequest>,

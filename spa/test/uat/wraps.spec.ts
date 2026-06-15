@@ -33,7 +33,7 @@ test.describe("wraps UAT", () => {
     await expect(requirements).toContainText("Tesla Wrap Requirements");
     await expect(requirements).toContainText("PNG only");
     await expect(requirements).toContainText("512x512 to 1024x1024 pixels");
-    await expect(requirements).toContainText("/LightShow/wraps");
+    await expect(requirements).toContainText("/Wraps");
     // Upload form is live (not disabled).
     const drop = page.locator("[data-testid=wraps-dropzone]");
     await expect(drop).toBeVisible();

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useState } from "preact/hooks";
 import { api, ApiError } from "../api/client";
 import type {
   ChimeGroup,
@@ -88,7 +88,13 @@ function describeSchedule(s: StoredSchedule): string {
   }
 }
 
-export function ChimeScheduler() {
+/** Props: a parent-bumped nonce that forces a snapshot refetch (e.g. after the
+ * top "Upload New Chime" panel adds a file to the library). */
+interface ChimeSchedulerProps {
+  refreshKey?: number;
+}
+
+export function ChimeScheduler({ refreshKey }: ChimeSchedulerProps = {}) {
   const [status, setStatus] = useState<Status>("loading");
   const [snap, setSnap] = useState<SchedulerSnapshot | null>(null);
 
@@ -110,11 +116,10 @@ export function ChimeScheduler() {
   const [randomBusy, setRandomBusy] = useState(false);
   const [randomError, setRandomError] = useState<string | null>(null);
 
-  // ── Library upload ──
-  const libInputRef = useRef<HTMLInputElement>(null);
-  const [libBusy, setLibBusy] = useState(false);
+  // ── Library row actions (Set Active / Delete) ──
   const [libError, setLibError] = useState<string | null>(null);
   const [libNotice, setLibNotice] = useState<string | null>(null);
+  const [activating, setActivating] = useState<string | null>(null);
 
   const reload = (signal?: AbortSignal) =>
     api
@@ -133,6 +138,15 @@ export function ChimeScheduler() {
     void reload(ctrl.signal);
     return () => ctrl.abort();
   }, []);
+
+  // Re-fetch when the parent signals a library change (e.g. a new upload from
+  // the top "Upload New Chime" panel) so the table reflects it immediately.
+  useEffect(() => {
+    if (refreshKey === undefined) return;
+    const ctrl = new AbortController();
+    void reload(ctrl.signal);
+    return () => ctrl.abort();
+  }, [refreshKey]);
 
   // ── Schedule form handlers ──
   function resetScheduleForm() {
@@ -271,26 +285,25 @@ export function ChimeScheduler() {
   }
 
   // ── Library handlers ──
-  async function onLibrarySelected(e: Event) {
-    const input = e.currentTarget as HTMLInputElement;
-    const file = input.files?.[0] ?? null;
-    if (!file) return;
-    setLibBusy(true);
+  async function setActiveChime(filename: string) {
+    setActivating(filename);
     setLibError(null);
     setLibNotice(null);
     try {
-      await api.uploadLibraryChime(file);
-      setLibNotice(`Added ${file.name} to the chime library.`);
-      if (libInputRef.current) libInputRef.current.value = "";
-      await reload();
+      await api.setActiveChime(filename);
+      setLibNotice(
+        `Set ${filename} as the active lock chime — syncing to the car.`,
+      );
     } catch (err) {
-      setLibError(failMessage(err, "Couldn't upload the chime."));
+      setLibError(failMessage(err, "Couldn't set the active chime."));
     } finally {
-      setLibBusy(false);
+      setActivating(null);
     }
   }
 
   async function removeLibraryChime(filename: string) {
+    setLibError(null);
+    setLibNotice(null);
     try {
       await api.deleteLibraryChime(filename);
       await reload();
@@ -816,21 +829,6 @@ export function ChimeScheduler() {
       <details class="settings-section" id="library-section" open>
         <summary>Chime Library</summary>
         <div class="section-content">
-          <div class="chime-upload-row">
-            <input
-              ref={libInputRef}
-              type="file"
-              class="chime-file-input"
-              accept=".wav,audio/wav,audio/x-wav,audio/wave"
-              data-testid="library-file-input"
-              onChange={onLibrarySelected}
-              disabled={libBusy}
-            />
-            <span class="scheduler-hint">
-              {libBusy ? "Uploading…" : "Add a 16-bit PCM WAV to the library."}
-            </span>
-          </div>
-
           {libError && (
             <p class="chime-upload-status fatal" role="alert" data-testid="library-error">
               {libError}
@@ -844,16 +842,17 @@ export function ChimeScheduler() {
 
           {library.length === 0 ? (
             <p class="media-pending" data-testid="library-empty">
-              The chime library is empty. Upload a WAV above to schedule or group
-              it.
+              The chime library is empty. Upload a WAV with “Upload New Chime”
+              above and it will appear here.
             </p>
           ) : (
             <table class="chime-library" data-testid="library-table">
               <thead>
                 <tr>
-                  <th>Name</th>
+                  <th>Filename</th>
                   <th>Size</th>
-                  <th />
+                  <th>Status</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -862,14 +861,43 @@ export function ChimeScheduler() {
                     <td class="chime-cell-name">{c.filename}</td>
                     <td>{Math.max(1, Math.round(c.bytes / 1024))} KB</td>
                     <td>
-                      <button
-                        type="button"
-                        class="group-btn group-btn-delete"
-                        data-testid="library-delete"
-                        onClick={() => void removeLibraryChime(c.filename)}
-                      >
-                        Delete
-                      </button>
+                      <span class="chime-status-valid">Valid</span>
+                    </td>
+                    <td>
+                      <div class="chime-row-actions">
+                        <audio
+                          controls
+                          preload="none"
+                          data-testid="library-audio"
+                          src={api.libraryAudioUrl(c.filename)}
+                        />
+                        <div class="chime-row-buttons">
+                          <a
+                            class="action-btn"
+                            data-testid="library-download"
+                            href={api.libraryDownloadUrl(c.filename)}
+                          >
+                            Download
+                          </a>
+                          <button
+                            type="button"
+                            class="action-btn primary"
+                            data-testid="library-set-active"
+                            disabled={activating === c.filename}
+                            onClick={() => void setActiveChime(c.filename)}
+                          >
+                            {activating === c.filename ? "Syncing…" : "Set Active"}
+                          </button>
+                          <button
+                            type="button"
+                            class="action-btn danger"
+                            data-testid="library-delete"
+                            onClick={() => void removeLibraryChime(c.filename)}
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </div>
                     </td>
                   </tr>
                 ))}

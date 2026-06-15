@@ -10,7 +10,7 @@ import "../styles/light-shows.css";
  * Light Shows screen (route `/light_shows`).
  *
  * Reads `GET /api/lightshows` on mount — rows under `LightShow/` on p2,
- * excluding the `LightShow/wraps/` subtree (which belongs to Wraps).
+ * excluding the root-level `Wraps/` folder (which belongs to Wraps).
  * Install (POST) and remove (DELETE) route through the gadgetd eject-handoff.
  */
 export function LightShows() {

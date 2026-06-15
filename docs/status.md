@@ -334,8 +334,9 @@ every daemon at once). Get reads + a safe handoff lock proven before feature wor
 - [x] **Wraps:** list with raw-PNG thumbnails. **(DONE — SPA `<img>` Preview column wired via
   `api.mediaContentUrl(rel_path, modified)`; UAT seeds `WEBD_MEDIA_RO_ROOT` + asserts real decode
   `naturalWidth>0`; `npx playwright test wraps.spec.ts` green + populated desktop screenshot verified)**
-- [ ] Wrap upload: `.png` only, ≤1 MB, 64×64–2048×2048, name ≤32 `[A-Za-z0-9_- space]`,
-  ~10 max; atomic publish. **(partial: validation + install proven; dimension/name caps to verify)**
+- [ ] Wrap upload: `.png` only, ≤1 MB, 512×512–1024×1024, name ≤32 `[A-Za-z0-9_- space]`,
+  ~10 max; atomic publish. **(partial: PNG magic + 512–1024 dimension + ≤1 MB validation
+  proven; ≤32-char name cap + ~10-file count cap still to add)**
 - [x] Wrap delete (incl. bulk). **(proven)**
 - [ ] **Plates (images):** list w/ thumbnails, upload, delete `.png` ≤512 KB,
   exactly 420×75 (NA)/492×75 (EU), name ≤12 alnum, ≤5. **(partial: validation A1 done;

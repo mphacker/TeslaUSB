@@ -314,8 +314,9 @@ The user can:
 
 - **List wraps with image thumbnails** (the thumbnail is the **raw PNG served from
   the drive**; the browser scales it — no separate thumbnail file in v1).
-- **Upload** wrap PNGs: **`.png` only**, **≤ 1 MB**, dimensions **64×64 to
-  2048×2048**, filename ≤ 32 chars `[A-Za-z0-9_- and space]`, **up to ~10** wraps.
+- **Upload** wrap PNGs: **`.png` only**, **≤ 1 MB**, dimensions **512×512 to
+  1024×1024** (each side inclusive), filename ≤ 32 chars `[A-Za-z0-9_- and space]`,
+  **up to ~10** wraps.
   *Outcome:* validated (PNG header + dimensions parsed without heavyweight image
   libs) and atomically published to the wraps folder; appears in the list.
 - **Delete** wraps (including bulk delete). *Outcome:* removed from the wraps folder.

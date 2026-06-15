@@ -2761,6 +2761,19 @@ async fn library_audio_rejects_traversal() {
 }
 
 #[tokio::test]
+async fn library_audio_oversize_file_is_404() {
+    let fx = library_fixture(Reply::Json(json!({})));
+    // A safe-named file just over the 1 MiB cap must be refused as a flat 404
+    // (uniform with the jail; never a 413 that would leak that it exists), and
+    // the capped read must never buffer the whole oversized file.
+    let big = vec![0u8; (1024 * 1024) + 1];
+    std::fs::write(fx.library_dir.join("Big.wav"), &big).unwrap();
+    let (status, ..) =
+        get_chime_bytes(&fx.app, "/api/chime-scheduler/library/Big.wav/audio").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn library_activate_happy_path_enqueues_lockchime_install() {
     let fx = library_fixture(Reply::Json(json!({ "job_id": "m-7", "state": "queued" })));
     std::fs::write(fx.library_dir.join("Horn.wav"), sample_wav(64)).unwrap();

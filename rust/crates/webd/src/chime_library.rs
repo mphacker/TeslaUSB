@@ -102,7 +102,7 @@ pub(crate) async fn activate(
     Path(filename): Path<String>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let path = resolve_library_file(&state, &filename)?;
-    let bytes = tokio::fs::read(&path).await.map_err(|_| ApiError::NotFound)?;
+    let bytes = read_capped(&path).await?;
     // Re-validate on the way to the car: a library file could have been written
     // before a stricter rule, or torn by a concurrent overwrite. webd remains
     // the authority for what reaches the MEDIA partition.
@@ -126,7 +126,7 @@ async fn serve_bytes(
     attachment: bool,
 ) -> Result<Response, ApiError> {
     let path = resolve_library_file(state, filename)?;
-    let bytes = tokio::fs::read(&path).await.map_err(|_| ApiError::NotFound)?;
+    let bytes = read_capped(&path).await?;
     let len = bytes.len();
 
     let mut response = (StatusCode::OK, Body::from(bytes)).into_response();
@@ -168,16 +168,27 @@ fn resolve_library_file(state: &AppState, filename: &str) -> Result<std::path::P
     if !meta.is_file() {
         return Err(ApiError::NotFound);
     }
-    // Defence against reading a stray oversized file fully into memory: a real
-    // library chime is always ≤1 MiB (validated on upload).
-    if meta.len() > MAX_CHIME_BYTES {
-        return Err(ApiError::status(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "chime_too_large",
-            "chime exceeds the 1 MiB limit",
-        ));
-    }
     Ok(real)
+}
+
+/// Open a resolved library file and read at most `MAX_CHIME_BYTES + 1` bytes,
+/// bounding memory regardless of the file's size on disk. Anything larger than
+/// the 1 MiB cap is rejected as a flat `404` — uniform with the path jail, so
+/// the endpoint never reveals that a safe-named (but oversized) file exists, and
+/// it closes the check-then-read race (a real chime is always ≤1 MiB; schedulerd
+/// validates on write, so an oversized file here is anomalous, not legitimate).
+async fn read_capped(path: &std::path::Path) -> Result<Vec<u8>, ApiError> {
+    use tokio::io::AsyncReadExt;
+    let file = tokio::fs::File::open(path).await.map_err(|_| ApiError::NotFound)?;
+    let mut buf = Vec::new();
+    file.take(MAX_CHIME_BYTES + 1)
+        .read_to_end(&mut buf)
+        .await
+        .map_err(|_| ApiError::NotFound)?;
+    if buf.len() as u64 > MAX_CHIME_BYTES {
+        return Err(ApiError::NotFound);
+    }
+    Ok(buf)
 }
 
 /// A conservative single-segment `*.wav` filename guard, mirroring `schedulerd`'s

@@ -12,34 +12,41 @@
 > [`adr/`](./adr/) (locked architecture, incl. [`ADR-0003`](./adr/0003-media-read-path.md)
 > media read path).
 
-## ⏯️ Resume here — in-flight work (2026-06-15 09:00 ET)
+## ⏯️ Resume here — in-flight work (2026-06-15 14:00 ET)
 
-**Last committed:** `0375ac8` (local branch `mhackermsft/b1-clean`, **not pushed**)
-— the `webd` **media-content range-streaming endpoint** (`GET|HEAD
-/api/media/content?path=<rel>` over the F3 RO mount; 200/206/416, 404 on
-jail-escape/missing/non-file, 503+Retry-After on absent mount; podman-verified
-210 webd tests + clippy clean; GPT-5.5-reviewed) **together with** the
-pre-existing **file-backed chime-library** feature (per operator's "commit
-everything" call). NB: the chime-library Rust+SPA is committed but was NOT
-design-reviewed here and its UI has NOT been through a dedicated Playwright gate
-— it still needs its own review/verification pass; no chime-library status boxes
-are ticked.
+**Last committed:** `dc940b5` (local branch `mhackermsft/b1-clean`, **not pushed**)
+— §4.5 `feat-active-chime-player`: the v1-faithful **Active Lock Chime card**
+(filename + size + native `<audio>` player from `/api/media/content?path=LockChime.wav`,
+cache-bust `&v=<mtime>`; old Remove button + confirmation flow removed; spec drift
+dropped). GPT-5.5 Approve; `npx playwright test media.spec.ts` = 22 passed. The
+prior commit `0375ac8` landed the `webd` **media-content range-streaming endpoint**
++ the pre-existing **file-backed chime-library** feature.
 
-**In flight (UNCOMMITTED): §4.5 `feat-active-chime-player` — v1-faithful Active
-Lock Chime card.** Card now = filename (`LockChime.wav`) + size + a native
-`<audio>` player sourced from `/api/media/content?path=LockChime.wav` (cache-bust
-`&v=<mtime>`); the old Remove button + its whole confirmation-dialog flow are
-removed (v1 has no remove control here — confirmed vs captured baseline DOM +
-GPT-5.5). Spec drift fixed: dropped "original-name/duration" from `Requirements.md`
-§4.5 and this file. Files: `spa/src/screens/Media.tsx`, `spa/src/api/client.ts`
-(added `activeChimeAudioUrl`, removed dead `removeChime`/`LOCK_CHIME_ID`),
-`spa/src/styles/media.css` (removed orphaned `.chime-modal*`/`.active-chime-actions`/
-`.chime-remove-btn`), `spa/test/uat/media.spec.ts`.
-- **Verified:** `npx tsc --noEmit` exit 0; **`npx playwright test media.spec.ts`
-  = 22 passed** (clean console, screenshots 375 + 1280, nav ~147 ms); orphan grep
-  clean. mai implemented; Opus did the orphan-CSS/const cleanup.
-- **DONE:** mai implemented; Opus did the orphan-CSS/const cleanup; GPT-5.5
-  review = **Approve, no findings**; ticked §4.5 active-card box; committed.
+**In flight (UNCOMMITTED): chime-library backend review fixes.** The committed
+chime-library (`rust/crates/webd/src/chime_library.rs`, routes
+`/api/chime-scheduler/library/{filename}/{audio,download,activate}`) got its
+deferred GPT-5.5 backend review (**Request-changes**) and the findings are now
+applied:
+- [Important] oversize library file → **flat `404`** (was `413`, which leaked
+  existence and broke the uniform-jail contract).
+- [FYI] closed the check-then-read TOCTOU: new `read_capped()` opens the file and
+  reads ≤ `MAX_CHIME_BYTES + 1` bytes (hard memory bound), 404 if it exceeds 1 MiB.
+  Both serve + activate paths now use it; the stat-based size branch is gone.
+- Added webd integration test `library_audio_oversize_file_is_404`.
+- **Verified (podman):** `cargo test -p webd --lib` = **211 passed**; the 8
+  chime-library integration tests (serve/download/missing-404/traversal-404/
+  oversize-404/activate happy-missing-invalid) all green; `cargo clippy -p webd
+  --all-targets -- -D warnings` clean.
+- Files: `rust/crates/webd/src/chime_library.rs`, `rust/crates/webd/src/tests.rs`.
+- This **clears the "committed but unreviewed"** chime-library caveat. The §4.5
+  *library* boxes (play / set-active) still stay `[ ]`: the routes serve from
+  `/data/teslausb/chimes` (ext4), but locked requirement #4 needs the library
+  **in `media.img`** (`chimelib-to-img`, gated:F3) before parity is honest.
+
+**Next item to start:** `chimelib-to-img` (move the chime library into `media.img`
+so library playback/set-active are served from the image per requirement #4) — or
+`feat-media-audio`/`feat-thumbnails` (read-path SPA wiring on `/api/media/content`,
+file-disjoint from the chime work).
 
 **Open follow-ups (logged in session SQL `todos`, not blocking):**
 - `f3-followup-mount-perms`: harden the F3 RO mount (`ro,nodev,nosuid,noexec,

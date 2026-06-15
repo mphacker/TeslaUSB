@@ -82,6 +82,11 @@ const GADGET_FIXTURE = {
   lun_file: "/data/teslausb/cam.img",
   media_lun_file: "/data/teslausb/media.img",
   handoff_active: false,
+  pending_mutations: 0,
+  applying_mutations: 0,
+  media_ro_mounted: true,
+  media_ro_path: "/run/teslausb/media-ro",
+  media_ro_error: null,
   last_handoff_id: "h-42",
   last_result: "done",
 };
@@ -223,6 +228,9 @@ test.describe("settings dashboard UAT", () => {
     );
     await expect(page.locator("#usb-gadget-card")).toContainText(
       "/data/teslausb/media.img",
+    );
+    await expect(page.locator("[data-testid=usb-media-ro]")).toHaveText(
+      "Mounted (/run/teslausb/media-ro)",
     );
 
     // WiFi + Access Point — degraded read-only copy (no nmcli/AP tooling).

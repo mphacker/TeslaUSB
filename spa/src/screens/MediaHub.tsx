@@ -400,6 +400,17 @@ export function MediaHub() {
                 <div style="color:var(--text-primary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
                   {gadget.media_lun_file ?? "\u2014"}
                 </div>
+                <div style="color:var(--text-secondary)">Media mount (read)</div>
+                <div
+                  data-testid="usb-media-ro"
+                  style="color:var(--text-primary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"
+                >
+                  {gadget.media_ro_mounted === null
+                    ? "\u2014"
+                    : gadget.media_ro_mounted
+                      ? `Mounted${gadget.media_ro_path ? ` (${gadget.media_ro_path})` : ""}`
+                      : `Not mounted${gadget.media_ro_error ? ` \u2014 ${gadget.media_ro_error}` : ""}`}
+                </div>
               </div>
             ) : gadgetUnavailable ? (
               <div

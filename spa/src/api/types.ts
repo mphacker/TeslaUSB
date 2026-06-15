@@ -240,6 +240,15 @@ export interface GadgetStatus {
   lun_file: string | null;
   media_lun_file: string | null;
   handoff_active: boolean;
+  /** Queued / in-flight media mutations (null when gadgetd omits the counts). */
+  pending_mutations: number | null;
+  applying_mutations: number | null;
+  /** RO media-mount health (the `/api/media/content` read seam). `mounted` is
+   * null when an older gadgetd doesn't report it; `error` is the last mount
+   * failure reason or null when healthy. */
+  media_ro_mounted: boolean | null;
+  media_ro_path: string | null;
+  media_ro_error: string | null;
   last_handoff_id: string | null;
   last_result: unknown | null;
 }

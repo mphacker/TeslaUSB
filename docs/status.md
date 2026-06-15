@@ -58,14 +58,27 @@ rebinds the gadget).
 2. **Fixed wifid deploy (optional, deferred)** — only after reading
    `watchdog.rs`/`nmcli.rs`/`orchestrator.rs` `tick()` to PROVE empty-creds idle never
    resets the SDIO chip / seizes wlan0. Until then leave disabled (WiFi is fine).
-3. **B-tier follow-up:** wire gadgetd `media_ro_*` health into webd `/api/gadget/status`
-   (`gadget.rs:357-374`) for observability.
+3. **B-tier follow-up:** ✅ **DONE (2026-06-16)** — gadgetd `media_ro_*` health +
+   `pending/applying_mutations` counts now flow through webd `map_gadget_status`
+   (`gadget.rs`) to the SPA; MediaHub shows a **"Media mount (read)"** row.
+   Live-verified on hardware: `/api/gadget/status` returns
+   `media_ro_mounted:true, media_ro_path:/run/teslausb/media-ro` and the SPA row
+   renders "Mounted (/run/teslausb/media-ro)" (Playwright /settings, console clean).
+   `cargo test -p webd` 225 passed; media-hub UAT 14 passed; GPT-5.5-reviewed (no
+   blocking). See `files/hw-results.md` "media_ro health passthrough".
 4. **Continue the feature backlog** against the now-current device, parallelized by
    non-overlapping surface.
 
-**Last committed:** `53ef228` (local branch `mhackermsft/b1-clean`, **not pushed**;
-55 ahead of origin). The deploy + status/hw-results updates from this session are
-**uncommitted** — commit next.
+**Last committed:** `f005183` (local branch `mhackermsft/b1-clean`, **not pushed**).
+This session's deploy + status/hw-results updates are committed (`235f693` foundation,
+`13e28aa` F4/F5, `f005183` feature-verify). Continue committing each milestone; never push.
+
+**Just done (2026-06-16):** (1) §4.9 wraps thumbnails + §4.5 active-chime player
+**live-verified on hardware** (real decode — 2/2 wrap `<img>` `naturalWidth=600`;
+chime `<audio>` `readyState=4` over `/api/media/content` [206]); (2) **B-tier item 3
+SHIPPED + deployed** — `media_ro_*` health passthrough now live (webd + SPA redeployed
+to the device; new "Media mount (read)" row renders real gadgetd data, console clean).
+See `files/hw-results.md` "feature-verify" + "media_ro health passthrough".
 
 **`feat-wrap-caps` — DONE (§4.9 wrap filename rule + ≤10 count cap).** `POST
 /api/wraps` now rejects (a) a filename whose stem (excluding `.png`) is empty, >32

@@ -353,7 +353,9 @@ pub(crate) fn map_status(resp: &Value) -> Option<Value> {
 /// `/api/gadget/status` shape the SPA consumes. `present` is the load-bearing
 /// field; if it is absent the frame is unusable and we return `None` (mapped to
 /// `502`). All other fields degrade to `false`/`null` so the read never 500s on
-/// a partial reply.
+/// a partial reply. The `media_ro_*` fields (RO media-mount health) and the
+/// `pending_mutations`/`applying_mutations` queue counts are passed through for
+/// observability; they are `null` when an older `gadgetd` omits them.
 pub(crate) fn map_gadget_status(resp: &Value) -> Option<Value> {
     if resp.get("error").is_some() {
         return None;
@@ -369,6 +371,11 @@ pub(crate) fn map_gadget_status(resp: &Value) -> Option<Value> {
         "lun_file": field("lun_file"),
         "media_lun_file": field("media_lun_file"),
         "handoff_active": flag("handoff_active"),
+        "pending_mutations": field("pending_mutations"),
+        "applying_mutations": field("applying_mutations"),
+        "media_ro_mounted": field("media_ro_mounted"),
+        "media_ro_path": field("media_ro_path"),
+        "media_ro_error": field("media_ro_error"),
         "last_handoff_id": field("last_handoff_id"),
         "last_result": field("last_result"),
     }))
@@ -496,10 +503,10 @@ mod stub_client {
 mod tests {
     use super::{
         DeleteRefusal, MutationOutcome, QueueOutcome, enqueue_install_request,
-        enqueue_remove_request_many, map_mutation_outcome, map_queue_outcome, map_status,
-        plan_car_delete,
+        enqueue_remove_request_many, map_gadget_status, map_mutation_outcome, map_queue_outcome,
+        map_status, plan_car_delete,
     };
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     const KEY: &str = "0:TeslaCam/SavedClips/2026-06-01_20-10-04/2026-06-01_20-10-04";
 
@@ -776,5 +783,54 @@ mod tests {
             map_queue_outcome(&resp),
             QueueOutcome::BadResponse(_)
         ));
+    }
+
+    #[test]
+    fn gadget_status_passes_through_media_ro_and_queue_counts() {
+        let resp = json!({
+            "present": true,
+            "bound": true,
+            "udc_state": "configured",
+            "pending_mutations": 2,
+            "applying_mutations": 1,
+            "media_ro_mounted": true,
+            "media_ro_path": "/run/teslausb/media-ro",
+            "media_ro_error": null,
+        });
+        let out = map_gadget_status(&resp).unwrap();
+        assert_eq!(out["pending_mutations"], 2);
+        assert_eq!(out["applying_mutations"], 1);
+        assert_eq!(out["media_ro_mounted"], true);
+        assert_eq!(out["media_ro_path"], "/run/teslausb/media-ro");
+        assert_eq!(out["media_ro_error"], Value::Null);
+    }
+
+    #[test]
+    fn gadget_status_degrades_media_ro_to_null_when_absent() {
+        // An older gadgetd that omits the media_ro_* / count fields must not
+        // 500 the read; the new keys degrade to null.
+        let resp = json!({ "present": true, "bound": false });
+        let out = map_gadget_status(&resp).unwrap();
+        assert_eq!(out["media_ro_mounted"], Value::Null);
+        assert_eq!(out["media_ro_path"], Value::Null);
+        assert_eq!(out["media_ro_error"], Value::Null);
+        assert_eq!(out["pending_mutations"], Value::Null);
+        assert_eq!(out["applying_mutations"], Value::Null);
+    }
+
+    #[test]
+    fn gadget_status_passes_through_media_ro_unmounted_with_error() {
+        // The not-mounted-with-reason case the SPA renders as
+        // "Not mounted — <error>" must survive the passthrough.
+        let resp = json!({
+            "present": true,
+            "media_ro_mounted": false,
+            "media_ro_path": null,
+            "media_ro_error": "mount failed: device busy",
+        });
+        let out = map_gadget_status(&resp).unwrap();
+        assert_eq!(out["media_ro_mounted"], false);
+        assert_eq!(out["media_ro_path"], Value::Null);
+        assert_eq!(out["media_ro_error"], "mount failed: device busy");
     }
 }

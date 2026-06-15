@@ -313,7 +313,12 @@ LUNs) is the single make-or-break that still needs the car.**
 - [x] Prev/next day in one fetch. **(proven)**
 - [x] Event markers by severity; click → open footage. **(A6/A6b proven)**
 - [ ] Filters: date range, **map bbox (pan/zoom)**, event type, severity, min distance. **(partial: verify bbox + all filters)**
-- [x] Side panel tabs (Events / Trips / All Clips) + source folder switch. **(proven)**
+- [x] Side panel tabs (Events / Trips / All Clips) + source folder switch. **(proven;
+  **All Clips tab LIVE-verified on hardware 2026-06-16** — the panel rendered all 4
+  real device clips from the live catalog with correct `folder_class` labels
+  [RecentClips/SavedClips/SentryClips], angle counts, sentry flags + timestamps;
+  no doomed `/clips/*/stream` request for the `ro_usb` clips; console clean. See
+  `files/hw-results.md` "clips browse live".)**
 - [ ] Units & timezone preferences re-render speeds/times. **(partial: wire to Settings §4.15)**
 
 ### 4.2 Event / Video Player — `Requirements.md` §4.2
@@ -321,7 +326,11 @@ LUNs) is the single make-or-break that still needs the car.**
 - [x] Stream **archived** clip with HTTP range (seek). **(proven for archived clips;
   live clips are the separate item below)**
 - [ ] **Play live (not-yet-archived) recorded clips** on the map. **(gated:B1 archive
-  loop, then the lun.0 `ReadFile` fallback — ADR-0003 / `contracts/scannerd-readfile.md`)**
+  loop, then the lun.0 `ReadFile` fallback — ADR-0003 / `contracts/scannerd-readfile.md`.
+  **Gate confirmed live 2026-06-16:** the device's clips are all `view_kind=ro_usb`;
+  `GET /api/clips/1/stream` correctly `404`s and EventPlayer shows the "Not yet
+  archived" overlay [`data-testid=video-unarchived`] by design — playback genuinely
+  needs the B1 archive pipeline to produce a `VIEW_ARCHIVE` angle.)**
 - [x] Switch camera angle (position preserved where possible). **(proven)**
 - [x] Navigate clips within an event (prev/next). **(A6b proven)**
 - [ ] Telemetry HUD overlay (SEI: speed/gear/brake/throttle/steering/AP-FSD), synced. **(partial: client-side SEI parse exists — A7; verify full HUD)**

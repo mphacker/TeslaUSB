@@ -177,6 +177,7 @@ export function Boombox() {
                 <th class="bulk-check-col" aria-label="Select"></th>
                 <th>Name</th>
                 <th>Size</th>
+                <th>Play</th>
                 <th>Actions</th>
               </tr>
             </thead>
@@ -197,6 +198,15 @@ export function Boombox() {
                     </td>
                     <td>{item.name}</td>
                     <td>{fmtBytes(item.size_bytes)}</td>
+                    <td>
+                      <audio
+                        class="media-row-player"
+                        controls
+                        preload="none"
+                        data-testid="boombox-audio"
+                        src={api.mediaContentUrl(item.rel_path, item.modified)}
+                      />
+                    </td>
                     <td>
                       <button
                         class="action-btn"

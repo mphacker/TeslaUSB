@@ -20,6 +20,43 @@ const PATH = "/boombox";
 const SCREEN = "boombox";
 
 test.describe("boombox UAT", () => {
+  test("mocked list — audio player renders with media URL", async ({ page }) => {
+    const mediaContentReqs: string[] = [];
+    page.on("request", (r) => {
+      if (new URL(r.url()).pathname === "/api/media/content") mediaContentReqs.push(r.url());
+    });
+    await page.route("**/api/boombox", (route) => {
+      if (route.request().method() !== "GET") return route.continue();
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          items: [
+            {
+              name: "Horn.wav",
+              rel_path: "Boombox/Horn.wav",
+              size_bytes: 2048,
+              modified: "2024-06-01T07:15:00Z",
+            },
+          ],
+        }),
+      });
+    });
+
+    await gotoScreen(page, PATH, SCREEN);
+
+    const audio = page.locator("[data-testid=boombox-audio]");
+    await expect(audio).toHaveCount(1);
+    await expect(audio).toHaveAttribute("preload", "none");
+    await expect(audio).toHaveAttribute("src", /\/api\/media\/content\?path=Boombox%2FHorn\.wav&v=/);
+    // preload="none" must defer the byte fetch: nothing hits the content endpoint on render.
+    await page.waitForTimeout(200);
+    expect(
+      mediaContentReqs,
+      `unexpected media-content fetch on render: ${JSON.stringify(mediaContentReqs)}`,
+    ).toEqual([]);
+  });
+
   test("parity — media nav active, pills, warning/requirements/upload-form/empty", async ({
     page,
   }, testInfo) => {

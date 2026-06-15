@@ -6,6 +6,10 @@ import { api } from "../api/client";
 import { fmtBytes, useMediaCategory } from "../hooks/useMediaCategory";
 import "../styles/light-shows.css";
 
+function isPlayableAudio(name: string): boolean {
+  return /\.(mp3|wav)$/i.test(name);
+}
+
 /**
  * Light Shows screen (route `/light_shows`).
  *
@@ -140,13 +144,14 @@ export function LightShows() {
                   )}
                   <th class="show-name-column">Show Name</th>
                   <th class="show-files-column">Size</th>
+                  <th class="show-play-column">Play</th>
                   <th class="show-actions-column">Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {cat.state.items.length === 0 ? (
                   <tr>
-                    <td colSpan={3}>
+                    <td colSpan={4}>
                       <div class="light-shows-empty" data-testid="light-shows-empty">
                         <Icon name="sparkles" class="empty-icon" />
                         <p>No light show files installed yet.</p>
@@ -170,6 +175,19 @@ export function LightShows() {
                         </td>
                         <td>{item.name}</td>
                         <td>{fmtBytes(item.size_bytes)}</td>
+                        <td>
+                          {isPlayableAudio(item.name) ? (
+                            <audio
+                              class="media-row-player"
+                              controls
+                              preload="none"
+                              data-testid="light-shows-audio"
+                              src={api.mediaContentUrl(item.rel_path, item.modified)}
+                            />
+                          ) : (
+                            <span aria-hidden="true">—</span>
+                          )}
+                        </td>
                         <td>
                           <button
                             class="action-btn"

@@ -92,6 +92,12 @@
   opacity: 0.55;
 }
 
+.media-row-player {
+  max-width: 220px;
+  height: 32px;
+  vertical-align: middle;
+}
+
 .light-shows-video-table-container {
   border: 1px solid var(--border-table);
   border-radius: 4px;
@@ -132,7 +138,11 @@
 }
 
 .light-shows-video-table .show-files-column {
-  width: 45%;
+  width: 15%;
+}
+
+.light-shows-video-table .show-play-column {
+  width: 30%;
 }
 
 .light-shows-video-table .show-actions-column {

@@ -198,6 +198,12 @@
   opacity: 0.55;
 }
 
+.media-row-player {
+  max-width: 220px;
+  height: 32px;
+  vertical-align: middle;
+}
+
 .music-readonly-note {
   font-size: 13px;
   line-height: 1.45;

@@ -43,10 +43,27 @@ applied:
   `/data/teslausb/chimes` (ext4), but locked requirement #4 needs the library
   **in `media.img`** (`chimelib-to-img`, gated:F3) before parity is honest.
 
-**Next item to start:** `chimelib-to-img` (move the chime library into `media.img`
-so library playback/set-active are served from the image per requirement #4) — or
-`feat-media-audio`/`feat-thumbnails` (read-path SPA wiring on `/api/media/content`,
-file-disjoint from the chime work).
+**Next item to start:** `feat-thumbnails` (§4.9 Wraps/Plates `<img>` thumbnails) —
+needs the UAT harness to seed `WEBD_MEDIA_RO_ROOT` + inject list rows so `<img>`
+loads real bytes (img fetches eagerly, unlike `<audio preload="none">`). GPT-5.5
+endorsed this as the honest approach. Then `chimelib-to-img` (move chime library
+into `media.img` per requirement #4, unblocks the §4.5 library boxes).
+
+**Just done (UNCOMMITTED before this commit): `feat-media-audio` (§4.6/4.7/4.8
+in-browser audio playback).** Native `<audio controls preload="none">` per row on
+Music / Boombox / Light Shows, sourced from `GET /api/media/content?path=<rel>&v=<mtime>`
+via a new `api.mediaContentUrl(path, version)` helper (and `activeChimeAudioUrl`
+refactored to delegate to it, byte-identical). Light Shows renders a player only for
+`.mp3`/`.wav` rows, not `.fseq`. mai implemented; Opus added GPT-5.5's required
+"no content-fetch on render" assertion and fixed a visual regression (Light Shows
+`table-layout:fixed` column widths rebalanced 25/15/30/30 for the new Play column —
+caught by the desktop screenshot, the DOM test had passed). GPT-5.5 design check:
+**PROCEED-WITH-CHANGES** (split audio-now/thumbnails-later endorsed; honesty hinges
+on citing BOTH the Rust range tests and the Playwright wiring — done). Verified: tsc
+clean; `npx playwright test music/boombox/light-shows` = **42 passed**, clean
+console/network. Files: `spa/src/api/client.ts`, `spa/src/screens/{Music,Boombox,
+LightShows}.tsx`, `spa/src/styles/{music,boombox,light-shows}.css`,
+`spa/test/uat/{music,boombox,light-shows}.spec.ts`.
 
 **Open follow-ups (logged in session SQL `todos`, not blocking):**
 - `f3-followup-mount-perms`: harden the F3 RO mount (`ro,nodev,nosuid,noexec,
@@ -267,8 +284,11 @@ every daemon at once). Get reads + a safe handoff lock proven before feature wor
 ### 4.6 Music — `Requirements.md` §4.6
 
 - [ ] Browse library incl. nested folders. **(partial: flat list proven; nested folder browse to verify)**
-- [ ] Play track in-browser (stream from image via RO mount). **(read path READY —
-  `/api/media/content`, backend verified; needs SPA `<audio>` wiring + Playwright)**
+- [x] Play track in-browser (native `<audio preload="none">` per row, streamed from
+  `GET /api/media/content?path=<rel>&v=<mtime>`). **(DONE — read path covered by
+  webd range-streaming integration tests; SPA wiring verified `npx playwright test
+  music.spec.ts` incl. mocked-list player test asserting preload=none + encoded src +
+  cache-bust + NO content-fetch on render; 14 passed, clean console/network)**
 - [ ] Upload `.mp3/.flac/.wav/.aac/.m4a`, up to **2 GB**, **16 MB chunked** upload. **(gated: chunked-upload backend — Tier-C remainder A1/A2)**
 - [ ] Create folders + move files between folders. **(gated: music folder ops — A1)**
 - [ ] Delete files (and folders). **(partial: bulk delete proven; folder delete to verify)**
@@ -276,8 +296,10 @@ every daemon at once). Get reads + a safe handoff lock proven before feature wor
 
 ### 4.7 Boombox — `Requirements.md` §4.7
 
-- [ ] List/play current sounds. **(partial: list proven; play read path READY —
-  `/api/media/content`, backend verified; needs SPA `<audio>` wiring + Playwright)**
+- [x] List/play current sounds. **(DONE — list proven; native `<audio preload="none">`
+  per row from `GET /api/media/content`; verified `npx playwright test boombox.spec.ts`
+  incl. mocked-list player test [preload=none + encoded src + no content-fetch on render];
+  14 passed, clean console/network. Read path covered by webd range-streaming tests.)**
 - [ ] Upload `.mp3/.wav`, ≤1 MB each, ≤5 files total (clear rejection). **(partial:
   single upload proven; 5-file cap + size reject to verify)**
 - [x] Delete (incl. bulk). **(bulk-delete A2 proven)**
@@ -285,8 +307,11 @@ every daemon at once). Get reads + a safe handoff lock proven before feature wor
 ### 4.8 Light Shows — `Requirements.md` §4.8
 
 - [x] List shows grouped by name stem (`.fseq` + paired audio). **(proven)**
-- [ ] Play show audio in-browser. **(read path READY — `/api/media/content`,
-  backend verified; needs SPA `<audio>` wiring + Playwright)**
+- [x] Play show audio in-browser. **(DONE — native `<audio preload="none">` rendered
+  ONLY for audio rows [`.mp3`/`.wav`], not `.fseq`, from `GET /api/media/content`;
+  verified `npx playwright test light-shows.spec.ts` incl. mocked-list test asserting
+  exactly one player [`.fseq` has none] + no content-fetch on render; 14 passed.
+  Table column widths rebalanced for the new Play column [visual gate].)**
 - [ ] Upload `.fseq`/audio single ≤100 MB, or **ZIP ≤500 MB** auto-extracted+flattened. **(gated: ZIP upload backend — Tier-C A1)**
 - [ ] Set active show (`lightshow_active.json`). **(not started)**
 - [x] Delete files/shows (incl. bulk). **(bulk-delete proven)**

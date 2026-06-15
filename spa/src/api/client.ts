@@ -109,6 +109,10 @@ function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   return request<T>("GET", path, signal);
 }
 
+function mediaContentUrl(path: string, version?: string | null): string {
+  return `/api/media/content?path=${encodeURIComponent(path)}${version ? `&v=${encodeURIComponent(version)}` : ""}`;
+}
+
 /**
  * `POST <path>` a bulk-delete batch as `{ names: [...] }` JSON and assert the
  * gadgetd handoff reached its terminal `done` state. Shared by every media
@@ -632,12 +636,18 @@ export const api = {
   libraryAudioUrl: (filename: string): string =>
     `/api/chime-scheduler/library/${encodeURIComponent(filename)}/audio`,
 
+  /** Root-relative URL for inline playback of any media file under the MEDIA
+   * partition (`GET /api/media/content?path=<rel>`). `version` (the file's
+   * mtime) is appended as a cache-buster so a re-uploaded same-name file isn't
+   * replayed from a stale cache. */
+  mediaContentUrl,
+
   /** Root-relative URL for inline playback of the active lock chime
    * (`GET /api/media/content?path=LockChime.wav`). `version` (the installed
    * chime's mtime) is appended as a cache-buster so the native <audio> element
    * reloads the new bytes after an install rather than replaying a stale chime. */
   activeChimeAudioUrl: (version?: string | null): string =>
-    `/api/media/content?path=LockChime.wav${version ? `&v=${encodeURIComponent(version)}` : ""}`,
+    mediaContentUrl("LockChime.wav", version),
 
   /** Root-relative URL to download a library chime (`GET …/library/:filename/download`). */
   libraryDownloadUrl: (filename: string): string =>

@@ -17,6 +17,43 @@ const PATH = "/music";
 const SCREEN = "music";
 
 test.describe("music UAT", () => {
+  test("mocked list — audio player renders with media URL", async ({ page }) => {
+    const mediaContentReqs: string[] = [];
+    page.on("request", (r) => {
+      if (new URL(r.url()).pathname === "/api/media/content") mediaContentReqs.push(r.url());
+    });
+    await page.route("**/api/music", (route) => {
+      if (route.request().method() !== "GET") return route.continue();
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          items: [
+            {
+              name: "Song.mp3",
+              rel_path: "Music/Song.mp3",
+              size_bytes: 4096,
+              modified: "2024-06-01T07:15:00Z",
+            },
+          ],
+        }),
+      });
+    });
+
+    await gotoScreen(page, PATH, SCREEN);
+
+    const audio = page.locator("[data-testid=music-audio]");
+    await expect(audio).toHaveCount(1);
+    await expect(audio).toHaveAttribute("preload", "none");
+    await expect(audio).toHaveAttribute("src", /\/api\/media\/content\?path=Music%2FSong\.mp3&v=/);
+    // preload="none" must defer the byte fetch: nothing hits the content endpoint on render.
+    await page.waitForTimeout(200);
+    expect(
+      mediaContentReqs,
+      `unexpected media-content fetch on render: ${JSON.stringify(mediaContentReqs)}`,
+    ).toEqual([]);
+  });
+
   test("parity — media nav active, pills, info/upload-form/empty", async ({
     page,
   }, testInfo) => {

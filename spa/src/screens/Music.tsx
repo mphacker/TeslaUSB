@@ -87,6 +87,7 @@ export function Music() {
                     <th class="bulk-check-col" aria-label="Select"></th>
                     <th>Path</th>
                     <th>Size</th>
+                    <th>Play</th>
                     <th>Actions</th>
                   </tr>
                 </thead>
@@ -107,6 +108,15 @@ export function Music() {
                         </td>
                         <td style="word-break: break-all;">{item.rel_path.replace(/^Music\//, "")}</td>
                         <td>{fmtBytes(item.size_bytes)}</td>
+                        <td>
+                          <audio
+                            class="media-row-player"
+                            controls
+                            preload="none"
+                            data-testid="music-audio"
+                            src={api.mediaContentUrl(item.rel_path, item.modified)}
+                          />
+                        </td>
                         <td>
                           <button
                             class="action-btn"

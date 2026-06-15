@@ -12,13 +12,50 @@
 > [`adr/`](./adr/) (locked architecture, incl. [`ADR-0003`](./adr/0003-media-read-path.md)
 > media read path).
 
-## ⏯️ Resume here — in-flight work (2026-06-15 19:05 ET)
+## ⏯️ Resume here — REDEPLOY DONE: HEAD live on hardware, foundation complete (2026-06-16)
 
-**Last committed:** `2edd4bd` (local branch `mhackermsft/b1-clean`, **not pushed**).
-Recent commits: `2edd4bd` (Boombox cap replace check → full `rel_path`), `b7a4cae`
-(§4.9 Wrap name + count caps), `ae10a3b` (docs: wrap dimension bound →
-512×512–1024×1024), `d480067` (§4.7 Boombox ≤5-file cap), `3dbf452` (§4.9 Wraps/Plates
-`<img>` thumbnails), `b1b9bc1` (§4.6/4.7/4.8 in-browser audio).
+**Operator granted full live-hardware access and asked to finish fast + optimize
+build/test.** The device had drifted **70 commits behind HEAD**; the highest-leverage
+move was not new code but **rebuild HEAD + redeploy the stack**. ✅ **Done — the full
+foundation (F1/F2/F3/F6) is now LIVE and verified on `cybertruckusb.local`.**
+
+**What is now true on the device (all verified — see `files/hw-results.md`):**
+- ✅ **F1 two-LUN foundation LIVE** — lun.0 → `teslacam.img` (`ro=0`, car records),
+  lun.1 → `media.img`. UDC `configured`.
+- ✅ **F2 enforced** — lun.1 `ro=1` (car can no longer write Media metadata) after
+  the gadgetd recompose; lun.0 stays `ro=0`.
+- ✅ **F3 + media seam LIVE** — `/run/teslausb/media-ro` mounted RO (loop0p1);
+  `GET /api/media/content` serves real bytes (wrap PNG → 200/4940 B). Playwright
+  device-smoke (14 routes × 2 viewports) **console-clean** — prior `/wraps` 503 gone.
+- ✅ **F6** — HEAD scannerd + indexd serve the catalog over both images.
+- ✅ **wifid crash-loop stopped** — `disable --now wifid` (reversible; NetworkManager
+  owns wlan0). Only remaining failed unit is the benign stock `rpi-zram-writeback.timer`.
+- ✅ **HEAD app stack deployed** — gadgetd/gadgetd-control/webd/scannerd/indexd/schedulerd
+  all active on HEAD binaries; new SPA bundle served.
+
+**The optimized deploy loop (proven this session — use this, NOT `setup.sh deploy-app`):**
+cross-build via podman (`build-release.sh --cross-podman --spa-project spa`, ~20 s warm)
+→ `scp` binary to `/home/pi/teslausb-deploy/incoming/` → sha256-verify → backup current
+to `.prev-<ts>` → `sudo install -m755` (unlink+create, ETXTBSY-safe) → restart one
+service at a time → verify. For gadgetd specifically: **stop control+oneshot BEFORE
+swapping the binary** (`gadgetd up` won't rewrite a bound gadget), then `start` to
+recompose. `deploy-app` is UNSAFE here (it would start the running wifid + never
+rebinds the gadget).
+
+**Remaining (next):**
+1. **C1 (car accepts 2 LUNs)** — the single make-or-break that needs the car. Frame a
+   one-visit test plan.
+2. **Fixed wifid deploy (optional, deferred)** — only after reading
+   `watchdog.rs`/`nmcli.rs`/`orchestrator.rs` `tick()` to PROVE empty-creds idle never
+   resets the SDIO chip / seizes wlan0. Until then leave disabled (WiFi is fine).
+3. **B-tier follow-up:** wire gadgetd `media_ro_*` health into webd `/api/gadget/status`
+   (`gadget.rs:357-374`) for observability.
+4. **Continue the feature backlog** against the now-current device, parallelized by
+   non-overlapping surface.
+
+**Last committed:** `53ef228` (local branch `mhackermsft/b1-clean`, **not pushed**;
+55 ahead of origin). The deploy + status/hw-results updates from this session are
+**uncommitted** — commit next.
 
 **`feat-wrap-caps` — DONE (§4.9 wrap filename rule + ≤10 count cap).** `POST
 /api/wraps` now rejects (a) a filename whose stem (excluding `.png`) is empty, >32
@@ -111,53 +148,45 @@ LightShows}.tsx`, `spa/src/styles/{music,boombox,light-shows}.css`,
 
 ## Phase 0 — Foundation slice (live-hardware; the end-to-end backbone)
 
-These six items (F1–F6) are the **live-device** foundation: the 2-image migration,
-the two-LUN gadget, the RO loop-mount read path, and the eject-handoff write path.
-**They can only be completed on the physical Pi (and, for the LUN-acceptance question,
-in the car) via the `hardware-test` skill — they are operator/hardware-gated (`(C)`,
-`gated:C1`) and are NOT started autonomously.** F2/F3 logic is already built and
-bench-green in podman; F1 (the migration that flips the live device from single
-`disk.img` to two LUNs) is the unlock, and it needs the operator to run it on the box.
+These six items (F1–F6) are the **live-device** foundation. **STATUS (2026-06-16):
+the two-LUN foundation is LIVE and the read path is fully wired on the device.**
+F1 (2-image migration), F2 (`lun.1 ro=1`), F3 (RO loop-mount + webd media seam),
+and F6 (scannerd raw-`pread` + indexd catalog over both images) are **done and
+verified on hardware** (HEAD stack deployed via the layered redeploy 2026-06-16 —
+see `files/hw-results.md`). The device runs `lun.0=teslacam.img` (car-writable,
+`ro=0`) + `lun.1=media.img` (`ro=1`), UDC `configured`, `/run/teslausb/media-ro`
+mounted RO, and `GET /api/media/content` serves real bytes (Playwright device-smoke
+console-clean across 14 routes × 2 viewports). F4/F5 remain gated (no `webd` reader
+fds to drain yet / no live lun.1-only write proof). **C1 (does the car accept two
+LUNs) is the single make-or-break that still needs the car.**
 
-> **Why feature work proceeds ahead of this:** "DO FIRST" is the *end-to-end* ordering
-> — a feature is only **(proven)** once it runs against the real two-LUN device. But
-> the backend/SPA logic for most features does **not** depend on the migration and is
-> deliberately built and verified in isolation now (`cargo test` for logic, Playwright
-> for UI), so it is ready to be re-proven end-to-end the moment F1 lands. Items that
-> genuinely cannot be exercised without the foundation are tagged `gated:F#`. This is
-> the agreed sequencing per the GPT-5.5/mai reviews — get the logic correct and tested
-> in parallel, then land the single hardware foundation slice and re-verify on-device.
-
-Sequenced as a single vertical slice per the GPT-5.5/mai reviews (do **not** wire
-every daemon at once). Get reads + a safe handoff lock proven before feature work.
-
-- [ ] **F1 · 2-image migration on the live device** (single `disk.img` → `lun.0`
-  `teslacam.img` + `lun.1` `media.img`). Runbook exists
-  ([`usb-io-and-archiving-architecture.md`](./specs/usb-io-and-archiving-architecture.md) §6);
-  host-built/bench-validated, **not yet run on the live device**. **(C, gated:C1 spike)**
-- [ ] **F2 · Enforce `lun.1 ro=1`** in gadgetd configfs so the car cannot write
+- [x] **F1 · 2-image migration on the live device** (single `disk.img` → `lun.0`
+  `teslacam.img` + `lun.1` `media.img`). **DONE & LIVE** — the device runs the two
+  single-partition images under `mass_storage.usb0` (`lun.0`→`teslacam.img`,
+  `lun.1`→`media.img`), UDC `configured`, gadget attached; verified by on-device
+  inventory 2026-06-16 (`files/hw-results.md`). Host enumerates exactly 2 drives.
+- [x] **F2 · Enforce `lun.1 ro=1`** in gadgetd configfs so the car cannot write
   media exFAT metadata (makes the RO-mount sole-writer premise true — GPT-5.5 #9).
-  **(planner + unit tests DONE & bench-green 2026-06-12: per-LUN `ro` in
-  `config.rs` — `lun.0` rw so the car keeps recording, `lun.1 ro=1`; `cargo test
-  -p gadgetd` 76 passed in podman. `ro` is set once at bring-up and persists across
-  the eject-handoff. Live enforcement takes effect at the next gadget bring-up, so
-  it lands with F1 migration — gated:F1+C1. Follow-ups logged from GPT-5.5 review:
-  startup `ro` verify/log, optional CLI override for the C1 spike, and exFAT
-  integrity/repair on `media.img` is now solely Pi-side.)**
-- [ ] **F3 · gadgetd RO loop-mount of `media.img`** — persistent, gadgetd-owned;
-  exposes a media-root path (`/run/teslausb/media-ro`) for `webd` to read via
-  `std::fs`. **(impl + unit tests DONE & bench-green 2026-06-12: new
-  `mediamount.rs` (`losetup -rfP` + `mount -o ro`, idempotent `ensure_mounted`,
-  fail-closed `suspend`/`resume` that refuse to stack on an image with a live
-  loop — never-double-mount); a `ReadMountGate` trait injected into
-  `run_handoff` suspends the RO mount before a P2 RW mutate and resumes after
-  re-present (P1/TeslaCam never touched); suspend-fail ⇒ `Refused` before eject,
-  resume-fail ⇒ degraded (surfaced via new `gadget_status` `media_ro_*` fields),
-  not a fault. Reviewed by GPT-5.5 — its Critical (startup double-mount after a
-  failed cleanup) is fixed by the loop-presence guard. `cargo test -p gadgetd
-  --bins` 82 passed + clippy clean in podman. Full mount lifecycle needs real
-  loop devices, and the `webd` read handlers that consume the path are separate
-  gated items, so live enforcement lands with F1 — gated:F1+C1.)**
+  **DONE & LIVE 2026-06-16** — HEAD gadgetd deployed; gadget recomposed (stop
+  control+oneshot → install → `gadgetd up`); on-device configfs now reads
+  `lun.0/ro=0` (car records) + **`lun.1/ro=1`**, UDC re-enumerated `configured`.
+  Per-LUN `ro` in `config.rs`; `ro` set once at bring-up, persists across the
+  eject-handoff. GPT-5.5-reviewed runbook (stop-before-swap; `up` won't rewrite a
+  bound gadget). Evidence: `files/hw-results.md` (Layer 2).
+- [x] **F3 · gadgetd RO loop-mount of `media.img`** — persistent, gadgetd-owned;
+  exposes a media-root path (`/run/teslausb/media-ro`) for `webd` to read.
+  **DONE & LIVE 2026-06-16** — `gadgetd serve` brought up the RO mount:
+  `findmnt /run/teslausb/media-ro` → `exfat ro … /dev/loop0p1` (single loop, no
+  double-mount). webd media seam serves real bytes on-device:
+  `GET /api/media/content?path=Wraps/wrapfix-100523.png` → **200, 4940 B,
+  image/png**; range request → **206**. Playwright device-smoke (14 routes × 2
+  viewports) now **console-clean** — the prior `/wraps` 503 is resolved.
+  `mediamount.rs`: `losetup -rfP` + `mount -o ro` (resolved via service PATH
+  `/usr/sbin/losetup`,`/usr/bin/mount`), fail-closed `suspend`/`resume` around a P2
+  RW mutate. Evidence: `files/hw-results.md` (Layer 2). **Follow-up (logged, B-tier,
+  non-blocking):** webd `/api/gadget/status` does not yet surface the `media_ro_*`
+  health fields gadgetd emits (`gadget.rs:357-374`) — wire them through for
+  observability.
 - [ ] **F4 · Handoff read-drain / quiesce** — a read-lease so an in-flight media
   read is drained/blocked before a `lun.1` RW mutate; RO mount torn down and
   rebuilt around the handoff (GPT-5.5 #5). Extends the existing handoff state
@@ -173,11 +202,11 @@ every daemon at once). Get reads + a safe handoff lock proven before feature wor
   genuine "lun.1-only while lun.0 stays up" is NOT live-proven — live device is
   still single-LUN (F1) — and the ADR-0003 read-drain/RO-remount around the
   write (F4) is not built. gated:F1+F4)**
-- [ ] **F6 · scannerd raw `pread` reader + indexd catalog** for both images.
-  **(reader + catalog logic proven on ARM bench: clips + 8 media_entries
-  cataloged, bench re-validation PASS; NOT yet proven against both LUNs on the
-  live device, which still runs single `disk.img`. gated:F1 for the live
-  two-image proof)**
+- [x] **F6 · scannerd raw `pread` reader + indexd catalog** for both images.
+  **DONE & LIVE** — HEAD scannerd + indexd deployed to the device (Layer 1 redeploy
+  2026-06-16); both read both single-partition images and the catalog serves real
+  data: `/api/clips` 200 with buckets/timestamps, all 5 toybox listings + `/api/chimes`
+  (installed `LockChime.wav`) 200. Verified on ARM hardware (`files/hw-results.md`).
 
 ---
 

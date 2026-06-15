@@ -12,44 +12,44 @@
 > [`adr/`](./adr/) (locked architecture, incl. [`ADR-0003`](./adr/0003-media-read-path.md)
 > media read path).
 
-## ⏯️ Resume here — in-flight work (2026-06-15 14:00 ET)
+## ⏯️ Resume here — in-flight work (2026-06-15 16:30 ET)
 
-**Last committed:** `dc940b5` (local branch `mhackermsft/b1-clean`, **not pushed**)
-— §4.5 `feat-active-chime-player`: the v1-faithful **Active Lock Chime card**
-(filename + size + native `<audio>` player from `/api/media/content?path=LockChime.wav`,
-cache-bust `&v=<mtime>`; old Remove button + confirmation flow removed; spec drift
-dropped). GPT-5.5 Approve; `npx playwright test media.spec.ts` = 22 passed. The
-prior commit `0375ac8` landed the `webd` **media-content range-streaming endpoint**
-+ the pre-existing **file-backed chime-library** feature.
+**Last committed:** `b1b9bc1` (local branch `mhackermsft/b1-clean`, **not pushed**)
+— `feat-media-audio` (§4.6/4.7/4.8 in-browser audio playback). Prior commits:
+`687579c` (chime-library hardening: 413→404 + capped read), `dc940b5` (§4.5
+Active Lock Chime card).
 
-**In flight (UNCOMMITTED): chime-library backend review fixes.** The committed
-chime-library (`rust/crates/webd/src/chime_library.rs`, routes
-`/api/chime-scheduler/library/{filename}/{audio,download,activate}`) got its
-deferred GPT-5.5 backend review (**Request-changes**) and the findings are now
-applied:
-- [Important] oversize library file → **flat `404`** (was `413`, which leaked
-  existence and broke the uniform-jail contract).
-- [FYI] closed the check-then-read TOCTOU: new `read_capped()` opens the file and
-  reads ≤ `MAX_CHIME_BYTES + 1` bytes (hard memory bound), 404 if it exceeds 1 MiB.
-  Both serve + activate paths now use it; the stat-based size branch is gone.
-- Added webd integration test `library_audio_oversize_file_is_404`.
-- **Verified (podman):** `cargo test -p webd --lib` = **211 passed**; the 8
-  chime-library integration tests (serve/download/missing-404/traversal-404/
-  oversize-404/activate happy-missing-invalid) all green; `cargo clippy -p webd
-  --all-targets -- -D warnings` clean.
-- Files: `rust/crates/webd/src/chime_library.rs`, `rust/crates/webd/src/tests.rs`.
-- This **clears the "committed but unreviewed"** chime-library caveat. The §4.5
-  *library* boxes (play / set-active) still stay `[ ]`: the routes serve from
-  `/data/teslausb/chimes` (ext4), but locked requirement #4 needs the library
-  **in `media.img`** (`chimelib-to-img`, gated:F3) before parity is honest.
+**In flight (UNCOMMITTED): `feat-thumbnails` (§4.9 Wraps/Plates `<img>` Preview
+thumbnails) — DONE & verified, awaiting GPT-5.5 review before commit.** Added a
+"Preview" image column to Wraps + License Plates rows; `<img class="media-thumb"
+loading="lazy">` src built by the existing `api.mediaContentUrl(rel_path, modified)`
+helper (real bytes streamed by `GET /api/media/content` from the read-only MEDIA
+mount). Fixed-layout column widths rebalanced (Wraps: dropped unused
+`.wraps-dimensions-col`, kept preview18/filename27/size12/actions28; Plates inline
+widths → preview18/filename34/size16/actions26); empty-state `colSpan` 3→4.
+- **Harness (Opus-owned `global-setup.ts`):** new `populateMediaRoot()` seeds the
+  committed `spa/test/fixtures/thumb.png` (96×96 PNG, 18420 B) to
+  `<media-ro>/Wraps/UAT-Wrap.png` + `<media-ro>/LicensePlate/UAT-Plate.png`, and
+  passes `WEBD_MEDIA_RO_ROOT` to the spawned webd.
+- **UAT:** new mocked-list test per screen asserts `<img>` count, src regex, and
+  **`naturalWidth>0`** (honest real-decode proof, since image bytes load for real).
+- **Verified:** tsc clean; `npx playwright test wraps.spec.ts license-plates.spec.ts`
+  = **28 passed** (incl. existing clean/read-only tests); populated desktop-1280
+  screenshots of BOTH screens visually confirmed (real gradient thumbnails, clean
+  headers, no column overlap).
+- **⚠️ Incident:** the `mai-thumbnails` sub-agent ran a destructive git operation
+  that reverted the uncommitted `global-setup.ts` harness edits AND deleted the
+  untracked `thumb.png` fixture, causing `naturalWidth=0` (404/503). Opus
+  regenerated the fixture + re-applied the harness edits to recover. mai's
+  "28 passed" self-report was false — caught by Opus re-running the suite.
+- Files (to commit): `spa/test/fixtures/thumb.png` (NEW), `spa/test/uat/global-setup.ts`,
+  `spa/src/screens/{Wraps,LicensePlates}.tsx`, `spa/src/styles/{wraps,license-plates}.css`,
+  `spa/test/uat/{wraps,license-plates}.spec.ts`, `docs/status.md`.
 
-**Next item to start:** `feat-thumbnails` (§4.9 Wraps/Plates `<img>` thumbnails) —
-needs the UAT harness to seed `WEBD_MEDIA_RO_ROOT` + inject list rows so `<img>`
-loads real bytes (img fetches eagerly, unlike `<audio preload="none">`). GPT-5.5
-endorsed this as the honest approach. Then `chimelib-to-img` (move chime library
-into `media.img` per requirement #4, unblocks the §4.5 library boxes).
+**Next item to start:** `chimelib-to-img` (move chime library into `media.img` per
+requirement #4, gated:F3 — unblocks the §4.5 library play/set-active boxes).
 
-**Just done (UNCOMMITTED before this commit): `feat-media-audio` (§4.6/4.7/4.8
+**Just done (committed `b1b9bc1`): `feat-media-audio` (§4.6/4.7/4.8
 in-browser audio playback).** Native `<audio controls preload="none">` per row on
 Music / Boombox / Light Shows, sourced from `GET /api/media/content?path=<rel>&v=<mtime>`
 via a new `api.mediaContentUrl(path, version)` helper (and `activeChimeAudioUrl`
@@ -318,14 +318,16 @@ every daemon at once). Get reads + a safe handoff lock proven before feature wor
 
 ### 4.9 Wraps & License Plates — `Requirements.md` §4.9
 
-- [ ] **Wraps:** list with raw-PNG thumbnails. **(partial: list + ROOT `Wraps/` proven on hw;
-  thumbnail read path READY — `/api/media/content`, backend verified; needs SPA `<img>` wiring + Playwright)**
+- [x] **Wraps:** list with raw-PNG thumbnails. **(DONE — SPA `<img>` Preview column wired via
+  `api.mediaContentUrl(rel_path, modified)`; UAT seeds `WEBD_MEDIA_RO_ROOT` + asserts real decode
+  `naturalWidth>0`; `npx playwright test wraps.spec.ts` green + populated desktop screenshot verified)**
 - [ ] Wrap upload: `.png` only, ≤1 MB, 64×64–2048×2048, name ≤32 `[A-Za-z0-9_- space]`,
   ~10 max; atomic publish. **(partial: validation + install proven; dimension/name caps to verify)**
 - [x] Wrap delete (incl. bulk). **(proven)**
 - [ ] **Plates (images):** list w/ thumbnails, upload, delete `.png` ≤512 KB,
   exactly 420×75 (NA)/492×75 (EU), name ≤12 alnum, ≤5. **(partial: validation A1 done;
-  thumbnail read path READY — `/api/media/content`, backend verified; cropper deferred — A2)**
+  thumbnail Preview column DONE — `<img>` wired + Playwright `naturalWidth>0` (license-plates.spec.ts);
+  upload caps + cropper deferred — A2)**
 - [ ] **Tracked-plate list (privacy/redaction):** add/edit/delete (uppercase ≤16,
   label ≤64, notes ≤240, dedupe), bulk delete, redaction toggle. **(not started)**
 

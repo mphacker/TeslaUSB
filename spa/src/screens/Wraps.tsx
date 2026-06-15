@@ -155,6 +155,7 @@ export function Wraps() {
                   {cat.state.items.length > 0 && (
                     <th class="bulk-check-col" aria-label="Select"></th>
                   )}
+                  <th class="wraps-preview-col">Preview</th>
                   <th class="wraps-filename-col">Filename</th>
                   <th class="wraps-size-col">Size</th>
                   <th class="wraps-actions-col">Actions</th>
@@ -163,7 +164,7 @@ export function Wraps() {
               <tbody>
                 {cat.state.items.length === 0 ? (
                   <tr>
-                    <td colSpan={3}>
+                    <td colSpan={4}>
                       <div class="wraps-empty" data-testid="wraps-empty">
                         <Icon name="palette" class="wraps-empty-icon" />
                         <p>No custom wraps installed yet.</p>
@@ -183,6 +184,17 @@ export function Wraps() {
                             onChange={() => cat.toggleSelect(item.name)}
                             disabled={cat.bulkDeleting}
                             aria-label={`Select ${item.name}`}
+                          />
+                        </td>
+                        <td>
+                          <img
+                            class="media-thumb"
+                            src={api.mediaContentUrl(item.rel_path, item.modified)}
+                            alt={item.name}
+                            loading="lazy"
+                            width={64}
+                            height={64}
+                            data-testid="wraps-thumb"
                           />
                         </td>
                         <td>{item.name}</td>

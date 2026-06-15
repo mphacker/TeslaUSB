@@ -129,6 +129,16 @@
   transition: border-color 0.3s ease;
 }
 
+.media-thumb {
+  width: 64px;
+  height: 64px;
+  object-fit: contain;
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  display: block;
+}
+
 .license-plates-table tbody tr:hover {
   background-color: var(--bg-table-hover);
   transition: background-color 0.15s ease;

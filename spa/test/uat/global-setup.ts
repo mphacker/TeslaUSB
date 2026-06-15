@@ -26,7 +26,13 @@ const DIST = resolve(SPA, "dist");
 // hand webd `WEBD_ARCHIVE_ROOT` + a `WEBD_CACHE_DIR` (which `/export` needs).
 const ARCHIVE_ROOT = resolve(ART, "archive");
 const CACHE_DIR = resolve(ART, "cache");
+// Read-only MEDIA-partition mount that `GET /api/media/content` serves from.
+// Seed real image files so the Wraps/Plates <img> thumbnails load genuine bytes
+// (the catalog has no media rows, so the thumbnail UAT injects the matching list
+// entries via page.route and lets the real read path serve these).
+const MEDIA_RO_ROOT = resolve(ART, "media-ro");
 const FIXTURE_MP4 = resolve(SPA, "test", "fixtures", "clip.mp4");
+const FIXTURE_PNG = resolve(SPA, "test", "fixtures", "thumb.png");
 // Mirrors build-db.mjs CLIPS canonical_key list + ANGLES camera list (6×4=24).
 const ARCHIVE_KEYS = [
   "2024-06-01_07-15-00",
@@ -123,6 +129,30 @@ function populateArchive() {
   }
 }
 
+/**
+ * Materialise the read-only MEDIA mount that `GET /api/media/content` serves.
+ * Writes the committed PNG fixture to the toybox image folders so the Wraps and
+ * Plates thumbnail <img>s resolve to real, decodable bytes (not a 503/broken
+ * image). Idempotent; must run before webd spawns (the content handler
+ * canonicalises the root, so the directory has to exist first). Keep in sync
+ * with the rel_paths the thumbnail UATs inject.
+ */
+function populateMediaRoot() {
+  if (!existsSync(FIXTURE_PNG)) {
+    throw new Error(
+      `thumbnail fixture missing at ${FIXTURE_PNG} — commit test/fixtures/thumb.png`,
+    );
+  }
+  for (const [folder, file] of [
+    ["Wraps", "UAT-Wrap.png"],
+    ["LicensePlate", "UAT-Plate.png"],
+  ] as const) {
+    const dir = resolve(MEDIA_RO_ROOT, folder);
+    mkdirSync(dir, { recursive: true });
+    copyFileSync(FIXTURE_PNG, resolve(dir, file));
+  }
+}
+
 export default async function globalSetup() {
   mkdirSync(ART, { recursive: true });
 
@@ -137,6 +167,9 @@ export default async function globalSetup() {
 
   // Archive media must exist before webd spawns (see populateArchive docs).
   populateArchive();
+  // Seed the read-only MEDIA mount for thumbnail serving (same eager-canonicalise
+  // constraint — the directory must exist before webd spawns).
+  populateMediaRoot();
 
   for (const [label, p] of [
     ["seed DB", SEED_DB],
@@ -175,6 +208,7 @@ export default async function globalSetup() {
       WEBD_BIND: `${HOST}:${PORT}`,
       WEBD_ARCHIVE_ROOT: ARCHIVE_ROOT,
       WEBD_CACHE_DIR: CACHE_DIR,
+      WEBD_MEDIA_RO_ROOT: MEDIA_RO_ROOT,
       RUST_LOG: process.env.RUST_LOG ?? "warn",
     },
     stdio: ["ignore", logFd, logFd],

@@ -153,15 +153,16 @@ export function LicensePlates() {
                   {cat.state.items.length > 0 && (
                     <th style="width: 6%;" aria-label="Select"></th>
                   )}
-                  <th style="width: 42%;">Filename</th>
-                  <th style="width: 18%;">Size</th>
-                  <th style="width: 40%;">Actions</th>
+                  <th style="width: 18%;">Preview</th>
+                  <th style="width: 34%;">Filename</th>
+                  <th style="width: 16%;">Size</th>
+                  <th style="width: 26%;">Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {cat.state.items.length === 0 ? (
                   <tr>
-                    <td colSpan={3}>
+                    <td colSpan={4}>
                       <div
                         class="license-plates-empty"
                         data-testid="license-plates-empty"
@@ -184,6 +185,17 @@ export function LicensePlates() {
                             onChange={() => cat.toggleSelect(item.name)}
                             disabled={cat.bulkDeleting}
                             aria-label={`Select ${item.name}`}
+                          />
+                        </td>
+                        <td>
+                          <img
+                            class="media-thumb"
+                            src={api.mediaContentUrl(item.rel_path, item.modified)}
+                            alt={item.name}
+                            loading="lazy"
+                            width={64}
+                            height={64}
+                            data-testid="plates-thumb"
                           />
                         </td>
                         <td>{item.name}</td>

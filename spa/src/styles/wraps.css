@@ -141,12 +141,18 @@
   width: 18%;
 }
 
-.wraps-filename-col {
-  width: 27%;
+.media-thumb {
+  width: 64px;
+  height: 64px;
+  object-fit: contain;
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  display: block;
 }
 
-.wraps-dimensions-col {
-  width: 15%;
+.wraps-filename-col {
+  width: 27%;
 }
 
 .wraps-size-col {
@@ -175,6 +181,12 @@
   margin: 0 auto;
   font-size: 14px;
   line-height: 1.5;
+}
+
+@media (max-width: 768px) {
+  .wraps-table {
+    min-width: 620px;
+  }
 }
 
 @media (max-width: 480px) {

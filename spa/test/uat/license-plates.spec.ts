@@ -18,6 +18,36 @@ const PATH = "/license_plates";
 const SCREEN = "plates";
 
 test.describe("license plates UAT", () => {
+  test("mocked list — preview thumbnail renders real image bytes", async ({ page }) => {
+    await page.route("**/api/plates", (route) => {
+      if (route.request().method() !== "GET") return route.continue();
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          items: [
+            {
+              name: "UAT-Plate.png",
+              rel_path: "LicensePlate/UAT-Plate.png",
+              size_bytes: 18420,
+              modified: "2024-06-01T07:15:00Z",
+            },
+          ],
+        }),
+      });
+    });
+
+    await gotoScreen(page, PATH, SCREEN);
+
+    const thumb = page.locator("[data-testid=plates-thumb]");
+    await expect(thumb).toHaveCount(1);
+    await expect(thumb).toHaveAttribute(
+      "src",
+      /\/api\/media\/content\?path=LicensePlate%2FUAT-Plate\.png&v=/,
+    );
+    await expect.poll(async () => thumb.evaluate((el: HTMLImageElement) => el.naturalWidth)).toBeGreaterThan(0);
+  });
+
   test("parity — media nav active, pills, requirements/upload-form/empty", async ({
     page,
   }, testInfo) => {

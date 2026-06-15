@@ -339,9 +339,15 @@ LUNs) is the single make-or-break that still needs the car.**
   `docs/tasks/parity-baseline/lock-chimes/`). **(DONE — player sourced from `GET
   /api/media/content?path=LockChime.wav` cache-busted by mtime; mai impl,
   GPT-5.5 Approve, verified `npx playwright test media.spec.ts` = 22 passed
-  [clean console, 375 + 1280, nav ~147 ms] + tsc clean)**
-- [ ] Play any library chime in-browser (streamed from image via RO mount). **(read
-  path READY — `/api/media/content`, backend verified; needs SPA `<audio>` wiring + Playwright)**
+  [clean console, 375 + 1280, nav ~147 ms] + tsc clean. **LIVE-PROVEN on hardware
+  2026-06-16:** the `<audio>` element on `/media` fetched `LockChime.wav` from the
+  device's RO media mount via `/api/media/content` [206], decoded to
+  `readyState=4` [HAVE_ENOUGH_DATA], duration 2.49 s, console clean — see
+  `files/hw-results.md` "feature-verify". Real in-browser playback works.)**
+- [ ] Play any library chime in-browser (streamed from image via RO mount). **(playback
+  MECHANISM live-proven on hardware via the active-chime player [same `/api/media/content`
+  seam, real WAV decode `readyState=4`, 2026-06-16]; remaining gap is per-row `<audio>`
+  wiring in the library list + library content to exercise it)**
 - [ ] Upload chime(s) `.wav` (+`.mp3`→WAV), ≤1 MB & ≤5 s; added to `Chimes/`. **(partial:
   single-file install proven on hw; multi-file + mp3 transcode + 5 s/normalize to verify)**
 - [ ] Delete library chime. **(partial: delete path exists; verify against `Chimes/` in image)**
@@ -398,7 +404,10 @@ LUNs) is the single make-or-break that still needs the car.**
 
 - [x] **Wraps:** list with raw-PNG thumbnails. **(DONE — SPA `<img>` Preview column wired via
   `api.mediaContentUrl(rel_path, modified)`; UAT seeds `WEBD_MEDIA_RO_ROOT` + asserts real decode
-  `naturalWidth>0`; `npx playwright test wraps.spec.ts` green + populated desktop screenshot verified)**
+  `naturalWidth>0`; `npx playwright test wraps.spec.ts` green + populated desktop screenshot verified.
+  **LIVE-PROVEN on hardware 2026-06-16:** both wraps on the device's `/wraps` page decoded real
+  bytes [2/2 `<img>` `naturalWidth`=600, `complete`] served from `media.img` via the RO mount seam
+  [200], console clean — see `files/hw-results.md` "feature-verify".)**
 - [x] Wrap upload: `.png` only, ≤1 MB, 512×512–1024×1024, name ≤32 `[A-Za-z0-9_- space]`,
   ~10 max; atomic publish. **(DONE — `validate_wrap_filename` (≤32-char stem, charset
   `[A-Za-z0-9_- space]`) + `WRAPS_MAX_FILES=10` count cap with exact `rel_path` replace

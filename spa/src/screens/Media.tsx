@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import { MediaPills } from "../components/MediaPills";
 import { Icon } from "../components/Icon";
 import { ChimeScheduler } from "./ChimeScheduler";
-import { api, ApiError, CHIME_MAX_BYTES, isQueued } from "../api/client";
+import { api, ApiError, CHIME_MAX_BYTES } from "../api/client";
 import type { Chimes, InstalledChime } from "../api/types";
 import "../styles/media.css";
 
@@ -222,13 +222,7 @@ export function Media() {
   // refetches and shows the new chime in its library table.
   const [libraryRefresh, setLibraryRefresh] = useState(0);
 
-  // ── Remove state ──
-  const [removePending, setRemovePending] = useState(false);
-  const [removing, setRemoving] = useState(false);
-  const [removeFail, setRemoveFail] = useState<ChimeFailure | null>(null);
-
   const uploadAbortRef = useRef<AbortController | null>(null);
-  const removeAbortRef = useRef<AbortController | null>(null);
 
   /** Reload `GET /api/chimes` after a successful mutation (or initial mount). */
   const refetch = (signal?: AbortSignal) =>
@@ -256,7 +250,6 @@ export function Media() {
     return () => {
       ctrl.abort();
       uploadAbortRef.current?.abort();
-      removeAbortRef.current?.abort();
     };
   }, []);
 
@@ -306,41 +299,6 @@ export function Media() {
     }
   }
 
-  function openRemove() {
-    setRemoveFail(null);
-    setRemovePending(true);
-  }
-
-  function closeRemove() {
-    if (removing) return;
-    setRemovePending(false);
-    setRemoveFail(null);
-  }
-
-  async function confirmRemove() {
-    if (removing) return;
-    setRemoving(true);
-    setRemoveFail(null);
-    const ac = new AbortController();
-    removeAbortRef.current = ac;
-    try {
-      const res = await api.removeChime(ac.signal);
-      setRemovePending(false);
-      setNotice(
-        isQueued(res)
-          ? "Removing the lock chime — syncing to the car."
-          : "Removed the lock chime — the car will use its built-in chime.",
-      );
-      await refetch();
-    } catch (err) {
-      if (ac.signal.aborted) return; // silent: user/unmount cancelled
-      setRemoveFail(classifyChimeFailure(err));
-    } finally {
-      if (removeAbortRef.current === ac) removeAbortRef.current = null;
-      setRemoving(false);
-    }
-  }
-
   return (
     <div class="container media-page" data-page="media" data-screen="media">
       {/* ── Media pill sub-nav (v1 media_hub_nav.html parity) ── */}
@@ -362,18 +320,13 @@ export function Media() {
                 Installed {chimeModified(installed.modified)}
               </span>
             </div>
-            <div class="active-chime-actions">
-              <button
-                type="button"
-                class="action-btn danger chime-remove-btn"
-                data-testid="active-chime-remove"
-                onClick={openRemove}
-                disabled={removing}
-              >
-                <Icon name="trash-2" class="chime-btn-icon" />
-                Remove
-              </button>
-            </div>
+            <audio
+              class="active-chime-player"
+              controls
+              preload="none"
+              data-testid="active-chime-audio"
+              src={api.activeChimeAudioUrl(installed.modified)}
+            />
           </div>
         ) : status === "ready" ? (
           <p class="media-pending" data-testid="active-chime-none">
@@ -480,78 +433,7 @@ export function Media() {
       {/* ── Chime Scheduler · Random Groups · Library ── (live: schedulerd via webd) */}
       <ChimeScheduler refreshKey={libraryRefresh} />
 
-      {/* ── Operator-gated remove confirmation (names the chime; no one-click). ── */}
-      {removePending && (
-        <div
-          class="chime-modal-backdrop"
-          role="presentation"
-          onClick={closeRemove}
-        >
-          <div
-            class="chime-modal"
-            role="alertdialog"
-            aria-modal="true"
-            aria-labelledby="chimeRemoveTitle"
-            aria-describedby="chimeRemoveDesc"
-            data-testid="chime-remove-dialog"
-            onClick={(e: Event) => e.stopPropagation()}
-          >
-            <h3 id="chimeRemoveTitle" class="chime-modal-title">
-              Remove the lock chime?
-            </h3>
-            <p id="chimeRemoveDesc" class="chime-modal-desc">
-              This removes{" "}
-              <strong class="chime-modal-name">
-                {installed?.name ?? "LockChime.wav"}
-              </strong>{" "}
-              from the vehicle and briefly ejects the USB drive. The car returns
-              to its built-in chime.
-            </p>
 
-            {removeFail && (
-              <div
-                class={`chime-modal-status${removeFail.retryable ? " retryable" : " fatal"}`}
-                role="alert"
-                data-testid="chime-remove-error"
-              >
-                {removeFail.message}
-              </div>
-            )}
-
-            <div class="chime-modal-actions">
-              <button
-                type="button"
-                class="chime-modal-btn cancel"
-                onClick={closeRemove}
-                disabled={removing}
-              >
-                {removeFail && !removeFail.retryable ? "Close" : "Cancel"}
-              </button>
-              {(!removeFail || removeFail.retryable) && (
-                <button
-                  type="button"
-                  class="chime-modal-btn confirm"
-                  data-testid="chime-remove-confirm"
-                  onClick={confirmRemove}
-                  disabled={removing}
-                  aria-busy={removing ? "true" : "false"}
-                >
-                  {removing ? (
-                    <>
-                      <span class="chime-spinner" aria-hidden="true" /> Removing
-                      {"\u2026"}
-                    </>
-                  ) : removeFail ? (
-                    "Retry"
-                  ) : (
-                    "Remove"
-                  )}
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

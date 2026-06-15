@@ -231,10 +231,12 @@ drive root; the library lives in `Chimes/`.
 
 The user can:
 
-- **See the active lock chime** at the top of the page — its **original name**
-  (the library file it was copied from, not just "LockChime.wav"), with size /
-  duration, and **play it** in the browser. *(In v1 this is a player for the real
-  active sound — not a bare filename with a remove button.)*
+- **See the active lock chime** at the top of the page — shown as its filename
+  (`LockChime.wav`) with its size, and **play it** in the browser with a native
+  HTML5 audio player. *(In v1 this card is a player for the real active sound —
+  not a bare filename with a remove button. v1 shows the literal `LockChime.wav`
+  + size + an `<audio>` element; it does not show provenance/original-name or
+  duration, and has no remove control on this card.)*
 - **Play any library chime** in the browser (HTML5 audio streamed from the device).
 - **Upload** one or more chimes (`.wav`, also `.mp3` which is converted to WAV).
   Limits: **≤ 1 MB and ≤ 5 seconds** each *(verify exact transcode/normalize

@@ -187,9 +187,6 @@ export interface ChimeHandoffResult {
   job_id?: string;
 }
 
-/** The single lock-chime slot id on the p2 MEDIA partition (B-1 is single-slot). */
-export const LOCK_CHIME_ID = "LockChime";
-
 /** Logical lock-chime size cap mirrored from webd's `CHIME_MAX_BYTES` (1 MiB). */
 export const CHIME_MAX_BYTES = 1024 * 1024;
 
@@ -328,22 +325,6 @@ export const api = {
       form,
     );
     return assertAccepted(res, "install");
-  },
-
-  /**
-   * Remove the installed lock chime via the same `gadgetd` eject-handoff
-   * (`DELETE /api/chimes/LockChime`, contract §2.3.1). The id is baked in
-   * because B-1 is single-slot — any other id is a `404`. Idempotent: removing
-   * when nothing is installed still returns `200 {handoff_id, state:"done"}`.
-   * Same terminal/transient status mapping as {@link installChime}. Throws on abort.
-   */
-  removeChime: async (signal?: AbortSignal): Promise<ChimeHandoffResult> => {
-    const res = await request<ChimeHandoffResult>(
-      "DELETE",
-      `/api/chimes/${LOCK_CHIME_ID}`,
-      signal,
-    );
-    return assertAccepted(res, "remove");
   },
 
   // ── Toybox media categories (GET = catalog read; POST/DELETE = gadgetd handoff) ──
@@ -650,6 +631,13 @@ export const api = {
   /** Root-relative URL for inline playback of a library chime (`GET …/library/:filename/audio`). */
   libraryAudioUrl: (filename: string): string =>
     `/api/chime-scheduler/library/${encodeURIComponent(filename)}/audio`,
+
+  /** Root-relative URL for inline playback of the active lock chime
+   * (`GET /api/media/content?path=LockChime.wav`). `version` (the installed
+   * chime's mtime) is appended as a cache-buster so the native <audio> element
+   * reloads the new bytes after an install rather than replaying a stale chime. */
+  activeChimeAudioUrl: (version?: string | null): string =>
+    `/api/media/content?path=LockChime.wav${version ? `&v=${encodeURIComponent(version)}` : ""}`,
 
   /** Root-relative URL to download a library chime (`GET …/library/:filename/download`). */
   libraryDownloadUrl: (filename: string): string =>

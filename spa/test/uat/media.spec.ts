@@ -15,11 +15,11 @@ import { resolve } from "node:path";
 //    eject-handoff) reports the installed lock chime. The screen renders that
 //    live fact, degrading to honest empty states when nothing is installed (the
 //    UAT seed has no media). This read hits REAL webd.
-//  - `POST /api/chimes` / `DELETE /api/chimes/LockChime` route through the
-//    gadgetd eject-handoff. gadgetd is NOT running in the UAT harness (only webd
-//    is spawned), so a real call would 503. The install/remove FLOWS are
-//    therefore driven against Playwright route mocks (the contract is fixed by
-//    docs/specs/contracts §2.3.1; mocking an absent dependency is sanctioned).
+//  - `POST /api/chimes` routes through the gadgetd eject-handoff. gadgetd is
+//    NOT running in the UAT harness (only webd is spawned), so a real call would
+//    503. The install flow is therefore driven against Playwright route mocks
+//    (the contract is fixed by docs/specs/contracts §2.3.1; mocking an absent
+//    dependency is sanctioned).
 //    The READ path and the no-mutation-on-load guarantee are still verified
 //    against real webd.
 
@@ -329,7 +329,7 @@ test.describe("media (lock chimes) UAT", () => {
     await expect(page.locator("[data-testid=active-chime-none]")).toBeVisible();
     await page.waitForTimeout(200);
 
-    // No mutating HTTP method fires on load — install/remove require a click.
+    // No mutating HTTP method fires on load — install requires a click.
     const mutating = probe.requests.filter((r) =>
       ["POST", "PUT", "PATCH", "DELETE"].includes(r.method.toUpperCase()),
     );
@@ -410,15 +410,17 @@ test.describe("media (lock chimes) UAT", () => {
 
     await gotoMedia(page);
 
-    // Active Lock Chime card shows the live name + size + install time + Remove.
+    // Active Lock Chime card shows the live name + size + install time + player.
     const active = page.locator("[data-testid=active-chime]");
+    const audio = page.locator("[data-testid=active-chime-audio]");
     await expect(active).toBeVisible();
     await expect(page.locator("[data-testid=active-chime-name]")).toHaveText(
       "LockChime.wav",
     );
     await expect(active).toContainText("215 KB");
     await expect(active).toContainText("2026-06-01 20:10");
-    await expect(page.locator("[data-testid=active-chime-remove]")).toBeVisible();
+    await expect(audio).toBeVisible();
+    await expect(audio).toHaveAttribute("src", /\/api\/media\/content\?path=LockChime\.wav/);
 
     // No empty state when a chime is installed.
     await expect(page.locator("[data-testid=active-chime-none]")).toHaveCount(0);
@@ -578,51 +580,6 @@ test.describe("media (lock chimes) UAT", () => {
 
     // No POST was ever attempted for the rejected files (only client validation).
     expect(posts, `unexpected POST(s): ${JSON.stringify(posts)}`).toEqual([]);
-    assertCleanConsole(probe);
-  });
-
-  // ── Gate 9: remove — operator-gated confirm → DELETE → empty state ──────
-  test("remove — named confirm dialog deletes via DELETE /api/chimes/LockChime", async ({
-    page,
-    probe,
-  }) => {
-    let installedNow: typeof INSTALLED | null = INSTALLED;
-    const deletes: string[] = [];
-
-    await page.route("**/api/chimes", (route) => {
-      if (route.request().method() !== "GET") return route.continue();
-      return jsonRoute(route, 200, { installed: installedNow });
-    });
-    await page.route("**/api/chimes/*", (route) => {
-      if (route.request().method() !== "DELETE") return route.continue();
-      deletes.push(new URL(route.request().url()).pathname);
-      installedNow = null; // removed
-      return jsonRoute(route, 200, { handoff_id: "h-remove-1", state: "done" });
-    });
-
-    await gotoMedia(page);
-    await expect(page.locator("[data-testid=active-chime]")).toBeVisible();
-
-    // Remove is a deliberate, named confirmation (no one-click delete).
-    await page.locator("[data-testid=active-chime-remove]").click();
-    const dialog = page.locator("[data-testid=chime-remove-dialog]");
-    await expect(dialog).toBeVisible();
-    await expect(dialog).toHaveAttribute("role", "alertdialog");
-    await expect(dialog).toContainText("LockChime.wav");
-
-    await page.locator("[data-testid=chime-remove-confirm]").click();
-
-    // Dialog closes, success notice shows, and the card falls back to empty.
-    await expect(dialog).toHaveCount(0);
-    await expect(page.locator("[data-testid=chime-notice]")).toContainText(
-      "Removed the lock chime",
-    );
-    await expect(page.locator("[data-testid=active-chime-none]")).toBeVisible();
-    await expect(page.locator("[data-testid=library-empty]")).toBeVisible();
-
-    expect(deletes, "expected one DELETE /api/chimes/LockChime").toEqual([
-      "/api/chimes/LockChime",
-    ]);
     assertCleanConsole(probe);
   });
 

@@ -12,53 +12,34 @@
 > [`adr/`](./adr/) (locked architecture, incl. [`ADR-0003`](./adr/0003-media-read-path.md)
 > media read path).
 
-## ⏯️ Resume here — in-flight work (2026-06-15 08:10 ET)
+## ⏯️ Resume here — in-flight work (2026-06-15 09:00 ET)
 
-**Last completed & committed:** F2 (`lun.1 ro=1`, `e31f73b`) and **F3** (gadgetd
-persistent RO loop-mount of `media.img` at `/run/teslausb/media-ro` + suspend/
-resume gate around the write-handoff, `edecb14`). Both on local branch
-`mhackermsft/b1-clean` — **nothing pushed**.
+**Last committed:** `0375ac8` (local branch `mhackermsft/b1-clean`, **not pushed**)
+— the `webd` **media-content range-streaming endpoint** (`GET|HEAD
+/api/media/content?path=<rel>` over the F3 RO mount; 200/206/416, 404 on
+jail-escape/missing/non-file, 503+Retry-After on absent mount; podman-verified
+210 webd tests + clippy clean; GPT-5.5-reviewed) **together with** the
+pre-existing **file-backed chime-library** feature (per operator's "commit
+everything" call). NB: the chime-library Rust+SPA is committed but was NOT
+design-reviewed here and its UI has NOT been through a dedicated Playwright gate
+— it still needs its own review/verification pass; no chime-library status boxes
+are ticked.
 
-**Done & VERIFIED this session (NOT yet committed): `webd` media-content
-range-streaming endpoint** — `GET|HEAD /api/media/content?path=<rel_path>`
-serves bytes from the F3 RO mount via `tokio::fs` (Option A, simple file I/O;
-decided Opus + GPT-5.5). `200`/`206`/`416`, `404` on jail-escape/missing/non-file,
-`503 Retry-After: 2` on absent mount. Files: `rust/crates/webd/src/media.rs`
-(`content` handler + `MediaConfig.media_ro_root` + `content_type_for` +
-`media_unavailable`), `route.rs` (one route line), `tests.rs` (7 new tests).
-- **Verification (podman): `cargo test -p webd` = 210 passed / 0 failed**
-  (9 media_content tests incl. full/206/HEAD/traversal-404/missing-404/dir-404/
-  416/absent-503 + `content_type_for` unit); **`cargo clippy -p webd --all-targets
-  -- -D warnings` = clean.** mai-code-1-flash implemented; verified green on resume.
-- **GPT-5.5 adversarial review: DONE & reconciled.** Applied: stat-before-open
-  (reject non-regular files without opening — Important), `X-Content-Type-Options:
-  nosniff` on media responses (hardening — FYI), and added 416 + directory-404
-  tests (Nit). Re-verified green (210 tests, clippy clean).
-- **REMAINING: operator commit decision (entanglement below), then commit.**
-
-**⚠️ Working-tree entanglement (must resolve before commit):** a SEPARATE,
-pre-existing, **uncommitted** feature also sits dirty in the tree — a *file-backed
-chime-library serve/download/activate* feature: untracked
-`rust/crates/webd/src/chime_library.rs` + edits to `lib.rs`, `query.rs`,
-`lightshows.rs`, `wraps.rs`, the `.merge(crate::chime_library::routes())` line in
-`route.rs`, `get_chime_bytes`/Wraps tests in `tests.rs`, and several `spa/` files
-(`Media.tsx`, `Wraps.tsx`, `LightShows.tsx`, `ChimeScheduler.tsx`, api `client.ts`,
-`media.css`, UAT specs), plus `deploy/systemd/webd.service`,
-`scannerd/src/produce.rs`. This is NOT this session's work and is unreviewed here.
-`media-content` is interleaved with it inside `route.rs` and `tests.rs`, so a clean
-media-content-only commit needs **patch-level staging** (`git add -p`): take all of
-`media.rs`, plus only the `/media/content` route hunk and the `media_content_*`
-test hunks. Do NOT commit or discard the chime-library work without operator say-so.
-
-**Next actions on resume (in order):**
-1. Read `gpt55-media-review` result; reconcile; fix any Critical/Important in the
-   3 media-content files; re-verify in podman.
-2. Decide commit strategy WITH THE OPERATOR (entanglement above) — likely patch-
-   stage media-content only; leave chime-library dirty for its own review.
-3. Tick read-path items below ONLY where end-to-end proven. The endpoint alone
-   does NOT check the 4.5/4.6/4.7/4.8 *playback* boxes — those are UI items needing
-   the SPA wired + a Playwright run. It DOES unblock them (remove gated:F3 where
-   the blocker was purely the read path).
+**In flight (UNCOMMITTED): §4.5 `feat-active-chime-player` — v1-faithful Active
+Lock Chime card.** Card now = filename (`LockChime.wav`) + size + a native
+`<audio>` player sourced from `/api/media/content?path=LockChime.wav` (cache-bust
+`&v=<mtime>`); the old Remove button + its whole confirmation-dialog flow are
+removed (v1 has no remove control here — confirmed vs captured baseline DOM +
+GPT-5.5). Spec drift fixed: dropped "original-name/duration" from `Requirements.md`
+§4.5 and this file. Files: `spa/src/screens/Media.tsx`, `spa/src/api/client.ts`
+(added `activeChimeAudioUrl`, removed dead `removeChime`/`LOCK_CHIME_ID`),
+`spa/src/styles/media.css` (removed orphaned `.chime-modal*`/`.active-chime-actions`/
+`.chime-remove-btn`), `spa/test/uat/media.spec.ts`.
+- **Verified:** `npx tsc --noEmit` exit 0; **`npx playwright test media.spec.ts`
+  = 22 passed** (clean console, screenshots 375 + 1280, nav ~147 ms); orphan grep
+  clean. mai implemented; Opus did the orphan-CSS/const cleanup.
+- **DONE:** mai implemented; Opus did the orphan-CSS/const cleanup; GPT-5.5
+  review = **Approve, no findings**; ticked §4.5 active-card box; committed.
 
 **Open follow-ups (logged in session SQL `todos`, not blocking):**
 - `f3-followup-mount-perms`: harden the F3 RO mount (`ro,nodev,nosuid,noexec,
@@ -252,11 +233,14 @@ every daemon at once). Get reads + a safe handoff lock proven before feature wor
 
 ### 4.5 Lock Chimes — `Requirements.md` §4.5  ← **highest current divergence**
 
-- [ ] **Active chime card done right:** show the **original library name** it was
-  copied from (not "LockChime.wav"), size/duration, and a **player** for the real
-  active sound; **no stray Remove button**. **(read path READY — `GET
-  /api/media/content?path=LockChime.wav`, backend verified; needs the SPA card
-  rebuild [player + original-name + no-Remove] + Playwright)**
+- [x] **Active chime card done right (v1-faithful):** filename (`LockChime.wav`)
+  + size + a native `<audio>` **player** for the real active sound; **no Remove
+  button** (dead remove modal/handlers/CSS removed). No provenance/original-name
+  or duration — v1 shows neither (per captured baseline DOM
+  `docs/tasks/parity-baseline/lock-chimes/`). **(DONE — player sourced from `GET
+  /api/media/content?path=LockChime.wav` cache-busted by mtime; mai impl,
+  GPT-5.5 Approve, verified `npx playwright test media.spec.ts` = 22 passed
+  [clean console, 375 + 1280, nav ~147 ms] + tsc clean)**
 - [ ] Play any library chime in-browser (streamed from image via RO mount). **(read
   path READY — `/api/media/content`, backend verified; needs SPA `<audio>` wiring + Playwright)**
 - [ ] Upload chime(s) `.wav` (+`.mp3`→WAV), ≤1 MB & ≤5 s; added to `Chimes/`. **(partial:

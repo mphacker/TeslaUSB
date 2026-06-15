@@ -16,7 +16,7 @@ use crate::dto::MediaListDto;
 use crate::error::ApiError;
 use crate::media_upload::{
     BulkDeleteRequest, check_extension, plan_bulk_delete, read_file_upload, sanitise_filename,
-    validate_png_magic, validate_wrap_dimensions,
+    validate_png_magic, validate_wrap_dimensions, validate_wrap_filename,
 };
 
 const PARTITION_MEDIA: u8 = 2;
@@ -24,6 +24,10 @@ const WRAPS_DIR: &str = "Wraps";
 
 /// Maximum accepted wrap image size (1 MiB).
 const WRAPS_MAX_BYTES: usize = 1024 * 1024;
+
+/// Tesla's Paint Shop reads up to ~10 wraps; reject uploads beyond this. A
+/// re-upload of an existing (exact) name is a replace and is always allowed.
+const WRAPS_MAX_FILES: usize = 10;
 
 /// Axum `DefaultBodyLimit` for the POST route (8 MiB — defence-in-depth).
 pub(crate) const WRAPS_BODY_LIMIT: usize = 8 * 1024 * 1024;
@@ -48,10 +52,37 @@ pub(crate) async fn install_wrap(
     let (raw_name, bytes) = read_file_upload(multipart, "file", WRAPS_MAX_BYTES).await?;
     let name = sanitise_filename(&raw_name)?;
     check_extension(&name, &["png"])?;
+    validate_wrap_filename(&name)?;
     validate_png_magic(&bytes)?;
     validate_wrap_dimensions(&bytes)?;
 
     let rel_path = format!("{WRAPS_DIR}/{name}");
+
+    // Capacity: at most WRAPS_MAX_FILES wraps total. An exact re-upload of the
+    // same destination path is a replace (net count unchanged) and is permitted
+    // even at capacity; a new path at capacity is rejected before any gadgetd
+    // handoff. The dedupe identity is the full destination `rel_path`, not the
+    // bare file name: `list_wraps` returns every row under `Wraps/%` (including
+    // any nested `Wraps/sub/<name>`), so matching on name alone could let a
+    // root-level upload masquerade as a replace of a same-named nested file and
+    // bypass the cap. The comparison is exact (case-sensitive) to match the
+    // case-sensitive p2 store, so a differently-cased path is a distinct file.
+    // The catalog count trails an in-flight install by one index pass; the
+    // resulting TOCTOU under truly concurrent distinct uploads is accepted (a
+    // single-operator appliance that installs one file at a time).
+    let existing =
+        crate::route::read(state.catalog.clone(), crate::query::list_wraps).await?;
+    let is_replace = existing.iter().any(|item| item.rel_path == rel_path);
+    if !is_replace && existing.len() >= WRAPS_MAX_FILES {
+        return Err(ApiError::status(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "wraps_full",
+            format!(
+                "Wraps folder already holds the maximum of {WRAPS_MAX_FILES} images; delete one before uploading another"
+            ),
+        ));
+    }
+
     crate::route::run_install(state, "wrap_install", PARTITION_MEDIA, rel_path, bytes).await
 }
 

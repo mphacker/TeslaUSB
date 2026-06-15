@@ -1690,6 +1690,26 @@ fn multipart_body_with_filename(filename: &str, parts: &[(&str, &[u8])]) -> Vec<
     body
 }
 
+fn multipart_body_with_content_type(
+    filename: &str,
+    content_type: &str,
+    parts: &[(&str, &[u8])],
+) -> Vec<u8> {
+    let mut body = Vec::new();
+    for (name, content) in parts {
+        body.extend_from_slice(format!("--{BOUNDARY}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!("Content-Disposition: form-data; name=\"{name}\"; filename=\"{filename}\"\r\n")
+                .as_bytes(),
+        );
+        body.extend_from_slice(format!("Content-Type: {content_type}\r\n\r\n").as_bytes());
+        body.extend_from_slice(content);
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
+    body
+}
+
 /// POST a multipart body to `/api/boombox` and return `(status, parsed-json)`.
 async fn post_boombox(app: &Router, body: Vec<u8>) -> (StatusCode, Value) {
     let resp = app
@@ -1713,6 +1733,40 @@ async fn post_boombox(app: &Router, body: Vec<u8>) -> (StatusCode, Value) {
         .unwrap();
     let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     (status, value)
+}
+
+async fn post_wraps(app: &Router, body: Vec<u8>) -> (StatusCode, Value) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/wraps")
+                .header(
+                    axum::http::header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={BOUNDARY}"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, value)
+}
+
+fn valid_wrap_png(w: u32, h: u32) -> Vec<u8> {
+    let mut data = b"\x89PNG\r\n\x1a\n".to_vec();
+    data.extend_from_slice(&13u32.to_be_bytes());
+    data.extend_from_slice(b"IHDR");
+    data.extend_from_slice(&w.to_be_bytes());
+    data.extend_from_slice(&h.to_be_bytes());
+    data.extend_from_slice(&[8, 6, 0, 0, 0]);
+    data
 }
 
 /// POST a multipart body and return `(status, parsed-json)`.
@@ -2148,6 +2202,46 @@ fn boombox_fixture(reply: Reply, rows: &[(&str, &str, &str, i64)]) -> BoomboxFix
     }
 }
 
+struct WrapsFixture {
+    _dir: TempDir,
+    app: Router,
+    last: Arc<Mutex<Option<Value>>>,
+}
+
+fn wraps_fixture(reply: Reply, rows: &[(&str, &str, &str, i64)]) -> WrapsFixture {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("catalog.db");
+    {
+        let mut conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        indexd::db::apply_migrations(&mut conn).unwrap();
+        seed_media_rows(&conn, rows);
+    }
+
+    let static_dir = dir.path().join("static");
+    std::fs::create_dir_all(&static_dir).unwrap();
+    std::fs::write(static_dir.join("index.html"), "<!doctype html>shell").unwrap();
+
+    let catalog = Catalog::open(&db_path).unwrap();
+    let archive_dir = dir.path().join("archive");
+    let cache_dir = dir.path().join("cache");
+    std::fs::create_dir_all(&archive_dir).unwrap();
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    let media = MediaConfig::new(archive_dir, cache_dir);
+    let last = Arc::new(Mutex::new(None));
+    let gadget: Arc<dyn GadgetClient> = Arc::new(MockGadget {
+        reply,
+        last: Arc::clone(&last),
+    });
+    let app = router_with_gadget(catalog, static_dir, media, gadget);
+
+    WrapsFixture {
+        _dir: dir,
+        app,
+        last,
+    }
+}
+
 /// Helper: open a pre-v2 DB (`schema_version=1`, no `media_entries` table).
 fn open_v1_catalog(dir: &TempDir) -> (std::path::PathBuf, Router) {
     let db_path = dir.path().join("v1_catalog.db");
@@ -2314,6 +2408,147 @@ async fn boombox_upload_rejected_when_too_large() {
 
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(body["error"]["code"], "file_too_large");
+    assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");
+}
+
+#[tokio::test]
+async fn wraps_upload_rejected_when_full() {
+    let fx = wraps_fixture(
+        Reply::Json(json!({ "state": "queued", "job_id": "m-1" })),
+        &[
+            ("slot1", "Wraps/w01.png", "w01.png", 1),
+            ("slot1", "Wraps/w02.png", "w02.png", 1),
+            ("slot1", "Wraps/w03.png", "w03.png", 1),
+            ("slot1", "Wraps/w04.png", "w04.png", 1),
+            ("slot1", "Wraps/w05.png", "w05.png", 1),
+            ("slot1", "Wraps/w06.png", "w06.png", 1),
+            ("slot1", "Wraps/w07.png", "w07.png", 1),
+            ("slot1", "Wraps/w08.png", "w08.png", 1),
+            ("slot1", "Wraps/w09.png", "w09.png", 1),
+            ("slot1", "Wraps/w10.png", "w10.png", 1),
+        ],
+    );
+    let body = multipart_body_with_content_type(
+        "w11.png",
+        "image/png",
+        &[("file", &valid_wrap_png(512, 512))],
+    );
+
+    let (status, body) = post_wraps(&fx.app, body).await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["code"], "wraps_full");
+    assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");
+}
+
+#[tokio::test]
+async fn wraps_replace_allowed_when_full() {
+    let fx = wraps_fixture(
+        Reply::Json(json!({ "state": "queued", "job_id": "m-1" })),
+        &[
+            ("slot1", "Wraps/w01.png", "w01.png", 1),
+            ("slot1", "Wraps/w02.png", "w02.png", 1),
+            ("slot1", "Wraps/w03.png", "w03.png", 1),
+            ("slot1", "Wraps/w04.png", "w04.png", 1),
+            ("slot1", "Wraps/w05.png", "w05.png", 1),
+            ("slot1", "Wraps/w06.png", "w06.png", 1),
+            ("slot1", "Wraps/w07.png", "w07.png", 1),
+            ("slot1", "Wraps/w08.png", "w08.png", 1),
+            ("slot1", "Wraps/w09.png", "w09.png", 1),
+            ("slot1", "Wraps/w10.png", "w10.png", 1),
+        ],
+    );
+    let body = multipart_body_with_content_type(
+        "w05.png",
+        "image/png",
+        &[("file", &valid_wrap_png(512, 512))],
+    );
+
+    let (status, body) = post_wraps(&fx.app, body).await;
+
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(body["state"], "queued");
+    assert!(fx.last.lock().unwrap().is_some(), "gadgetd contacted");
+}
+
+#[tokio::test]
+async fn wraps_under_cap_reaches_gadgetd() {
+    let fx = wraps_fixture(
+        Reply::Json(json!({ "state": "queued", "job_id": "m-1" })),
+        &[
+            ("slot1", "Wraps/w01.png", "w01.png", 1),
+            ("slot1", "Wraps/w02.png", "w02.png", 1),
+            ("slot1", "Wraps/w03.png", "w03.png", 1),
+            ("slot1", "Wraps/w04.png", "w04.png", 1),
+            ("slot1", "Wraps/w05.png", "w05.png", 1),
+            ("slot1", "Wraps/w06.png", "w06.png", 1),
+            ("slot1", "Wraps/w07.png", "w07.png", 1),
+            ("slot1", "Wraps/w08.png", "w08.png", 1),
+            ("slot1", "Wraps/w09.png", "w09.png", 1),
+        ],
+    );
+    let body = multipart_body_with_content_type(
+        "w10.png",
+        "image/png",
+        &[("file", &valid_wrap_png(512, 512))],
+    );
+
+    let (status, body) = post_wraps(&fx.app, body).await;
+
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(body["state"], "queued");
+    assert!(fx.last.lock().unwrap().is_some(), "gadgetd contacted");
+}
+
+#[tokio::test]
+async fn wraps_nested_same_name_is_not_a_replace_at_capacity() {
+    // A nested `Wraps/old/w10.png` shares the bare name `w10.png` with the
+    // incoming root-level upload but is a DISTINCT destination path. At capacity
+    // it must NOT be treated as a replace (which would bypass the cap).
+    let fx = wraps_fixture(
+        Reply::Json(json!({ "state": "queued", "job_id": "m-1" })),
+        &[
+            ("slot1", "Wraps/w01.png", "w01.png", 1),
+            ("slot1", "Wraps/w02.png", "w02.png", 1),
+            ("slot1", "Wraps/w03.png", "w03.png", 1),
+            ("slot1", "Wraps/w04.png", "w04.png", 1),
+            ("slot1", "Wraps/w05.png", "w05.png", 1),
+            ("slot1", "Wraps/w06.png", "w06.png", 1),
+            ("slot1", "Wraps/w07.png", "w07.png", 1),
+            ("slot1", "Wraps/w08.png", "w08.png", 1),
+            ("slot1", "Wraps/w09.png", "w09.png", 1),
+            ("slot1", "Wraps/old/w10.png", "w10.png", 1),
+        ],
+    );
+    let body = multipart_body_with_content_type(
+        "w10.png",
+        "image/png",
+        &[("file", &valid_wrap_png(512, 512))],
+    );
+
+    let (status, body) = post_wraps(&fx.app, body).await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["code"], "wraps_full");
+    assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");
+}
+
+#[tokio::test]
+async fn wraps_upload_rejected_bad_name() {
+    let fx = wraps_fixture(
+        Reply::Json(json!({ "state": "queued", "job_id": "m-1" })),
+        &[],
+    );
+    let body = multipart_body_with_content_type(
+        "bad!name.png",
+        "image/png",
+        &[("file", &valid_wrap_png(512, 512))],
+    );
+
+    let (status, body) = post_wraps(&fx.app, body).await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["code"], "invalid_filename");
     assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");
 }
 

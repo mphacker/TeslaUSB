@@ -322,6 +322,34 @@ pub(crate) fn validate_plate_filename(name: &str) -> Result<(), ApiError> {
     ))
 }
 
+/// Validate a wrap base filename against v1's rule: at most 32 characters,
+/// ASCII letters, digits, spaces, hyphens, and underscores only. The `.png`
+/// extension is excluded from the count and check — pass the already-
+/// `sanitise_filename`d name; this strips a single trailing `.png`/`.PNG`
+/// before validating.
+///
+/// Returns `Err(422 invalid_filename)` otherwise.
+pub(crate) fn validate_wrap_filename(name: &str) -> Result<(), ApiError> {
+    let stem = name
+        .strip_suffix(".png")
+        .or_else(|| name.strip_suffix(".PNG"))
+        .unwrap_or(name);
+    let ok = !stem.is_empty()
+        && stem.chars().count() <= 32
+        && stem
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == ' ' || c == '-' || c == '_');
+    if ok {
+        return Ok(());
+    }
+    Err(ApiError::status(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "invalid_filename",
+        "wrap name must be 1-32 letters, digits, spaces, hyphens, or underscores (excluding the .png extension)"
+            .to_owned(),
+    ))
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -460,6 +488,20 @@ mod tests {
         assert!(super::validate_plate_filename("my_plate.png").is_err());
         assert!(super::validate_plate_filename("my plate.png").is_err());
         assert!(super::validate_plate_filename(".png").is_err());
+    }
+
+    #[test]
+    fn wrap_filename_enforces_v1_rule() {
+        super::validate_wrap_filename("cool wrap.png").unwrap();
+        super::validate_wrap_filename("plate1").unwrap();
+        super::validate_wrap_filename("my-plate.png").unwrap();
+        super::validate_wrap_filename("my_plate.png").unwrap();
+        super::validate_wrap_filename(&("a".repeat(32) + ".png")).unwrap();
+
+        assert!(super::validate_wrap_filename(&("a".repeat(33) + ".png")).is_err());
+        assert!(super::validate_wrap_filename("bad!name.png").is_err());
+        assert!(super::validate_wrap_filename(".png").is_err());
+        assert!(super::validate_wrap_filename("café.png").is_err());
     }
 
     #[test]

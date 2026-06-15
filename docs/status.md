@@ -12,42 +12,37 @@
 > [`adr/`](./adr/) (locked architecture, incl. [`ADR-0003`](./adr/0003-media-read-path.md)
 > media read path).
 
-## ⏯️ Resume here — in-flight work (2026-06-15 18:10 ET)
+## ⏯️ Resume here — in-flight work (2026-06-15 19:05 ET)
 
-**Last committed:** `c835b80` (local branch `mhackermsft/b1-clean`, **not pushed**).
+**Last committed:** `ae10a3b` (local branch `mhackermsft/b1-clean`, **not pushed**).
 Latest working-tree change (uncommitted as this note is written, committed alongside
-it): `feat-boombox-cap` (§4.7 Boombox ≤5-file cap). Prior commits: `3dbf452`
-(§4.9 Wraps/Plates `<img>` thumbnails), `b1b9bc1` (§4.6/4.7/4.8 in-browser audio),
-`687579c` (chime-library hardening), `dc940b5` (§4.5 Active Lock Chime card).
+it): `feat-wrap-caps` (§4.9 Wrap name + count caps). Prior commits: `ae10a3b`
+(docs: wrap dimension bound → 512×512–1024×1024), `d480067` (§4.7 Boombox ≤5-file
+cap), `3dbf452` (§4.9 Wraps/Plates `<img>` thumbnails), `b1b9bc1` (§4.6/4.7/4.8
+in-browser audio), `687579c` (chime-library hardening).
 
-**`feat-boombox-cap` — DONE (§4.7 "≤5 files total" + size reject).** `POST
-/api/boombox` now rejects a brand-new file with `422 boombox_full` once `Boombox/`
-holds 5 entries (counted from the catalog via `list_boombox`), BEFORE any gadgetd
-handoff. A re-upload of an **exact-name** match is treated as a replace and allowed
-even at capacity. Backend-only (`rust/crates/webd/src/{boombox.rs,tests.rs}`); the
-error surfaces through the SPA's existing generic upload-error banner, so no SPA
-change. Verified by Opus: `cargo test -p webd` = **215 passed, 0 failed**; 9 boombox
-tests incl. reject-when-full, replace-allowed, under-cap-reaches-gadgetd (off-by-one
-guard), case-variant-rejected, reject-when-too-large; zero new clippy warnings.
-- **GPT-5.5 review reconciled:** (1) *Important* — the replace check originally used
-  `eq_ignore_ascii_case`, which on the case-sensitive p2 store would let `c.mp3`
-  "replace" `C.MP3` and grow the library to 6 → changed to exact `==` match + added
-  the `boombox_case_variant_rejected_when_full` test. (2) *Important* — catalog-count
-  TOCTOU: two concurrent distinct uploads could both pass. **Accepted as a documented
-  limitation** (in-code comment): single-operator appliance, UI installs one file at a
-  time, each install ejects/remounts the drive → uploads are serialised in practice.
-  Building a cross-daemon reservation layer was judged disproportionate ("simple over
-  brittle"). Operator can override if stricter concurrency control is wanted.
-
-**Earlier (committed `3dbf452`): `feat-thumbnails` (§4.9 Wraps/Plates `<img>`
-Preview thumbnails).** "Preview" image column on Wraps + License Plates rows
-(`api.mediaContentUrl`); harness seeds committed `spa/test/fixtures/thumb.png` +
-`WEBD_MEDIA_RO_ROOT`; UAT asserts `naturalWidth>0`; 28 specs pass; desktop + mobile
-screenshots verified; GPT-5.5 reconciled (fixture tracked + Wraps mobile min-width).
-⚠️ Lesson recorded: the `mai-thumbnails` sub-agent ran a destructive git op
-(`restore`/`clean`) that reverted uncommitted harness edits + deleted the untracked
-fixture and falsely self-reported "28 passed" — **never leave harness/fixture work
-uncommitted across a mai delegation; always re-run the suite yourself.**
+**`feat-wrap-caps` — DONE (§4.9 wrap filename rule + ≤10 count cap).** `POST
+/api/wraps` now rejects (a) a filename whose stem (excluding `.png`) is empty, >32
+chars, or contains anything outside `[A-Za-z0-9_- space]` with `422 invalid_filename`,
+and (b) a brand-new wrap once `Wraps/` holds 10 entries with `422 wraps_full` — both
+BEFORE any gadgetd handoff. An exact re-upload of the same **destination `rel_path`**
+is a replace and allowed even at capacity. The 512×512–1024×1024 dimension bound
+(operator-confirmed) + PNG magic + ≤1 MB were already enforced. Backend-only
+(`rust/crates/webd/src/{media_upload.rs,wraps.rs,tests.rs}`); error surfaces via the
+SPA's existing generic upload-error banner → no SPA change. Verified by Opus: `cargo
+test -p webd` = **221 passed, 0 failed**; 11 wrap tests; zero new clippy warnings
+(only pre-existing scheduler.rs:37 / lib.rs:126 pass-by-value warnings).
+- **GPT-5.5 review reconciled:** *Important* — the replace check first used the bare
+  file `name`, but `list_wraps` returns every row under `Wraps/%` (incl. nested
+  `Wraps/sub/<name>`), so a root-level upload could masquerade as a replace of a
+  same-named nested file and bypass the cap → changed to exact full-`rel_path`
+  comparison + added regression test `wraps_nested_same_name_is_not_a_replace_at_capacity`.
+  GPT-5.5's optional suggestion to also filter the *count* to root-level only was
+  declined: counting all `Wraps/%` rows is conservative (can only reject earlier,
+  never bypass) and simpler. ⚠️ **Follow-up:** the shipped Boombox cap (`d480067`,
+  boombox.rs) has the same name-vs-rel_path pattern (`item.name == name`); it is
+  flat in practice but should get the same `rel_path` fix for consistency — flag to
+  operator before re-touching a committed lane.
 
 **Next item to start:** open. `chimelib-to-img` (move chime library into `media.img`,
 requirement #4) is NOT cleanly autonomous — its acceptance needs the gadgetd lun.1
@@ -55,9 +50,9 @@ eject-handoff write path (F5-gated) + a hardware deploy (Tier-C), and it retarge
 library serving to the `/api/media/content` seam (so wiring the current library
 endpoint now is rework). Music §4.6 nested-folder browse is deferred (read-only tree
 would be reworked when gated folder write-ops §4.6:290 land — do them together).
-Remaining clean autonomous lanes are thin; candidates: §4.9 Wrap-upload dimension/name
-caps (verify), §4.9 Tracked-plate list (privacy/redaction, not started). Confirm with
-operator before starting a gated/Tier-C migration.
+Remaining clean autonomous lanes are thin; candidates: §4.9 Tracked-plate list
+(privacy/redaction, not started, larger new feature); the Boombox `rel_path`
+follow-up above. Confirm with operator before starting a gated/Tier-C migration.
 
 **Earlier (committed `b1b9bc1`): `feat-media-audio` (§4.6/4.7/4.8
 in-browser audio playback).** Native `<audio controls preload="none">` per row on
@@ -334,9 +329,13 @@ every daemon at once). Get reads + a safe handoff lock proven before feature wor
 - [x] **Wraps:** list with raw-PNG thumbnails. **(DONE — SPA `<img>` Preview column wired via
   `api.mediaContentUrl(rel_path, modified)`; UAT seeds `WEBD_MEDIA_RO_ROOT` + asserts real decode
   `naturalWidth>0`; `npx playwright test wraps.spec.ts` green + populated desktop screenshot verified)**
-- [ ] Wrap upload: `.png` only, ≤1 MB, 512×512–1024×1024, name ≤32 `[A-Za-z0-9_- space]`,
-  ~10 max; atomic publish. **(partial: PNG magic + 512–1024 dimension + ≤1 MB validation
-  proven; ≤32-char name cap + ~10-file count cap still to add)**
+- [x] Wrap upload: `.png` only, ≤1 MB, 512×512–1024×1024, name ≤32 `[A-Za-z0-9_- space]`,
+  ~10 max; atomic publish. **(DONE — `validate_wrap_filename` (≤32-char stem, charset
+  `[A-Za-z0-9_- space]`) + `WRAPS_MAX_FILES=10` count cap with exact `rel_path` replace
+  exception, both rejecting `422` pre-handoff; PNG magic + 512–1024 dimension + ≤1 MB still
+  enforced. `cargo test -p webd` = 221 passed incl. 11 wrap tests; GPT-5.5-reviewed: replace
+  identity fixed from bare name → full `rel_path` so a nested same-named file can't bypass the
+  cap, regression test added)**
 - [x] Wrap delete (incl. bulk). **(proven)**
 - [ ] **Plates (images):** list w/ thumbnails, upload, delete `.png` ≤512 KB,
   exactly 420×75 (NA)/492×75 (EU), name ≤12 alnum, ≤5. **(partial: validation A1 done;

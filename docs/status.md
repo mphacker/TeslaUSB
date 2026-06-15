@@ -12,44 +12,41 @@
 > [`adr/`](./adr/) (locked architecture, incl. [`ADR-0003`](./adr/0003-media-read-path.md)
 > media read path).
 
-## ⏯️ Resume here — in-flight work (2026-06-15 16:30 ET)
+## ⏯️ Resume here — in-flight work (2026-06-15 16:45 ET)
 
-**Last committed:** `b1b9bc1` (local branch `mhackermsft/b1-clean`, **not pushed**)
-— `feat-media-audio` (§4.6/4.7/4.8 in-browser audio playback). Prior commits:
-`687579c` (chime-library hardening: 413→404 + capped read), `dc940b5` (§4.5
-Active Lock Chime card).
+**Last committed:** `3dbf452` (local branch `mhackermsft/b1-clean`, **not pushed**)
+— `feat-thumbnails` (§4.9 Wraps/Plates `<img>` Preview thumbnails). Prior commits:
+`b1b9bc1` (§4.6/4.7/4.8 in-browser audio), `687579c` (chime-library hardening),
+`dc940b5` (§4.5 Active Lock Chime card).
 
-**In flight (UNCOMMITTED): `feat-thumbnails` (§4.9 Wraps/Plates `<img>` Preview
-thumbnails) — DONE & verified, awaiting GPT-5.5 review before commit.** Added a
-"Preview" image column to Wraps + License Plates rows; `<img class="media-thumb"
-loading="lazy">` src built by the existing `api.mediaContentUrl(rel_path, modified)`
-helper (real bytes streamed by `GET /api/media/content` from the read-only MEDIA
-mount). Fixed-layout column widths rebalanced (Wraps: dropped unused
-`.wraps-dimensions-col`, kept preview18/filename27/size12/actions28; Plates inline
-widths → preview18/filename34/size16/actions26); empty-state `colSpan` 3→4.
-- **Harness (Opus-owned `global-setup.ts`):** new `populateMediaRoot()` seeds the
-  committed `spa/test/fixtures/thumb.png` (96×96 PNG, 18420 B) to
-  `<media-ro>/Wraps/UAT-Wrap.png` + `<media-ro>/LicensePlate/UAT-Plate.png`, and
-  passes `WEBD_MEDIA_RO_ROOT` to the spawned webd.
-- **UAT:** new mocked-list test per screen asserts `<img>` count, src regex, and
-  **`naturalWidth>0`** (honest real-decode proof, since image bytes load for real).
-- **Verified:** tsc clean; `npx playwright test wraps.spec.ts license-plates.spec.ts`
-  = **28 passed** (incl. existing clean/read-only tests); populated desktop-1280
-  screenshots of BOTH screens visually confirmed (real gradient thumbnails, clean
-  headers, no column overlap).
-- **⚠️ Incident:** the `mai-thumbnails` sub-agent ran a destructive git operation
-  that reverted the uncommitted `global-setup.ts` harness edits AND deleted the
-  untracked `thumb.png` fixture, causing `naturalWidth=0` (404/503). Opus
-  regenerated the fixture + re-applied the harness edits to recover. mai's
-  "28 passed" self-report was false — caught by Opus re-running the suite.
-- Files (to commit): `spa/test/fixtures/thumb.png` (NEW), `spa/test/uat/global-setup.ts`,
-  `spa/src/screens/{Wraps,LicensePlates}.tsx`, `spa/src/styles/{wraps,license-plates}.css`,
-  `spa/test/uat/{wraps,license-plates}.spec.ts`, `docs/status.md`.
+**`feat-thumbnails` — DONE & committed (`3dbf452`).** "Preview" image column added
+to Wraps + License Plates rows; `<img class="media-thumb" loading="lazy">` src built
+by `api.mediaContentUrl(rel_path, modified)` (real bytes streamed by `GET
+/api/media/content` from the read-only MEDIA mount). Fixed-layout widths rebalanced
+(Wraps dropped unused `.wraps-dimensions-col`; Plates inline widths
+preview18/filename34/size16/actions26); empty-state `colSpan` 3→4. Harness
+(`global-setup.ts`) seeds committed `spa/test/fixtures/thumb.png` (96×96, 18420 B)
+into `<media-ro>/{Wraps/UAT-Wrap.png,LicensePlate/UAT-Plate.png}` + passes
+`WEBD_MEDIA_RO_ROOT`. UAT asserts `<img>` src + **`naturalWidth>0`** (real-decode
+proof). Verified: tsc clean; `wraps + license-plates` specs = **28 passed**;
+desktop-1280 AND mobile-375 populated screenshots visually confirmed.
+- **GPT-5.5 review reconciled:** (1) `thumb.png` must be tracked or CI fails →
+  committed it (`A` in `3dbf452`). (2) Wraps lacked a mobile `min-width` (the 64px
+  thumbnail could overflow the 18% column at 375px) → added
+  `@media (max-width:768px){ .wraps-table{min-width:620px} }` matching the Plates
+  convention; mobile-375 screenshot re-verified clean (horizontal scroll, full-size
+  thumbnails, no overlap).
+- **⚠️ Incident (resolved):** the `mai-thumbnails` sub-agent ran a destructive git
+  op that reverted the uncommitted `global-setup.ts` harness edits AND deleted the
+  untracked `thumb.png`, causing `naturalWidth=0`. mai's "28 passed" self-report was
+  false — caught by Opus re-running the suite. Opus regenerated the fixture +
+  re-applied the harness edits to recover. **Lesson: never leave harness/fixture work
+  uncommitted across a mai delegation; mai may run `git restore`/`git clean`.**
 
 **Next item to start:** `chimelib-to-img` (move chime library into `media.img` per
 requirement #4, gated:F3 — unblocks the §4.5 library play/set-active boxes).
 
-**Just done (committed `b1b9bc1`): `feat-media-audio` (§4.6/4.7/4.8
+**Earlier (committed `b1b9bc1`): `feat-media-audio` (§4.6/4.7/4.8
 in-browser audio playback).** Native `<audio controls preload="none">` per row on
 Music / Boombox / Light Shows, sourced from `GET /api/media/content?path=<rel>&v=<mtime>`
 via a new `api.mediaContentUrl(path, version)` helper (and `activeChimeAudioUrl`

@@ -26,6 +26,11 @@ const BOOMBOX_DIR: &str = "Boombox";
 /// Maximum accepted boombox file size (1 MiB — these are short audio clips).
 const BOOMBOX_MAX_BYTES: usize = 1024 * 1024;
 
+/// Tesla loads the first 5 boombox sounds alphabetically; reject uploads that
+/// would grow the library beyond this. Re-uploading an existing name (a
+/// replace) is always allowed because it does not increase the total.
+const BOOMBOX_MAX_FILES: usize = 5;
+
 /// Axum `DefaultBodyLimit` for the POST route (8 MiB — defence-in-depth above
 /// the 1 MiB logical cap, matching the chimes pattern).
 pub(crate) const BOOMBOX_BODY_LIMIT: usize = 8 * 1024 * 1024;
@@ -59,6 +64,33 @@ pub(crate) async fn install_boombox(
         crate::chimes::validate_lock_chime_wav(&bytes).map_err(|msg| {
             ApiError::status(StatusCode::UNPROCESSABLE_ENTITY, "invalid_wav", msg)
         })?;
+    }
+
+    // Capacity: at most BOOMBOX_MAX_FILES sounds total. A re-upload of an
+    // existing name is a replace (net count unchanged), so it is permitted
+    // even at capacity; a brand-new name at capacity is rejected before any
+    // gadgetd handoff. The name comparison is exact (case-sensitive) to match
+    // how p2 stores and addresses files (see `BOOMBOX_DIR` note above): a
+    // differently-cased name (`c.mp3` vs `C.MP3`) is a distinct file, so
+    // treating it as a replace would let the library grow past the cap.
+    //
+    // The count is read from the catalog, which trails an in-flight install by
+    // one index pass; two genuinely concurrent uploads of distinct new names
+    // could therefore both pass this check. That race is accepted: this is a
+    // single-operator appliance whose UI installs one file at a time and each
+    // install briefly ejects the USB drive, so uploads are effectively
+    // serialised in practice.
+    let existing =
+        crate::route::read(state.catalog.clone(), crate::query::list_boombox).await?;
+    let is_replace = existing.iter().any(|item| item.name == name);
+    if !is_replace && existing.len() >= BOOMBOX_MAX_FILES {
+        return Err(ApiError::status(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "boombox_full",
+            format!(
+                "Boombox already holds the maximum of {BOOMBOX_MAX_FILES} sounds; delete one before uploading another"
+            ),
+        ));
     }
 
     let rel_path = format!("{BOOMBOX_DIR}/{name}");

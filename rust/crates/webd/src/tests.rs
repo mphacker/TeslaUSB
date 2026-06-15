@@ -1671,11 +1671,15 @@ const BOUNDARY: &str = "X-TESLAUSB-BOUNDARY";
 
 /// Build a `multipart/form-data` body from `(field-name, content)` parts.
 fn multipart_body(parts: &[(&str, &[u8])]) -> Vec<u8> {
+    multipart_body_with_filename("chime.wav", parts)
+}
+
+fn multipart_body_with_filename(filename: &str, parts: &[(&str, &[u8])]) -> Vec<u8> {
     let mut body = Vec::new();
     for (name, content) in parts {
         body.extend_from_slice(format!("--{BOUNDARY}\r\n").as_bytes());
         body.extend_from_slice(
-            format!("Content-Disposition: form-data; name=\"{name}\"; filename=\"chime.wav\"\r\n")
+            format!("Content-Disposition: form-data; name=\"{name}\"; filename=\"{filename}\"\r\n")
                 .as_bytes(),
         );
         body.extend_from_slice(b"Content-Type: audio/wav\r\n\r\n");
@@ -1684,6 +1688,31 @@ fn multipart_body(parts: &[(&str, &[u8])]) -> Vec<u8> {
     }
     body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
     body
+}
+
+/// POST a multipart body to `/api/boombox` and return `(status, parsed-json)`.
+async fn post_boombox(app: &Router, body: Vec<u8>) -> (StatusCode, Value) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/boombox")
+                .header(
+                    axum::http::header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={BOUNDARY}"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, value)
 }
 
 /// POST a multipart body and return `(status, parsed-json)`.
@@ -2079,6 +2108,46 @@ fn seed_media_rows(conn: &Connection, rows: &[(&str, &str, &str, i64)]) {
     }
 }
 
+struct BoomboxFixture {
+    _dir: TempDir,
+    app: Router,
+    last: Arc<Mutex<Option<Value>>>,
+}
+
+fn boombox_fixture(reply: Reply, rows: &[(&str, &str, &str, i64)]) -> BoomboxFixture {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("catalog.db");
+    {
+        let mut conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        indexd::db::apply_migrations(&mut conn).unwrap();
+        seed_media_rows(&conn, rows);
+    }
+
+    let static_dir = dir.path().join("static");
+    std::fs::create_dir_all(&static_dir).unwrap();
+    std::fs::write(static_dir.join("index.html"), "<!doctype html>shell").unwrap();
+
+    let catalog = Catalog::open(&db_path).unwrap();
+    let archive_dir = dir.path().join("archive");
+    let cache_dir = dir.path().join("cache");
+    std::fs::create_dir_all(&archive_dir).unwrap();
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    let media = MediaConfig::new(archive_dir, cache_dir);
+    let last = Arc::new(Mutex::new(None));
+    let gadget: Arc<dyn GadgetClient> = Arc::new(MockGadget {
+        reply,
+        last: Arc::clone(&last),
+    });
+    let app = router_with_gadget(catalog, static_dir, media, gadget);
+
+    BoomboxFixture {
+        _dir: dir,
+        app,
+        last,
+    }
+}
+
 /// Helper: open a pre-v2 DB (`schema_version=1`, no `media_entries` table).
 fn open_v1_catalog(dir: &TempDir) -> (std::path::PathBuf, Router) {
     let db_path = dir.path().join("v1_catalog.db");
@@ -2134,6 +2203,118 @@ async fn get_boombox_degrades_on_v1_catalog() {
     let (status, body) = get_json(&app, "/api/boombox").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["items"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn boombox_upload_rejected_when_full() {
+    let fx = boombox_fixture(
+        Reply::Json(json!({ "state": "queued", "job_id": "m-1" })),
+        &[
+            ("slot1", "Boombox/a.wav", "a.wav", 1),
+            ("slot1", "Boombox/b.wav", "b.wav", 1),
+            ("slot1", "Boombox/c.mp3", "c.mp3", 1),
+            ("slot1", "Boombox/d.mp3", "d.mp3", 1),
+            ("slot1", "Boombox/e.mp3", "e.mp3", 1),
+        ],
+    );
+    let (status, body) = post_boombox(
+        &fx.app,
+        multipart_body_with_filename("f.mp3", &[("file", b"ID3\x03\x00\x00\x00\x00\x00\x00fakeaudio")]),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["code"], "boombox_full");
+    assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");
+}
+
+#[tokio::test]
+async fn boombox_replace_allowed_when_full() {
+    let fx = boombox_fixture(
+        Reply::Json(json!({ "state": "queued", "job_id": "m-1" })),
+        &[
+            ("slot1", "Boombox/a.wav", "a.wav", 1),
+            ("slot1", "Boombox/b.wav", "b.wav", 1),
+            ("slot1", "Boombox/c.mp3", "c.mp3", 1),
+            ("slot1", "Boombox/d.mp3", "d.mp3", 1),
+            ("slot1", "Boombox/e.mp3", "e.mp3", 1),
+        ],
+    );
+    let (status, body) = post_boombox(
+        &fx.app,
+        multipart_body_with_filename("c.mp3", &[("file", b"ID3\x03\x00\x00\x00\x00\x00\x00replace")]),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(body["state"], "queued");
+    assert!(fx.last.lock().unwrap().is_some(), "gadgetd contacted");
+}
+
+/// A differently-cased name is a DISTINCT file on the case-sensitive p2 store,
+/// so uploading `c.mp3` while `C.MP3` already occupies one of the five slots is
+/// a sixth file, not a replace, and must be rejected before any gadgetd handoff.
+#[tokio::test]
+async fn boombox_case_variant_rejected_when_full() {
+    let fx = boombox_fixture(
+        Reply::Json(json!({ "state": "queued", "job_id": "m-1" })),
+        &[
+            ("slot1", "Boombox/a.wav", "a.wav", 1),
+            ("slot1", "Boombox/b.wav", "b.wav", 1),
+            ("slot1", "Boombox/C.MP3", "C.MP3", 1),
+            ("slot1", "Boombox/d.mp3", "d.mp3", 1),
+            ("slot1", "Boombox/e.mp3", "e.mp3", 1),
+        ],
+    );
+    let (status, body) = post_boombox(
+        &fx.app,
+        multipart_body_with_filename("c.mp3", &[("file", b"ID3\x03\x00\x00\x00\x00\x00\x00distinct")]),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["code"], "boombox_full");
+    assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");
+}
+
+#[tokio::test]
+async fn boombox_upload_under_cap_reaches_gadgetd() {
+    let fx = boombox_fixture(
+        Reply::Json(json!({ "state": "queued", "job_id": "m-1" })),
+        &[
+            ("slot1", "Boombox/a.wav", "a.wav", 1),
+            ("slot1", "Boombox/b.wav", "b.wav", 1),
+            ("slot1", "Boombox/c.mp3", "c.mp3", 1),
+            ("slot1", "Boombox/d.mp3", "d.mp3", 1),
+        ],
+    );
+    let (status, body) = post_boombox(
+        &fx.app,
+        multipart_body_with_filename("e.mp3", &[("file", b"ID3\x03\x00\x00\x00\x00\x00\x00audio")]),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(body["state"], "queued");
+    assert!(fx.last.lock().unwrap().is_some(), "gadgetd contacted");
+}
+
+#[tokio::test]
+async fn boombox_upload_rejected_when_too_large() {
+    let fx = boombox_fixture(
+        Reply::Json(json!({ "state": "queued", "job_id": "m-1" })),
+        &[],
+    );
+    let oversize = vec![0_u8; 1024 * 1024 + 1];
+    let (status, body) = post_boombox(
+        &fx.app,
+        multipart_body_with_filename("big.mp3", &[("file", &oversize)]),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["code"], "file_too_large");
+    assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");
 }
 
 #[tokio::test]

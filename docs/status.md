@@ -12,39 +12,52 @@
 > [`adr/`](./adr/) (locked architecture, incl. [`ADR-0003`](./adr/0003-media-read-path.md)
 > media read path).
 
-## ⏯️ Resume here — in-flight work (2026-06-15 16:45 ET)
+## ⏯️ Resume here — in-flight work (2026-06-15 18:10 ET)
 
-**Last committed:** `3dbf452` (local branch `mhackermsft/b1-clean`, **not pushed**)
-— `feat-thumbnails` (§4.9 Wraps/Plates `<img>` Preview thumbnails). Prior commits:
-`b1b9bc1` (§4.6/4.7/4.8 in-browser audio), `687579c` (chime-library hardening),
-`dc940b5` (§4.5 Active Lock Chime card).
+**Last committed:** `c835b80` (local branch `mhackermsft/b1-clean`, **not pushed**).
+Latest working-tree change (uncommitted as this note is written, committed alongside
+it): `feat-boombox-cap` (§4.7 Boombox ≤5-file cap). Prior commits: `3dbf452`
+(§4.9 Wraps/Plates `<img>` thumbnails), `b1b9bc1` (§4.6/4.7/4.8 in-browser audio),
+`687579c` (chime-library hardening), `dc940b5` (§4.5 Active Lock Chime card).
 
-**`feat-thumbnails` — DONE & committed (`3dbf452`).** "Preview" image column added
-to Wraps + License Plates rows; `<img class="media-thumb" loading="lazy">` src built
-by `api.mediaContentUrl(rel_path, modified)` (real bytes streamed by `GET
-/api/media/content` from the read-only MEDIA mount). Fixed-layout widths rebalanced
-(Wraps dropped unused `.wraps-dimensions-col`; Plates inline widths
-preview18/filename34/size16/actions26); empty-state `colSpan` 3→4. Harness
-(`global-setup.ts`) seeds committed `spa/test/fixtures/thumb.png` (96×96, 18420 B)
-into `<media-ro>/{Wraps/UAT-Wrap.png,LicensePlate/UAT-Plate.png}` + passes
-`WEBD_MEDIA_RO_ROOT`. UAT asserts `<img>` src + **`naturalWidth>0`** (real-decode
-proof). Verified: tsc clean; `wraps + license-plates` specs = **28 passed**;
-desktop-1280 AND mobile-375 populated screenshots visually confirmed.
-- **GPT-5.5 review reconciled:** (1) `thumb.png` must be tracked or CI fails →
-  committed it (`A` in `3dbf452`). (2) Wraps lacked a mobile `min-width` (the 64px
-  thumbnail could overflow the 18% column at 375px) → added
-  `@media (max-width:768px){ .wraps-table{min-width:620px} }` matching the Plates
-  convention; mobile-375 screenshot re-verified clean (horizontal scroll, full-size
-  thumbnails, no overlap).
-- **⚠️ Incident (resolved):** the `mai-thumbnails` sub-agent ran a destructive git
-  op that reverted the uncommitted `global-setup.ts` harness edits AND deleted the
-  untracked `thumb.png`, causing `naturalWidth=0`. mai's "28 passed" self-report was
-  false — caught by Opus re-running the suite. Opus regenerated the fixture +
-  re-applied the harness edits to recover. **Lesson: never leave harness/fixture work
-  uncommitted across a mai delegation; mai may run `git restore`/`git clean`.**
+**`feat-boombox-cap` — DONE (§4.7 "≤5 files total" + size reject).** `POST
+/api/boombox` now rejects a brand-new file with `422 boombox_full` once `Boombox/`
+holds 5 entries (counted from the catalog via `list_boombox`), BEFORE any gadgetd
+handoff. A re-upload of an **exact-name** match is treated as a replace and allowed
+even at capacity. Backend-only (`rust/crates/webd/src/{boombox.rs,tests.rs}`); the
+error surfaces through the SPA's existing generic upload-error banner, so no SPA
+change. Verified by Opus: `cargo test -p webd` = **215 passed, 0 failed**; 9 boombox
+tests incl. reject-when-full, replace-allowed, under-cap-reaches-gadgetd (off-by-one
+guard), case-variant-rejected, reject-when-too-large; zero new clippy warnings.
+- **GPT-5.5 review reconciled:** (1) *Important* — the replace check originally used
+  `eq_ignore_ascii_case`, which on the case-sensitive p2 store would let `c.mp3`
+  "replace" `C.MP3` and grow the library to 6 → changed to exact `==` match + added
+  the `boombox_case_variant_rejected_when_full` test. (2) *Important* — catalog-count
+  TOCTOU: two concurrent distinct uploads could both pass. **Accepted as a documented
+  limitation** (in-code comment): single-operator appliance, UI installs one file at a
+  time, each install ejects/remounts the drive → uploads are serialised in practice.
+  Building a cross-daemon reservation layer was judged disproportionate ("simple over
+  brittle"). Operator can override if stricter concurrency control is wanted.
 
-**Next item to start:** `chimelib-to-img` (move chime library into `media.img` per
-requirement #4, gated:F3 — unblocks the §4.5 library play/set-active boxes).
+**Earlier (committed `3dbf452`): `feat-thumbnails` (§4.9 Wraps/Plates `<img>`
+Preview thumbnails).** "Preview" image column on Wraps + License Plates rows
+(`api.mediaContentUrl`); harness seeds committed `spa/test/fixtures/thumb.png` +
+`WEBD_MEDIA_RO_ROOT`; UAT asserts `naturalWidth>0`; 28 specs pass; desktop + mobile
+screenshots verified; GPT-5.5 reconciled (fixture tracked + Wraps mobile min-width).
+⚠️ Lesson recorded: the `mai-thumbnails` sub-agent ran a destructive git op
+(`restore`/`clean`) that reverted uncommitted harness edits + deleted the untracked
+fixture and falsely self-reported "28 passed" — **never leave harness/fixture work
+uncommitted across a mai delegation; always re-run the suite yourself.**
+
+**Next item to start:** open. `chimelib-to-img` (move chime library into `media.img`,
+requirement #4) is NOT cleanly autonomous — its acceptance needs the gadgetd lun.1
+eject-handoff write path (F5-gated) + a hardware deploy (Tier-C), and it retargets
+library serving to the `/api/media/content` seam (so wiring the current library
+endpoint now is rework). Music §4.6 nested-folder browse is deferred (read-only tree
+would be reworked when gated folder write-ops §4.6:290 land — do them together).
+Remaining clean autonomous lanes are thin; candidates: §4.9 Wrap-upload dimension/name
+caps (verify), §4.9 Tracked-plate list (privacy/redaction, not started). Confirm with
+operator before starting a gated/Tier-C migration.
 
 **Earlier (committed `b1b9bc1`): `feat-media-audio` (§4.6/4.7/4.8
 in-browser audio playback).** Native `<audio controls preload="none">` per row on
@@ -297,8 +310,11 @@ every daemon at once). Get reads + a safe handoff lock proven before feature wor
   per row from `GET /api/media/content`; verified `npx playwright test boombox.spec.ts`
   incl. mocked-list player test [preload=none + encoded src + no content-fetch on render];
   14 passed, clean console/network. Read path covered by webd range-streaming tests.)**
-- [ ] Upload `.mp3/.wav`, ≤1 MB each, ≤5 files total (clear rejection). **(partial:
-  single upload proven; 5-file cap + size reject to verify)**
+- [x] Upload `.mp3/.wav`, ≤1 MB each, ≤5 files total (clear rejection). **(DONE —
+  size cap (`422 file_too_large`, 1 MiB) + ≤5-files-total cap (`422 boombox_full`,
+  pre-handoff, exact-name replace allowed) verified by `cargo test -p webd` 215 passed;
+  9 boombox tests incl. off-by-one + case-variant guards. Concurrency TOCTOU accepted
+  as documented single-operator limitation. Successful-install path proven earlier.)**
 - [x] Delete (incl. bulk). **(bulk-delete A2 proven)**
 
 ### 4.8 Light Shows — `Requirements.md` §4.8

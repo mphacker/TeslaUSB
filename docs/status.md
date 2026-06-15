@@ -366,10 +366,14 @@ LUNs) is the single make-or-break that still needs the car.**
   device's RO media mount via `/api/media/content` [206], decoded to
   `readyState=4` [HAVE_ENOUGH_DATA], duration 2.49 s, console clean — see
   `files/hw-results.md` "feature-verify". Real in-browser playback works.)**
-- [ ] Play any library chime in-browser (streamed from image via RO mount). **(playback
-  MECHANISM live-proven on hardware via the active-chime player [same `/api/media/content`
-  seam, real WAV decode `readyState=4`, 2026-06-16]; remaining gap is per-row `<audio>`
-  wiring in the library list + library content to exercise it)**
+- [x] Play any library chime in-browser. **(DONE — the chime-library table on `/media`
+  renders a native `<audio data-testid="library-audio" preload="none">` per row sourced
+  from `GET /api/chime-scheduler/library/{filename}/audio` [the file-backed library on
+  ext4 `/data/teslausb/chimes`, schedulerd-owned — NOT the media RO mount, which only
+  holds the single active `LockChime.wav`]. **LIVE-PROVEN on hardware 2026-06-16:** both
+  device library chimes [`MarioFart.wav`, `test-chime.wav`] listed from live schedulerd
+  and both `<audio>` decoded to `readyState=4` [2.49 s / 0.10 s] over `/library/.../audio`
+  [200]; per-row Download link `200`; console clean. See `files/hw-results.md` "chime library".)**
 - [ ] Upload chime(s) `.wav` (+`.mp3`→WAV), ≤1 MB & ≤5 s; added to `Chimes/`. **(partial:
   single-file install proven on hw; multi-file + mp3 transcode + 5 s/normalize to verify)**
 - [ ] Delete library chime. **(partial: delete path exists; verify against `Chimes/` in image)**

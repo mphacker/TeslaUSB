@@ -45,10 +45,13 @@ fn usage() -> String {
 }
 
 /// Default state-document path; override with `SCHEDULERD_STATE`.
+#[cfg(unix)]
 const DEFAULT_STATE_PATH: &str = "/data/teslausb/chime-schedules.json";
 /// Default chime-library directory; override with `SCHEDULERD_LIBRARY_DIR`.
+#[cfg(unix)]
 const DEFAULT_LIBRARY_DIR: &str = "/data/teslausb/chimes";
 /// Default control-socket path; override with `SCHEDULERD_SOCKET`.
+#[cfg(unix)]
 const DEFAULT_SOCKET_PATH: &str = "/run/teslausb/schedulerd.sock";
 
 /// Run the control-socket server: serves schedule/group/library state to `webd`

@@ -273,10 +273,12 @@ pub(crate) trait ImageMutator {
 
 /// Run a single handoff through the injected seams, emitting `progress` markers.
 ///
-/// `allow_hot` permits ejecting while the host is actively enumerated. It
-/// defaults OFF: the car's tolerance to a mid-use eject is unmeasured
-/// (`SPEC.md` §9 prototype-unknown #2), so a production hot handoff is refused
-/// until that is validated on the car and the operator opts in.
+/// `allow_hot` permits a P1/TeslaCam hot handoff while the host is actively
+/// enumerated. It defaults OFF: the car's tolerance to a mid-use eject on the
+/// dashcam partition is unmeasured (`SPEC.md` §9 prototype-unknown #2), so a
+/// production P1 hot handoff is refused until that is validated on the car and
+/// the operator opts in. P2/media handoffs are allowed through this gate by
+/// default because the car only reads that image.
 ///
 /// Serialization (never two concurrent handoffs) is the caller's responsibility
 /// (a `try_lock` on the handoff mutex); this function assumes exclusive access.
@@ -302,11 +304,13 @@ pub(crate) fn run_handoff(
     }
 
     // Fail safe: if we cannot read the UDC state, assume the host is connected.
+    let hot_allowed = allow_hot || partition == Partition::P2;
     let configured = lun.udc_configured().unwrap_or(true);
-    if configured && !allow_hot {
+    if configured && !hot_allowed {
         return HandoffOutcome::Refused(
-            "hot_handoff_unvalidated: host is enumerated and the car's mid-use eject \
-             tolerance is unmeasured (SPEC.md §9 #2); enable only after HW validation"
+            "hot_handoff_unvalidated: host is enumerated on the TeslaCam (P1) dashcam \
+             partition and the car's mid-use eject tolerance is unmeasured (SPEC.md §9 #2); \
+             enable only after HW validation"
                 .to_owned(),
         );
     }
@@ -660,6 +664,42 @@ mod tests {
             |_| {},
         );
         assert_eq!(out, HandoffOutcome::Done);
+    }
+
+    #[test]
+    fn allows_media_p2_handoff_when_configured_even_without_flag() {
+        let mut lun = FakeLun::ok();
+        lun.configured = true;
+        let out = run_handoff(
+            &lun,
+            &FakeGuard(false),
+            &FakeMutator::ok(),
+            &NoopGate,
+            Partition::P2,
+            &del(),
+            false,
+            |_| {},
+        );
+        assert_eq!(out, HandoffOutcome::Done);
+        assert_eq!(*lun.events.borrow(), ["eject", "represent"]);
+    }
+
+    #[test]
+    fn still_refuses_media_p2_when_save_active() {
+        let mut lun = FakeLun::ok();
+        lun.configured = true;
+        let out = run_handoff(
+            &lun,
+            &FakeGuard(true),
+            &FakeMutator::ok(),
+            &NoopGate,
+            Partition::P2,
+            &del(),
+            false,
+            |_| {},
+        );
+        assert_eq!(out, HandoffOutcome::Refused("save_active".to_owned()));
+        assert!(lun.events.borrow().is_empty());
     }
 
     #[test]

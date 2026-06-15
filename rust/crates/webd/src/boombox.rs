@@ -85,8 +85,7 @@ pub(crate) async fn install_boombox(
     // install briefly ejects the USB drive, so uploads are effectively
     // serialised in practice.
     let rel_path = format!("{BOOMBOX_DIR}/{name}");
-    let existing =
-        crate::route::read(state.catalog.clone(), crate::query::list_boombox).await?;
+    let existing = crate::route::read(state.catalog.clone(), crate::query::list_boombox).await?;
     let is_replace = existing.iter().any(|item| item.rel_path == rel_path);
     if !is_replace && existing.len() >= BOOMBOX_MAX_FILES {
         return Err(ApiError::status(

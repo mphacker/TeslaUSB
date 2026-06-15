@@ -266,7 +266,18 @@ fn install_file(mnt: &Path, rel_path: &str, source: &Path) -> io::Result<()> {
     let parent = dest
         .parent()
         .ok_or_else(|| io::Error::other("destination has no parent"))?;
-    // The destination's parent must already resolve inside the mount.
+    // A freshly-formatted media image has no category subfolders (e.g. `Chimes/`,
+    // `Wraps/`), so the destination's parent may not exist yet. `rel` is validated
+    // relative and `..`/`.`-free (`validate_rel_path`), so `mnt_canon.join(rel)`
+    // stays lexically inside the mount and `create_dir_all` only ever materialises
+    // directories under `mnt_canon`. Without this, a first-ever install into a new
+    // category fails the `canonicalize(parent)` below with ENOENT.
+    std::fs::create_dir_all(parent)?;
+    // The destination's parent must be a real directory (not a swapped-in symlink)
+    // and must resolve inside the mount (defence against a TOCTOU/symlink escape).
+    if !std::fs::symlink_metadata(parent)?.is_dir() {
+        return Err(io::Error::other("destination parent is not a directory"));
+    }
     let parent_canon = std::fs::canonicalize(parent)?;
     if !parent_canon.starts_with(&mnt_canon) {
         return Err(io::Error::other("destination escapes the mount"));
@@ -458,7 +469,7 @@ pub(crate) fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> io::Resu
 #[cfg(test)]
 #[allow(clippy::panic, clippy::expect_used, clippy::unwrap_used)]
 mod tests {
-    use super::{delete_files, run_with_timeout, unescape_mountinfo};
+    use super::{delete_files, install_file, run_with_timeout, unescape_mountinfo};
     use std::path::PathBuf;
     use std::process::Command;
     use std::time::Duration;
@@ -516,6 +527,34 @@ mod tests {
         assert!(err.to_string().contains("inconsistent state"));
         // Fail closed: the present file must NOT have been deleted.
         assert!(mnt.join(present).exists());
+        std::fs::remove_dir_all(&mnt).ok();
+    }
+
+    #[test]
+    fn install_file_creates_missing_category_parent() {
+        // Regression: a first-ever install into a new category folder (e.g.
+        // `Chimes/`) on a freshly-formatted media image must auto-create the
+        // parent rather than failing `canonicalize(parent)` with ENOENT.
+        let mnt = temp_mnt("install-mkparent");
+        let src = mnt.join("source.wav");
+        std::fs::write(&src, b"RIFFchimebytes").unwrap();
+        install_file(&mnt, "Chimes/testchime.wav", &src)
+            .expect("install auto-creates the missing Chimes/ parent");
+        let dest = mnt.join("Chimes/testchime.wav");
+        assert!(dest.is_file());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"RIFFchimebytes");
+        std::fs::remove_dir_all(&mnt).ok();
+    }
+
+    #[test]
+    fn install_file_still_rejects_traversal() {
+        // The new create_dir_all must not weaken the jail: a `..` path is refused
+        // before anything is created.
+        let mnt = temp_mnt("install-traversal");
+        let src = mnt.join("source.wav");
+        std::fs::write(&src, b"x").unwrap();
+        install_file(&mnt, "../escape.wav", &src).expect_err("traversal is refused");
+        assert!(!mnt.parent().unwrap().join("escape.wav").exists());
         std::fs::remove_dir_all(&mnt).ok();
     }
 

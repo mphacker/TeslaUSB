@@ -158,6 +158,7 @@ fn decode_exfat_timestamp(packed: u32) -> Option<String> {
 ///
 /// Categories:
 /// * Lock chime — root-level `LockChime.wav` (exact match).
+/// * Chimes — any file under `Chimes/` (library uploads, visible on the media drive).
 /// * Boombox — any file under `Boombox/` (Tesla loads the first 5
 ///   alphabetically; subdirectories are allowed by the producer but Tesla
 ///   only plays root-level names in practice).
@@ -172,6 +173,7 @@ fn decode_exfat_timestamp(packed: u32) -> Option<String> {
 /// `rel_path LIKE 'Wraps/%'` vs `rel_path LIKE 'LightShow/%'` split.
 fn is_toybox_path(path: &str) -> bool {
     path == LOCK_CHIME_REL_PATH
+        || path.starts_with("Chimes/")
         || path.starts_with("Boombox/")
         || path.starts_with("Music/")
         || path.starts_with("LightShow/")
@@ -183,8 +185,8 @@ fn is_toybox_path(path: &str) -> bool {
 ///
 /// Includes:
 /// * `LockChime.wav` at the partition root (exact match).
-/// * All files under `Boombox/`, `Music/`, `LightShow/`, `LicensePlate/`, and
-///   the root-level `Wraps/` folder.
+/// * All files under `Chimes/`, `Boombox/`, `Music/`, `LightShow/`,
+///   `LicensePlate/`, and the root-level `Wraps/` folder.
 ///
 /// Only "complete" entries are collected: both the exFAT set-checksum must
 /// pass AND `valid_data_length == data_length` must hold — a mid-install

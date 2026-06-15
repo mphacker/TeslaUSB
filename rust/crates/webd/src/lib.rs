@@ -83,8 +83,8 @@ struct AppState {
     scheduler: Arc<dyn scheduler::SchedulerClient>,
     jobs: jobs::JobHub,
     /// The `schedulerd`-owned chime library directory (`/data/teslausb/chimes`),
-    /// read **only** by the file-backed library routes in
-    /// [`crate::chime_library`]. `schedulerd` remains its sole writer.
+    /// kept for compatibility with the legacy scheduler proxy path.
+    #[allow(dead_code)]
     chime_library_dir: PathBuf,
 }
 

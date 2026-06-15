@@ -596,6 +596,23 @@ pub(crate) fn list_plates(conn: &Connection) -> Result<Vec<MediaItemDto>, rusqli
         .collect::<Result<Vec<_>, _>>()
 }
 
+/// `GET /api/chimes/library` — files under the root-level `Chimes/` folder on p2.
+pub(crate) fn list_chime_library(conn: &Connection) -> Result<Vec<MediaItemDto>, rusqlite::Error> {
+    if !media_entries_present(conn)? {
+        return Ok(vec![]);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT name, rel_path, size_bytes, modified FROM media_entries \
+         WHERE partition = 'slot1' \
+           AND rel_path LIKE 'Chimes/%' \
+           AND rel_path NOT LIKE 'Chimes/%/%' \
+           AND lower(rel_path) LIKE '%.wav' \
+         ORDER BY rel_path ASC",
+    )?;
+    stmt.query_map([], map_media_item)?
+        .collect::<Result<Vec<_>, _>>()
+}
+
 /// `GET /api/wraps` — files under the root-level `Wraps/` folder on p2.
 pub(crate) fn list_wraps(conn: &Connection) -> Result<Vec<MediaItemDto>, rusqlite::Error> {
     if !media_entries_present(conn)? {
@@ -608,4 +625,55 @@ pub(crate) fn list_wraps(conn: &Connection) -> Result<Vec<MediaItemDto>, rusqlit
     )?;
     stmt.query_map([], map_media_item)?
         .collect::<Result<Vec<_>, _>>()
+}
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::Connection;
+
+    use super::list_chime_library;
+
+    fn seed_media_rows(conn: &Connection, rows: &[(&str, &str, &str, i64)]) {
+        for (partition, rel_path, name, size_bytes) in rows {
+            conn.execute(
+                "INSERT INTO media_entries (partition, rel_path, name, size_bytes, modified, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, 0, 0)",
+                (*partition, *rel_path, *name, *size_bytes),
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn list_chime_library_returns_only_chimes_rows() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let mut conn = Connection::open(tmp.path()).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        indexd::db::apply_migrations(&mut conn).unwrap();
+        seed_media_rows(
+            &conn,
+            &[
+                ("slot1", "Chimes/a.wav", "a.wav", 10),
+                ("slot1", "Chimes/b.wav", "b.wav", 20),
+                ("slot1", "Chimes/sub/c.wav", "c.wav", 30),
+                ("slot1", "Chimes/readme.txt", "readme.txt", 40),
+                ("slot1", "LockChime.wav", "LockChime.wav", 50),
+                ("slot1", "Wraps/x.png", "x.png", 60),
+            ],
+        );
+
+        let items = list_chime_library(&conn).unwrap();
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].rel_path, "Chimes/a.wav");
+        assert_eq!(items[1].rel_path, "Chimes/b.wav");
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a.wav", "b.wav"]
+        );
+        assert!(items.iter().all(|item| item.rel_path.starts_with("Chimes/") && item.rel_path.matches('/').count() == 1));
+    }
 }

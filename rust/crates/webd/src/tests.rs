@@ -599,8 +599,13 @@ fn header<'a>(headers: &'a axum::http::HeaderMap, name: &str) -> Option<&'a str>
 #[tokio::test]
 async fn media_content_streams_full_file() {
     let (dir, app) = media_content_app(&[("Music/song.mp3", &pattern(16))], true);
-    let (status, headers, body) =
-        request(&app, Method::GET, "/api/media/content?path=Music/song.mp3", None).await;
+    let (status, headers, body) = request(
+        &app,
+        Method::GET,
+        "/api/media/content?path=Music/song.mp3",
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(header(&headers, "content-type"), Some("audio/mpeg"));
     assert_eq!(header(&headers, "content-length"), Some("16"));
@@ -630,8 +635,13 @@ async fn media_content_range_returns_206() {
 #[tokio::test]
 async fn media_content_head_has_empty_body() {
     let (dir, app) = media_content_app(&[("Music/song.mp3", &pattern(16))], true);
-    let (status, headers, body) =
-        request(&app, Method::HEAD, "/api/media/content?path=Music/song.mp3", None).await;
+    let (status, headers, body) = request(
+        &app,
+        Method::HEAD,
+        "/api/media/content?path=Music/song.mp3",
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(header(&headers, "content-length"), Some("16"));
     assert!(body.is_empty());
@@ -663,19 +673,34 @@ async fn media_content_traversal_is_404() {
     let gadget_sock = dir.path().join("gadgetd.sock");
     let app = build_router(catalog, static_dir, media, gadget_sock);
 
-    let (status, _, _) =
-        request(&app, Method::GET, "/api/media/content?path=../secret.txt", None).await;
+    let (status, _, _) = request(
+        &app,
+        Method::GET,
+        "/api/media/content?path=../secret.txt",
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    let (status, _, _) =
-        request(&app, Method::GET, "/api/media/content?path=/etc/passwd", None).await;
+    let (status, _, _) = request(
+        &app,
+        Method::GET,
+        "/api/media/content?path=/etc/passwd",
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
 async fn media_content_missing_file_is_404() {
     let (dir, app) = media_content_app(&[("Music/song.mp3", &pattern(16))], true);
-    let (status, _, _) =
-        request(&app, Method::GET, "/api/media/content?path=Music/missing.mp3", None).await;
+    let (status, _, _) = request(
+        &app,
+        Method::GET,
+        "/api/media/content?path=Music/missing.mp3",
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     let _ = dir;
 }
@@ -701,8 +726,7 @@ async fn media_content_directory_is_404() {
     // Seeding `Music/song.mp3` creates the `Music/` directory; requesting the
     // directory itself must be rejected as a non-regular file, not streamed.
     let (dir, app) = media_content_app(&[("Music/song.mp3", &pattern(16))], true);
-    let (status, _, _) =
-        request(&app, Method::GET, "/api/media/content?path=Music", None).await;
+    let (status, _, _) = request(&app, Method::GET, "/api/media/content?path=Music", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     let _ = dir;
 }
@@ -722,22 +746,54 @@ async fn media_content_absent_mount_is_503() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(header(resp.headers(), "retry-after"), Some("2"));
-    assert_eq!(header(resp.headers(), "content-type"), Some("application/json"));
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-    assert_eq!(body.as_ref(), br#"{"error":{"code":"media_unavailable","message":"media not mounted"}}"#);
+    assert_eq!(
+        header(resp.headers(), "content-type"),
+        Some("application/json")
+    );
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        body.as_ref(),
+        br#"{"error":{"code":"media_unavailable","message":"media not mounted"}}"#
+    );
     let _ = dir;
 }
 
 #[test]
 fn content_type_for_maps_extensions() {
-    assert_eq!(super::media::content_type_for(std::path::Path::new("song.wav")), "audio/wav");
-    assert_eq!(super::media::content_type_for(std::path::Path::new("song.mp3")), "audio/mpeg");
-    assert_eq!(super::media::content_type_for(std::path::Path::new("song.flac")), "audio/flac");
-    assert_eq!(super::media::content_type_for(std::path::Path::new("song.aac")), "audio/aac");
-    assert_eq!(super::media::content_type_for(std::path::Path::new("song.m4a")), "audio/mp4");
-    assert_eq!(super::media::content_type_for(std::path::Path::new("song.png")), "image/png");
-    assert_eq!(super::media::content_type_for(std::path::Path::new("song.jpg")), "image/jpeg");
-    assert_eq!(super::media::content_type_for(std::path::Path::new("song.jpeg")), "image/jpeg");
+    assert_eq!(
+        super::media::content_type_for(std::path::Path::new("song.wav")),
+        "audio/wav"
+    );
+    assert_eq!(
+        super::media::content_type_for(std::path::Path::new("song.mp3")),
+        "audio/mpeg"
+    );
+    assert_eq!(
+        super::media::content_type_for(std::path::Path::new("song.flac")),
+        "audio/flac"
+    );
+    assert_eq!(
+        super::media::content_type_for(std::path::Path::new("song.aac")),
+        "audio/aac"
+    );
+    assert_eq!(
+        super::media::content_type_for(std::path::Path::new("song.m4a")),
+        "audio/mp4"
+    );
+    assert_eq!(
+        super::media::content_type_for(std::path::Path::new("song.png")),
+        "image/png"
+    );
+    assert_eq!(
+        super::media::content_type_for(std::path::Path::new("song.jpg")),
+        "image/jpeg"
+    );
+    assert_eq!(
+        super::media::content_type_for(std::path::Path::new("song.jpeg")),
+        "image/jpeg"
+    );
     assert_eq!(
         super::media::content_type_for(std::path::Path::new("song.fseq")),
         "application/octet-stream"
@@ -746,7 +802,10 @@ fn content_type_for_maps_extensions() {
         super::media::content_type_for(std::path::Path::new("song.unknown")),
         "application/octet-stream"
     );
-    assert_eq!(super::media::content_type_for(std::path::Path::new("song")), "application/octet-stream");
+    assert_eq!(
+        super::media::content_type_for(std::path::Path::new("song")),
+        "application/octet-stream"
+    );
 }
 
 #[tokio::test]
@@ -2313,7 +2372,10 @@ async fn boombox_upload_rejected_when_full() {
     );
     let (status, body) = post_boombox(
         &fx.app,
-        multipart_body_with_filename("f.mp3", &[("file", b"ID3\x03\x00\x00\x00\x00\x00\x00fakeaudio")]),
+        multipart_body_with_filename(
+            "f.mp3",
+            &[("file", b"ID3\x03\x00\x00\x00\x00\x00\x00fakeaudio")],
+        ),
     )
     .await;
 
@@ -2336,7 +2398,10 @@ async fn boombox_replace_allowed_when_full() {
     );
     let (status, body) = post_boombox(
         &fx.app,
-        multipart_body_with_filename("c.mp3", &[("file", b"ID3\x03\x00\x00\x00\x00\x00\x00replace")]),
+        multipart_body_with_filename(
+            "c.mp3",
+            &[("file", b"ID3\x03\x00\x00\x00\x00\x00\x00replace")],
+        ),
     )
     .await;
 
@@ -2362,7 +2427,10 @@ async fn boombox_case_variant_rejected_when_full() {
     );
     let (status, body) = post_boombox(
         &fx.app,
-        multipart_body_with_filename("c.mp3", &[("file", b"ID3\x03\x00\x00\x00\x00\x00\x00distinct")]),
+        multipart_body_with_filename(
+            "c.mp3",
+            &[("file", b"ID3\x03\x00\x00\x00\x00\x00\x00distinct")],
+        ),
     )
     .await;
 
@@ -2388,7 +2456,10 @@ async fn boombox_nested_same_name_is_not_a_replace_at_capacity() {
     );
     let (status, body) = post_boombox(
         &fx.app,
-        multipart_body_with_filename("e.mp3", &[("file", b"ID3\x03\x00\x00\x00\x00\x00\x00audio")]),
+        multipart_body_with_filename(
+            "e.mp3",
+            &[("file", b"ID3\x03\x00\x00\x00\x00\x00\x00audio")],
+        ),
     )
     .await;
 
@@ -2410,7 +2481,10 @@ async fn boombox_upload_under_cap_reaches_gadgetd() {
     );
     let (status, body) = post_boombox(
         &fx.app,
-        multipart_body_with_filename("e.mp3", &[("file", b"ID3\x03\x00\x00\x00\x00\x00\x00audio")]),
+        multipart_body_with_filename(
+            "e.mp3",
+            &[("file", b"ID3\x03\x00\x00\x00\x00\x00\x00audio")],
+        ),
     )
     .await;
 
@@ -2768,13 +2842,21 @@ struct SchedFixture {
     _dir: TempDir,
     app: Router,
     last: Arc<Mutex<Option<Value>>>,
-    staged_existed: Arc<Mutex<Option<bool>>>,
 }
 
 fn sched_fixture(reply: SchedReply) -> SchedFixture {
+    sched_fixture_with_rows(reply, &[])
+}
+
+fn sched_fixture_with_rows(reply: SchedReply, rows: &[(&str, &str, &str, i64)]) -> SchedFixture {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("catalog.db");
     seed(&db_path);
+    if !rows.is_empty() {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        seed_media_rows(&conn, rows);
+    }
 
     let static_dir = dir.path().join("static");
     std::fs::create_dir_all(&static_dir).unwrap();
@@ -2797,19 +2879,11 @@ fn sched_fixture(reply: SchedReply) -> SchedFixture {
         last: Arc::clone(&last),
         staged_existed: Arc::clone(&staged_existed),
     });
-    let app = router_with_clients(
-        catalog,
-        static_dir,
-        media,
-        gadget,
-        scheduler,
-        library_dir,
-    );
+    let app = router_with_clients(catalog, static_dir, media, gadget, scheduler, library_dir);
     SchedFixture {
         _dir: dir,
         app,
         last,
-        staged_existed,
     }
 }
 
@@ -2836,18 +2910,30 @@ async fn put_json(app: &Router, uri: &str, body: Value) -> (StatusCode, Value) {
 }
 
 #[tokio::test]
-async fn chime_scheduler_snapshot_relays_schedulerd_json() {
+async fn chime_scheduler_snapshot_rewrites_library_from_media_catalog() {
     let snap = json!({
         "schedules": [{ "id": "s-1", "name": "Holidays" }],
         "groups": [],
         "randomMode": { "enabled": false },
-        "library": [{ "filename": "Jingle.wav" }],
+        "library": [{ "filename": "stale.wav", "bytes": 999 }],
     });
-    let fx = sched_fixture(SchedReply::Json(snap.clone()));
+    let fx = sched_fixture_with_rows(
+        SchedReply::Json(snap.clone()),
+        &[
+            ("slot1", "Chimes/Horn.wav", "Horn.wav", 64),
+            ("slot1", "Chimes/sub/Nested.wav", "Nested.wav", 32),
+            ("slot1", "Chimes/notes.txt", "notes.txt", 16),
+        ],
+    );
     let (status, body) = get_json(&fx.app, "/api/chime-scheduler").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, snap);
-    // webd forwarded a bare `snapshot` command, no extra fields.
+    assert_eq!(body["schedules"], snap["schedules"]);
+    assert_eq!(body["groups"], snap["groups"]);
+    assert_eq!(body["randomMode"], snap["randomMode"]);
+    assert_eq!(
+        body["library"],
+        json!([{ "filename": "Horn.wav", "bytes": 64 }])
+    );
     let req = fx.last.lock().unwrap().clone().unwrap();
     assert_eq!(req["cmd"], "snapshot");
 }
@@ -2940,17 +3026,23 @@ async fn chime_scheduler_group_crud_forwards_commands() {
 }
 
 #[tokio::test]
-async fn chime_scheduler_library_list_relays() {
-    let fx = sched_fixture(SchedReply::Json(json!({
-        "items": [{ "filename": "Jingle.wav" }, { "filename": "Horn.wav" }]
-    })));
+async fn chime_scheduler_library_list_uses_media_catalog() {
+    let fx = sched_fixture_with_rows(
+        SchedReply::Json(json!({ "items": [{ "filename": "ignored.wav" }] })),
+        &[
+            ("slot1", "Chimes/Horn.wav", "Horn.wav", 64),
+            ("slot1", "Chimes/sub/Nested.wav", "Nested.wav", 32),
+            ("slot1", "Chimes/notes.txt", "notes.txt", 16),
+        ],
+    );
     let (status, body) = get_json(&fx.app, "/api/chime-scheduler/library").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["items"].as_array().unwrap().len(), 2);
-    assert_eq!(
-        fx.last.lock().unwrap().clone().unwrap()["cmd"],
-        "list_library"
-    );
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["name"], "Horn.wav");
+    assert_eq!(items[0]["rel_path"], "Chimes/Horn.wav");
+    assert_eq!(items[0]["size_bytes"], 64);
+    assert!(fx.last.lock().unwrap().is_none(), "schedulerd not contacted");
 }
 
 /// POST a multipart body to the library upload route and return `(status, json)`.
@@ -2979,27 +3071,20 @@ async fn post_library(app: &Router, body: Vec<u8>) -> (StatusCode, Value) {
 }
 
 #[tokio::test]
-async fn chime_scheduler_library_upload_stages_then_forwards_add_library_file() {
-    let fx = sched_fixture(SchedReply::Json(json!({ "filename": "chime.wav" })));
+async fn chime_scheduler_library_upload_queues_media_install() {
+    let fx = library_fixture(Reply::Json(json!({ "state": "queued", "job_id": "m-1" })));
     let (status, body) = post_library(&fx.app, multipart_body(&[("file", &sample_wav(64))])).await;
-    assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(body["filename"], "chime.wav");
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(body["state"], "queued");
+    assert_eq!(body["job_id"], "m-1");
 
-    // schedulerd saw an `add_library_file` carrying a staged path that existed
-    // and was non-empty at call time, plus the multipart filename.
     let req = fx.last.lock().unwrap().clone().unwrap();
-    assert_eq!(req["cmd"], "add_library_file");
-    assert!(req["staged_path"].is_string());
-    assert_eq!(req["filename"], "chime.wav");
-    assert_eq!(*fx.staged_existed.lock().unwrap(), Some(true));
-
-    // webd cleans up its temp staging copy after the forward (schedulerd adopts
-    // on success); the staged path must no longer exist.
-    let staged = req["staged_path"].as_str().unwrap();
-    assert!(
-        !std::path::Path::new(staged).exists(),
-        "temp must be cleaned"
-    );
+    assert_eq!(req["cmd"], "enqueue_mutation");
+    assert_eq!(req["partition"], 2);
+    assert_eq!(req["mutation"]["op"], "install_file");
+    assert_eq!(req["mutation"]["rel_path"], "Chimes/chime.wav");
+    assert!(req["mutation"]["source_path"].is_string());
+    assert!(req["blob_path"].is_string());
 }
 
 #[tokio::test]
@@ -3015,13 +3100,27 @@ async fn chime_scheduler_library_upload_non_wav_is_422_before_forward() {
 }
 
 #[tokio::test]
-async fn chime_scheduler_library_delete_forwards_filename() {
-    let fx = sched_fixture(SchedReply::Json(json!({ "ok": true })));
-    let (status, _) = delete_json(&fx.app, "/api/chime-scheduler/library/Horn.wav").await;
-    assert_eq!(status, StatusCode::OK);
+async fn chime_scheduler_library_delete_queues_media_remove() {
+    let fx = library_fixture(Reply::Json(json!({ "state": "queued", "job_id": "m-1" })));
+    let (status, body) = delete_json(&fx.app, "/api/chime-scheduler/library/Horn.wav").await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(body["state"], "queued");
+    assert_eq!(body["job_id"], "m-1");
+
     let req = fx.last.lock().unwrap().clone().unwrap();
-    assert_eq!(req["cmd"], "delete_library_file");
-    assert_eq!(req["filename"], "Horn.wav");
+    assert_eq!(req["cmd"], "enqueue_mutation");
+    assert_eq!(req["partition"], 2);
+    assert_eq!(req["mutation"]["op"], "delete_paths");
+    assert_eq!(req["mutation"]["rel_paths"][0], "Chimes/Horn.wav");
+}
+
+#[tokio::test]
+async fn chime_scheduler_library_delete_rejects_invalid_name_before_handoff() {
+    let fx = library_fixture(Reply::Json(json!({ "state": "queued", "job_id": "m-1" })));
+    let (status, body) = delete_json(&fx.app, "/api/chime-scheduler/library/../bad.wav").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "not_found");
+    assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");
 }
 
 #[tokio::test]
@@ -3117,11 +3216,13 @@ fn library_fixture(gadget_reply: Reply) -> LibraryFixture {
     std::fs::create_dir_all(&static_dir).unwrap();
     std::fs::write(static_dir.join("index.html"), "<!doctype html>shell").unwrap();
 
-    let library_dir = dir.path().join("chimes");
+    let media_ro = dir.path().join("media-ro");
+    let library_dir = media_ro.join("Chimes");
     std::fs::create_dir_all(&library_dir).unwrap();
 
     let catalog = Catalog::open(&db_path).unwrap();
-    let media = MediaConfig::new(dir.path().join("archive"), dir.path().join("cache"));
+    let media = MediaConfig::new(dir.path().join("archive"), dir.path().join("cache"))
+        .with_media_ro_root(media_ro);
 
     let last = Arc::new(Mutex::new(None));
     let gadget: Arc<dyn GadgetClient> = Arc::new(MockGadget {
@@ -3158,7 +3259,7 @@ async fn library_audio_serves_wav_bytes_inline() {
     std::fs::write(fx.library_dir.join("Horn.wav"), &wav).unwrap();
 
     let (status, ct, disp, body) =
-        get_chime_bytes(&fx.app, "/api/chime-scheduler/library/Horn.wav/audio").await;
+        get_chime_bytes(&fx.app, "/api/chimes/library/Horn.wav/audio").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(ct.as_deref(), Some("audio/wav"));
     assert!(disp.is_none(), "inline audio must not be an attachment");
@@ -3172,7 +3273,7 @@ async fn library_download_sets_attachment_disposition() {
     std::fs::write(fx.library_dir.join("Horn.wav"), &wav).unwrap();
 
     let (status, ct, disp, body) =
-        get_chime_bytes(&fx.app, "/api/chime-scheduler/library/Horn.wav/download").await;
+        get_chime_bytes(&fx.app, "/api/chimes/library/Horn.wav/download").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(ct.as_deref(), Some("audio/wav"));
     assert_eq!(disp.as_deref(), Some("attachment; filename=\"Horn.wav\""));
@@ -3182,7 +3283,7 @@ async fn library_download_sets_attachment_disposition() {
 #[tokio::test]
 async fn library_audio_missing_file_is_404() {
     let fx = library_fixture(Reply::Json(json!({})));
-    let (status, ..) = get_chime_bytes(&fx.app, "/api/chime-scheduler/library/Gone.wav/audio").await;
+    let (status, ..) = get_chime_bytes(&fx.app, "/api/chimes/library/Gone.wav/audio").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -3194,11 +3295,7 @@ async fn library_audio_rejects_traversal() {
     let outside = fx.library_dir.parent().unwrap().join("secret.wav");
     std::fs::write(&outside, b"x").unwrap();
     // `%2e%2e%2f` decodes to `../`; the single-segment filename guard rejects it.
-    let (status, ..) = get_raw(
-        &fx.app,
-        "/api/chime-scheduler/library/%2e%2e%2fsecret.wav/audio",
-    )
-    .await;
+    let (status, ..) = get_raw(&fx.app, "/api/chimes/library/%2e%2e%2fsecret.wav/audio").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -3210,8 +3307,7 @@ async fn library_audio_oversize_file_is_404() {
     // the capped read must never buffer the whole oversized file.
     let big = vec![0u8; (1024 * 1024) + 1];
     std::fs::write(fx.library_dir.join("Big.wav"), &big).unwrap();
-    let (status, ..) =
-        get_chime_bytes(&fx.app, "/api/chime-scheduler/library/Big.wav/audio").await;
+    let (status, ..) = get_chime_bytes(&fx.app, "/api/chimes/library/Big.wav/audio").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -3220,8 +3316,7 @@ async fn library_activate_happy_path_enqueues_lockchime_install() {
     let fx = library_fixture(Reply::Json(json!({ "job_id": "m-7", "state": "queued" })));
     std::fs::write(fx.library_dir.join("Horn.wav"), sample_wav(64)).unwrap();
 
-    let (status, body) =
-        post_empty(&fx.app, "/api/chime-scheduler/library/Horn.wav/activate").await;
+    let (status, body) = post_empty(&fx.app, "/api/chimes/library/Horn.wav/activate").await;
     assert_eq!(status, StatusCode::ACCEPTED);
     assert_eq!(body["state"], "queued");
 
@@ -3237,8 +3332,7 @@ async fn library_activate_happy_path_enqueues_lockchime_install() {
 #[tokio::test]
 async fn library_activate_missing_file_is_404() {
     let fx = library_fixture(Reply::Json(json!({ "state": "queued" })));
-    let (status, _) =
-        post_empty(&fx.app, "/api/chime-scheduler/library/Gone.wav/activate").await;
+    let (status, _) = post_empty(&fx.app, "/api/chimes/library/Gone.wav/activate").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");
 }
@@ -3247,8 +3341,7 @@ async fn library_activate_missing_file_is_404() {
 async fn library_activate_invalid_wav_is_422_before_handoff() {
     let fx = library_fixture(Reply::Json(json!({ "state": "queued" })));
     std::fs::write(fx.library_dir.join("Bad.wav"), b"not a real wav").unwrap();
-    let (status, body) =
-        post_empty(&fx.app, "/api/chime-scheduler/library/Bad.wav/activate").await;
+    let (status, body) = post_empty(&fx.app, "/api/chimes/library/Bad.wav/activate").await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(body["error"]["code"], "invalid_wav");
     assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");

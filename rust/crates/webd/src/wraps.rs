@@ -70,8 +70,7 @@ pub(crate) async fn install_wrap(
     // The catalog count trails an in-flight install by one index pass; the
     // resulting TOCTOU under truly concurrent distinct uploads is accepted (a
     // single-operator appliance that installs one file at a time).
-    let existing =
-        crate::route::read(state.catalog.clone(), crate::query::list_wraps).await?;
+    let existing = crate::route::read(state.catalog.clone(), crate::query::list_wraps).await?;
     let is_replace = existing.iter().any(|item| item.rel_path == rel_path);
     if !is_replace && existing.len() >= WRAPS_MAX_FILES {
         return Err(ApiError::status(

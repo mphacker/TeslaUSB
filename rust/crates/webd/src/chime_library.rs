@@ -1,11 +1,11 @@
 //! `GET /api/chime-scheduler/library/{filename}/audio`,
 //! `GET /api/chime-scheduler/library/{filename}/download`, and
 //! `POST /api/chime-scheduler/library/{filename}/activate` — the file-backed
-//! companions to the `schedulerd`-proxied library CRUD in
-//! [`crate::chime_scheduler`].
+//! companions to the media-backed library CRUD aliases in this module.
 //!
-//! `schedulerd` owns the library directory (`/data/teslausb/chimes`) and is its
-//! sole *writer*; these handlers only ever *read* it. They give the SPA's
+//! The library lives in the MEDIA partition's root-level `Chimes/` folder;
+//! these handlers only *read* that catalog and queue writes through the same
+//! gadgetd handoff path used for direct chime installs. They give the SPA's
 //! v1-parity chime library its per-row actions:
 //!
 //!  * **audio** — serve the WAV bytes inline so an `<audio>` element can preview
@@ -27,15 +27,17 @@
 use axum::Json;
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{Path, State};
+use axum::extract::{Multipart, Path, State};
 use axum::http::StatusCode;
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use serde_json::Value;
 
 use crate::AppState;
+use crate::dto::MediaListDto;
 use crate::error::ApiError;
+use crate::media_upload::{check_extension, read_file_upload, sanitise_filename};
 
 /// The MEDIA partition wire index (`gadgetd` `Partition::P2`) — matches
 /// [`crate::chimes`].
@@ -45,6 +47,12 @@ const PARTITION_MEDIA: u8 = 2;
 /// derived from the library filename (the library file is a *source*, the active
 /// slot is always this fixed name).
 const CHIME_REL_PATH: &str = "LockChime.wav";
+
+/// The library folder on the MEDIA (p2) partition, visible on the USB drive.
+const CHIMES_DIR: &str = "Chimes";
+
+/// Maximum accepted library-chime size (1 MiB).
+const CHIME_LIBRARY_MAX_BYTES: usize = 1024 * 1024;
 
 /// `Content-Type` for a served WAV.
 const WAV_MIME: &str = "audio/wav";
@@ -57,10 +65,28 @@ const MAX_FILENAME_LEN: usize = 100;
 /// against reading a stray oversized file fully into memory on serve/activate.
 const MAX_CHIME_BYTES: u64 = 1024 * 1024;
 
-/// The file-backed library sub-routes, merged under `/api` by [`crate::route`]
-/// alongside the `schedulerd`-proxied library CRUD in [`crate::chime_scheduler`].
+/// The file-backed library sub-routes, merged under `/api` by [`crate::route`].
+/// The legacy `/api/chime-scheduler/library/*` aliases resolve to the same
+/// handlers so the existing SPA keeps working with the media-backed catalog.
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
+        .route(
+            "/chimes/library",
+            get(list_library)
+                .post(upload_library)
+                .layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)),
+        )
+        .route("/chimes/library/{name}", delete(remove_library))
+        .route("/chimes/library/{name}/audio", get(serve_audio))
+        .route("/chimes/library/{name}/download", get(serve_download))
+        .route("/chimes/library/{name}/activate", post(activate))
+        .route(
+            "/chime-scheduler/library",
+            get(list_library)
+                .post(upload_library)
+                .layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)),
+        )
+        .route("/chime-scheduler/library/{filename}", delete(remove_library))
         .route(
             "/chime-scheduler/library/{filename}/audio",
             get(serve_audio),
@@ -73,6 +99,49 @@ pub(crate) fn routes() -> Router<AppState> {
             "/chime-scheduler/library/{filename}/activate",
             post(activate),
         )
+}
+
+/// `GET /api/chimes/library`: list the media-backed library folder.
+pub(crate) async fn list_library(
+    State(state): State<AppState>,
+) -> Result<Json<MediaListDto>, ApiError> {
+    let items = crate::route::read(state.catalog, crate::query::list_chime_library).await?;
+    Ok(Json(MediaListDto { items }))
+}
+
+/// `POST /api/chimes/library`: upload a WAV into the media-backed `Chimes/` folder.
+pub(crate) async fn upload_library(
+    State(state): State<AppState>,
+    multipart: Multipart,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let (raw_name, bytes) = read_file_upload(multipart, "file", CHIME_LIBRARY_MAX_BYTES).await?;
+    let name = sanitise_filename(&raw_name)?;
+    check_extension(&name, &["wav"])?;
+    crate::chimes::validate_lock_chime_wav(&bytes)
+        .map_err(|msg| ApiError::status(StatusCode::UNPROCESSABLE_ENTITY, "invalid_wav", msg))?;
+
+    let rel_path = format!("{CHIMES_DIR}/{name}");
+    crate::route::run_install(
+        state,
+        "chime_library_install",
+        PARTITION_MEDIA,
+        rel_path,
+        bytes,
+    )
+    .await
+}
+
+/// `DELETE /api/chimes/library/{name}`: remove a media-backed library chime.
+pub(crate) async fn remove_library(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    if !is_safe_chime_filename(&name) {
+        return Err(ApiError::NotFound);
+    }
+    check_extension(&name, &["wav"])?;
+    let rel_path = format!("{CHIMES_DIR}/{name}");
+    crate::route::run_remove(state, "chime_library_remove", PARTITION_MEDIA, rel_path).await
 }
 
 /// `GET …/library/{filename}/audio`: stream the library chime inline (the
@@ -159,9 +228,14 @@ fn resolve_library_file(state: &AppState, filename: &str) -> Result<std::path::P
     if !is_safe_chime_filename(filename) {
         return Err(ApiError::NotFound);
     }
-    let dir = std::fs::canonicalize(&state.chime_library_dir).map_err(|_| ApiError::NotFound)?;
-    let real = std::fs::canonicalize(dir.join(filename)).map_err(|_| ApiError::NotFound)?;
-    if !real.starts_with(&dir) {
+
+    let root =
+        std::fs::canonicalize(state.media.media_ro_root()).map_err(|_| ApiError::NotFound)?;
+    let chimes_root = root.join(CHIMES_DIR);
+    let canonical_root = std::fs::canonicalize(&chimes_root).map_err(|_| ApiError::NotFound)?;
+    let candidate = canonical_root.join(filename);
+    let real = std::fs::canonicalize(&candidate).map_err(|_| ApiError::NotFound)?;
+    if !real.starts_with(&canonical_root) {
         return Err(ApiError::NotFound);
     }
     let meta = std::fs::metadata(&real).map_err(|_| ApiError::NotFound)?;
@@ -179,7 +253,9 @@ fn resolve_library_file(state: &AppState, filename: &str) -> Result<std::path::P
 /// validates on write, so an oversized file here is anomalous, not legitimate).
 async fn read_capped(path: &std::path::Path) -> Result<Vec<u8>, ApiError> {
     use tokio::io::AsyncReadExt;
-    let file = tokio::fs::File::open(path).await.map_err(|_| ApiError::NotFound)?;
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|_| ApiError::NotFound)?;
     let mut buf = Vec::new();
     file.take(MAX_CHIME_BYTES + 1)
         .read_to_end(&mut buf)
@@ -202,9 +278,10 @@ fn is_safe_chime_filename(name: &str) -> bool {
     // punctuation. In one pass this rejects path separators, control bytes
     // (incl. CR/LF), quotes and semicolons (`Content-Disposition`
     // header-injection vectors), and any non-ASCII byte.
-    if !name.bytes().all(|b| {
-        b.is_ascii_alphanumeric() || matches!(b, b' ' | b'.' | b'_' | b'-' | b'(' | b')')
-    }) {
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b' ' | b'.' | b'_' | b'-' | b'(' | b')'))
+    {
         return false;
     }
     // Belt-and-suspenders: no `..` even though separators are already excluded.

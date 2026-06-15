@@ -12,6 +12,47 @@
 > [`adr/`](./adr/) (locked architecture, incl. [`ADR-0003`](./adr/0003-media-read-path.md)
 > media read path).
 
+## ⏯️ Resume here — CHIMES-ON-MEDIA + IMMEDIATE SET-ACTIVE LIVE (2026-06-15)
+
+**Operator requirement (locked, now satisfied):** upload a lock chime → it lands
+in a `Chimes/` folder ON the media drive → "Set Active" copies it to the media-drive
+root as `LockChime.wav` so the car has it **immediately** (no manual unplug/replug).
+
+✅ **Shipped + proven live on `cybertruckusb.local` (see `files/hw-results.md`
+"Phase 2 — chimes-on-media"):**
+- **Chime library moved into `media.img`** (`Chimes/` folder), off ext4
+  `/data/teslausb/chimes`. webd `list_chime_library` reads the media catalog; the
+  `/api/chimes/library/*` and legacy `/api/chime-scheduler/library/*` routes share one
+  media-backed impl; the scheduler snapshot's `library` field is sourced from media.
+- **Per-partition hot-handoff (gadgetd):** P2/media handoffs now apply **immediately
+  by default** even while a USB host is enumerated (the car only *reads* that image);
+  P1/TeslaCam still gated behind `--allow-hot-handoff` (C1/C2 unmeasured). The Phase-1
+  bench stopgap `--allow-hot-handoff` flag was **removed** from `gadgetd-control.service`.
+- **`install_file` ENOENT fix (gadgetd `mutate.rs`):** auto-create the destination's
+  parent (`create_dir_all`) before the canonicalize jail check, so a first-ever install
+  into a new category folder (`Chimes/`, `Wraps/`, …) on a fresh `media.img` no longer
+  fails with `No such file or directory`. +2 regression tests.
+- **End-to-end hardware proof:** `POST /api/chimes/library` (a minted PCM WAV) → job
+  `done` in ~3 s → byte-identical at `Chimes/testchime.wav` on the RO media mount → it
+  appears in `/api/chimes/library` + the scheduler snapshot `library` after one scan
+  cycle (~15 s) → `POST …/testchime.wav/activate` → job `done` in ~3 s → media-root
+  `LockChime.wav` updated **immediately** to the identical bytes (sha match), **no
+  replug**. Playwright on the live `/media` page: Lock-Chimes table renders
+  `testchime.wav — 86 KB — Valid` with Download/Set Active/Delete, schedule picker lists
+  it, **0 console errors/warnings**, screenshots @375 + @1280.
+- **Deploy:** 5 aarch64 binaries (gadgetd/webd/scannerd/indexd/schedulerd) installed
+  under the hardware-test dead-man wrapper; GPT-5.5 deploy-plan review
+  (PROCEED-WITH-CHANGES) reconciled — unit restored from verified backup (no blind
+  `sed`), explicit rollback predefined, restart order = control-stop→gadgetd→control-start.
+  All 6 services active/enabled, wlan0 + SSH intact, system `degraded` only from the
+  benign stock `rpi-zram-writeback.timer`.
+
+**Remaining for full §4.5/§1.1 parity:** mp3→WAV transcode + multi-file + 5 s/normalize
+on upload; chime rename; **car-side pickup** of a `LockChime.wav` change (soft
+medium-change vs. re-enumeration) is the §1.1 / C1 car-only verification.
+
+---
+
 ## ⏯️ Resume here — REDEPLOY DONE: HEAD live on hardware, foundation complete (2026-06-16)
 
 **Operator granted full live-hardware access and asked to finish fast + optimize
@@ -262,7 +303,7 @@ LUNs) is the single make-or-break that still needs the car.**
   root-folder fix proven on the single-`disk.img` device; the layout is not
   proven on a live `media.img` LUN, and `Chimes/`-in-image is still pending —
   see next item. gated:F1+F3)**
-- [ ] **Chime library `Chimes/` lives IN `media.img`** (moved off `/data/teslausb/chimes`). **(gated:F3)**
+- [x] **Chime library `Chimes/` lives IN `media.img`** (moved off `/data/teslausb/chimes`). **(DONE 2026-06-15 — webd `list_chime_library` reads the media catalog `Chimes/*.wav`; `/api/chimes/library/*` + legacy `/api/chime-scheduler/library/*` share one media-backed impl; scheduler snapshot `library` sourced from media. LIVE-PROVEN: upload landed at `Chimes/testchime.wav` on the RO media mount, listed via `/api/chimes/library` + snapshot after a scan cycle. See `files/hw-results.md` "Phase 2".)**
 - [ ] Configurable advertised capacity per drive (TeslaCam 64 GB / Media 32 GB
   defaults, 4–2048 GB), fully pre-allocated. **(see §4.11 resize) (gated:C1)**
 
@@ -368,18 +409,26 @@ LUNs) is the single make-or-break that still needs the car.**
   `files/hw-results.md` "feature-verify". Real in-browser playback works.)**
 - [x] Play any library chime in-browser. **(DONE — the chime-library table on `/media`
   renders a native `<audio data-testid="library-audio" preload="none">` per row sourced
-  from `GET /api/chime-scheduler/library/{filename}/audio` [the file-backed library on
-  ext4 `/data/teslausb/chimes`, schedulerd-owned — NOT the media RO mount, which only
-  holds the single active `LockChime.wav`]. **LIVE-PROVEN on hardware 2026-06-16:** both
-  device library chimes [`MarioFart.wav`, `test-chime.wav`] listed from live schedulerd
-  and both `<audio>` decoded to `readyState=4` [2.49 s / 0.10 s] over `/library/.../audio`
-  [200]; per-row Download link `200`; console clean. See `files/hw-results.md` "chime library".)**
+  from `GET /api/chimes/library/{name}/audio`. **As of 2026-06-15 the library is
+  media-backed** (`Chimes/` in `media.img`, not the old ext4 `/data/teslausb/chimes`);
+  the legacy `/api/chime-scheduler/library/.../audio` alias still resolves to the same
+  media-backed handler. LIVE-PROVEN 2026-06-15: `testchime.wav` listed from the media
+  catalog and its row rendered with a Valid badge + Download/Set Active/Delete on the live
+  `/media` page, console clean. See `files/hw-results.md` "Phase 2".)**
 - [ ] Upload chime(s) `.wav` (+`.mp3`→WAV), ≤1 MB & ≤5 s; added to `Chimes/`. **(partial:
-  single-file install proven on hw; multi-file + mp3 transcode + 5 s/normalize to verify)**
+  single-file `.wav` install into `media.img` `Chimes/` LIVE-PROVEN 2026-06-15 [job done
+  ~3 s, byte-identical on the RO media mount; `files/hw-results.md` "Phase 2"]; multi-file
+  + mp3 transcode + 5 s/normalize still to verify)**
 - [ ] Delete library chime. **(partial: delete path exists; verify against `Chimes/` in image)**
 - [ ] Rename a chime (v1 rename API). **(not started)**
-- [ ] **Set active** → copy library file to `LockChime.wav` + **full re-enumeration**;
-  UI shows which library chime is active. **(gated:§1.1 re-enumeration + F3)**
+- [x] **Set active** → copy library file to media-root `LockChime.wav`, applied
+  **immediately** (per-partition hot-handoff on P2; no manual replug); UI shows which
+  library chime is active. **(DONE 2026-06-15 bench-proven — `POST …/library/{name}/activate`
+  re-validates the WAV and installs it to media-root `LockChime.wav` via the gadgetd
+  queue; the new gadgetd applies P2 handoffs immediately while the host is enumerated.
+  LIVE: media-root `LockChime.wav` updated byte-identical to the activated chime in ~3 s,
+  no replug — `files/hw-results.md` "Phase 2". Car-side pickup (soft medium-change vs.
+  full re-enumeration) is the remaining §1.1 / C1 car-only check.)**
 - [ ] Groups (create/edit/delete; persist `chime_groups.json`). **(partial: A3 UI +
   schedulerd render proven; verify CRUD round-trip)**
 - [ ] Schedules (weekly/date/holiday/recurring; CRUD+enable; `chime_schedules.json`). **(partial:

@@ -504,7 +504,9 @@ pub(crate) fn content_type_for(path: &Path) -> &'static str {
 fn media_unavailable() -> Response {
     let mut response = (
         StatusCode::SERVICE_UNAVAILABLE,
-        Body::from(r#"{"error":{"code":"media_unavailable","message":"media not mounted"}}"#.to_owned()),
+        Body::from(
+            r#"{"error":{"code":"media_unavailable","message":"media not mounted"}}"#.to_owned(),
+        ),
     )
         .into_response();
     let headers = response.headers_mut();

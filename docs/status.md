@@ -17,7 +17,7 @@
 **Operator granted full live-hardware access and asked to finish fast + optimize
 build/test.** The device had drifted **70 commits behind HEAD**; the highest-leverage
 move was not new code but **rebuild HEAD + redeploy the stack**. ✅ **Done — the full
-foundation (F1/F2/F3/F6) is now LIVE and verified on `cybertruckusb.local`.**
+foundation (F1–F6) is now LIVE and verified on `cybertruckusb.local`.**
 
 **What is now true on the device (all verified — see `files/hw-results.md`):**
 - ✅ **F1 two-LUN foundation LIVE** — lun.0 → `teslacam.img` (`ro=0`, car records),
@@ -32,6 +32,13 @@ foundation (F1/F2/F3/F6) is now LIVE and verified on `cybertruckusb.local`.**
   owns wlan0). Only remaining failed unit is the benign stock `rpi-zram-writeback.timer`.
 - ✅ **HEAD app stack deployed** — gadgetd/gadgetd-control/webd/scannerd/indexd/schedulerd
   all active on HEAD binaries; new SPA bundle served.
+- ✅ **F5/F4 media WRITE path PROVEN LIVE on two LUNs** — a real `POST /api/wraps`
+  round-tripped through the gadgetd eject-handoff into `media.img`; the RO mount was
+  suspended/rebuilt around the mutate, `lun.0`/TeslaCam untouched, and the new wrap
+  serves real bytes. **KEY GATE (by design):** media writes DEFER while a USB host is
+  enumerated (`hot_handoff_unvalidated`) — production applies them at a COLD window
+  (car ejects the drive) or with operator-opted `--allow-hot-handoff`. The car's
+  mid-use eject tolerance is the **C1/C2** unknown that still needs the car.
 
 **The optimized deploy loop (proven this session — use this, NOT `setup.sh deploy-app`):**
 cross-build via podman (`build-release.sh --cross-podman --spa-project spa`, ~20 s warm)
@@ -43,8 +50,11 @@ recompose. `deploy-app` is UNSAFE here (it would start the running wifid + never
 rebinds the gadget).
 
 **Remaining (next):**
-1. **C1 (car accepts 2 LUNs)** — the single make-or-break that needs the car. Frame a
-   one-visit test plan.
+1. **C1/C2 (car accepts 2 LUNs + mid-use eject tolerance)** — the single make-or-break
+   that needs the car. Frame a one-visit plan: confirm the car mounts both LUNs and
+   records to TeslaCam, then measure whether a hot media-LUN eject (the `--allow-hot-handoff`
+   path) disrupts recording — the gate that lets media uploads apply without waiting
+   for the car to cycle the drive.
 2. **Fixed wifid deploy (optional, deferred)** — only after reading
    `watchdog.rs`/`nmcli.rs`/`orchestrator.rs` `tick()` to PROVE empty-creds idle never
    resets the SDIO chip / seizes wlan0. Until then leave disabled (WiFi is fine).
@@ -187,21 +197,30 @@ LUNs) is the single make-or-break that still needs the car.**
   non-blocking):** webd `/api/gadget/status` does not yet surface the `media_ro_*`
   health fields gadgetd emits (`gadget.rs:357-374`) — wire them through for
   observability.
-- [ ] **F4 · Handoff read-drain / quiesce** — a read-lease so an in-flight media
+- [x] **F4 · Handoff read-drain / quiesce** — a read-lease so an in-flight media
   read is drained/blocked before a `lun.1` RW mutate; RO mount torn down and
   rebuilt around the handoff (GPT-5.5 #5). Extends the existing handoff state
   machine; "never two writers / never wrong bytes" outranks "always give the
-  drive back". **(partial: the RO-mount suspend/resume-around-mutate half landed
-  with F3 — the regression-prevention piece. The remaining work, draining
-  in-flight `webd` reader fds, is deferred until the `webd` media read handlers
-  exist — there are no readers to drain yet.)**
-- [ ] **F5 · gadgetd eject-handoff write path (lun.1 only)** — install/delete via
+  drive back". **RO-mount suspend/resume-around-mutate PROVEN LIVE 2026-06-16** —
+  the F5 wrap-write handoff tore down `/run/teslausb/media-ro` and rebuilt it RO
+  (single loop, no leak) around the mutate, with `lun.0` never touched
+  (`files/hw-results.md`). **Remaining (B-tier, non-blocking):** draining in-flight
+  `webd` reader fds — deferred until long-lived reader leases exist (today reads are
+  short `std::fs` opens, nothing to drain).
+- [x] **F5 · gadgetd eject-handoff write path (lun.1 only)** — install/delete via
   losetup→mount RW→mutate→sync→umount→re-present, cycling **only** `lun.1`.
-  **(partial: handoff mechanism + atomic install + `create_dir_all` parent fix
-  proven on the live single-`disk.img` device and on 2-LUN bench; but
-  genuine "lun.1-only while lun.0 stays up" is NOT live-proven — live device is
-  still single-LUN (F1) — and the ADR-0003 read-drain/RO-remount around the
-  write (F4) is not built. gated:F1+F4)**
+  **MECHANISM PROVEN LIVE on two LUNs 2026-06-16** — `POST /api/wraps` (real
+  PNG) → webd stages blob → `enqueue_mutation` IPC → gadgetd durable queue →
+  `LoopMutator` eject-handoff applied it; `/api/wraps` then lists the new wrap,
+  queue empties, **`lun.0`/TeslaCam stays `ro=0`/teslacam.img untouched**
+  (partition=2 handoff only), `lun.1 ro=1`, UDC re-enumerated, seam serves the new
+  bytes (200/2339B). **KEY GATE (by design):** the drain DEFERS while a USB host is
+  enumerated (`hot_handoff_unvalidated`, handoff.rs:306) — production applies media
+  writes only at a COLD window (car ejects the drive) OR with operator-opted
+  `gadgetd serve --allow-hot-handoff`. Bench drain was validated by temporarily
+  enabling that flag (reversible drop-in, dead-man-wrapped) then restored to
+  production-safe. **Remaining gated:C1/C2** — measure the car's mid-use eject
+  tolerance before enabling hot handoff in the car. Evidence: `files/hw-results.md`.
 - [x] **F6 · scannerd raw `pread` reader + indexd catalog** for both images.
   **DONE & LIVE** — HEAD scannerd + indexd deployed to the device (Layer 1 redeploy
   2026-06-16); both read both single-partition images and the catalog serves real
@@ -386,7 +405,10 @@ LUNs) is the single make-or-break that still needs the car.**
   exception, both rejecting `422` pre-handoff; PNG magic + 512–1024 dimension + ≤1 MB still
   enforced. `cargo test -p webd` = 222 passed incl. 11 wrap tests; GPT-5.5-reviewed: replace
   identity fixed from bare name → full `rel_path` so a nested same-named file can't bypass the
-  cap, regression test added)**
+  cap, regression test added. **Now LIVE-PROVEN on hardware 2026-06-16:** a real
+  `POST /api/wraps` round-tripped through the gadgetd eject-handoff into `media.img`
+  on the two-LUN device and the new thumbnail serves real bytes — see F5 /
+  `files/hw-results.md`.)**
 - [x] Wrap delete (incl. bulk). **(proven)**
 - [ ] **Plates (images):** list w/ thumbnails, upload, delete `.png` ≤512 KB,
   exactly 420×75 (NA)/492×75 (EU), name ≤12 alnum, ≤5. **(partial: validation A1 done;

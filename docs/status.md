@@ -12,6 +12,48 @@
 > [`adr/`](./adr/) (locked architecture, incl. [`ADR-0003`](./adr/0003-media-read-path.md)
 > media read path).
 
+## ⏯️ Resume here — END OF SESSION 2026-06-15 (chime UX polish shipped + live) (next: 2026-06-16)
+
+**Stopped for the night 2026-06-15 ~21:25.** Branch `mhackermsft/b1-clean`,
+working tree **clean** (all work committed, **nothing pushed** — push tomorrow if
+desired). Device `cybertruckusb.local` healthy: SSH + wlan0 connected, boot
+`degraded` (pre-existing benign zram timer), webd serving the latest SPA bundle.
+
+**Shipped + LIVE-PROVEN today (newest first):**
+- **Active-card SOURCE name** (commit `2408e72`): the Active Lock Chime card now
+  shows the *selected library chime's* name (e.g. `MarioFart.wav`) with an
+  "Installed as LockChime.wav" subtitle, instead of the meaningless always-on
+  `LockChime.wav`. Resolved client-side: just-activated name (while size matches)
+  → unique library size-match → honest `LockChime.wav` fallback. The child
+  `ChimeScheduler` reports its library up via `onLibraryLoaded`. 3 new Playwright
+  tests (post-activate naming, cold-load unique size-match, size-collision
+  fallback) — **72/72 green**. GPT-5.5 review: GO. **Live:** cold-load resolved
+  `tesla-tron-lock-sound.wav`; in-session activate updated to `MarioFart.wav` with
+  no reload, 0 console errors. See `files/hw-results.md` "Active card shows source
+  chime name" + `files/hw-sourcename-1280.png`.
+- **Set-Active UI auto-refresh** (commit `3e525b5`): active card + audio player
+  update on their own after Set Active, no manual reload (details in the block
+  below).
+
+**Device live-test side effect:** the active lock chime on the car is now
+`MarioFart.wav` (219770 B), changed during today's verification. Pick the
+preferred chime via the (now-fixed) UI — it updates immediately.
+
+**Recommended next steps for tomorrow (not yet started, all flagged below as
+future):**
+1. **Push** today's two commits (`3e525b5`, `2408e72`) if a PR/remote backup is
+   wanted (operator decision — nothing pushed yet).
+2. Continue working `status.md` items in the §4.5 chime area or pick the next
+   unchecked foundation/feature item per the build order. Candidates already
+   noted as future: **chime rename** (v1 rename API), **mp3→WAV transcode +
+   multi-file + 5 s/normalize on upload**, **event-driven scannerd rescan** (to
+   shorten the ~15–25 s activation convergence), **groups CRUD round-trip
+   verify**, and the car-side pickup **C1** check (car-only).
+3. Re-run the live UI smoke (`/media`) after any further SPA change — Playwright
+   on `cybertruckusb.local` is the binding gate for UI work.
+
+---
+
 ## ⏯️ Resume here — SET-ACTIVE UI AUTO-REFRESH LIVE (active card + audio, no reload) (2026-06-16)
 
 **Operator requirement (locked, now satisfied):** after clicking **Set Active**

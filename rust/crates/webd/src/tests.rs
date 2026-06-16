@@ -3346,3 +3346,557 @@ async fn library_activate_invalid_wav_is_422_before_handoff() {
     assert_eq!(body["error"]["code"], "invalid_wav");
     assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");
 }
+
+// ---------------------------------------------------------------------------
+// Music folder/move/delete endpoints
+// (`POST /api/music/folder`, `POST /api/music/folder-delete`,
+//  `POST /api/music/move`, `POST /api/music/delete`,
+//  extended `POST /api/music` with optional `path` field).
+//
+// The gadgetd socket is mocked via two mock variants:
+//   * `MockGadget` (already defined above) — records the LAST call; used where
+//     only one gadgetd round-trip is expected.
+//   * `AllCallsMock` — records ALL calls; used for move (two round-trips).
+// ---------------------------------------------------------------------------
+
+/// A mock [`GadgetClient`] that records EVERY call in order, returning the same
+/// canned reply for each. Used by the move test, which issues two enqueue calls.
+struct AllCallsMock {
+    reply: Reply,
+    calls: Arc<Mutex<Vec<Value>>>,
+}
+
+impl GadgetClient for AllCallsMock {
+    fn call(&self, request: Value) -> Result<Value, TransportError> {
+        self.calls.lock().unwrap().push(request);
+        match &self.reply {
+            Reply::Json(v) => Ok(v.clone()),
+            Reply::Unavailable => Err(TransportError::Unavailable("socket down".to_owned())),
+        }
+    }
+}
+
+/// Music fixture that seeds real files on a media-ro temp dir and wires the
+/// router to an `AllCallsMock` so every gadgetd call is captured.
+struct MusicFixture {
+    _dir: TempDir,
+    app: Router,
+    calls: Arc<Mutex<Vec<Value>>>,
+    /// Absolute path of the media-ro root; tests may seed additional files/dirs.
+    media_ro: std::path::PathBuf,
+}
+
+/// Build a music fixture with an optional set of pre-seeded media-ro files.
+///
+/// `files` is a slice of `(relative-path, bytes)` pairs seeded under the
+/// media-ro root (e.g. `("Music/A/x.mp3", b"fake")`).
+fn music_fixture_with_media(files: &[(&str, &[u8])]) -> MusicFixture {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("catalog.db");
+    {
+        let mut conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        indexd::db::apply_migrations(&mut conn).unwrap();
+    }
+
+    let static_dir = dir.path().join("static");
+    std::fs::create_dir_all(&static_dir).unwrap();
+    std::fs::write(static_dir.join("index.html"), "<!doctype html>shell").unwrap();
+
+    let media_ro = dir.path().join("media-ro");
+    std::fs::create_dir_all(&media_ro).unwrap();
+    for (rel, bytes) in files {
+        let path = media_ro.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    let catalog = Catalog::open(&db_path).unwrap();
+    let media = MediaConfig::new(dir.path().join("archive"), dir.path().join("cache"))
+        .with_media_ro_root(media_ro.clone());
+
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let gadget: Arc<dyn GadgetClient> = Arc::new(AllCallsMock {
+        reply: Reply::Json(json!({ "job_id": "m-1", "state": "queued" })),
+        calls: Arc::clone(&calls),
+    });
+    let app = router_with_gadget(catalog, static_dir, media, gadget);
+    MusicFixture {
+        _dir: dir,
+        app,
+        calls,
+        media_ro,
+    }
+}
+/// POST a multipart body to `POST /api/music` and return `(status, json)`.
+async fn post_music(app: &Router, body: Vec<u8>) -> (StatusCode, Value) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/music")
+                .header(
+                    axum::http::header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={BOUNDARY}"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, value)
+}
+
+/// Build a multipart/form-data body containing a text `path` field followed by
+/// a binary `file` field (audio/mpeg). Suitable for testing the extended
+/// `POST /api/music` handler.
+fn music_multipart_with_path(mp3_filename: &str, mp3_bytes: &[u8], path: &str) -> Vec<u8> {
+    let mut body = Vec::new();
+    // Text "path" field — no filename in Content-Disposition.
+    body.extend_from_slice(format!("--{BOUNDARY}\r\n").as_bytes());
+    body.extend_from_slice(
+        format!("Content-Disposition: form-data; name=\"path\"\r\n\r\n").as_bytes(),
+    );
+    body.extend_from_slice(path.as_bytes());
+    body.extend_from_slice(b"\r\n");
+    // Binary "file" field.
+    body.extend_from_slice(format!("--{BOUNDARY}\r\n").as_bytes());
+    body.extend_from_slice(
+        format!(
+            "Content-Disposition: form-data; name=\"file\"; filename=\"{mp3_filename}\"\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(b"Content-Type: audio/mpeg\r\n\r\n");
+    body.extend_from_slice(mp3_bytes);
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
+    body
+}
+
+// ── folder create ──────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn create_folder_enqueues_keep_file_and_returns_202() {
+    let fx = delete_fixture(Reply::Json(json!({ "job_id": "m-1", "state": "queued" })));
+    let (status, body) =
+        post_json(&fx.app, "/api/music/folder", json!({ "path": "NewBand" })).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(body["state"], "queued");
+
+    let req = fx.last.lock().unwrap().clone().unwrap();
+    assert_eq!(req["cmd"], "enqueue_mutation");
+    assert_eq!(req["partition"], 2);
+    assert_eq!(req["mutation"]["op"], "install_file");
+    assert_eq!(req["mutation"]["rel_path"], "Music/NewBand/.teslausb-keep");
+}
+
+#[tokio::test]
+async fn create_folder_nested_path_enqueues_nested_keep() {
+    let fx = delete_fixture(Reply::Json(json!({ "job_id": "m-2", "state": "queued" })));
+    let (status, _) = post_json(
+        &fx.app,
+        "/api/music/folder",
+        json!({ "path": "Artist/Album" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    let req = fx.last.lock().unwrap().clone().unwrap();
+    assert_eq!(req["mutation"]["rel_path"], "Music/Artist/Album/.teslausb-keep");
+}
+
+#[tokio::test]
+async fn create_folder_traversal_path_is_400() {
+    let fx = delete_fixture(Reply::Json(json!({ "state": "queued" })));
+    let (status, body) =
+        post_json(&fx.app, "/api/music/folder", json!({ "path": ".." })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_path");
+    assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");
+}
+
+// ── folder delete ──────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn folder_delete_enqueues_remove_and_returns_202() {
+    // Seed three files under Music/NewBand on the media-ro filesystem.
+    let fx = music_fixture_with_media(&[
+        ("Music/NewBand/a.mp3", b"x"),
+        ("Music/NewBand/b.mp3", b"y"),
+        ("Music/NewBand/.teslausb-keep", b"k"),
+    ]);
+    let (status, body) =
+        post_json(&fx.app, "/api/music/folder-delete", json!({ "path": "NewBand" })).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(body["state"], "queued");
+
+    // All calls must be delete_paths enqueues on partition 2.
+    let calls = fx.calls.lock().unwrap().clone();
+    assert!(!calls.is_empty(), "expected at least one gadgetd call");
+    for c in &calls {
+        assert_eq!(c["cmd"], "enqueue_mutation");
+        assert_eq!(c["partition"], 2);
+        assert_eq!(c["mutation"]["op"], "delete_paths");
+    }
+
+    // The union of all rel_paths across all calls must equal the seeded files.
+    let mut all_paths: Vec<String> = calls
+        .iter()
+        .flat_map(|c| {
+            c["mutation"]["rel_paths"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_owned())
+        })
+        .collect();
+    all_paths.sort();
+    all_paths.dedup();
+    assert_eq!(
+        all_paths,
+        vec![
+            "Music/NewBand/.teslausb-keep".to_owned(),
+            "Music/NewBand/a.mp3".to_owned(),
+            "Music/NewBand/b.mp3".to_owned(),
+        ],
+        "union of delete_paths must equal the seeded child files"
+    );
+}
+
+#[tokio::test]
+async fn folder_delete_empty_folder_on_disk_returns_404_folder_not_found() {
+    // Folder directory exists on disk but contains zero files → 404 folder_not_found.
+    let fx = music_fixture_with_media(&[]);
+    std::fs::create_dir_all(fx.media_ro.join("Music").join("EmptyBand")).unwrap();
+
+    let (status, body) =
+        post_json(&fx.app, "/api/music/folder-delete", json!({ "path": "EmptyBand" })).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "folder_not_found");
+    assert!(fx.calls.lock().unwrap().is_empty(), "gadgetd not contacted");
+}
+
+#[tokio::test]
+async fn folder_delete_traversal_path_is_400() {
+    let fx = delete_fixture(Reply::Json(json!({ "state": "queued" })));
+    let (status, body) =
+        post_json(&fx.app, "/api/music/folder-delete", json!({ "path": ".." })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_path");
+    assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");
+}
+
+// ── move ───────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn move_music_enqueues_install_only_and_returns_202() {
+    // move_music is copy-only: it enqueues the destination install and nothing
+    // else. The SPA deletes the source after the destination lands in the catalog.
+    let fx = music_fixture_with_media(&[("Music/A/x.mp3", b"fake mp3 data")]);
+    let (status, body) = post_json(
+        &fx.app,
+        "/api/music/move",
+        json!({ "from": "A/x.mp3", "to": "B/x.mp3" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(body["state"], "queued");
+
+    let calls = fx.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1, "expected exactly one gadgetd call (install only; no delete)");
+
+    // The single call must be install_file at the destination.
+    assert_eq!(calls[0]["cmd"], "enqueue_mutation");
+    assert_eq!(calls[0]["partition"], 2);
+    assert_eq!(calls[0]["mutation"]["op"], "install_file");
+    assert_eq!(calls[0]["mutation"]["rel_path"], "Music/B/x.mp3");
+
+    // No delete_paths call — the SPA owns the source removal after convergence.
+    assert!(
+        calls.iter().all(|c| c["mutation"]["op"] != "delete_paths"),
+        "move must not enqueue any delete_paths"
+    );
+}
+
+#[tokio::test]
+async fn move_missing_source_is_404() {
+    let fx = music_fixture_with_media(&[]);
+    let (status, _) = post_json(
+        &fx.app,
+        "/api/music/move",
+        json!({ "from": "A/x.mp3", "to": "B/x.mp3" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(fx.calls.lock().unwrap().is_empty(), "gadgetd not contacted");
+}
+
+#[tokio::test]
+async fn move_to_existing_dest_is_409() {
+    let fx = music_fixture_with_media(&[
+        ("Music/A/x.mp3", b"source data"),
+        ("Music/B/x.mp3", b"existing data"),
+    ]);
+    let (status, body) = post_json(
+        &fx.app,
+        "/api/music/move",
+        json!({ "from": "A/x.mp3", "to": "B/x.mp3" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"]["code"], "already_exists");
+    assert!(fx.calls.lock().unwrap().is_empty(), "gadgetd not contacted");
+}
+
+#[tokio::test]
+async fn move_same_from_to_is_400() {
+    let fx = music_fixture_with_media(&[("Music/A/x.mp3", b"data")]);
+    let (status, body) = post_json(
+        &fx.app,
+        "/api/music/move",
+        json!({ "from": "A/x.mp3", "to": "A/x.mp3" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_move");
+    assert!(fx.calls.lock().unwrap().is_empty(), "gadgetd not contacted");
+}
+
+#[tokio::test]
+async fn move_with_traversal_in_from_is_400() {
+    let fx = music_fixture_with_media(&[]);
+    let (status, body) = post_json(
+        &fx.app,
+        "/api/music/move",
+        json!({ "from": "../secret.mp3", "to": "B/x.mp3" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_path");
+    assert!(fx.calls.lock().unwrap().is_empty(), "gadgetd not contacted");
+}
+
+#[tokio::test]
+async fn move_with_traversal_in_to_is_400() {
+    let fx = music_fixture_with_media(&[("Music/A/x.mp3", b"data")]);
+    let (status, body) = post_json(
+        &fx.app,
+        "/api/music/move",
+        json!({ "from": "A/x.mp3", "to": "../B/x.mp3" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_path");
+    assert!(fx.calls.lock().unwrap().is_empty(), "gadgetd not contacted");
+}
+
+// ── install with path field ────────────────────────────────────────────────
+
+#[tokio::test]
+async fn install_music_with_path_builds_subdir_rel_path() {
+    let fx = delete_fixture(Reply::Json(json!({ "job_id": "m-10", "state": "queued" })));
+    let body = music_multipart_with_path("track.mp3", b"ID3\x00fake", "Daft Punk");
+    let (status, _) = post_music(&fx.app, body).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    let req = fx.last.lock().unwrap().clone().unwrap();
+    assert_eq!(req["mutation"]["op"], "install_file");
+    assert_eq!(req["mutation"]["rel_path"], "Music/Daft Punk/track.mp3");
+}
+
+#[tokio::test]
+async fn install_music_with_nested_path_builds_nested_rel_path() {
+    let fx = delete_fixture(Reply::Json(json!({ "job_id": "m-11", "state": "queued" })));
+    let body = music_multipart_with_path("track.mp3", b"ID3\x00fake", "Artist/Album");
+    let (status, _) = post_music(&fx.app, body).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    let req = fx.last.lock().unwrap().clone().unwrap();
+    assert_eq!(req["mutation"]["rel_path"], "Music/Artist/Album/track.mp3");
+}
+
+#[tokio::test]
+async fn install_music_with_traversal_path_is_400_before_handoff() {
+    let fx = delete_fixture(Reply::Json(json!({ "state": "queued" })));
+    let body = music_multipart_with_path("track.mp3", b"ID3\x00fake", "..");
+    let (status, resp) = post_music(&fx.app, body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(resp["error"]["code"], "invalid_path");
+    assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");
+}
+
+#[tokio::test]
+async fn install_music_without_path_is_top_level() {
+    // No `path` field → existing behaviour: rel_path = "Music/<name>".
+    let fx = delete_fixture(Reply::Json(json!({ "job_id": "m-12", "state": "queued" })));
+    let body = multipart_body_with_filename("song.mp3", &[("file", b"ID3\x00fake")]);
+    let (status, _) = post_music(&fx.app, body).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    let req = fx.last.lock().unwrap().clone().unwrap();
+    assert_eq!(req["mutation"]["rel_path"], "Music/song.mp3");
+}
+
+// ── nested delete ──────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn delete_music_paths_maps_nested_paths_to_music_prefix() {
+    let fx = delete_fixture(Reply::Json(json!({ "job_id": "m-d", "state": "queued" })));
+    let (status, _) = post_json(
+        &fx.app,
+        "/api/music/delete",
+        json!({ "paths": ["A/x.mp3", "y.mp3"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    let req = fx.last.lock().unwrap().clone().unwrap();
+    assert_eq!(req["cmd"], "enqueue_mutation");
+    assert_eq!(req["partition"], 2);
+    assert_eq!(req["mutation"]["op"], "delete_paths");
+    let paths = req["mutation"]["rel_paths"].as_array().unwrap();
+    assert_eq!(paths.len(), 2);
+    assert_eq!(paths[0], "Music/A/x.mp3");
+    assert_eq!(paths[1], "Music/y.mp3");
+}
+
+#[tokio::test]
+async fn delete_music_paths_traversal_component_is_400_before_handoff() {
+    let fx = delete_fixture(Reply::Json(json!({ "state": "queued" })));
+    let (status, body) = post_json(
+        &fx.app,
+        "/api/music/delete",
+        json!({ "paths": ["ok.mp3", "../evil.mp3"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_path");
+    assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");
+}
+
+#[tokio::test]
+async fn delete_music_paths_over_cap_is_422_before_handoff() {
+    let fx = delete_fixture(Reply::Json(json!({ "state": "queued" })));
+    let many: Vec<String> = (0..=crate::media_upload::MAX_BULK_DELETE)
+        .map(|i| format!("{i}.mp3"))
+        .collect();
+    let (status, body) = post_json(&fx.app, "/api/music/delete", json!({ "paths": many })).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["code"], "batch_too_large");
+    assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");
+}
+
+// ── run_remove_many chunking (>16 paths) ──────────────────────────────────
+
+#[tokio::test]
+async fn folder_delete_with_more_than_16_files_produces_chunked_enqueues() {
+    // Seed 20 files under Music/BigBand — more than DELETE_CHUNK=16.
+    let files: Vec<(String, &[u8])> = (0..20)
+        .map(|i| (format!("Music/BigBand/track{i:02}.mp3"), b"x".as_slice()))
+        .collect();
+    let file_refs: Vec<(&str, &[u8])> = files.iter().map(|(s, b)| (s.as_str(), *b)).collect();
+    let fx = music_fixture_with_media(&file_refs);
+
+    let (status, _) =
+        post_json(&fx.app, "/api/music/folder-delete", json!({ "path": "BigBand" })).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    let calls = fx.calls.lock().unwrap().clone();
+    // Must have produced ≥2 delete_paths calls (20 files / 16 per chunk = 2 chunks).
+    assert!(calls.len() >= 2, "expected at least 2 chunked enqueues, got {}", calls.len());
+
+    // Each individual call must have ≤16 paths.
+    for (i, c) in calls.iter().enumerate() {
+        assert_eq!(c["mutation"]["op"], "delete_paths");
+        let paths = c["mutation"]["rel_paths"].as_array().unwrap();
+        assert!(
+            paths.len() <= 16,
+            "chunk {i} has {} paths (must be ≤16)",
+            paths.len()
+        );
+    }
+
+    // The union of all paths must equal all 20 seeded files.
+    let mut all_paths: Vec<String> = calls
+        .iter()
+        .flat_map(|c| {
+            c["mutation"]["rel_paths"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_owned())
+        })
+        .collect();
+    all_paths.sort();
+    all_paths.dedup();
+    assert_eq!(all_paths.len(), 20, "union of all chunks must cover all 20 files");
+}
+
+// ── validate_music_subpath extended rejections ────────────────────────────
+
+#[tokio::test]
+async fn validate_music_subpath_rejects_backslash_component() {
+    let fx = delete_fixture(Reply::Json(json!({ "state": "queued" })));
+    let (status, body) = post_json(
+        &fx.app,
+        "/api/music/folder",
+        json!({ "path": r"Band\Album" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_path");
+    assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");
+}
+
+#[tokio::test]
+async fn validate_music_subpath_rejects_control_char_component() {
+    let fx = delete_fixture(Reply::Json(json!({ "state": "queued" })));
+    // A path component containing a tab (0x09, an ASCII control char).
+    let (status, body) = post_json(
+        &fx.app,
+        "/api/music/folder",
+        json!({ "path": "Band\tAlbum" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_path");
+    assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");
+}
+
+// ── delete_music_paths double-prefix guard ────────────────────────────────
+
+#[tokio::test]
+async fn delete_music_paths_rejects_music_prefix_in_path() {
+    let fx = delete_fixture(Reply::Json(json!({ "state": "queued" })));
+    // Caller incorrectly includes the "Music/" prefix — must be rejected 400.
+    let (status, body) = post_json(
+        &fx.app,
+        "/api/music/delete",
+        json!({ "paths": ["Music/A/x.mp3"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_path");
+    assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");
+}
+
+#[tokio::test]
+async fn delete_music_paths_rejects_music_prefix_case_insensitive() {
+    let fx = delete_fixture(Reply::Json(json!({ "state": "queued" })));
+    let (status, body) = post_json(
+        &fx.app,
+        "/api/music/delete",
+        json!({ "paths": ["MUSIC/A/x.mp3"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_path");
+    assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");
+}

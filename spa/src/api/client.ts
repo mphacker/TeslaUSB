@@ -368,13 +368,19 @@ export const api = {
   /** List installed music files (`GET /api/music`). */
   music: (signal?: AbortSignal) => getJson<MediaList>("/api/music", signal),
 
-  /** Install a music file (`POST /api/music`, multipart `file`). */
+  /**
+   * Install a music file (`POST /api/music`, multipart `file`).
+   * Pass `folder` (a path relative under `Music/`, no leading slash) to upload
+   * into a subfolder — the server appends it as the multipart `path` field.
+   */
   installMusic: async (
     file: File | Blob,
     signal?: AbortSignal,
+    folder?: string,
   ): Promise<MediaHandoffResult> => {
     const form = new FormData();
     form.append("file", file, "name" in file ? file.name : "track.mp3");
+    if (folder) form.append("path", folder);
     const res = await request<MediaHandoffResult>(
       "POST",
       "/api/music",
@@ -504,6 +510,75 @@ export const api = {
     bulkDelete("/api/boombox/bulk-delete", names, signal),
   bulkDeleteMusic: (names: string[], signal?: AbortSignal) =>
     bulkDelete("/api/music/bulk-delete", names, signal),
+
+  /** Create a folder under `Music/` by writing a `.teslausb-keep` placeholder.
+   *  `path` is relative under `Music/` (e.g. `"Daft Punk"` or `"Rock/80s"`). */
+  musicCreateFolder: async (
+    path: string,
+    signal?: AbortSignal,
+  ): Promise<MediaHandoffResult> => {
+    const res = await request<MediaHandoffResult>(
+      "POST",
+      "/api/music/folder",
+      signal,
+      JSON.stringify({ path }),
+      "application/json",
+    );
+    return assertAccepted(res, "create-folder");
+  },
+
+  /** Delete a folder and all its contents recursively.
+   *  `path` is relative under `Music/` (e.g. `"Daft Punk"`). */
+  musicDeleteFolder: async (
+    path: string,
+    signal?: AbortSignal,
+  ): Promise<MediaHandoffResult> => {
+    const res = await request<MediaHandoffResult>(
+      "POST",
+      "/api/music/folder-delete",
+      signal,
+      JSON.stringify({ path }),
+      "application/json",
+    );
+    return assertAccepted(res, "delete-folder");
+  },
+
+  /** Move a file within `Music/`.  Both `from` and `to` are subpaths relative
+   *  under `Music/` (e.g. `from:"track.mp3"`, `to:"Daft Punk/track.mp3"`). */
+  musicMove: async (
+    from: string,
+    to: string,
+    signal?: AbortSignal,
+  ): Promise<MediaHandoffResult> => {
+    const res = await request<MediaHandoffResult>(
+      "POST",
+      "/api/music/move",
+      signal,
+      JSON.stringify({ from, to }),
+      "application/json",
+    );
+    return assertAccepted(res, "move");
+  },
+
+  /**
+   * Delete one or more files in one gadgetd handoff (`POST /api/music/delete`).
+   * `paths` are subpaths under `Music/` with **no** leading `Music/` prefix
+   * (e.g. `["Daft Punk/track.mp3"]`, `["track.mp3"]`). The backend prepends
+   * `Music/` and rejects any path that already starts with `Music/`.
+   */
+  musicDeleteFiles: async (
+    paths: string[],
+    signal?: AbortSignal,
+  ): Promise<MediaHandoffResult> => {
+    const res = await request<MediaHandoffResult>(
+      "POST",
+      "/api/music/delete",
+      signal,
+      JSON.stringify({ paths }),
+      "application/json",
+    );
+    return assertAccepted(res, "delete-files");
+  },
   bulkDeleteLightshows: (names: string[], signal?: AbortSignal) =>
     bulkDelete("/api/lightshows/bulk-delete", names, signal),
   bulkDeletePlates: (names: string[], signal?: AbortSignal) =>

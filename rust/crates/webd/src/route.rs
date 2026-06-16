@@ -38,6 +38,12 @@ const DEFAULT_LIMIT: i64 = 100;
 /// Maximum page size; larger `limit` values are clamped to this.
 const MAX_LIMIT: i64 = 500;
 
+/// Maximum paths per single `delete_paths` enqueue: gadgetd's `enqueue_mutation`
+/// validates each mutation at enqueue time and rejects a `DeletePaths` whose set
+/// exceeds `MAX_DELETE_PATHS=16` (gadgetd `handoff.rs`). [`run_remove_many`]
+/// chunks at this size so every individual enqueue stays within the limit.
+const DELETE_CHUNK: usize = 16;
+
 /// Assemble the application router: the `/api` read endpoints nested under a
 /// JSON-404 fallback, with everything else served by the SPA host.
 pub(crate) fn router(state: AppState, static_dir: PathBuf) -> Router {
@@ -86,6 +92,10 @@ pub(crate) fn router(state: AppState, static_dir: PathBuf) -> Router {
         )
         .route("/music/{name}", delete(crate::music::remove_music))
         .route("/music/bulk-delete", post(crate::music::bulk_delete_music))
+        .route("/music/folder", post(crate::music::create_folder))
+        .route("/music/folder-delete", post(crate::music::delete_folder))
+        .route("/music/move", post(crate::music::move_music))
+        .route("/music/delete", post(crate::music::delete_music_paths))
         .route(
             "/lightshows",
             get(crate::lightshows::list_lightshows)
@@ -529,15 +539,20 @@ pub(crate) async fn run_remove(
     run_remove_many(state, kind, partition, vec![rel_path]).await
 }
 
-/// Generic p2-media bulk-remove primitive (the frictionless write path): hand
-/// `gadgetd` ONE queued `delete_paths` mutation for the whole `rel_paths` set
-/// and bracket the round-trip with `job_status` events under `kind`. A single
-/// handoff for the batch is deliberate — every handoff ejects and remounts the
-/// car-facing USB, so deleting `N` files in `N` handoffs would be `N`
-/// disconnect cycles. `gadgetd` accepts the mutation into its durable queue and
-/// answers `202 {state:"queued"}` immediately; it never hard-fails on a
-/// connected car. Same regular-file-only, idempotent-on-absent semantics as
-/// [`run_remove`].
+/// Generic p2-media bulk-remove primitive (the frictionless write path): chunks
+/// `rel_paths` into batches of ≤[`DELETE_CHUNK`] (16) and enqueues each batch
+/// as a separate `delete_paths` mutation. gadgetd coalesces all queued partition
+/// deletes into a single handoff/eject regardless, so multiple ≤16-path enqueues
+/// still produce exactly ONE car-disconnect cycle.
+///
+/// WHY chunking: gadgetd's `enqueue_mutation` validates each mutation at enqueue
+/// time and rejects a `DeletePaths` whose set exceeds `MAX_DELETE_PATHS=16`
+/// (gadgetd `handoff.rs`). Without this chunking a folder delete or bulk delete
+/// with >16 files would be silently refused.
+///
+/// Returns the outcome of the LAST chunk. All chunks share one `job_id`; the
+/// terminal job-status event is published once after all chunks complete
+/// successfully. A transport error or join failure on any chunk aborts early.
 ///
 /// `rel_paths` must be non-empty and already sanitised/validated by the caller
 /// (see [`crate::media_upload::plan_bulk_delete`]); this primitive does not
@@ -551,45 +566,65 @@ pub(crate) async fn run_remove_many(
     let job_id = state.jobs.next_job_id();
     state.jobs.publish_job(JobStatus::running(job_id, kind));
 
-    let client = state.gadget.clone();
-    let jobs = state.jobs.clone();
-    let request = gadget::enqueue_remove_request_many(partition, &rel_paths);
+    let mut last_outcome: Option<gadget::QueueOutcome> = None;
 
-    let join = tokio::task::spawn_blocking(move || match client.call(request) {
-        Ok(resp) => {
-            let outcome = gadget::map_queue_outcome(&resp);
-            jobs.publish_job(job_for_queue_outcome(job_id, kind, &outcome));
-            EnqueueResult::Outcome(outcome)
-        }
-        Err(transport) => {
-            jobs.publish_job(job_failed(
-                job_id,
-                kind,
-                format!("gadgetd transport: {transport:?}"),
-            ));
-            EnqueueResult::Transport(transport)
-        }
-    })
-    .await;
+    for chunk in rel_paths.chunks(DELETE_CHUNK) {
+        let client = state.gadget.clone();
+        let request = gadget::enqueue_remove_request_many(partition, chunk);
 
-    match join {
-        Ok(EnqueueResult::Outcome(outcome)) => queue_outcome_to_response(&outcome),
-        Ok(EnqueueResult::Transport(transport)) => Err(transport_to_error(transport)),
-        // A remove stages no blob, so StagingFailed never occurs here.
-        Ok(EnqueueResult::StagingFailed(detail)) => Err(ApiError::status(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "staging_failed",
-            detail,
-        )),
-        Err(_) => {
-            state.jobs.publish_job(job_failed(
-                job_id,
-                kind,
-                "blocking task join failed".to_owned(),
-            ));
-            Err(ApiError::Internal)
+        let join = tokio::task::spawn_blocking(move || match client.call(request) {
+            Ok(resp) => EnqueueResult::Outcome(gadget::map_queue_outcome(&resp)),
+            Err(transport) => EnqueueResult::Transport(transport),
+        })
+        .await;
+
+        match join {
+            Ok(EnqueueResult::Outcome(outcome)) => {
+                // A rejected or unparseable chunk fails the whole operation
+                // immediately. Without this, a later successfully-queued chunk
+                // would overwrite `last_outcome` and the endpoint would report
+                // success, silently dropping the failed chunk.
+                if !matches!(outcome, gadget::QueueOutcome::Queued { .. }) {
+                    state
+                        .jobs
+                        .publish_job(job_for_queue_outcome(job_id, kind, &outcome));
+                    return queue_outcome_to_response(&outcome);
+                }
+                last_outcome = Some(outcome);
+            }
+            Ok(EnqueueResult::Transport(transport)) => {
+                state.jobs.publish_job(job_failed(
+                    job_id,
+                    kind,
+                    format!("gadgetd transport: {transport:?}"),
+                ));
+                return Err(transport_to_error(transport));
+            }
+            // A remove stages no blob, so StagingFailed never occurs here.
+            Ok(EnqueueResult::StagingFailed(detail)) => {
+                return Err(ApiError::status(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "staging_failed",
+                    detail,
+                ));
+            }
+            Err(_) => {
+                state.jobs.publish_job(job_failed(
+                    job_id,
+                    kind,
+                    "blocking task join failed".to_owned(),
+                ));
+                return Err(ApiError::Internal);
+            }
         }
     }
+
+    let outcome = last_outcome
+        .expect("rel_paths was empty; caller must ensure non-empty input");
+    state
+        .jobs
+        .publish_job(job_for_queue_outcome(job_id, kind, &outcome));
+    queue_outcome_to_response(&outcome)
 }
 /// (contract D2 §2.5/§3). A new subscriber first receives a burst of the
 /// currently-running jobs, then live events as they are published.

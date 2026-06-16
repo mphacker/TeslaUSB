@@ -593,15 +593,32 @@ LUNs) is the single make-or-break that still needs the car.**
 
 ### 4.6 Music — `Requirements.md` §4.6
 
-- [ ] Browse library incl. nested folders. **(partial: flat list proven; nested folder browse to verify)**
+- [x] Browse library incl. nested folders. **(DONE — client-derived folder tree from
+  `GET /api/music` rel_paths; breadcrumb + per-folder Files view. LIVE-PROVEN on hardware
+  2026-06-16: created `/Music/zz-deploytest`, navigated in (breadcrumb `/Music / zz-deploytest`,
+  upload target scoped to the folder), navigated back to root — console clean. See
+  `files/hw-results.md` "music-rework".)**
 - [x] Play track in-browser (native `<audio preload="none">` per row, streamed from
   `GET /api/media/content?path=<rel>&v=<mtime>`). **(DONE — read path covered by
   webd range-streaming integration tests; SPA wiring verified `npx playwright test
   music.spec.ts` incl. mocked-list player test asserting preload=none + encoded src +
   cache-bust + NO content-fetch on render; 14 passed, clean console/network)**
 - [ ] Upload `.mp3/.flac/.wav/.aac/.m4a`, up to **2 GB**, **16 MB chunked** upload. **(gated: chunked-upload backend — Tier-C remainder A1/A2)**
-- [ ] Create folders + move files between folders. **(gated: music folder ops — A1)**
-- [ ] Delete files (and folders). **(partial: bulk delete proven; folder delete to verify)**
+- [x] Create folders + move files between folders. **(DONE — folder create = install a
+  `.teslausb-keep` placeholder (folder derived client-side, dotfile hidden); folder delete =
+  media-ro filesystem-walk enumerate child files + chunked (≤16) `run_remove_many`; move =
+  copy-only `musicMove` then FE two-phase source-delete after dest converges (no data-loss
+  window). `cargo test -p webd` 251 passed; `npx playwright test music.spec.ts` 26 passed on
+  desktop-1280 + mobile-375 incl. create/navigate/two-phase-move. LIVE-PROVEN on hardware
+  2026-06-16: create folder auto-refreshed with confirmation notice; upload into the folder
+  appeared immediately (no manual refresh); full native `<audio>` control bar per row. See
+  `files/hw-results.md` "music-rework".)**
+- [x] Delete files (and folders). **(DONE — per-row + bulk file delete sends STRIPPED
+  subpaths (fixes the `Music/Music/...` double-prefix that made delete silently no-op);
+  recursive folder delete enumerates child files via the media-ro walk. Auto-refresh polls
+  until the row is absent. LIVE-PROVEN on hardware 2026-06-16: deleted a file (row
+  self-removed, Files→0) then deleted the folder (root returned to empty) — `/api/music`
+  `{"items":[]}`, webd NRestarts=0, console clean. See `files/hw-results.md` "music-rework".)**
 - [x] Media-drive storage usage (used/free/total). **(proven)**
 
 ### 4.7 Boombox — `Requirements.md` §4.7

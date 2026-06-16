@@ -6,9 +6,21 @@
 
 .music-layout {
   display: grid;
-  grid-template-columns: 2fr 1fr;
+  /* Left (library/files) absorbs all extra width so the files table breathes;
+     the right (upload/player) panel is capped to a sensible reading width. */
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 440px);
   gap: 20px;
   align-items: start;
+}
+
+/*
+ * Music opts out of the global 1200px `.main-content` cap (carried-over v1 base)
+ * so the panel expands to the browser width — the v1 mock was authored at 1440px
+ * and the capped width crunched the files table. Scoped via the `music-active`
+ * body class set while the Music screen is mounted (mirrors `.mapping-active`).
+ */
+body.music-active .main-content {
+  max-width: none;
 }
 
 .music-panel {

@@ -32,6 +32,15 @@ export function Music() {
     return () => ctrl.abort();
   }, []);
 
+  // The Music screen opts out of the global 1200px `.main-content` cap (the v1
+  // mock was authored at 1440px) so the files table isn't crunched inside the
+  // two-column layout. Mirror TripMap's body-class pattern, scoped to while this
+  // screen is mounted.
+  useEffect(() => {
+    document.body.classList.add("music-active");
+    return () => document.body.classList.remove("music-active");
+  }, []);
+
   // Local state for the right-panel inputs
   const [folderInput, setFolderInput] = useState("");
   // Move-dialog destination (folder path relative under Music/, "" = root)

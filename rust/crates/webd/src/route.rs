@@ -626,6 +626,122 @@ pub(crate) async fn run_remove_many(
         .publish_job(job_for_queue_outcome(job_id, kind, &outcome));
     queue_outcome_to_response(&outcome)
 }
+
+/// Folder-delete write path: enqueue the folder's child-file deletes (chunked
+/// ≤[`DELETE_CHUNK`]), THEN enqueue a `remove_empty_dir` prune for the now-empty
+/// directory. gadgetd applies the file deletes first (file-only `delete_paths`,
+/// which deliberately refuses directories), then the empty-only `remove_dir`
+/// prune removes the orphaned directory the deletes leave behind.
+///
+/// `dir_rel_path` is enqueued even when `file_rel_paths` is empty — that REPAIRS
+/// an already-orphaned empty folder (a folder whose files were previously
+/// deleted before the prune existed). The prune is idempotent on an absent
+/// directory and empty-only, so it can never remove a file.
+///
+/// `file_rel_paths` must be already sanitised/validated by the caller; this
+/// primitive does not re-validate path safety. Returns the outcome of the
+/// directory-prune enqueue (the terminal step). A rejected file-delete chunk or
+/// any transport error aborts early.
+pub(crate) async fn run_folder_delete(
+    state: AppState,
+    kind: &'static str,
+    partition: u8,
+    file_rel_paths: Vec<String>,
+    dir_rel_path: String,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let job_id = state.jobs.next_job_id();
+    state.jobs.publish_job(JobStatus::running(job_id, kind));
+
+    // 1) Enqueue the child-file deletes (chunked ≤16). Each chunk must queue;
+    //    a rejected chunk fails the whole operation immediately.
+    for chunk in file_rel_paths.chunks(DELETE_CHUNK) {
+        let client = state.gadget.clone();
+        let request = gadget::enqueue_remove_request_many(partition, chunk);
+
+        let join = tokio::task::spawn_blocking(move || match client.call(request) {
+            Ok(resp) => EnqueueResult::Outcome(gadget::map_queue_outcome(&resp)),
+            Err(transport) => EnqueueResult::Transport(transport),
+        })
+        .await;
+
+        match join {
+            Ok(EnqueueResult::Outcome(outcome)) => {
+                if !matches!(outcome, gadget::QueueOutcome::Queued { .. }) {
+                    state
+                        .jobs
+                        .publish_job(job_for_queue_outcome(job_id, kind, &outcome));
+                    return queue_outcome_to_response(&outcome);
+                }
+            }
+            Ok(EnqueueResult::Transport(transport)) => {
+                state.jobs.publish_job(job_failed(
+                    job_id,
+                    kind,
+                    format!("gadgetd transport: {transport:?}"),
+                ));
+                return Err(transport_to_error(transport));
+            }
+            Ok(EnqueueResult::StagingFailed(detail)) => {
+                return Err(ApiError::status(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "staging_failed",
+                    detail,
+                ));
+            }
+            Err(_) => {
+                state.jobs.publish_job(job_failed(
+                    job_id,
+                    kind,
+                    "blocking task join failed".to_owned(),
+                ));
+                return Err(ApiError::Internal);
+            }
+        }
+    }
+
+    // 2) Enqueue the empty-directory prune (always — repairs an orphaned folder).
+    let client = state.gadget.clone();
+    let request = gadget::enqueue_remove_empty_dir_request(partition, &dir_rel_path);
+
+    let join = tokio::task::spawn_blocking(move || match client.call(request) {
+        Ok(resp) => EnqueueResult::Outcome(gadget::map_queue_outcome(&resp)),
+        Err(transport) => EnqueueResult::Transport(transport),
+    })
+    .await;
+
+    let outcome = match join {
+        Ok(EnqueueResult::Outcome(outcome)) => outcome,
+        Ok(EnqueueResult::Transport(transport)) => {
+            state.jobs.publish_job(job_failed(
+                job_id,
+                kind,
+                format!("gadgetd transport: {transport:?}"),
+            ));
+            return Err(transport_to_error(transport));
+        }
+        // A prune stages no blob, so StagingFailed never occurs here.
+        Ok(EnqueueResult::StagingFailed(detail)) => {
+            return Err(ApiError::status(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "staging_failed",
+                detail,
+            ));
+        }
+        Err(_) => {
+            state.jobs.publish_job(job_failed(
+                job_id,
+                kind,
+                "blocking task join failed".to_owned(),
+            ));
+            return Err(ApiError::Internal);
+        }
+    };
+
+    state
+        .jobs
+        .publish_job(job_for_queue_outcome(job_id, kind, &outcome));
+    queue_outcome_to_response(&outcome)
+}
 /// (contract D2 §2.5/§3). A new subscriber first receives a burst of the
 /// currently-running jobs, then live events as they are published.
 async fn jobs_stream(

@@ -31,7 +31,7 @@
 //! delete-after-install (or install-after-delete) of the same path resolve to
 //! the single latest intent.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -240,8 +240,20 @@ impl MutationQueue {
         let mut coalesced_seqs = Vec::new();
         let mut delete_paths: Vec<String> = Vec::new();
         let mut installs: Vec<Mutation> = Vec::new();
+        // Directory prunes have no path effect (so the `wins_any` test below
+        // would wrongly coalesce them). They are always applied; dedup by path,
+        // preserving first-seen order.
+        let mut remove_dirs: Vec<String> = Vec::new();
+        let mut remove_dir_seen: BTreeSet<String> = BTreeSet::new();
 
         for entry in &queued {
+            if let Mutation::RemoveEmptyDir { rel_path } = &entry.mutation {
+                apply_seqs.push(entry.seq);
+                if remove_dir_seen.insert(rel_path.clone()) {
+                    remove_dirs.push(rel_path.clone());
+                }
+                continue;
+            }
             let mut wins_any = false;
             for (path, _effect) in entry_effects(&entry.mutation) {
                 if latest.get(&path).is_some_and(|(seq, _)| *seq == entry.seq) {
@@ -281,6 +293,12 @@ impl MutationQueue {
                     rel_paths: chunk.to_vec(),
                 });
             }
+        }
+        // Directory prunes run AFTER the file deletes (each apply is its own
+        // handoff/eject, applied in order) so the folder's files are already gone
+        // when the empty-only `remove_dir` runs, and BEFORE installs.
+        for rel_path in remove_dirs {
+            applies.push(Mutation::RemoveEmptyDir { rel_path });
         }
         applies.extend(installs);
 
@@ -389,6 +407,9 @@ fn entry_effects(mutation: &Mutation) -> Vec<(String, Effect)> {
             .iter()
             .map(|p| (p.clone(), Effect::Delete))
             .collect(),
+        // A directory prune touches no catalog path effect; it is handled as an
+        // always-applied entry in `plan_batch` (never coalesced by path).
+        Mutation::RemoveEmptyDir { .. } => vec![],
     }
 }
 
@@ -433,6 +454,12 @@ mod tests {
 
     fn delete(path: &str) -> Mutation {
         Mutation::DeletePath {
+            rel_path: path.to_owned(),
+        }
+    }
+
+    fn remove_dir(path: &str) -> Mutation {
+        Mutation::RemoveEmptyDir {
             rel_path: path.to_owned(),
         }
     }
@@ -546,6 +573,56 @@ mod tests {
         ));
         assert_eq!(plan.applies[1], install("Boombox/c.wav", "/s/c"));
         assert_eq!(plan.apply_seqs.len(), 3);
+        assert!(plan.coalesced_seqs.is_empty());
+    }
+
+    #[test]
+    fn folder_delete_orders_dir_prune_after_files_and_marks_it_applied() {
+        let mut q = MutationQueue::default();
+        // A folder delete: the child-file deletes plus a prune of the now-empty dir.
+        q.enqueue(2, delete("Music/Artist/Album/a.mp3"), None, None)
+            .unwrap();
+        q.enqueue(2, delete("Music/Artist/Album/b.mp3"), None, None)
+            .unwrap();
+        q.enqueue(2, remove_dir("Music/Artist/Album"), None, None)
+            .unwrap();
+        let plan = q.plan_batch(2);
+
+        // Files coalesce into one DeletePaths; the prune follows as its own entry.
+        assert_eq!(plan.applies.len(), 2);
+        assert!(matches!(
+            &plan.applies[0],
+            Mutation::DeletePaths { rel_paths }
+                if rel_paths == &vec!["Music/Artist/Album/a.mp3".to_owned(),
+                                      "Music/Artist/Album/b.mp3".to_owned()]
+        ));
+        assert_eq!(plan.applies[1], remove_dir("Music/Artist/Album"));
+        // The prune (seq 3) has no path effect but MUST be applied, not coalesced.
+        assert!(plan.apply_seqs.contains(&3));
+        assert!(plan.coalesced_seqs.is_empty());
+    }
+
+    #[test]
+    fn folder_delete_dir_prune_alone_is_applied() {
+        // Repairing an already-orphaned empty folder: no file deletes, just the prune.
+        let mut q = MutationQueue::default();
+        q.enqueue(2, remove_dir("Music/EmptyOrphan"), None, None)
+            .unwrap();
+        let plan = q.plan_batch(2);
+        assert_eq!(plan.applies, vec![remove_dir("Music/EmptyOrphan")]);
+        assert_eq!(plan.apply_seqs, vec![1]);
+        assert!(plan.coalesced_seqs.is_empty());
+    }
+
+    #[test]
+    fn folder_delete_dedups_repeated_dir_prune() {
+        let mut q = MutationQueue::default();
+        q.enqueue(2, remove_dir("Music/Dir"), None, None).unwrap();
+        q.enqueue(2, remove_dir("Music/Dir"), None, None).unwrap();
+        let plan = q.plan_batch(2);
+        // Same dir twice → emitted once, but BOTH seqs retired (applied).
+        assert_eq!(plan.applies, vec![remove_dir("Music/Dir")]);
+        assert_eq!(plan.apply_seqs.len(), 2);
         assert!(plan.coalesced_seqs.is_empty());
     }
 

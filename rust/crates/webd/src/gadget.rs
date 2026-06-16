@@ -214,6 +214,24 @@ pub(crate) fn enqueue_remove_request_many(partition: u8, rel_paths: &[String]) -
     })
 }
 
+/// Build the `enqueue_mutation` request to prune an **empty** directory (and any
+/// now-empty ancestors) at `rel_path` via the durable write path. This
+/// complements [`enqueue_remove_request_many`]: `delete_paths` is regular-file-
+/// only (it refuses directories so a clip delete can never recurse), which
+/// leaves the now-empty folder behind after its files are removed. `gadgetd`'s
+/// `remove_empty_dir` uses an empty-only `remove_dir` (NEVER recursive, so it
+/// can never delete a file), refuses protected/structural directories, and is
+/// idempotent on an already-absent directory (so a retried prune is safe). No
+/// `blob_path` (a prune stages nothing). `rel_path` must be a fixed, validated,
+/// partition-root-relative directory.
+pub(crate) fn enqueue_remove_empty_dir_request(partition: u8, rel_path: &str) -> Value {
+    json!({
+        "cmd": "enqueue_mutation",
+        "partition": partition,
+        "mutation": { "op": "remove_empty_dir", "rel_path": rel_path },
+    })
+}
+
 /// Build the `handoff_status` wire request for a prior handoff id.
 pub(crate) fn status_request(handoff_id: &str) -> Value {
     json!({ "cmd": "handoff_status", "handoff_id": handoff_id })
@@ -503,8 +521,8 @@ mod stub_client {
 mod tests {
     use super::{
         DeleteRefusal, MutationOutcome, QueueOutcome, enqueue_install_request,
-        enqueue_remove_request_many, map_gadget_status, map_mutation_outcome, map_queue_outcome,
-        map_status, plan_car_delete,
+        enqueue_remove_empty_dir_request, enqueue_remove_request_many, map_gadget_status,
+        map_mutation_outcome, map_queue_outcome, map_status, plan_car_delete,
     };
     use serde_json::{Value, json};
 
@@ -754,6 +772,16 @@ mod tests {
         assert_eq!(req["cmd"], "enqueue_mutation");
         assert_eq!(req["mutation"]["op"], "delete_paths");
         assert!(req.get("blob_path").is_none(), "a delete stages no blob");
+    }
+
+    #[test]
+    fn enqueue_remove_empty_dir_request_shape() {
+        let req = enqueue_remove_empty_dir_request(2, "Music/Artist/Album");
+        assert_eq!(req["cmd"], "enqueue_mutation");
+        assert_eq!(req["partition"], 2);
+        assert_eq!(req["mutation"]["op"], "remove_empty_dir");
+        assert_eq!(req["mutation"]["rel_path"], "Music/Artist/Album");
+        assert!(req.get("blob_path").is_none(), "a prune stages no blob");
     }
 
     #[test]

@@ -3537,17 +3537,24 @@ async fn folder_delete_enqueues_remove_and_returns_202() {
     assert_eq!(status, StatusCode::ACCEPTED);
     assert_eq!(body["state"], "queued");
 
-    // All calls must be delete_paths enqueues on partition 2.
+    // All delete calls must be delete_paths enqueues on partition 2; the final
+    // call must be the remove_empty_dir prune of the now-empty folder.
     let calls = fx.calls.lock().unwrap().clone();
-    assert!(!calls.is_empty(), "expected at least one gadgetd call");
-    for c in &calls {
+    assert!(calls.len() >= 2, "expected file deletes + a dir prune");
+
+    let (prune, deletes) = calls.split_last().unwrap();
+    for c in deletes {
         assert_eq!(c["cmd"], "enqueue_mutation");
         assert_eq!(c["partition"], 2);
         assert_eq!(c["mutation"]["op"], "delete_paths");
     }
+    assert_eq!(prune["cmd"], "enqueue_mutation");
+    assert_eq!(prune["partition"], 2);
+    assert_eq!(prune["mutation"]["op"], "remove_empty_dir");
+    assert_eq!(prune["mutation"]["rel_path"], "Music/NewBand");
 
-    // The union of all rel_paths across all calls must equal the seeded files.
-    let mut all_paths: Vec<String> = calls
+    // The union of all rel_paths across the delete calls must equal the files.
+    let mut all_paths: Vec<String> = deletes
         .iter()
         .flat_map(|c| {
             c["mutation"]["rel_paths"]
@@ -3571,16 +3578,23 @@ async fn folder_delete_enqueues_remove_and_returns_202() {
 }
 
 #[tokio::test]
-async fn folder_delete_empty_folder_on_disk_returns_404_folder_not_found() {
-    // Folder directory exists on disk but contains zero files → 404 folder_not_found.
+async fn folder_delete_empty_folder_on_disk_repairs_orphan_and_returns_202() {
+    // Folder directory exists on disk but contains zero files. Rather than 404,
+    // the prune is still enqueued to REPAIR the already-orphaned empty directory
+    // (a folder whose files were deleted before the prune existed).
     let fx = music_fixture_with_media(&[]);
     std::fs::create_dir_all(fx.media_ro.join("Music").join("EmptyBand")).unwrap();
 
     let (status, body) =
         post_json(&fx.app, "/api/music/folder-delete", json!({ "path": "EmptyBand" })).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["error"]["code"], "folder_not_found");
-    assert!(fx.calls.lock().unwrap().is_empty(), "gadgetd not contacted");
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(body["state"], "queued");
+
+    // Exactly one call: the remove_empty_dir prune (no files to delete).
+    let calls = fx.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1, "only the dir prune is enqueued");
+    assert_eq!(calls[0]["mutation"]["op"], "remove_empty_dir");
+    assert_eq!(calls[0]["mutation"]["rel_path"], "Music/EmptyBand");
 }
 
 #[tokio::test]
@@ -3591,6 +3605,23 @@ async fn folder_delete_traversal_path_is_400() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"]["code"], "invalid_path");
     assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");
+}
+
+#[tokio::test]
+async fn folder_delete_symlinked_folder_is_404_and_not_followed() {
+    // Defence-in-depth: a folder that is a symlink (diverging canonical vs lexical
+    // path) must be refused — never followed into another folder's files.
+    let fx = music_fixture_with_media(&[("Music/Keep/song.mp3", b"x")]);
+    let music = fx.media_ro.join("Music");
+    std::os::unix::fs::symlink(music.join("Keep"), music.join("Link")).unwrap();
+
+    let (status, _) =
+        post_json(&fx.app, "/api/music/folder-delete", json!({ "path": "Link" })).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(
+        fx.calls.lock().unwrap().is_empty(),
+        "a symlinked folder must not enqueue any delete"
+    );
 }
 
 // ── move ───────────────────────────────────────────────────────────────────
@@ -3809,11 +3840,20 @@ async fn folder_delete_with_more_than_16_files_produces_chunked_enqueues() {
     assert_eq!(status, StatusCode::ACCEPTED);
 
     let calls = fx.calls.lock().unwrap().clone();
-    // Must have produced ≥2 delete_paths calls (20 files / 16 per chunk = 2 chunks).
-    assert!(calls.len() >= 2, "expected at least 2 chunked enqueues, got {}", calls.len());
+    // The final call is the remove_empty_dir prune; the rest are delete chunks.
+    let (prune, deletes) = calls.split_last().unwrap();
+    assert_eq!(prune["mutation"]["op"], "remove_empty_dir");
+    assert_eq!(prune["mutation"]["rel_path"], "Music/BigBand");
 
-    // Each individual call must have ≤16 paths.
-    for (i, c) in calls.iter().enumerate() {
+    // Must have produced ≥2 delete_paths calls (20 files / 16 per chunk = 2 chunks).
+    assert!(
+        deletes.len() >= 2,
+        "expected at least 2 chunked enqueues, got {}",
+        deletes.len()
+    );
+
+    // Each individual delete call must have ≤16 paths.
+    for (i, c) in deletes.iter().enumerate() {
         assert_eq!(c["mutation"]["op"], "delete_paths");
         let paths = c["mutation"]["rel_paths"].as_array().unwrap();
         assert!(
@@ -3824,7 +3864,7 @@ async fn folder_delete_with_more_than_16_files_produces_chunked_enqueues() {
     }
 
     // The union of all paths must equal all 20 seeded files.
-    let mut all_paths: Vec<String> = calls
+    let mut all_paths: Vec<String> = deletes
         .iter()
         .flat_map(|c| {
             c["mutation"]["rel_paths"]

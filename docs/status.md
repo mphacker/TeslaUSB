@@ -618,7 +618,17 @@ LUNs) is the single make-or-break that still needs the car.**
   recursive folder delete enumerates child files via the media-ro walk. Auto-refresh polls
   until the row is absent. LIVE-PROVEN on hardware 2026-06-16: deleted a file (row
   self-removed, Files→0) then deleted the folder (root returned to empty) — `/api/music`
-  `{"items":[]}`, webd NRestarts=0, console clean. See `files/hw-results.md` "music-rework".)**
+  `{"items":[]}`, webd NRestarts=0, console clean. See `files/hw-results.md` "music-rework".
+  **FOLLOW-UP (2026-06-16): orphaned empty directory on the USB now actually removed.** Added
+  a gadgetd `RemoveEmptyDir` eject-handoff mutation (empty-only `remove_dir`, walks up,
+  refuses protected/TeslaCam roots + symlinked path components); folder-delete enqueues the
+  file deletes then the prune (best-effort, ordered after deletes, own handoff). Repairs
+  already-orphaned empty folders too. gadgetd 99 + webd 254 tests pass; GPT-5.5 reviewed
+  (2 blockers fixed: intermediate-symlink canon==lexical guard, symlinked-folder refusal).
+  LIVE-PROVEN on hardware: created `HWTEST_DELME` → deleted → directory gone from the live
+  exFAT (`/run/teslausb/media-ro`); two pre-existing orphaned empty dirs (`test`,
+  `zz-deploytest`) deleted via folder-delete and removed. gadget never torn down
+  (control-daemon-only restart), NRestarts=0. See `files/hw-results.md` "folder-delete".)**
 - [x] Media-drive storage usage (used/free/total). **(proven)**
 
 ### 4.7 Boombox — `Requirements.md` §4.7

@@ -285,10 +285,12 @@ pub(crate) async fn create_folder(
 /// We therefore enumerate the folder's child files from the **authoritative
 /// media-ro filesystem** (the catalog lags disk by the scan interval and can
 /// miss just-applied files, leaving orphans that reappear) and delete them as
-/// files. [`run_remove_many`] chunks the list internally (≤16 per enqueue) and
-/// gadgetd coalesces all queued deletes into a single handoff/eject. The
-/// now-empty exFAT directory is invisible in the catalog — folders are derived
-/// from their files — so the folder disappears from the UI.
+/// files, THEN enqueue a `remove_empty_dir` prune for the now-empty directory
+/// (empty-only, never recursive). [`crate::route::run_folder_delete`] chunks the
+/// file deletes internally (≤16 per enqueue) and appends the dir prune; gadgetd
+/// applies the deletes first, then prunes the emptied directory. The prune is
+/// enqueued even when no files are found, which repairs an already-orphaned
+/// empty folder.
 pub(crate) async fn delete_folder(
     State(state): State<AppState>,
     Json(req): Json<FolderRequest>,
@@ -306,6 +308,15 @@ pub(crate) async fn delete_folder(
         Ok(p) if p.starts_with(&root) => p,
         _ => return Err(ApiError::NotFound),
     };
+
+    // Defence-in-depth on the untrusted exFAT (which cannot itself hold symlinks,
+    // but webd does not trust that): refuse a folder whose canonical path differs
+    // from its lexical path — i.e. a symlink somewhere in the path. Without this,
+    // `Music/DeleteMe -> Music/Keep` would resolve, pass the jail, and enqueue
+    // deletes for `Keep`'s files.
+    if folder_canonical != folder_candidate {
+        return Err(ApiError::NotFound);
+    }
 
     // Assert it is a directory (not a file).
     let meta = tokio::fs::metadata(&folder_canonical)
@@ -356,21 +367,21 @@ pub(crate) async fn delete_folder(
     .await
     .map_err(|_| ApiError::Internal)??;
 
-    if rel_paths.is_empty() {
-        return Err(ApiError::status(
-            StatusCode::NOT_FOUND,
-            "folder_not_found",
-            "no files found under the given folder",
-        ));
-    }
-
     let mut rel_paths = rel_paths;
     rel_paths.sort();
     rel_paths.dedup();
 
-    // run_remove_many chunks internally (≤16 per enqueue); gadgetd coalesces
-    // all into a single handoff.
-    crate::route::run_remove_many(state, "music_remove", PARTITION_MEDIA, rel_paths).await
+    // The directory itself (partition-root-relative). gadgetd's `delete_paths`
+    // is regular-file-only and refuses directories, so deleting the child files
+    // leaves an orphaned empty exFAT directory behind. `run_folder_delete`
+    // enqueues the file deletes AND a `remove_empty_dir` prune (empty-only,
+    // never recursive) for this directory. The prune is enqueued even when
+    // `rel_paths` is empty, which REPAIRS an already-orphaned empty folder the
+    // user can otherwise neither see emptied nor remove.
+    let dir_rel = format!("{MUSIC_DIR}/{validated}");
+
+    crate::route::run_folder_delete(state, "music_remove", PARTITION_MEDIA, rel_paths, dir_rel)
+        .await
 }
 
 /// `POST /api/music/move` — copy a music file to a new location within `Music/`.

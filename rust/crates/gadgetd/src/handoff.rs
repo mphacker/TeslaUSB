@@ -83,6 +83,20 @@ pub(crate) enum Mutation {
         /// Absolute path of the staged source file on the Pi data area.
         source_path: String,
     },
+    /// Remove the **empty** directory at `rel_path` (and any now-empty ancestors
+    /// up the chain), under the mounted partition root. This exists because
+    /// [`Mutation::DeletePaths`] deliberately refuses directories (so a clip
+    /// delete can never recurse), which leaves an orphaned empty directory behind
+    /// after a folder's files are deleted. Unlike [`Mutation::DeletePath`], this
+    /// NEVER recurses: it uses an empty-only `remove_dir`, so it is impossible
+    /// for it to delete any file — if the directory is non-empty it is left
+    /// untouched. Protected directories (top-level partition roots and the
+    /// TeslaCam structural roots) are refused. An already-absent directory is
+    /// treated as success, so a retried prune is safe.
+    RemoveEmptyDir {
+        /// Partition-root-relative directory to prune (empty-only, never recursive).
+        rel_path: String,
+    },
 }
 
 /// Upper bound on the number of paths in a single [`Mutation::DeletePaths`]. A
@@ -101,6 +115,14 @@ impl Mutation {
         match self {
             Self::DeletePath { rel_path } | Self::InstallFile { rel_path, .. } => {
                 validate_rel_path(rel_path)?;
+            }
+            Self::RemoveEmptyDir { rel_path } => {
+                validate_rel_path(rel_path)?;
+                if is_protected_dir(rel_path) {
+                    return Err(format!(
+                        "remove_empty_dir: refusing to prune a protected directory: {rel_path}"
+                    ));
+                }
             }
             Self::DeletePaths { rel_paths } => {
                 if rel_paths.is_empty() {
@@ -152,6 +174,29 @@ pub(crate) fn validate_rel_path(raw: &str) -> Result<String, String> {
         }
     }
     Ok(parts.join("/"))
+}
+
+/// Directories a [`Mutation::RemoveEmptyDir`] prune must NEVER remove, even when
+/// empty: any top-level partition directory (a single path component, e.g.
+/// `Music`, `TeslaCam`, `Chimes`, `Boombox`) and the TeslaCam structural roots
+/// the car expects to exist (`TeslaCam/SavedClips`, `SentryClips`, `RecentClips`).
+///
+/// `RemoveEmptyDir` is only ever issued by the media folder-delete path (for a
+/// user-created subfolder two-or-more levels deep), but gadgetd does not trust
+/// its callers: this is defence-in-depth against a bug or malformed request
+/// pruning a structural directory the car relies on. Comparison is
+/// case-insensitive because the backing exFAT filesystem is.
+pub(crate) fn is_protected_dir(rel_path: &str) -> bool {
+    let comps: Vec<&str> = rel_path.split('/').filter(|c| !c.is_empty()).collect();
+    // A single component (or none) is a top-level partition root — never prune.
+    if comps.len() < 2 {
+        return true;
+    }
+    comps.len() == 2
+        && comps[0].eq_ignore_ascii_case("TeslaCam")
+        && (comps[1].eq_ignore_ascii_case("SavedClips")
+            || comps[1].eq_ignore_ascii_case("SentryClips")
+            || comps[1].eq_ignore_ascii_case("RecentClips"))
 }
 
 /// Progress markers emitted as the handoff advances (for status reporting).
@@ -403,7 +448,7 @@ fn represent_after(
 mod tests {
     use super::{
         HandoffOutcome, HandoffPhase, ImageMutator, LunControl, MutateError, Mutation, Partition,
-        ReadMountGate, SaveGuard, run_handoff, validate_rel_path,
+        ReadMountGate, SaveGuard, is_protected_dir, run_handoff, validate_rel_path,
     };
     use std::cell::{Cell, RefCell};
 
@@ -463,6 +508,59 @@ mod tests {
             rel_paths: vec!["TeslaCam/ok.mp4".to_owned(), "../escape".to_owned()],
         };
         assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn is_protected_dir_guards_roots_and_structural_dirs() {
+        // Top-level (single component) partition roots are always protected.
+        assert!(is_protected_dir("Music"));
+        assert!(is_protected_dir("TeslaCam"));
+        assert!(is_protected_dir("Chimes"));
+        // TeslaCam structural second-level roots (case-insensitive, exFAT).
+        assert!(is_protected_dir("TeslaCam/SavedClips"));
+        assert!(is_protected_dir("TeslaCam/SentryClips"));
+        assert!(is_protected_dir("TeslaCam/RecentClips"));
+        assert!(is_protected_dir("teslacam/savedclips"));
+        // User subfolders (depth >= 2, not a structural root) are prunable.
+        assert!(!is_protected_dir("Music/Artist"));
+        assert!(!is_protected_dir("Music/Artist/Album"));
+        assert!(!is_protected_dir("TeslaCam/SavedClips/2026-06-01_20-10-04"));
+    }
+
+    #[test]
+    fn mutation_validate_guards_remove_empty_dir() {
+        // A normal user subfolder validates.
+        assert!(
+            Mutation::RemoveEmptyDir {
+                rel_path: "Music/Artist/Album".to_owned(),
+            }
+            .validate()
+            .is_ok()
+        );
+        // Traversal is refused.
+        assert!(
+            Mutation::RemoveEmptyDir {
+                rel_path: "../escape".to_owned(),
+            }
+            .validate()
+            .is_err()
+        );
+        // A protected top-level root is refused.
+        assert!(
+            Mutation::RemoveEmptyDir {
+                rel_path: "Music".to_owned(),
+            }
+            .validate()
+            .is_err()
+        );
+        // A TeslaCam structural root is refused.
+        assert!(
+            Mutation::RemoveEmptyDir {
+                rel_path: "TeslaCam/SentryClips".to_owned(),
+            }
+            .validate()
+            .is_err()
+        );
     }
 
     // ---- Fakes for the orchestration tests ----

@@ -16,7 +16,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use crate::handoff::{ImageMutator, MutateError, Mutation, Partition, validate_rel_path};
+use crate::handoff::{
+    ImageMutator, MutateError, Mutation, Partition, is_protected_dir, validate_rel_path,
+};
 
 /// Cap on an `InstallFile` source (media assets are MB-scale; refuse anything
 /// that would blow the ~5 s handoff window or the card).
@@ -153,7 +155,97 @@ fn apply_op(mnt: &Path, mutation: &Mutation) -> io::Result<()> {
             rel_path,
             source_path,
         } => install_file(mnt, rel_path, Path::new(source_path)),
+        Mutation::RemoveEmptyDir { rel_path } => remove_empty_dir(mnt, rel_path),
     }
+}
+
+/// Remove the **empty** directory at `rel_path`, then walk UP and remove any
+/// now-empty ancestors, stopping at the first non-empty, protected, or absent
+/// directory. This is the orphan-directory cleanup that complements
+/// [`delete_files`]: after a folder's files are deleted (file-only, never
+/// recursive) the empty exFAT directory lingers, so this prunes it.
+///
+/// SAFETY — this can NEVER delete a file:
+/// - It uses `remove_dir` (empty-only). A directory containing any entry returns
+///   an error and is left completely untouched; we treat that as success and
+///   stop (best-effort prune).
+/// - Each candidate is re-jailed every iteration: `symlink_metadata` (a symlink
+///   or non-dir stops the walk), then `canonicalize` + `starts_with(mnt_canon)`
+///   (a resolved path escaping the mount is a hard error), and the mount root
+///   itself is never a candidate.
+/// - Protected directories ([`is_protected_dir`]: top-level partition roots and
+///   the TeslaCam structural roots) stop the walk before removal.
+///
+/// An already-absent directory (`NotFound`) is success — a retried prune is safe.
+/// Any other `remove_dir` error (e.g. `DirectoryNotEmpty`) ends the walk without
+/// failing the handoff: leaving an empty directory behind is harmless and must
+/// not poison a delete that already succeeded.
+fn remove_empty_dir(mnt: &Path, rel_path: &str) -> io::Result<()> {
+    let mnt_canon = std::fs::canonicalize(mnt)?;
+    let rel = validate_rel_path(rel_path).map_err(io::Error::other)?;
+
+    // Components to walk up from the deepest. `validate_rel_path` guarantees a
+    // relative, `.`/`..`-free path, so this is just the cleaned segments.
+    let mut comps: Vec<String> = rel.split('/').map(str::to_owned).collect();
+
+    while !comps.is_empty() {
+        let current_rel = comps.join("/");
+        // Stop before touching any protected/structural directory.
+        if is_protected_dir(&current_rel) {
+            break;
+        }
+
+        let joined = mnt_canon.join(&current_rel);
+        // Stat WITHOUT following symlinks: a symlink (or anything not a real
+        // directory) is not something we prune.
+        match std::fs::symlink_metadata(&joined) {
+            Ok(meta) => {
+                if !meta.is_dir() {
+                    break;
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                // Already gone (orphan repaired or never existed) — keep walking
+                // up in case an ancestor is now empty too.
+                comps.pop();
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+
+        // Re-jail the resolved real path: never the mount root, never an escape.
+        let canon = std::fs::canonicalize(&joined)?;
+        if canon == mnt_canon {
+            break;
+        }
+        if !canon.starts_with(&mnt_canon) {
+            return Err(io::Error::other(format!(
+                "resolved path {} escapes the mount",
+                canon.display()
+            )));
+        }
+        // Defence-in-depth on the untrusted exFAT (which cannot itself hold
+        // symlinks, but gadgetd does not trust that): require the canonical path
+        // to equal the lexical path. If an intermediate symlink made resolution
+        // diverge, `is_protected_dir`'s lexical check would no longer match the
+        // directory `remove_dir` actually targets — so refuse and stop.
+        let expected = mnt_canon.join(&current_rel);
+        if canon != expected {
+            break;
+        }
+
+        match std::fs::remove_dir(&canon) {
+            Ok(()) => {
+                comps.pop();
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                comps.pop();
+            }
+            // Non-empty (or any other error): leave it and stop. Best-effort.
+            Err(_) => break,
+        }
+    }
+    Ok(())
 }
 
 /// Delete a set of individual files within the single mount (one eject), using
@@ -469,7 +561,7 @@ pub(crate) fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> io::Resu
 #[cfg(test)]
 #[allow(clippy::panic, clippy::expect_used, clippy::unwrap_used)]
 mod tests {
-    use super::{delete_files, install_file, run_with_timeout, unescape_mountinfo};
+    use super::{delete_files, install_file, remove_empty_dir, run_with_timeout, unescape_mountinfo};
     use std::path::PathBuf;
     use std::process::Command;
     use std::time::Duration;
@@ -577,6 +669,98 @@ mod tests {
         let err = delete_files(&mnt, &[a.to_owned(), a.to_owned()])
             .expect_err("duplicate present path is refused");
         assert!(err.to_string().contains("duplicate"));
+        std::fs::remove_dir_all(&mnt).ok();
+    }
+
+    #[test]
+    fn remove_empty_dir_removes_an_empty_dir() {
+        let mnt = temp_mnt("red-empty");
+        std::fs::create_dir_all(mnt.join("Music/Artist/Album")).unwrap();
+        remove_empty_dir(&mnt, "Music/Artist/Album").expect("empty dir pruned");
+        assert!(!mnt.join("Music/Artist/Album").exists());
+        // The now-empty parent is pruned too, but the protected top-level stays.
+        assert!(!mnt.join("Music/Artist").exists());
+        assert!(mnt.join("Music").exists());
+        std::fs::remove_dir_all(&mnt).ok();
+    }
+
+    #[test]
+    fn remove_empty_dir_never_touches_a_non_empty_dir_or_its_file() {
+        let mnt = temp_mnt("red-nonempty");
+        touch(&mnt, "Music/Artist/Album/song.mp3");
+        remove_empty_dir(&mnt, "Music/Artist/Album").expect("best-effort, non-fatal");
+        // The directory and its file MUST be untouched (empty-only remove_dir).
+        assert!(mnt.join("Music/Artist/Album/song.mp3").is_file());
+        std::fs::remove_dir_all(&mnt).ok();
+    }
+
+    #[test]
+    fn remove_empty_dir_stops_at_a_non_empty_ancestor() {
+        let mnt = temp_mnt("red-ancestor");
+        // Album is empty; Artist also holds a sibling file → walk stops at Artist.
+        std::fs::create_dir_all(mnt.join("Music/Artist/Album")).unwrap();
+        touch(&mnt, "Music/Artist/other.mp3");
+        remove_empty_dir(&mnt, "Music/Artist/Album").expect("prunes only the empty leaf");
+        assert!(!mnt.join("Music/Artist/Album").exists());
+        assert!(mnt.join("Music/Artist").is_dir());
+        assert!(mnt.join("Music/Artist/other.mp3").is_file());
+        std::fs::remove_dir_all(&mnt).ok();
+    }
+
+    #[test]
+    fn remove_empty_dir_is_idempotent_when_absent() {
+        let mnt = temp_mnt("red-absent");
+        std::fs::create_dir_all(mnt.join("Music")).unwrap();
+        // The target never existed: a retried prune (orphan already gone) is OK.
+        remove_empty_dir(&mnt, "Music/Gone/Deeper").expect("absent dir is success");
+        std::fs::remove_dir_all(&mnt).ok();
+    }
+
+    #[test]
+    fn remove_empty_dir_refuses_to_prune_protected_top_level() {
+        let mnt = temp_mnt("red-toplevel");
+        std::fs::create_dir_all(mnt.join("Music")).unwrap();
+        // Even though Music/ is empty, a single top-level component is protected.
+        remove_empty_dir(&mnt, "Music").expect("protected break is non-fatal");
+        assert!(mnt.join("Music").is_dir());
+        std::fs::remove_dir_all(&mnt).ok();
+    }
+
+    #[test]
+    fn remove_empty_dir_refuses_teslacam_structural_root() {
+        let mnt = temp_mnt("red-structural");
+        std::fs::create_dir_all(mnt.join("TeslaCam/SavedClips")).unwrap();
+        remove_empty_dir(&mnt, "TeslaCam/SavedClips").expect("structural break is non-fatal");
+        assert!(mnt.join("TeslaCam/SavedClips").is_dir());
+        std::fs::remove_dir_all(&mnt).ok();
+    }
+
+    #[test]
+    fn remove_empty_dir_refuses_traversal() {
+        let mnt = temp_mnt("red-traversal");
+        let escape = mnt.parent().unwrap().join("escape-target");
+        std::fs::create_dir_all(&escape).unwrap();
+        remove_empty_dir(&mnt, "../escape-target").expect_err("traversal is refused");
+        assert!(escape.is_dir());
+        std::fs::remove_dir_all(&mnt).ok();
+        std::fs::remove_dir_all(&escape).ok();
+    }
+
+    #[test]
+    fn remove_empty_dir_refuses_symlinked_path_component() {
+        // An intermediate symlink that diverges the canonical path from the
+        // lexical path must be refused (so the lexical protected-dir check can
+        // never disagree with the directory remove_dir actually targets).
+        use std::os::unix::fs::symlink;
+        let mnt = temp_mnt("red-symlink");
+        // A real, empty victim directory the symlink resolves into.
+        std::fs::create_dir_all(mnt.join("Other/Album")).unwrap();
+        // Music/link -> <mnt>/Other ; request prune of Music/link/Album.
+        std::fs::create_dir_all(mnt.join("Music")).unwrap();
+        symlink(mnt.join("Other"), mnt.join("Music/link")).unwrap();
+        remove_empty_dir(&mnt, "Music/link/Album").expect("symlink mismatch break is non-fatal");
+        // The victim directory MUST be untouched: resolution diverged → refused.
+        assert!(mnt.join("Other/Album").is_dir());
         std::fs::remove_dir_all(&mnt).ok();
     }
 

@@ -528,7 +528,12 @@ LUNs) is the single make-or-break that still needs the car.**
   LIVE-PROVEN 2026-06-16: Set Active updates the Active Lock Chime card + audio player
   with no manual reload (parent bounded-polls `/api/chimes`); clear in-flight/converged/
   timeout notices; buttons disabled while pending. See top "Resume here — SET-ACTIVE UI
-  AUTO-REFRESH" block + `files/hw-setactive-*.png`.)**
+  AUTO-REFRESH" block + `files/hw-setactive-*.png`.)** **Active card SOURCE-NAME
+  LIVE-PROVEN 2026-06-15: the card now shows the selected library chime's name (e.g.
+  `MarioFart.wav`) with an "Installed as LockChime.wav" subtitle, resolved client-side
+  (just-activated name, else unique library size-match, else honest `LockChime.wav`
+  fallback). Verified on hardware cold-load + in-session activation, console clean —
+  `files/hw-sourcename-1280.png`.**
 - [ ] Groups (create/edit/delete; persist `chime_groups.json`). **(partial: A3 UI +
   schedulerd render proven; verify CRUD round-trip)**
 - [ ] Schedules (weekly/date/holiday/recurring; CRUD+enable; `chime_schedules.json`). **(partial:

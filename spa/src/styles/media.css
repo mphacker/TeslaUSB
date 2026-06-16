@@ -64,6 +64,12 @@
   color: var(--text-primary);
   word-break: break-word;
 }
+.media-page .active-chime-source {
+  margin-top: 2px;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  word-break: break-word;
+}
 .media-page .active-chime-meta {
   display: flex;
   flex-wrap: wrap;

@@ -942,5 +942,116 @@ test.describe("media (lock chimes) UAT", () => {
       await expect(page.locator("[data-testid=activation-notice]")).toContainText("is now your active lock chime");
       await expect(page.locator("[data-testid=active-chime]")).toContainText("2 KB");
     });
+
+    test("active card shows the activated source name, not LockChime.wav", async ({ page }) => {
+      await page.clock.install({ time: new Date("2024-01-01T00:00:00Z") });
+      const oldInstalled = {
+        name: "LockChime.wav",
+        rel_path: "LockChime.wav",
+        size_bytes: 1024,
+        modified: "2026-06-15T23:57:58",
+      };
+      const newInstalled = {
+        name: "LockChime.wav",
+        rel_path: "LockChime.wav",
+        size_bytes: 2048,
+        modified: "2026-06-15T23:58:00",
+      };
+      let installed = oldInstalled;
+
+      await page.route("**/api/chime-scheduler", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        return jsonRoute(route, 200, snapshot([{ filename: "MarioFart.wav", bytes: 2048 }]));
+      });
+      await page.route("**/api/chime-scheduler/library/*/activate", (route) => {
+        if (route.request().method() !== "POST") return route.continue();
+        return route.fulfill({
+          status: 202,
+          contentType: "application/json",
+          body: JSON.stringify({ state: "queued", job_id: "a1" }),
+        });
+      });
+      await page.route("**/api/chimes", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        return jsonRoute(route, 200, { installed });
+      });
+
+      await gotoActivationMedia(page);
+      // Before activation the size doesn't match the library, so the honest
+      // device filename shows.
+      await expect(page.locator("[data-testid=active-chime-name]")).toHaveText("LockChime.wav");
+      await expect(page.locator("[data-testid=active-chime-source]")).toHaveCount(0);
+
+      await page.locator("[data-testid=library-set-active]").first().click();
+      installed = newInstalled;
+      await page.clock.fastForward(2000);
+
+      // After activation the card shows the SOURCE name, with the device file as
+      // a subtitle.
+      await expect(page.locator("[data-testid=active-chime-name]")).toHaveText("MarioFart.wav");
+      await expect(page.locator("[data-testid=active-chime-source]")).toHaveText(
+        "Installed as LockChime.wav",
+      );
+    });
+
+    test("cold load resolves the source name via a unique library size match", async ({ page }) => {
+      await page.route("**/api/chime-scheduler", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        return jsonRoute(
+          route,
+          200,
+          snapshot([
+            { filename: "MarioFart.wav", bytes: 2048 },
+            { filename: "Other.wav", bytes: 4096 },
+          ]),
+        );
+      });
+      await page.route("**/api/chimes", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        return jsonRoute(route, 200, {
+          installed: {
+            name: "LockChime.wav",
+            rel_path: "LockChime.wav",
+            size_bytes: 2048,
+            modified: "2026-06-15T23:58:00",
+          },
+        });
+      });
+
+      await gotoActivationMedia(page);
+      await expect(page.locator("[data-testid=active-chime-name]")).toHaveText("MarioFart.wav");
+      await expect(page.locator("[data-testid=active-chime-source]")).toHaveText(
+        "Installed as LockChime.wav",
+      );
+    });
+
+    test("size collision falls back to the honest LockChime.wav name", async ({ page }) => {
+      await page.route("**/api/chime-scheduler", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        return jsonRoute(
+          route,
+          200,
+          snapshot([
+            { filename: "A.wav", bytes: 2048 },
+            { filename: "B.wav", bytes: 2048 },
+          ]),
+        );
+      });
+      await page.route("**/api/chimes", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        return jsonRoute(route, 200, {
+          installed: {
+            name: "LockChime.wav",
+            rel_path: "LockChime.wav",
+            size_bytes: 2048,
+            modified: "2026-06-15T23:58:00",
+          },
+        });
+      });
+
+      await gotoActivationMedia(page);
+      await expect(page.locator("[data-testid=active-chime-name]")).toHaveText("LockChime.wav");
+      await expect(page.locator("[data-testid=active-chime-source]")).toHaveCount(0);
+    });
   });
 });

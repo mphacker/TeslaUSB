@@ -3,7 +3,7 @@ import { MediaPills } from "../components/MediaPills";
 import { Icon } from "../components/Icon";
 import { ChimeScheduler } from "./ChimeScheduler";
 import { api, ApiError, CHIME_MAX_BYTES } from "../api/client";
-import type { Chimes, InstalledChime } from "../api/types";
+import type { Chimes, InstalledChime, LibraryEntry } from "../api/types";
 import "../styles/media.css";
 
 /**
@@ -62,6 +62,32 @@ function activationConverged(
   if (inst.size_bytes !== pending.preSize) return true; // size changed → rewritten
   if (pending.preModified == null) return inst.modified != null; // mtime became readable
   return inst.modified !== pending.preModified; // mtime advanced → rewritten
+}
+
+/**
+ * Resolve the *source* name to show on the active card. The car's active file is
+ * always literally `LockChime.wav`, which is meaningless to the operator — they
+ * want to see which library chime they activated (e.g. `MarioFart.wav`). No
+ * backend field carries this, so we resolve it client-side from the only signals
+ * available, never overclaiming:
+ *   1. The chime we just activated this session (exact operator intent), as long
+ *      as its byte size still matches what's installed.
+ *   2. Otherwise, a UNIQUE library entry whose byte size equals the installed
+ *      chime (the activate copies bytes verbatim, so sizes match). A size
+ *      collision (>1 match) or a chime not present in the library (0 matches)
+ *      resolves to `null` → the card falls back to the honest `LockChime.wav`.
+ */
+function resolveActiveSourceName(
+  installed: InstalledChime | null,
+  library: LibraryEntry[],
+  lastActivated: { filename: string; bytes: number } | null,
+): string | null {
+  if (!installed) return null;
+  if (lastActivated && lastActivated.bytes === installed.size_bytes) {
+    return lastActivated.filename;
+  }
+  const matches = library.filter((c) => c.bytes === installed.size_bytes);
+  return matches.length === 1 ? matches[0].filename : null;
 }
 
 function buildId(): string {
@@ -266,6 +292,13 @@ export function Media() {
     phase: "syncing" | "waiting";
   } | null>(null);
   const [activationNotice, setActivationNotice] = useState<string | null>(null);
+  // The chime library (reported up by the embedded ChimeScheduler) + the chime
+  // activated this session, used only to resolve the active card's source name.
+  const [library, setLibrary] = useState<LibraryEntry[]>([]);
+  const [lastActivated, setLastActivated] = useState<{
+    filename: string;
+    bytes: number;
+  } | null>(null);
 
   const uploadAbortRef = useRef<AbortController | null>(null);
   const activationAbortRef = useRef<AbortController | null>(null);
@@ -366,6 +399,7 @@ export function Media() {
       const c = await api.chimes();
       setInstalled(c.installed);
       if (activationConverged(c.installed, pendingActivation)) {
+        setLastActivated({ filename: pendingActivation.filename, bytes: pendingActivation.bytes });
         setPendingActivation(null);
         setActivationNotice(`“${pendingActivation.filename}” is now your active lock chime.`);
       }
@@ -399,6 +433,7 @@ export function Media() {
         setInstalled(c.installed);
         if (activationConverged(c.installed, pendingActivation)) {
           stopPolling();
+          setLastActivated({ filename: pendingActivation.filename, bytes: pendingActivation.bytes });
           setPendingActivation(null);
           setActivationNotice(`“${pendingActivation.filename}” is now your active lock chime.`);
           return;
@@ -452,25 +487,35 @@ export function Media() {
       <div class="media-card" id="activeChimeSection">
         <h3>Active Lock Chime</h3>
         {status === "ready" && installed ? (
-          <div class="active-chime" data-testid="active-chime">
-            <div class="active-chime-name" data-testid="active-chime-name">
-              {installed.name}
-            </div>
-            <div class="active-chime-meta">
-              <span class="chime-pill">{chimeSize(installed.size_bytes)}</span>
-              <span class="chime-pill">
-                Installed {chimeModified(installed.modified)}
-              </span>
-            </div>
-            <audio
-              class="active-chime-player"
-              controls
-              preload="none"
-              data-testid="active-chime-audio"
-              key={installed.modified ?? String(installed.size_bytes)}
-              src={api.activeChimeAudioUrl(installed.modified)}
-            />
-          </div>
+          (() => {
+            const sourceName = resolveActiveSourceName(installed, library, lastActivated);
+            return (
+              <div class="active-chime" data-testid="active-chime">
+                <div class="active-chime-name" data-testid="active-chime-name">
+                  {sourceName ?? installed.name}
+                </div>
+                {sourceName && (
+                  <div class="active-chime-source" data-testid="active-chime-source">
+                    Installed as {installed.name}
+                  </div>
+                )}
+                <div class="active-chime-meta">
+                  <span class="chime-pill">{chimeSize(installed.size_bytes)}</span>
+                  <span class="chime-pill">
+                    Installed {chimeModified(installed.modified)}
+                  </span>
+                </div>
+                <audio
+                  class="active-chime-player"
+                  controls
+                  preload="none"
+                  data-testid="active-chime-audio"
+                  key={installed.modified ?? String(installed.size_bytes)}
+                  src={api.activeChimeAudioUrl(installed.modified)}
+                />
+              </div>
+            );
+          })()
         ) : status === "ready" ? (
           <p class="media-pending" data-testid="active-chime-none">
             No lock chime is installed. The vehicle will play its built-in chime
@@ -602,6 +647,7 @@ export function Media() {
       <ChimeScheduler
         pendingUpload={pendingUpload}
         onActivated={onChimeActivated}
+        onLibraryLoaded={setLibrary}
         activationBusy={!!pendingActivation}
       />
 

@@ -101,12 +101,14 @@ function describeSchedule(s: StoredSchedule): string {
 interface ChimeSchedulerProps {
   pendingUpload?: PendingUpload | null;
   onActivated?: (filename: string, bytes: number) => void;
+  onLibraryLoaded?: (library: LibraryEntry[]) => void;
   activationBusy?: boolean;
 }
 
 export function ChimeScheduler({
   pendingUpload,
   onActivated,
+  onLibraryLoaded,
   activationBusy,
 }: ChimeSchedulerProps = {}) {
   const [status, setStatus] = useState<Status>("loading");
@@ -159,6 +161,13 @@ export function ChimeScheduler({
     void reload(ctrl.signal);
     return () => ctrl.abort();
   }, []);
+
+  // Report the library up to the parent so the "Active Lock Chime" card can
+  // resolve which library chime is installed (the car file is always named
+  // `LockChime.wav`). `setLibrary` from the parent is referentially stable.
+  useEffect(() => {
+    if (snap) onLibraryLoaded?.(snap.library);
+  }, [snap, onLibraryLoaded]);
 
   useEffect(() => {
     if (!pendingUpload) {

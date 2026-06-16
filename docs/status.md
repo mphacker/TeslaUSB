@@ -557,7 +557,14 @@ LUNs) is the single make-or-break that still needs the car.**
   single-file `.wav` install into `media.img` `Chimes/` LIVE-PROVEN 2026-06-15 [job done
   ~3 s, byte-identical on the RO media mount; `files/hw-results.md` "Phase 2"]; multi-file
   + mp3 transcode + 5 s/normalize still to verify)**
-- [ ] Delete library chime. **(partial: delete path exists; verify against `Chimes/` in image)**
+- [x] Delete library chime. **(SHIPPED — optimistic "Removing…" + bounded poll
+  (2 s/45 s) until the chime leaves the catalog, then auto-drop + "removed" notice,
+  no manual refresh; timeout → "Refresh now"; per-entry budgets for concurrent
+  deletes + synchronous double-click guard. GPT-5.5 design + diff review. Live on
+  hardware: 2 chimes deleted via the real UI — optimistic state at ~160 ms, row
+  auto-removed with notice at ~11 s, gone from `/api/chime-scheduler`, active
+  LockChime.wav untouched, console clean — `files/hw-delete-notice-1280.png`,
+  `files/hw-results.md`.)**
 - [ ] Rename a chime (v1 rename API). **(not started)**
 - [x] **Set active** → copy library file to media-root `LockChime.wav`, applied
   **immediately** (per-partition hot-handoff on P2; no manual replug); UI shows which

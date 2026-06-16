@@ -1,4 +1,4 @@
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import { api, ApiError } from "../api/client";
 import type {
   ChimeGroup,
@@ -142,6 +142,27 @@ export function ChimeScheduler({
     token: number;
     phase: "syncing" | "waiting";
   } | null>(null);
+  // ── Pending library deletes (auto-refresh: wait for the row to leave the
+  // catalog) ──
+  // Each entry carries its OWN `startedAt` so a sibling delete that converges
+  // can never reset another row's 45s budget. Known limitation: re-uploading a
+  // file with the same name while its delete is still pending can leave the
+  // delete stuck in "waiting" (the stale catalog row reappears) — the row's
+  // "Refresh now" recovers it; the delete button is disabled on an
+  // upload-pending row so the inverse can't be triggered from the table.
+  const [pendingDeletes, setPendingDeletes] = useState<
+    { filename: string; phase: "removing" | "waiting"; startedAt: number }[]
+  >([]);
+  const [deleteToken, setDeleteToken] = useState(0);
+  const pendingDeletesRef = useRef<
+    { filename: string; phase: "removing" | "waiting"; startedAt: number }[]
+  >([]);
+  // Filenames with an in-flight DELETE request — set synchronously before the
+  // await so a rapid double-click can't fire two DELETEs before the row locks.
+  const deleteInFlightRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    pendingDeletesRef.current = pendingDeletes;
+  }, [pendingDeletes]);
 
   const reload = async (signal?: AbortSignal): Promise<SchedulerSnapshot | null> => {
     try {
@@ -250,6 +271,86 @@ export function ChimeScheduler({
       stopPolling();
     };
   }, [pendingUpload?.token]);
+
+  useEffect(() => {
+    if (deleteToken === 0) return;
+    if (!pendingDeletesRef.current.some((d) => d.phase === "removing")) return;
+
+    let cancelled = false;
+    const ctrl = new AbortController();
+    let pollId: ReturnType<typeof setTimeout> | null = null;
+
+    const stop = () => {
+      if (pollId) clearTimeout(pollId);
+      pollId = null;
+    };
+
+    const runPoll = async () => {
+      if (cancelled) return;
+      const snapshot = await reload(ctrl.signal);
+      if (cancelled) return;
+      const now = Date.now();
+      // Poll every 2s; each row owns a 45s budget from its own `startedAt`.
+      // Budget the last read so the waiting affordance appears before the clock
+      // jumps past the cap.
+      const isTimedOut = (startedAt: number) =>
+        now - startedAt >= POLL_MAX_MS - POLL_INTERVAL_MS;
+      const before = pendingDeletesRef.current;
+
+      if (!snapshot) {
+        // GET failed/aborted: roll only the rows whose own budget elapsed into
+        // the waiting phase; keep polling while any row is still within budget.
+        setPendingDeletes((prev) =>
+          prev.map((d) =>
+            d.phase === "removing" && isTimedOut(d.startedAt) ? { ...d, phase: "waiting" } : d,
+          ),
+        );
+        if (!cancelled && before.some((d) => d.phase === "removing" && !isTimedOut(d.startedAt))) {
+          pollId = setTimeout(() => void runPoll(), POLL_INTERVAL_MS);
+        } else {
+          stop();
+        }
+        return;
+      }
+
+      const present = new Set(snapshot.library.map((entry) => entry.filename));
+      const removed = before.filter((d) => !present.has(d.filename)).map((d) => d.filename);
+
+      // Single update: drop rows that left the catalog AND roll budget-elapsed
+      // survivors into the waiting phase.
+      setPendingDeletes((prev) =>
+        prev
+          .filter((d) => present.has(d.filename))
+          .map((d) =>
+            d.phase === "removing" && isTimedOut(d.startedAt) ? { ...d, phase: "waiting" } : d,
+          ),
+      );
+      if (removed.length > 0) {
+        setLibNotice(
+          removed.length === 1
+            ? `“${removed[0]}” removed from your chime library.`
+            : `${removed.length} chimes removed from your chime library.`,
+        );
+      }
+
+      const stillRemoving = before.some(
+        (d) => present.has(d.filename) && d.phase === "removing" && !isTimedOut(d.startedAt),
+      );
+      if (stillRemoving) {
+        pollId = setTimeout(() => void runPoll(), POLL_INTERVAL_MS);
+      } else {
+        stop();
+      }
+    };
+
+    pollId = setTimeout(() => void runPoll(), POLL_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      ctrl.abort();
+      stop();
+    };
+  }, [deleteToken]);
 
   // ── Schedule form handlers ──
   function resetScheduleForm() {
@@ -404,12 +505,27 @@ export function ChimeScheduler({
   async function removeLibraryChime(filename: string) {
     setLibError(null);
     setLibNotice(null);
+    if (pendingDeletesRef.current.some((d) => d.filename === filename)) return;
+    if (deleteInFlightRef.current.has(filename)) return;
+    deleteInFlightRef.current.add(filename);
     try {
       await api.deleteLibraryChime(filename);
-      await reload();
     } catch (err) {
       setLibError(failMessage(err, "Couldn't remove the chime."));
+      return;
+    } finally {
+      deleteInFlightRef.current.delete(filename);
     }
+
+    setPendingDeletes((prev) => {
+      const next: { filename: string; phase: "removing" | "waiting"; startedAt: number }[] =
+        prev.some((d) => d.filename === filename)
+          ? prev
+          : [...prev, { filename, phase: "removing", startedAt: Date.now() }];
+      pendingDeletesRef.current = next;
+      return next;
+    });
+    setDeleteToken((t) => t + 1);
   }
 
   async function refreshPendingNow() {
@@ -422,6 +538,29 @@ export function ChimeScheduler({
     if (matched) {
       setPending(null);
       setLibNotice(`“${pending.filename}” added to your chime library.`);
+    }
+  }
+
+  async function refreshDeletesNow() {
+    if (pendingDeletesRef.current.length === 0) return;
+    const snapshot = await reload();
+    if (!snapshot) return;
+    const present = new Set(snapshot.library.map((entry) => entry.filename));
+    const removed = pendingDeletesRef.current
+      .filter((d) => !present.has(d.filename))
+      .map((d) => d.filename);
+    if (removed.length > 0) {
+      setPendingDeletes((prev) => {
+        const next: { filename: string; phase: "removing" | "waiting"; startedAt: number }[] =
+          prev.filter((d) => present.has(d.filename));
+        pendingDeletesRef.current = next;
+        return next;
+      });
+      setLibNotice(
+        removed.length === 1
+          ? `“${removed[0]}” removed from your chime library.`
+          : `${removed.length} chimes removed from your chime library.`,
+      );
     }
   }
 
@@ -998,40 +1137,53 @@ export function ChimeScheduler({
               <tbody>
                 {displayLibrary.map((c) => {
                   const pendingRow = Boolean((c as LibraryRow).pending);
+                  const deletePhase = pendingDeletes.find((d) => d.filename === c.filename)?.phase;
+                  const deleting = deletePhase !== undefined;
+                  const rowLocked = pendingRow || deleting;
                   const statusLabel = pendingRow
                     ? c.phase === "waiting"
                       ? "Waiting for media scan…"
                       : "Syncing…"
-                    : "Valid";
+                    : deleting
+                      ? deletePhase === "waiting"
+                        ? "Removing — waiting for scan…"
+                        : "Removing…"
+                      : "Valid";
                   const pendingStatusTestId = pendingRow ? "library-pending-status" : undefined;
                   return (
                     <tr
                       key={c.filename}
-                      data-testid={pendingRow ? "library-row library-row-pending" : "library-row"}
+                      data-testid={
+                        pendingRow
+                          ? "library-row library-row-pending"
+                          : deleting
+                            ? "library-row library-row-deleting"
+                            : "library-row"
+                      }
                     >
                       <td class="chime-cell-name">{c.filename}</td>
                       <td>{Math.max(1, Math.round(c.bytes / 1024))} KB</td>
                       <td data-testid={pendingStatusTestId}>
-                        <span class={pendingRow ? "chime-status-pending" : "chime-status-valid"}>
+                        <span class={pendingRow || deleting ? "chime-status-pending" : "chime-status-valid"}>
                           {statusLabel}
                         </span>
                       </td>
                       <td>
                         <div class="chime-row-actions">
                           <audio
-                            controls={!pendingRow}
+                            controls={!rowLocked}
                             preload="none"
                             data-testid="library-audio"
                             src={api.libraryAudioUrl(c.filename)}
-                            aria-disabled={pendingRow ? "true" : undefined}
+                            aria-disabled={rowLocked ? "true" : undefined}
                           />
                           <div class="chime-row-buttons">
                             <a
                               class="action-btn"
                               data-testid="library-download"
-                              href={pendingRow ? undefined : api.libraryDownloadUrl(c.filename)}
-                              aria-disabled={pendingRow ? "true" : undefined}
-                              onClick={pendingRow ? (e: Event) => e.preventDefault() : undefined}
+                              href={rowLocked ? undefined : api.libraryDownloadUrl(c.filename)}
+                              aria-disabled={rowLocked ? "true" : undefined}
+                              onClick={rowLocked ? (e: Event) => e.preventDefault() : undefined}
                             >
                               Download
                             </a>
@@ -1039,7 +1191,7 @@ export function ChimeScheduler({
                               type="button"
                               class="action-btn primary"
                               data-testid="library-set-active"
-                              disabled={pendingRow || activating !== null || activationBusy}
+                              disabled={rowLocked || activating !== null || activationBusy}
                               onClick={() => void setActiveChime(c.filename, c.bytes)}
                             >
                               {activating === c.filename ? "Syncing…" : "Set Active"}
@@ -1048,10 +1200,10 @@ export function ChimeScheduler({
                               type="button"
                               class="action-btn danger"
                               data-testid="library-delete"
-                              disabled={pendingRow}
+                              disabled={rowLocked}
                               onClick={() => void removeLibraryChime(c.filename)}
                             >
-                              Delete
+                              {deleting ? "Removing…" : "Delete"}
                             </button>
                           </div>
                           {pendingRow && c.phase === "waiting" && (
@@ -1060,6 +1212,16 @@ export function ChimeScheduler({
                               class="action-btn"
                               data-testid="library-refresh-now"
                               onClick={() => void refreshPendingNow()}
+                            >
+                              Refresh now
+                            </button>
+                          )}
+                          {deleting && deletePhase === "waiting" && (
+                            <button
+                              type="button"
+                              class="action-btn"
+                              data-testid="library-delete-refresh-now"
+                              onClick={() => void refreshDeletesNow()}
                             >
                               Refresh now
                             </button>

@@ -166,7 +166,7 @@ test.describe("music UAT", () => {
     for (const req of probe.requests) {
       const u = new URL(req.url);
       expect(u.origin, `off-origin request to ${req.url}`).toBe(origin);
-      if (u.pathname.startsWith("/api/")) {
+      if (u.pathname.startsWith("/api/") && u.pathname !== "/api/media-events") {
         const call = `${req.method.toUpperCase()} ${u.pathname}`;
         expect(
           ALLOWED_API.has(u.pathname) && req.method.toUpperCase() === "GET",

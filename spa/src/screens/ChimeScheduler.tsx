@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { api, ApiError } from "../api/client";
+import { subscribeMediaEvents } from "../api/mediaEvents";
 import type {
   ChimeGroup,
   GroupInput,
@@ -182,6 +183,19 @@ export function ChimeScheduler({
     void reload(ctrl.signal);
     return () => ctrl.abort();
   }, []);
+
+  // Realtime: silently reload the scheduler snapshot (which carries the chime
+  // library) whenever webd reports a catalog change, so an installed/removed
+  // library chime appears or disappears promptly. The per-op convergence polls
+  // below still own the "syncing"/"removing" badge lifecycle.
+  const silentReloadRef = useRef<() => void>(() => {});
+  silentReloadRef.current = () => {
+    void reload();
+  };
+  useEffect(
+    () => subscribeMediaEvents(() => silentReloadRef.current()),
+    [],
+  );
 
   // Report the library up to the parent so the "Active Lock Chime" card can
   // resolve which library chime is installed (the car file is always named

@@ -13,6 +13,7 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import type { RefObject } from "preact";
 import { ApiError, isQueued } from "../api/client";
+import { subscribeMediaEvents } from "../api/mediaEvents";
 import type { MediaItem, MediaList } from "../api/types";
 
 export type { MediaItem };
@@ -189,6 +190,22 @@ export function useMediaCategory({
       bulkAbortRef.current?.abort();
     };
   }, []);
+
+  // Realtime: silently refetch the list whenever webd reports a catalog change
+  // (an install/delete landed and was indexed). This replaces the old
+  // single-shot post-mutation fetch that left the list stale until manual
+  // refresh — now any change, including one from another tab, lands promptly.
+  const silentRefetchRef = useRef<() => void>(() => {});
+  silentRefetchRef.current = () => {
+    const ctrl = new AbortController();
+    listAbortRef.current?.abort();
+    listAbortRef.current = ctrl;
+    doFetch(ctrl.signal);
+  };
+  useEffect(
+    () => subscribeMediaEvents(() => silentRefetchRef.current()),
+    [],
+  );
 
   function onFileChange(e: Event) {
     setUploadFail(null);

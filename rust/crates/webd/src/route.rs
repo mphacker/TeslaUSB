@@ -55,6 +55,7 @@ pub(crate) fn router(state: AppState, static_dir: PathBuf) -> Router {
         .route("/trips", get(trips))
         .route("/trips/{id}", get(trip_detail))
         .route("/events", get(events))
+        .route("/media-events", get(media_events_stream))
         .route("/clips", get(clips))
         .route("/clips/{id}", get(clip_detail).delete(delete_clip))
         .route("/clips/{id}/stream", get(crate::media::stream))
@@ -742,6 +743,24 @@ pub(crate) async fn run_folder_delete(
         .publish_job(job_for_queue_outcome(job_id, kind, &outcome));
     queue_outcome_to_response(&outcome)
 }
+/// `GET /api/media-events`: a Server-Sent Events stream that emits a
+/// `media-changed` event whenever the catalog is committed by `indexd` (a media
+/// install/delete has been applied and indexed). Browsers subscribe once and
+/// refetch the category they are viewing on each tick — replacing per-screen
+/// list polling. The payload is a constant `"1"`; the event name carries the
+/// signal. A lagged client still receives a single coalesced tick (correct: it
+/// just means "refetch"). Keep-alive comments every 15 s hold the connection
+/// open through idle periods and proxies.
+async fn media_events_stream(
+    State(state): State<AppState>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let stream = BroadcastStream::new(state.media_events.subscribe()).map(|item| {
+        let _ = item; // Ok(()) tick or Lagged gap both mean the same: "refetch".
+        Ok(Event::default().event("media-changed").data("1"))
+    });
+    Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+}
+
 /// (contract D2 §2.5/§3). A new subscriber first receives a burst of the
 /// currently-running jobs, then live events as they are published.
 async fn jobs_stream(

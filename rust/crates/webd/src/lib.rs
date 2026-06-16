@@ -41,6 +41,7 @@ mod health;
 mod jobs;
 mod lightshows;
 mod media;
+mod media_events;
 mod media_upload;
 mod music;
 mod plates;
@@ -82,6 +83,10 @@ struct AppState {
     gadget: Arc<dyn gadget::GadgetClient>,
     scheduler: Arc<dyn scheduler::SchedulerClient>,
     jobs: jobs::JobHub,
+    /// Process-wide media-change bus: a background `data_version` monitor ticks
+    /// this whenever `indexd` commits, and the `/api/media-events` SSE forwards
+    /// each tick to browsers so media lists refresh in real time (no polling).
+    media_events: media_events::MediaEvents,
     /// The `schedulerd`-owned chime library directory (`/data/teslausb/chimes`),
     /// kept for compatibility with the legacy scheduler proxy path.
     #[allow(dead_code)]
@@ -188,6 +193,7 @@ fn router_with_clients(
             archive_root: media.archive_root_path(),
         }),
     };
+    let media_events = media_events::MediaEvents::start(&catalog);
     let state = AppState {
         catalog,
         media,
@@ -196,6 +202,7 @@ fn router_with_clients(
         gadget,
         scheduler,
         jobs: jobs::JobHub::new(),
+        media_events,
         chime_library_dir,
     };
     route::router(state, static_dir)

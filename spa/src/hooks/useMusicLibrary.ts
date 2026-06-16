@@ -13,6 +13,7 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import type { RefObject } from "preact";
 import { api } from "../api/client";
+import { subscribeMediaEvents } from "../api/mediaEvents";
 import { classifyMediaFailure } from "./useMediaCategory";
 import type { MediaFailure } from "./useMediaCategory";
 import type { MediaItem } from "../api/types";
@@ -320,6 +321,22 @@ export function useMusicLibrary(): UseMusicLibrary {
       listAbortRef.current = null;
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Realtime: when webd reports a catalog change (an upload/create/move/delete
+  // landed and was indexed), refetch the list immediately so new music appears
+  // without waiting for the convergence poll or a manual refresh. The
+  // convergence poll below still owns clearing the per-op "syncing" badges.
+  const silentRefetchRef = useRef<() => void>(() => {});
+  silentRefetchRef.current = () => {
+    const ctrl = new AbortController();
+    listAbortRef.current?.abort();
+    listAbortRef.current = ctrl;
+    doFetch(ctrl.signal);
+  };
+  useEffect(
+    () => subscribeMediaEvents(() => silentRefetchRef.current()),
+    [],
+  );
 
   // ── Poll-until-convergence (mirrors ChimeScheduler exactly) ─────────────────
   // Fires whenever pollToken increments (i.e., after each 202 response).

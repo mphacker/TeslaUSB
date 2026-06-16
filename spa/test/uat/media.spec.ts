@@ -345,7 +345,7 @@ test.describe("media (lock chimes) UAT", () => {
     for (const req of probe.requests) {
       const u = new URL(req.url);
       expect(u.origin, `off-origin request to ${req.url}`).toBe(origin);
-      if (u.pathname.startsWith("/api/")) {
+      if (u.pathname.startsWith("/api/") && u.pathname !== "/api/media-events") {
         expect(
           allowedReads.has(`${req.method.toUpperCase()} ${u.pathname}`),
           `unexpected API call ${req.method} ${u.pathname}`,

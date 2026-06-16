@@ -12,7 +12,36 @@
 > [`adr/`](./adr/) (locked architecture, incl. [`ADR-0003`](./adr/0003-media-read-path.md)
 > media read path).
 
-## ⏯️ Resume here — END OF SESSION 2026-06-15 (chime UX polish shipped + live) (next: 2026-06-16)
+## ⏯️ Resume here — REALTIME MEDIA UPDATES LIVE (webd SSE push, replaces list polling) (2026-06-17)
+
+**Shipped + live on hardware.** Media lists across all six screens (Music,
+Boombox, Light Shows, Wraps, License Plates, Lock Chimes library) now refresh the
+instant a change lands, instead of waiting on per-screen polling timers (2 s
+first-poll delay) or a manual refresh.
+
+- **Backend (`webd`, no `gadgetd` touch):** new `media_events.rs` runs a background
+  monitor over a dedicated read-only catalog connection watching SQLite
+  `PRAGMA data_version`; it ticks a `tokio::broadcast` whenever `indexd` commits.
+  New `GET /api/media-events` SSE forwards each tick as a `media-changed` event.
+  Monitor thread holds a `Weak` and self-terminates when `AppState` drops
+  (test-safe). Wired in `lib.rs` (`AppState.media_events`, started before catalog
+  is moved) + `route.rs` (`media_events_stream`).
+- **Frontend:** singleton `EventSource` client `api/mediaEvents.ts` (lazy-open,
+  ref-counted close, 150 ms debounce, native auto-reconnect). `useMediaCategory`,
+  `useMusicLibrary`, and `ChimeScheduler` each subscribe and silently refetch on a
+  tick — fixing the `useMediaCategory` single-shot-fetch staleness bug outright.
+  Per-op "syncing"/"removing" convergence badges unchanged.
+- **Verified:** `cargo test -p webd` 256 pass (incl. 2 new `media_events` tests
+  proving tick-on-external-commit + thread shutdown). Playwright UAT full suite
+  green (read-only specs updated to allow the new `GET /api/media-events`).
+- **Live (2026-06-16, hw rails, webd-only restart):** deployed webd aarch64
+  `926eaaa3` + realtime SPA to `cybertruckusb.local`; uploaded a throwaway file →
+  `event: media-changed` pushed over the SSE 25 s later (the indexd reindex
+  moment), with the file present in `/api/music` at that instant. gadgetd never
+  touched (uptime continuous, all services active, WiFi/boot intact). Evidence:
+  `files/hw-results.md`.
+
+
 
 **Stopped for the night 2026-06-15 ~21:25.** Branch `mhackermsft/b1-clean`,
 working tree **clean** (all work committed, **nothing pushed** — push tomorrow if

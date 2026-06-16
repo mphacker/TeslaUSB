@@ -816,7 +816,7 @@ test.describe("chime scheduler UAT (A3b)", () => {
     );
     await firstRow.locator("[data-testid=library-set-active]").click();
 
-    await expect(page.locator("[data-testid=library-notice]")).toContainText("syncing");
+    await expect(firstRow.locator("[data-testid=library-set-active]")).toContainText("Syncing…");
     expect(cap.libraryActivate).toEqual(["Sparkle.wav"]);
     assertCleanConsole(probe);
   });

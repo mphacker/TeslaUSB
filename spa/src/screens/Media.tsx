@@ -41,6 +41,28 @@ import "../styles/media.css";
  */
 
 const DASH = "\u2014";
+const ACT_POLL_INTERVAL_MS = 2000;
+const ACT_POLL_MAX_MS = 60000;
+
+/**
+ * True once `GET /api/chimes` shows the activated chime has actually landed on
+ * the car's `LockChime.wav`. The active file is ALWAYS named `LockChime.wav`,
+ * so the filename can't distinguish chimes — we confirm a *rewrite* instead:
+ * the size must match the activated file AND (nothing was active before, OR the
+ * size changed, OR the mtime became readable/advanced). Requiring a change in
+ * addition to a size match avoids a same-size old chime reading as "applied"
+ * before the handoff has run.
+ */
+function activationConverged(
+  inst: InstalledChime | null,
+  pending: { bytes: number; preModified: string | null; preSize: number | null },
+): boolean {
+  if (!inst || inst.size_bytes !== pending.bytes) return false;
+  if (pending.preSize == null) return true; // nothing was active before — a size match lands
+  if (inst.size_bytes !== pending.preSize) return true; // size changed → rewritten
+  if (pending.preModified == null) return inst.modified != null; // mtime became readable
+  return inst.modified !== pending.preModified; // mtime advanced → rewritten
+}
 
 function buildId(): string {
   return (
@@ -235,8 +257,18 @@ export function Media() {
     bytes: number;
     token: number;
   } | null>(null);
+  const [pendingActivation, setPendingActivation] = useState<{
+    filename: string;
+    bytes: number;
+    token: number;
+    preModified: string | null;
+    preSize: number | null;
+    phase: "syncing" | "waiting";
+  } | null>(null);
+  const [activationNotice, setActivationNotice] = useState<string | null>(null);
 
   const uploadAbortRef = useRef<AbortController | null>(null);
+  const activationAbortRef = useRef<AbortController | null>(null);
 
   /** Reload `GET /api/chimes` after a successful mutation (or initial mount). */
   const refetch = (signal?: AbortSignal) =>
@@ -264,6 +296,7 @@ export function Media() {
     return () => {
       ctrl.abort();
       uploadAbortRef.current?.abort();
+      activationAbortRef.current?.abort();
     };
   }, []);
 
@@ -315,6 +348,99 @@ export function Media() {
     }
   }
 
+  function onChimeActivated(filename: string, bytes: number) {
+    setActivationNotice(null);
+    setPendingActivation((prev) => ({
+      filename,
+      bytes,
+      token: (prev?.token ?? 0) + 1,
+      preModified: installed?.modified ?? null,
+      preSize: installed?.size_bytes ?? null,
+      phase: "syncing",
+    }));
+  }
+
+  async function refreshActivationNow() {
+    if (!pendingActivation) return;
+    try {
+      const c = await api.chimes();
+      setInstalled(c.installed);
+      if (activationConverged(c.installed, pendingActivation)) {
+        setPendingActivation(null);
+        setActivationNotice(`“${pendingActivation.filename}” is now your active lock chime.`);
+      }
+    } catch {
+      // keep current waiting state when the catalog is unavailable.
+    }
+  }
+
+  useEffect(() => {
+    if (!pendingActivation?.token) return;
+
+    let cancelled = false;
+    const ctrl = new AbortController();
+    activationAbortRef.current = ctrl;
+    let pollId: ReturnType<typeof setTimeout> | null = null;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    const startedAt = Date.now();
+
+    const stopPolling = () => {
+      if (pollId) clearTimeout(pollId);
+      if (timeoutId) clearTimeout(timeoutId);
+      pollId = null;
+      timeoutId = null;
+    };
+
+    const runPoll = async () => {
+      if (cancelled) return;
+      try {
+        const c = await api.chimes(ctrl.signal);
+        if (cancelled) return;
+        setInstalled(c.installed);
+        if (activationConverged(c.installed, pendingActivation)) {
+          stopPolling();
+          setPendingActivation(null);
+          setActivationNotice(`“${pendingActivation.filename}” is now your active lock chime.`);
+          return;
+        }
+      } catch {
+        // Aborted (unmount/new-token/timeout) or a transient read failure: fall
+        // through to re-arm so a momentary blip can't silently stop the poll.
+        if (cancelled) return;
+      }
+      if (Date.now() - startedAt < ACT_POLL_MAX_MS) {
+        pollId = setTimeout(() => {
+          void runPoll();
+        }, ACT_POLL_INTERVAL_MS);
+      }
+    };
+
+    setPendingActivation((current) =>
+      current && current.token === pendingActivation.token
+        ? { ...current, phase: "syncing" }
+        : current,
+    );
+
+    void runPoll();
+    timeoutId = setTimeout(() => {
+      if (cancelled) return;
+      ctrl.abort();
+      stopPolling();
+      setPendingActivation((current) =>
+        current && current.token === pendingActivation.token
+          ? { ...current, phase: "waiting" }
+          : current,
+      );
+    }, ACT_POLL_MAX_MS);
+
+    return () => {
+      cancelled = true;
+      ctrl.abort();
+      stopPolling();
+      if (activationAbortRef.current === ctrl) activationAbortRef.current = null;
+    };
+  }, [pendingActivation?.token]);
+
   return (
     <div class="container media-page" data-page="media" data-screen="media">
       {/* ── Media pill sub-nav (v1 media_hub_nav.html parity) ── */}
@@ -341,6 +467,7 @@ export function Media() {
               controls
               preload="none"
               data-testid="active-chime-audio"
+              key={installed.modified ?? String(installed.size_bytes)}
               src={api.activeChimeAudioUrl(installed.modified)}
             />
           </div>
@@ -358,6 +485,31 @@ export function Media() {
           <p class="media-pending" data-testid="active-chime-loading">
             Reading the installed lock chime…
           </p>
+        )}
+        {/* Activation progress/result — rendered regardless of whether a chime
+            is currently installed (so promoting the first-ever chime, or a poll
+            that transiently reports {installed:null}, still shows status). */}
+        {pendingActivation?.phase === "syncing" && (
+          <p data-testid="activation-status">
+            Applying “{pendingActivation.filename}” to the car — this usually takes about 15–30 seconds…
+          </p>
+        )}
+        {pendingActivation?.phase === "waiting" && (
+          <>
+            <p data-testid="activation-status">
+              Still applying “{pendingActivation.filename}” — it should appear shortly.
+            </p>
+            <button
+              type="button"
+              data-testid="activation-refresh-now"
+              onClick={() => void refreshActivationNow()}
+            >
+              Refresh now
+            </button>
+          </>
+        )}
+        {activationNotice && !pendingActivation && (
+          <p data-testid="activation-notice">{activationNotice}</p>
         )}
       </div>
 
@@ -447,7 +599,11 @@ export function Media() {
       </details>
 
       {/* ── Chime Scheduler · Random Groups · Library ── (live: schedulerd via webd) */}
-      <ChimeScheduler pendingUpload={pendingUpload} />
+      <ChimeScheduler
+        pendingUpload={pendingUpload}
+        onActivated={onChimeActivated}
+        activationBusy={!!pendingActivation}
+      />
 
 
     </div>

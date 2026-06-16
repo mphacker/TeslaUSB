@@ -439,7 +439,11 @@ test.describe("media (lock chimes) UAT", () => {
       const m = post.match(/filename="([^"]+)"/);
       const filename = m ? m[1] : "Chime.wav";
       libraryPosts.push(filename);
-      return jsonRoute(route, 200, { filename, bytes: 4096 });
+      return route.fulfill({
+        status: 202,
+        contentType: "application/json",
+        body: JSON.stringify({ state: "queued", job_id: "job-1" }),
+      });
     });
     await page.route("**/api/chimes", (route) => {
       if (route.request().method() === "GET") return jsonRoute(route, 200, { installed: null });
@@ -463,7 +467,7 @@ test.describe("media (lock chimes) UAT", () => {
     // Upload → POST hits the LIBRARY endpoint, success notice shows.
     await page.locator("[data-testid=chime-upload-submit]").click();
     await expect(page.locator("[data-testid=chime-notice]")).toContainText(
-      "Added Chime.wav to your chime library",
+      "Upload accepted — syncing",
     );
 
     // v1 parity: adding to the library does NOT install an active chime, so the
@@ -494,7 +498,11 @@ test.describe("media (lock chimes) UAT", () => {
           error: { code: "schedulerd_unavailable", message: "The chime service is restarting." },
         });
       }
-      return jsonRoute(route, 200, { filename: "Chime.wav", bytes: 4096 });
+      return route.fulfill({
+        status: 202,
+        contentType: "application/json",
+        body: JSON.stringify({ state: "queued", job_id: "job-2" }),
+      });
     });
     await page.route("**/api/chimes", (route) => {
       if (route.request().method() === "GET") return jsonRoute(route, 200, { installed: null });
@@ -520,7 +528,7 @@ test.describe("media (lock chimes) UAT", () => {
     // Retry → success.
     await page.locator("[data-testid=chime-upload-submit]").click();
     await expect(page.locator("[data-testid=chime-notice]")).toContainText(
-      "Added Chime.wav to your chime library",
+      "Upload accepted — syncing",
     );
     await expect(page.locator("[data-testid=chime-upload-error]")).toHaveCount(0);
     expect(attempt, "expected two POST attempts (503, then success)").toBe(2);
@@ -668,5 +676,271 @@ test.describe("media (lock chimes) UAT", () => {
       contentType: "image/png",
     });
     console.log(`[uat][screenshot:media:${testInfo.project.name}] ${shot}`);
+  });
+
+  test.describe("Set Active — auto-refresh", () => {
+    const SCHED_MENUS = {
+      holidays: [],
+      intervals: [],
+      weekdays: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
+    };
+
+    function snapshot(library: { filename: string; bytes: number }[]) {
+      return {
+        schedules: [],
+        groups: [],
+        randomMode: { enabled: false },
+        library,
+        menus: SCHED_MENUS,
+      };
+    }
+
+    async function gotoActivationMedia(page: Page) {
+      await page.goto("/media", { waitUntil: "load" });
+      await expect(page.locator(".container[data-screen=media]")).toBeVisible();
+      await expect(page.locator("[data-testid=active-chime]")).toBeVisible();
+    }
+
+    test("auto-refresh on activate updates the active card", async ({ page }) => {
+      await page.clock.install({ time: new Date("2024-01-01T00:00:00Z") });
+      const oldInstalled = {
+        name: "LockChime.wav",
+        rel_path: "LockChime.wav",
+        size_bytes: 1024,
+        modified: "2026-06-15T23:57:58",
+      };
+      const newInstalled = {
+        name: "LockChime.wav",
+        rel_path: "LockChime.wav",
+        size_bytes: 2048,
+        modified: "2026-06-15T23:58:00",
+      };
+      let installed = oldInstalled;
+      let navigations = 0;
+
+      page.on("framenavigated", () => {
+        navigations += 1;
+      });
+
+      await page.route("**/api/chime-scheduler", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        return jsonRoute(route, 200, snapshot([{ filename: "Sparkle.wav", bytes: 2048 }]));
+      });
+      await page.route("**/api/chime-scheduler/library/*/activate", (route) => {
+        if (route.request().method() !== "POST") return route.continue();
+        return route.fulfill({
+          status: 202,
+          contentType: "application/json",
+          body: JSON.stringify({ state: "queued", job_id: "a1" }),
+        });
+      });
+      await page.route("**/api/chimes", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        return jsonRoute(route, 200, { installed });
+      });
+
+      await page.goto("/media", { waitUntil: "load" });
+      await expect(page.locator(".container[data-screen=media]")).toBeVisible();
+      navigations = 0;
+
+      await expect(page.locator("[data-testid=active-chime]")).toContainText("1 KB");
+      await expect(page.locator("[data-testid=active-chime]")).toContainText("2026-06-15 23:57");
+
+      await page.locator("[data-testid=library-set-active]").first().click();
+      await expect(page.locator("[data-testid=activation-status]")).toContainText("Applying “Sparkle.wav”");
+
+      installed = newInstalled;
+      await page.clock.fastForward(2000);
+
+      await expect(page.locator("[data-testid=active-chime]")).toContainText("2 KB");
+      await expect(page.locator("[data-testid=active-chime-audio]")).toHaveAttribute(
+        "src",
+        /v=2026-06-15T23%3A58%3A00/,
+      );
+      await expect(page.locator("[data-testid=activation-notice]")).toContainText("is now your active lock chime");
+      expect(navigations).toBe(0);
+    });
+
+    test("all Set Active buttons disable while pending", async ({ page }) => {
+      await page.clock.install({ time: new Date("2024-01-01T00:00:00Z") });
+      let installed = {
+        name: "LockChime.wav",
+        rel_path: "LockChime.wav",
+        size_bytes: 1024,
+        modified: "2026-06-15T23:57:58",
+      };
+
+      await page.route("**/api/chime-scheduler", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        return jsonRoute(route, 200, snapshot([
+          { filename: "Sparkle.wav", bytes: 2048 },
+          { filename: "Bell.wav", bytes: 4096 },
+        ]));
+      });
+      await page.route("**/api/chime-scheduler/library/*/activate", (route) => {
+        if (route.request().method() !== "POST") return route.continue();
+        return route.fulfill({
+          status: 202,
+          contentType: "application/json",
+          body: JSON.stringify({ state: "queued", job_id: "a1" }),
+        });
+      });
+      await page.route("**/api/chimes", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        return jsonRoute(route, 200, { installed });
+      });
+
+      await gotoActivationMedia(page);
+
+      const buttons = page.locator("[data-testid=library-set-active]");
+      await buttons.first().click();
+      await expect(page.locator("[data-testid=activation-status]")).toContainText("Applying “Sparkle.wav”");
+      await expect(buttons.nth(0)).toBeDisabled();
+      await expect(buttons.nth(1)).toBeDisabled();
+    });
+
+    test("timeout shows waiting and Refresh now", async ({ page }) => {
+      await page.clock.install({ time: new Date("2024-01-01T00:00:00Z") });
+      let installed = {
+        name: "LockChime.wav",
+        rel_path: "LockChime.wav",
+        size_bytes: 1024,
+        modified: "2026-06-15T23:57:58",
+      };
+
+      await page.route("**/api/chime-scheduler", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        return jsonRoute(route, 200, snapshot([{ filename: "Sparkle.wav", bytes: 2048 }]));
+      });
+      await page.route("**/api/chime-scheduler/library/*/activate", (route) => {
+        if (route.request().method() !== "POST") return route.continue();
+        return route.fulfill({
+          status: 202,
+          contentType: "application/json",
+          body: JSON.stringify({ state: "queued", job_id: "a1" }),
+        });
+      });
+      await page.route("**/api/chimes", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        return jsonRoute(route, 200, { installed });
+      });
+
+      await gotoActivationMedia(page);
+
+      await page.locator("[data-testid=library-set-active]").first().click();
+      await expect(page.locator("[data-testid=activation-status]")).toContainText("Applying “Sparkle.wav”");
+      await page.waitForTimeout(50);
+      await page.clock.fastForward(65000);
+      await page.waitForTimeout(0);
+      await expect(page.locator("[data-testid=activation-status]")).toContainText("Still applying", {
+        timeout: 20000,
+      });
+      await expect(page.locator("[data-testid=activation-refresh-now]")).toBeVisible();
+      // Buttons stay disabled through the waiting phase too, so a still-applying
+      // handoff can't be raced by a second activation (prevents misattribution).
+      await expect(page.locator("[data-testid=library-set-active]").first()).toBeDisabled();
+
+      installed = {
+        name: "LockChime.wav",
+        rel_path: "LockChime.wav",
+        size_bytes: 2048,
+        modified: "2026-06-15T23:58:00",
+      };
+      await page.locator("[data-testid=activation-refresh-now]").click();
+      await expect(page.locator("[data-testid=activation-notice]")).toContainText("is now your active lock chime");
+      // Once converged, Set Active re-enables.
+      await expect(page.locator("[data-testid=library-set-active]").first()).toBeEnabled();
+    });
+
+    test("same-size activation converges on modified change", async ({ page }) => {
+      await page.clock.install({ time: new Date("2024-01-01T00:00:00Z") });
+      let installed = {
+        name: "LockChime.wav",
+        rel_path: "LockChime.wav",
+        size_bytes: 1024,
+        modified: "2026-06-15T23:57:58",
+      };
+
+      await page.route("**/api/chime-scheduler", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        return jsonRoute(route, 200, snapshot([{ filename: "Sparkle.wav", bytes: 1024 }]));
+      });
+      await page.route("**/api/chime-scheduler/library/*/activate", (route) => {
+        if (route.request().method() !== "POST") return route.continue();
+        return route.fulfill({
+          status: 202,
+          contentType: "application/json",
+          body: JSON.stringify({ state: "queued", job_id: "a1" }),
+        });
+      });
+      await page.route("**/api/chimes", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        return jsonRoute(route, 200, { installed });
+      });
+
+      await gotoActivationMedia(page);
+      await page.locator("[data-testid=library-set-active]").first().click();
+
+      installed = {
+        name: "LockChime.wav",
+        rel_path: "LockChime.wav",
+        size_bytes: 1024,
+        modified: "2026-06-15T23:58:00",
+      };
+      await page.clock.fastForward(2000);
+
+      await expect(page.locator("[data-testid=activation-notice]")).toContainText("is now your active lock chime");
+      await expect(page.locator("[data-testid=active-chime-audio]")).toHaveAttribute(
+        "src",
+        /v=2026-06-15T23%3A58%3A00/,
+      );
+    });
+
+    test("activating the first chime shows status with no chime installed", async ({ page }) => {
+      await page.clock.install({ time: new Date("2024-01-01T00:00:00Z") });
+      let installed: {
+        name: string;
+        rel_path: string;
+        size_bytes: number;
+        modified: string;
+      } | null = null;
+
+      await page.route("**/api/chime-scheduler", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        return jsonRoute(route, 200, snapshot([{ filename: "Sparkle.wav", bytes: 2048 }]));
+      });
+      await page.route("**/api/chime-scheduler/library/*/activate", (route) => {
+        if (route.request().method() !== "POST") return route.continue();
+        return route.fulfill({
+          status: 202,
+          contentType: "application/json",
+          body: JSON.stringify({ state: "queued", job_id: "a1" }),
+        });
+      });
+      await page.route("**/api/chimes", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        return jsonRoute(route, 200, { installed });
+      });
+
+      await page.goto("/media", { waitUntil: "load" });
+      await expect(page.locator(".container[data-screen=media]")).toBeVisible();
+      // Nothing installed yet — the empty state renders, but the activation
+      // status must still show (blocker: status was nested in the installed branch).
+      await expect(page.locator("[data-testid=active-chime-none]")).toBeVisible();
+
+      await page.locator("[data-testid=library-set-active]").first().click();
+      await expect(page.locator("[data-testid=activation-status]")).toContainText("Applying “Sparkle.wav”");
+
+      installed = {
+        name: "LockChime.wav",
+        rel_path: "LockChime.wav",
+        size_bytes: 2048,
+        modified: "2026-06-15T23:58:00",
+      };
+      await page.clock.fastForward(2000);
+
+      await expect(page.locator("[data-testid=activation-notice]")).toContainText("is now your active lock chime");
+      await expect(page.locator("[data-testid=active-chime]")).toContainText("2 KB");
+    });
   });
 });

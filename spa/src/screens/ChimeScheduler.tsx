@@ -100,9 +100,15 @@ function describeSchedule(s: StoredSchedule): string {
 
 interface ChimeSchedulerProps {
   pendingUpload?: PendingUpload | null;
+  onActivated?: (filename: string, bytes: number) => void;
+  activationBusy?: boolean;
 }
 
-export function ChimeScheduler({ pendingUpload }: ChimeSchedulerProps = {}) {
+export function ChimeScheduler({
+  pendingUpload,
+  onActivated,
+  activationBusy,
+}: ChimeSchedulerProps = {}) {
   const [status, setStatus] = useState<Status>("loading");
   const [snap, setSnap] = useState<SchedulerSnapshot | null>(null);
 
@@ -373,15 +379,12 @@ export function ChimeScheduler({ pendingUpload }: ChimeSchedulerProps = {}) {
   }
 
   // ── Library handlers ──
-  async function setActiveChime(filename: string) {
+  async function setActiveChime(filename: string, bytes: number) {
     setActivating(filename);
     setLibError(null);
-    setLibNotice(null);
     try {
       await api.setActiveChime(filename);
-      setLibNotice(
-        `Set ${filename} as the active lock chime — syncing to the car.`,
-      );
+      onActivated?.(filename, bytes);
     } catch (err) {
       setLibError(failMessage(err, "Couldn't set the active chime."));
     } finally {
@@ -1027,8 +1030,8 @@ export function ChimeScheduler({ pendingUpload }: ChimeSchedulerProps = {}) {
                               type="button"
                               class="action-btn primary"
                               data-testid="library-set-active"
-                              disabled={pendingRow || activating === c.filename}
-                              onClick={() => void setActiveChime(c.filename)}
+                              disabled={pendingRow || activating !== null || activationBusy}
+                              onClick={() => void setActiveChime(c.filename, c.bytes)}
                             >
                               {activating === c.filename ? "Syncing…" : "Set Active"}
                             </button>

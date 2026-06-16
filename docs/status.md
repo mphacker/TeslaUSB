@@ -12,6 +12,58 @@
 > [`adr/`](./adr/) (locked architecture, incl. [`ADR-0003`](./adr/0003-media-read-path.md)
 > media read path).
 
+## ⏯️ Resume here — SET-ACTIVE UI AUTO-REFRESH LIVE (active card + audio, no reload) (2026-06-16)
+
+**Operator requirement (locked, now satisfied):** after clicking **Set Active**
+on a library chime, the **Active Lock Chime** card *and* its audio player must
+update on their own with a clear time expectation — no manual page reload. Three
+reported symptoms ("sometimes it doesn't seem to happen", a vague "syncing"
+notice, and the player only playing the new sound after a reload) all had one
+root cause: Set Active refreshed nothing on the read side.
+
+✅ **Shipped + proven live on `cybertruckusb.local` (see `files/hw-results.md`
+"Set Active auto-refresh" + screenshots
+`files/hw-setactive-{desktop-1280,mobile-375}.png`):**
+- **Root cause:** the active card + `<audio>` live in the parent `Media`
+  (`GET /api/chimes`, loaded once on mount); the **child** `ChimeScheduler` Set
+  Active button had no channel to refresh the parent → stale until reload.
+- **Fix (mirrors the upload auto-refresh):** child raises `onActivated(filename,
+  bytes)` after the `202`; parent records `pendingActivation = {filename, bytes,
+  token, preModified, preSize, phase}` and **bounded-polls** `GET /api/chimes`
+  (2 s interval, 60 s cap) until the active file reflects the activated chime,
+  updating the card/audio on every poll (no reload).
+- **Convergence key (robust):** `installed.size_bytes === activatedBytes` AND
+  (nothing was active before, OR the size changed, OR the mtime became
+  readable/advanced) — handles null mtime + same-second granularity + same-size
+  re-activation, defeating the false-positive a mtime-only or size-only key has.
+- **Audio reload:** `<audio key={installed.modified ?? size}>` remounts so the
+  new bytes actually load (not a stale buffered chime).
+- **UX:** in-flight "Applying … usually 15–30 seconds…"; on convergence "‘<name>’
+  is now your active lock chime."; on 60 s timeout "Still applying …" + a
+  **Refresh now** button. **All** Set Active buttons are disabled while a handoff
+  is pending (syncing *and* waiting) so an in-flight activation can't be raced by
+  a second one (prevents misattribution).
+- **Verified:** build clean; **media + chime-scheduler Playwright UAT green**
+  (5 new Set-Active tests: auto-refresh, all-buttons-disabled, timeout→Refresh
+  now, same-size→mtime convergence, first-chime-with-none-installed). **Live:**
+  activated `XPLockChime.wav` → "Applying…" + both buttons disabled → active card
+  **215 KB/23:57 → 277 KB/00:49** and audio `v=` cache-bust advanced, success
+  notice shown, **no manual reload**, buttons re-enabled, **0 console
+  errors/warnings**, backend `LockChime.wav` = 283744 B confirmed, screenshots
+  @375 + @1280.
+- **Reviews:** two GPT-5.5 adversarial cycles reconciled — cycle 1 (root cause +
+  weak convergence key), cycle 2 found 4 issues (status hidden when no chime
+  installed; size-only convergence; missing poll try/catch; button re-enable in
+  waiting) — **all 4 fixed**, the last by disabling buttons through both phases.
+  **Deploy:** SPA-static-only (no Rust binary) under the hardware-test dead-man
+  wrapper; snapshot `spa.b1-backup-20260615-204819`; wlan0 + SSH intact; webd
+  serving new bundle `index-KZ1j0wlF.js`.
+
+**Note:** the device's active chime is now `XPLockChime.wav` (set during this
+live test). The operator can pick their preferred chime via the now-fixed UI.
+
+---
+
 ## ⏯️ Resume here — CHIME LIBRARY AUTO-REFRESH AFTER UPLOAD LIVE (2026-06-15)
 
 **Operator requirement (locked, now satisfied):** after uploading a chime, the
@@ -472,7 +524,11 @@ LUNs) is the single make-or-break that still needs the car.**
   queue; the new gadgetd applies P2 handoffs immediately while the host is enumerated.
   LIVE: media-root `LockChime.wav` updated byte-identical to the activated chime in ~3 s,
   no replug — `files/hw-results.md` "Phase 2". Car-side pickup (soft medium-change vs.
-  full re-enumeration) is the remaining §1.1 / C1 car-only check.)**
+  full re-enumeration) is the remaining §1.1 / C1 car-only check. **UI auto-refresh
+  LIVE-PROVEN 2026-06-16: Set Active updates the Active Lock Chime card + audio player
+  with no manual reload (parent bounded-polls `/api/chimes`); clear in-flight/converged/
+  timeout notices; buttons disabled while pending. See top "Resume here — SET-ACTIVE UI
+  AUTO-REFRESH" block + `files/hw-setactive-*.png`.)**
 - [ ] Groups (create/edit/delete; persist `chime_groups.json`). **(partial: A3 UI +
   schedulerd render proven; verify CRUD round-trip)**
 - [ ] Schedules (weekly/date/holiday/recurring; CRUD+enable; `chime_schedules.json`). **(partial:

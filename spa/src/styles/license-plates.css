@@ -73,6 +73,11 @@
   opacity: 0.55;
 }
 
+.license-plates-drop-zone.dragging {
+  border-color: var(--btn-primary-bg);
+  background: var(--surface-hover, rgba(127, 127, 127, 0.08));
+}
+
 .license-plates-drop-content {
   pointer-events: none;
 }

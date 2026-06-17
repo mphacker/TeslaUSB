@@ -94,6 +94,11 @@
   margin-bottom: 20px;
 }
 
+.boombox-drop-zone.dragging {
+  border-color: var(--btn-primary-bg);
+  background: var(--surface-hover, rgba(127, 127, 127, 0.08));
+}
+
 .boombox-drop-zone .drop-icon {
   display: block;
   width: 40px;

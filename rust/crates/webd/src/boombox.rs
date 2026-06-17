@@ -23,17 +23,20 @@ const PARTITION_MEDIA: u8 = 2;
 /// Category root directory on p2 (exFAT is case-sensitive).
 const BOOMBOX_DIR: &str = "Boombox";
 
-/// Maximum accepted boombox file size (1 MiB — these are short audio clips).
-const BOOMBOX_MAX_BYTES: usize = 1024 * 1024;
+/// Maximum accepted boombox file size (8 MiB). Boombox sounds are short
+/// external-speaker clips, but `.mp3`/`.wav` at higher bitrates (or a few
+/// seconds of WAV) can exceed the old 1 MiB cap; 8 MiB is generous yet safe
+/// against the ~1 GiB `media.img` (the library is capped at 5 files).
+const BOOMBOX_MAX_BYTES: usize = 8 * 1024 * 1024;
 
 /// Tesla loads the first 5 boombox sounds alphabetically; reject uploads that
 /// would grow the library beyond this. Re-uploading an existing name (a
 /// replace) is always allowed because it does not increase the total.
 const BOOMBOX_MAX_FILES: usize = 5;
 
-/// Axum `DefaultBodyLimit` for the POST route (8 MiB — defence-in-depth above
-/// the 1 MiB logical cap, matching the chimes pattern).
-pub(crate) const BOOMBOX_BODY_LIMIT: usize = 8 * 1024 * 1024;
+/// Axum `DefaultBodyLimit` for the POST route (10 MiB — `BOOMBOX_MAX_BYTES`
+/// plus a 2 MiB margin for multipart framing; defence-in-depth).
+pub(crate) const BOOMBOX_BODY_LIMIT: usize = 10 * 1024 * 1024;
 
 /// `GET /api/boombox` — list installed boombox horn sounds.
 ///
@@ -49,7 +52,7 @@ pub(crate) async fn list_boombox(
 /// `POST /api/boombox` — install a boombox horn sound.
 ///
 /// Accepts `multipart/form-data` with a single `file` field holding a `.wav`
-/// or `.mp3` file (≤ 1 MiB). The destination path is constructed as
+/// or `.mp3` file (≤ 8 MiB). The destination path is constructed as
 /// `Boombox/<sanitised_filename>` — the client-supplied name is never used raw.
 pub(crate) async fn install_boombox(
     State(state): State<AppState>,

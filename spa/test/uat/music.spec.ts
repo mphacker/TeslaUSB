@@ -535,6 +535,110 @@ test.describe("music UAT", () => {
       `console errors during move flow: ${JSON.stringify(consoleErrors)}`,
     ).toEqual([]);
   });
+
+  test("file input accepts multiple files", async ({ page }) => {
+    await gotoScreen(page, PATH, SCREEN);
+    await expect(page.locator("input[type=file]")).toHaveAttribute(
+      "multiple",
+      "",
+    );
+  });
+
+  test("drag-and-drop multiple files — stages then uploads all", async ({
+    page,
+  }, testInfo) => {
+    const sel = viewportSelectors(testInfo.project.name);
+    let musicGetCount = 0;
+    const postFilenames: string[] = [];
+    await page.route("**/api/music", (route) => {
+      const req = route.request();
+      if (req.method() !== "GET") {
+        // Capture the multipart filename for assertion.
+        const body = req.postData() ?? "";
+        const m = body.match(/filename="([^"]+)"/);
+        if (m) postFilenames.push(m[1]);
+        return route.fulfill({
+          status: 202,
+          contentType: "application/json",
+          body: QUEUED_BODY,
+        });
+      }
+      musicGetCount++;
+      // First GET empty; after the uploads land, both files are present.
+      const items =
+        musicGetCount === 1
+          ? []
+          : [
+              {
+                name: "alpha.mp3",
+                rel_path: "Music/alpha.mp3",
+                size_bytes: 3,
+                modified: null,
+              },
+              {
+                name: "beta.mp3",
+                rel_path: "Music/beta.mp3",
+                size_bytes: 3,
+                modified: null,
+              },
+            ];
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: musicListBody(items),
+      });
+    });
+
+    const consoleErrors: string[] = [];
+    page.on("console", (msg) => {
+      if (msg.type() === "error") consoleErrors.push(msg.text());
+    });
+    page.on("pageerror", (err) => consoleErrors.push(err.message));
+
+    await gotoScreen(page, PATH, SCREEN);
+    await expect(page.locator("[data-testid=music-empty]")).toBeVisible();
+
+    // Simulate a real OS drag-drop of two audio files onto the drop zone.
+    await page.locator("[data-testid=music-dropzone]").evaluate((el) => {
+      const dt = new DataTransfer();
+      dt.items.add(
+        new File([new Uint8Array([1, 2, 3])], "alpha.mp3", {
+          type: "audio/mpeg",
+        }),
+      );
+      dt.items.add(
+        new File([new Uint8Array([4, 5, 6])], "beta.mp3", {
+          type: "audio/mpeg",
+        }),
+      );
+      for (const type of ["dragenter", "dragover", "drop"]) {
+        const ev = new DragEvent(type, { bubbles: true, cancelable: true });
+        Object.defineProperty(ev, "dataTransfer", { value: dt });
+        el.dispatchEvent(ev);
+      }
+    });
+
+    // Both dropped files are staged (not yet uploaded).
+    const staged = page.locator("[data-testid=music-selected-files]");
+    await expect(staged).toContainText("alpha.mp3");
+    await expect(staged).toContainText("beta.mp3");
+    expect(postFilenames, "no upload should fire on drop alone").toEqual([]);
+
+    // Upload all staged files.
+    await page.locator("[data-testid=music-upload-btn]").click();
+
+    // Both files each POST to /api/music, then appear after convergence.
+    await expect(page.locator(sel.fileList)).toContainText("alpha.mp3", {
+      timeout: 8000,
+    });
+    await expect(page.locator(sel.fileList)).toContainText("beta.mp3");
+    expect(postFilenames.sort()).toEqual(["alpha.mp3", "beta.mp3"]);
+
+    expect(
+      consoleErrors,
+      `console errors during DnD flow: ${JSON.stringify(consoleErrors)}`,
+    ).toEqual([]);
+  });
 });
 
 

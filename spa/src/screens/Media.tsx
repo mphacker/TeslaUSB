@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import { MediaPills } from "../components/MediaPills";
 import { Icon } from "../components/Icon";
 import { ChimeScheduler } from "./ChimeScheduler";
+import { useFullWidthScreen } from "../hooks/useFullWidthScreen";
 import { api, ApiError, CHIME_MAX_BYTES } from "../api/client";
 import type { Chimes, InstalledChime, LibraryEntry } from "../api/types";
 import "../styles/media.css";
@@ -268,6 +269,7 @@ async function validateChimeWav(file: File): Promise<string | null> {
 type Status = "loading" | "ready" | "error";
 
 export function Media() {
+  useFullWidthScreen();
   const [status, setStatus] = useState<Status>("loading");
   const [installed, setInstalled] = useState<InstalledChime | null>(null);
 

@@ -49,6 +49,58 @@ desired). Device `cybertruckusb.local` healthy: SSH + wlan0 connected, boot
 `degraded` (pre-existing benign zram timer), webd serving the latest SPA bundle.
 
 **Shipped + LIVE-PROVEN today (newest first):**
+- **Light-show + boombox upload size raised + clean over-limit errors** (2026-06-17):
+  light shows ship with full-song audio (`.mp3`/`.wav`) that routinely exceeds the
+  old **5 MiB** cap, so legit files (7–13 MB) were rejected. Raised
+  `LIGHTSHOW_MAX_BYTES` 5 → **32 MiB** (body limit 16 → 34 MiB) and, same fix,
+  `BOOMBOX_MAX_BYTES` 1 → **8 MiB** (body limit 8 → 10 MiB) — `media.img` is ~1 GiB
+  so these per-file caps stay safe. Also fixed the confusing
+  **"Couldn't reach the device"** error: `read_file_upload` returned its 422 early
+  *without draining* the multipart body, which reset the connection mid-upload on
+  large files and the browser misread it as a network failure — it now drains the
+  field before responding (cheap, bounded by the body limit). SPA classifier maps
+  413 / `file_too_large` to a human "That file is too large…" message instead of the
+  raw byte count. webd: 256 unit tests pass (boombox oversize test updated to the new
+  cap) + aarch64 cross-build (podman); SPA: 22 light-show UAT pass incl. a new
+  oversize-413 test. DEPLOYED to `cybertruckusb.local` — webd binary swapped (backups
+  `webd.b1-backup-*`), SPA served `index-XGAKgEOJ.js`, webd + gadgetd active,
+  `/api/lightshows` + `/api/boombox` 200.
+- **Multi-file upload + live status — media screens** (2026-06-17): Boombox, Light
+  Shows, Wraps, and License Plates upload zones now accept **multiple files at once**
+  (drag-drop or picker), show **realtime per-file status** (pending • / uploading ↻ /
+  done ✓ / error ✗) with an "Uploading n/m…" counter, and **auto-add the new files to
+  the library list below with no page refresh** (refetch after each file lands, plus the
+  shipped SSE catalog stream). Reworked the shared `useMediaCategory` hook to a
+  multi-file model (`selectedFiles[]`, `uploadItems[]`, `uploadProgress`, client-side
+  `accept` extension filtering + dedupe, sequential install with per-file status, Retry
+  for failures) and extracted a shared `MediaUploadZone` component + `media-upload.css`
+  so all four screens render an identical zone. SPA-only (no gadgetd). `npm run build`
+  clean; full UAT suite = **362 passed** (desktop-1280 + mobile-375), incl. multi-file
+  DnD + an upload-flow integration test proving the live-list refresh. DEPLOYED to
+  `cybertruckusb.local` — served `index-B8uqcrMo.js`, webd + gadgetd active.
+- **Drag-and-drop upload — media screens** (2026-06-17): Boombox, Light Shows, Wraps,
+  and License Plates now accept dragged files onto their upload zone (previously only
+  click-to-choose worked — the drop zones had no DnD handlers). Added a reusable
+  `useFileDrop()` hook (manages the `.dragging` highlight + `preventDefault` on
+  dragover/drop, reads `dataTransfer.files`) and an `onFilesDropped()` handler on the
+  shared `useMediaCategory` hook that stages the first dropped file (these are
+  single-file uploads with count caps, unlike Music's multi-file). Per-screen
+  `.dropzone.dragging` highlight CSS added. SPA-only (no gadgetd). `npm run build`
+  clean; `npx playwright test` for the 4 specs = **70 passed** (desktop-1280 +
+  mobile-375), each incl. a new real-`DragEvent` drop test asserting the file stages.
+  **Live:** deployed `index-j1JdIkyN.js` to `cybertruckusb.local` (file swap,
+  webd/gadgetd untouched + active).
+- **Full-width media cards** (2026-06-17): Chimes, Boombox, Light Shows, Wraps, and
+  License Plates now fill the browser width like Music — their `.container` cards were
+  capped at the global 1200px `.main-content` width, crunching the tables/galleries.
+  Added a reusable `useFullWidthScreen()` hook (ref-counted body-class toggle) +
+  `styles/fullwidth.css` (`body.screen-fullwidth .main-content { max-width: none }`),
+  scoped so non-media screens keep the centred column. SPA-only (no gadgetd). `npm run
+  build` clean; `npx playwright test` for all 5 specs = **104 passed** (desktop-1280 +
+  mobile-375), each incl. a new full-width assertion (`screen-fullwidth` class +
+  computed `.main-content` max-width `none`); desktop screenshot visually confirms the
+  card spans edge-to-edge. **Live:** deployed `index-HxBWirkg.css` to
+  `cybertruckusb.local` (file swap, webd/gadgetd untouched + active).
 - **Active-card SOURCE name** (commit `2408e72`): the Active Lock Chime card now
   shows the *selected library chime's* name (e.g. `MarioFart.wav`) with an
   "Installed as LockChime.wav" subtitle, instead of the meaningless always-on
@@ -633,6 +685,14 @@ LUNs) is the single make-or-break that still needs the car.**
   music.spec.ts` incl. mocked-list player test asserting preload=none + encoded src +
   cache-bust + NO content-fetch on render; 14 passed, clean console/network)**
 - [ ] Upload `.mp3/.flac/.wav/.aac/.m4a`, up to **2 GB**, **16 MB chunked** upload. **(gated: chunked-upload backend — Tier-C remainder A1/A2)**
+  - **(2026-06-17: drag-and-drop + multi-file selection now work.** The drop zone was a
+    styled div with no DnD handlers and a single-file input. Wired real
+    `onDragOver/Enter/Leave/Drop` (reads `dataTransfer.files`, `.dragging` highlight) +
+    `multiple` on the input; `useMusicLibrary` now stages a `File[]`, filters to the allowed
+    extensions client-side, and uploads sequentially with `Uploading n/m…` progress (gadgetd
+    coalesces the handoffs). SPA-only; ≤10 MB single-shot cap unchanged. `npm run build`
+    clean; `npx playwright test music.spec.ts` 30 passed (desktop-1280 + mobile-375) incl. a
+    real-`DragEvent` drop-of-two-files test + a `multiple`-attribute assertion; console clean.)**
 - [x] Create folders + move files between folders. **(DONE — folder create = install a
   `.teslausb-keep` placeholder (folder derived client-side, dotfile hidden); folder delete =
   media-ro filesystem-walk enumerate child files + chunked (≤16) `run_remove_many`; move =

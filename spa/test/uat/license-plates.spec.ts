@@ -157,4 +157,71 @@ test.describe("license plates UAT", () => {
     await expect(page.locator(".media-pills")).toBeVisible();
     await captureScreenshot(page, testInfo, SCREEN);
   });
+
+  test("full-width — main-content cap removed so the card fills the width", async ({
+    page,
+  }) => {
+    await gotoScreen(page, PATH, SCREEN);
+    await expect(page.locator(".media-pills")).toBeVisible();
+    const hasClass = await page.evaluate(() =>
+      document.body.classList.contains("screen-fullwidth"),
+    );
+    expect(hasClass, "body should carry the screen-fullwidth class").toBe(true);
+    const maxWidth = await page
+      .locator(".main-content")
+      .evaluate((el) => getComputedStyle(el).maxWidth);
+    expect(maxWidth, ".main-content max-width must be uncapped").toBe("none");
+  });
+
+  test("drag-and-drop — dropping a file stages it for upload", async ({
+    page,
+  }) => {
+    await gotoScreen(page, PATH, SCREEN);
+    const zone = page.locator("[data-testid=license-plates-dropzone]");
+    await expect(zone).toBeVisible();
+    await zone.evaluate((el) => {
+      const dt = new DataTransfer();
+      dt.items.add(new File([new Uint8Array([1, 2, 3])], "dropped.png", {
+        type: "image/png",
+      }));
+      for (const t of ["dragenter", "dragover", "drop"]) {
+        const ev = new DragEvent(t, { bubbles: true, cancelable: true });
+        Object.defineProperty(ev, "dataTransfer", { value: dt });
+        el.dispatchEvent(ev);
+      }
+    });
+    await expect(page.getByText("dropped.png", { exact: false })).toBeVisible();
+  });
+
+  test("upload button label is 'Upload' (not 'Install')", async ({ page }) => {
+    await gotoScreen(page, PATH, SCREEN);
+    const zone = page.locator("[data-testid=license-plates-dropzone]");
+    await expect(zone.getByRole("button", { name: "Upload" })).toBeVisible();
+    await expect(zone).not.toContainText("Install");
+  });
+
+  test("drag-and-drop — multiple files stage and the button reflects the count", async ({
+    page,
+  }) => {
+    await gotoScreen(page, PATH, SCREEN);
+    const zone = page.locator("[data-testid=license-plates-dropzone]");
+    await zone.evaluate((el) => {
+      const dt = new DataTransfer();
+      for (const n of ["multi-a.png", "multi-b.png"]) {
+        dt.items.add(
+          new File([new Uint8Array([1, 2, 3])], n, { type: "image/png" }),
+        );
+      }
+      for (const t of ["dragenter", "dragover", "drop"]) {
+        const ev = new DragEvent(t, { bubbles: true, cancelable: true });
+        Object.defineProperty(ev, "dataTransfer", { value: dt });
+        el.dispatchEvent(ev);
+      }
+    });
+    await expect(page.getByText("multi-a.png", { exact: false })).toBeVisible();
+    await expect(page.getByText("multi-b.png", { exact: false })).toBeVisible();
+    await expect(
+      zone.getByRole("button", { name: "Upload 2 files" }),
+    ).toBeVisible();
+  });
 });

@@ -2,6 +2,8 @@ import { Icon } from "../components/Icon";
 import { MediaPills } from "../components/MediaPills";
 import { BulkDeleteBar } from "../components/BulkDeleteBar";
 import { useScreenHook } from "../components/screenHook";
+import { useFullWidthScreen } from "../hooks/useFullWidthScreen";
+import { MediaUploadZone } from "../components/MediaUploadZone";
 import { api } from "../api/client";
 import { fmtBytes, useMediaCategory } from "../hooks/useMediaCategory";
 import "../styles/boombox.css";
@@ -17,12 +19,14 @@ import "../styles/boombox.css";
  */
 export function Boombox() {
   useScreenHook("boombox");
+  useFullWidthScreen();
 
   const cat = useMediaCategory({
     fetchList: api.boombox,
     install: api.installBoombox,
     remove: api.removeBoombox,
     bulkDelete: api.bulkDeleteBoombox,
+    accept: [".wav", ".mp3"],
   });
 
   return (
@@ -99,40 +103,14 @@ export function Boombox() {
         )}
       </div>
 
-      <form onSubmit={cat.onUploadSubmit} aria-busy={cat.uploading}>
-        <div class="boombox-drop-zone" data-testid="boombox-dropzone">
-          <Icon name="upload" class="drop-icon" />
-          <div class="drop-title">Choose a WAV or MP3 file (≤ 1 MB)</div>
-          <input
-            ref={cat.fileInputRef}
-            type="file"
-            accept=".wav,.mp3"
-            onChange={cat.onFileChange}
-            disabled={cat.uploading}
-            aria-label="Choose boombox sound file"
-          />
-          {cat.selectedFile && (
-            <div class="drop-hint">{cat.selectedFile.name} ({fmtBytes(cat.selectedFile.size)})</div>
-          )}
-        </div>
-        {cat.uploadFail && (
-          <p role="alert" style="color: var(--accent-error); margin: 8px 0;">
-            {cat.uploadFail.message}
-            {cat.uploadFail.retryable && (
-              <> <button type="submit" class="action-btn" disabled={!cat.selectedFile}>Retry</button></>
-            )}
-          </p>
-        )}
-        <button
-          type="submit"
-          class="action-btn"
-          disabled={!cat.selectedFile || cat.uploading}
-          aria-busy={cat.uploading}
-          style="margin-top: 8px;"
-        >
-          {cat.uploading ? "Installing…" : "Install"}
-        </button>
-      </form>
+      <MediaUploadZone
+        cat={cat}
+        testId="boombox-dropzone"
+        accept=".wav,.mp3"
+        icon="upload"
+        title="Choose WAV or MP3 files (≤ 1 MB each)"
+        hint="Supports: .wav, .mp3 — drag & drop or pick multiple"
+      />
 
       {/* ── Confirm remove dialog ── */}
       {cat.confirmRemoveName && (

@@ -152,5 +152,132 @@ test.describe("boombox UAT", () => {
     await expect(page.locator(".media-pills")).toBeVisible();
     await captureScreenshot(page, testInfo, SCREEN);
   });
+
+  test("full-width — main-content cap removed so the card fills the width", async ({
+    page,
+  }) => {
+    await gotoScreen(page, PATH, SCREEN);
+    await expect(page.locator(".media-pills")).toBeVisible();
+    const hasClass = await page.evaluate(() =>
+      document.body.classList.contains("screen-fullwidth"),
+    );
+    expect(hasClass, "body should carry the screen-fullwidth class").toBe(true);
+    const maxWidth = await page
+      .locator(".main-content")
+      .evaluate((el) => getComputedStyle(el).maxWidth);
+    expect(maxWidth, ".main-content max-width must be uncapped").toBe("none");
+  });
+
+  test("drag-and-drop — dropping a file stages it for upload", async ({
+    page,
+  }) => {
+    await gotoScreen(page, PATH, SCREEN);
+    const zone = page.locator("[data-testid=boombox-dropzone]");
+    await expect(zone).toBeVisible();
+    await zone.evaluate((el) => {
+      const dt = new DataTransfer();
+      dt.items.add(new File([new Uint8Array([1, 2, 3])], "dropped.wav", {
+        type: "audio/wav",
+      }));
+      for (const t of ["dragenter", "dragover", "drop"]) {
+        const ev = new DragEvent(t, { bubbles: true, cancelable: true });
+        Object.defineProperty(ev, "dataTransfer", { value: dt });
+        el.dispatchEvent(ev);
+      }
+    });
+    await expect(page.getByText("dropped.wav", { exact: false })).toBeVisible();
+  });
+
+  test("upload button label is 'Upload' (not 'Install')", async ({ page }) => {
+    await gotoScreen(page, PATH, SCREEN);
+    const zone = page.locator("[data-testid=boombox-dropzone]");
+    await expect(zone.getByRole("button", { name: "Upload" })).toBeVisible();
+    await expect(zone).not.toContainText("Install");
+  });
+
+  test("drag-and-drop — multiple files stage and the button reflects the count", async ({
+    page,
+  }) => {
+    await gotoScreen(page, PATH, SCREEN);
+    const zone = page.locator("[data-testid=boombox-dropzone]");
+    await zone.evaluate((el) => {
+      const dt = new DataTransfer();
+      for (const n of ["multi-a.wav", "multi-b.wav"]) {
+        dt.items.add(
+          new File([new Uint8Array([1, 2, 3])], n, { type: "audio/wav" }),
+        );
+      }
+      for (const t of ["dragenter", "dragover", "drop"]) {
+        const ev = new DragEvent(t, { bubbles: true, cancelable: true });
+        Object.defineProperty(ev, "dataTransfer", { value: dt });
+        el.dispatchEvent(ev);
+      }
+    });
+    await expect(page.getByText("multi-a.wav", { exact: false })).toBeVisible();
+    await expect(page.getByText("multi-b.wav", { exact: false })).toBeVisible();
+    await expect(
+      zone.getByRole("button", { name: "Upload 2 files" }),
+    ).toBeVisible();
+  });
+
+  test("upload flow — dropped file uploads and appears in the library without refresh", async ({
+    page,
+  }) => {
+    let installed = false;
+    await page.route("**/api/boombox", async (route) => {
+      const req = route.request();
+      if (req.method() === "GET") {
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            items: installed
+              ? [
+                  {
+                    name: "Horn.wav",
+                    rel_path: "Boombox/Horn.wav",
+                    size_bytes: 2048,
+                    modified: "2024-06-01T07:15:00Z",
+                  },
+                ]
+              : [],
+          }),
+        });
+      }
+      if (req.method() === "POST") {
+        installed = true;
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ state: "done" }),
+        });
+      }
+      return route.continue();
+    });
+
+    await gotoScreen(page, PATH, SCREEN);
+    await expect(page.locator("[data-testid=boombox-audio]")).toHaveCount(0);
+
+    const zone = page.locator("[data-testid=boombox-dropzone]");
+    await zone.evaluate((el) => {
+      const dt = new DataTransfer();
+      dt.items.add(
+        new File([new Uint8Array([1, 2, 3])], "Horn.wav", {
+          type: "audio/wav",
+        }),
+      );
+      for (const t of ["dragenter", "dragover", "drop"]) {
+        const ev = new DragEvent(t, { bubbles: true, cancelable: true });
+        Object.defineProperty(ev, "dataTransfer", { value: dt });
+        el.dispatchEvent(ev);
+      }
+    });
+    await expect(zone.getByText("Horn.wav", { exact: false })).toBeVisible();
+
+    await zone.getByRole("button", { name: "Upload" }).click();
+
+    // Item 3: the library refetches itself — Horn.wav shows up with no reload.
+    await expect(page.locator("[data-testid=boombox-audio]")).toHaveCount(1);
+  });
 });
 

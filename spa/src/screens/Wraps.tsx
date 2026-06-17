@@ -2,6 +2,8 @@ import { Icon } from "../components/Icon";
 import { MediaPills } from "../components/MediaPills";
 import { BulkDeleteBar } from "../components/BulkDeleteBar";
 import { useScreenHook } from "../components/screenHook";
+import { useFullWidthScreen } from "../hooks/useFullWidthScreen";
+import { MediaUploadZone } from "../components/MediaUploadZone";
 import { api } from "../api/client";
 import { fmtBytes, useMediaCategory } from "../hooks/useMediaCategory";
 import "../styles/wraps.css";
@@ -15,12 +17,14 @@ import "../styles/wraps.css";
  */
 export function Wraps() {
   useScreenHook("wraps");
+  useFullWidthScreen();
 
   const cat = useMediaCategory({
     fetchList: api.wraps,
     install: api.installWrap,
     remove: api.removeWrap,
     bulkDelete: api.bulkDeleteWraps,
+    accept: [".png"],
   });
 
   return (
@@ -79,46 +83,14 @@ export function Wraps() {
 
       {/* ── Upload zone ── */}
       <div class="wraps-folder-controls" id="wrapUploadControls">
-        <form
-          class="wraps-drop-zone"
-          onSubmit={cat.onUploadSubmit}
-          aria-busy={cat.uploading}
-          data-testid="wraps-dropzone"
-        >
-          <div class="wraps-drop-inner">
-            <Icon name="image" class="wraps-drop-icon" />
-            <p class="wraps-drop-title">Choose a PNG wrap (≤ 1 MB)</p>
-            <p class="wraps-drop-hint">PNG files only • 512–1024px</p>
-            <input
-              ref={cat.fileInputRef}
-              type="file"
-              accept=".png,image/png"
-              onChange={cat.onFileChange}
-              disabled={cat.uploading}
-              aria-label="Choose wrap PNG"
-            />
-            {cat.selectedFile && (
-              <p>{cat.selectedFile.name} ({fmtBytes(cat.selectedFile.size)})</p>
-            )}
-          </div>
-          {cat.uploadFail && (
-            <p role="alert" style="color: var(--accent-error); margin: 8px 0;">
-              {cat.uploadFail.message}
-              {cat.uploadFail.retryable && (
-                <> <button type="submit" class="action-btn" disabled={!cat.selectedFile}>Retry</button></>
-              )}
-            </p>
-          )}
-          <button
-            type="submit"
-            class="action-btn"
-            disabled={!cat.selectedFile || cat.uploading}
-            aria-busy={cat.uploading}
-            style="margin-top: 8px;"
-          >
-            {cat.uploading ? "Installing…" : "Install"}
-          </button>
-        </form>
+        <MediaUploadZone
+          cat={cat}
+          testId="wraps-dropzone"
+          accept=".png,image/png"
+          icon="image"
+          title="Choose PNG wraps (≤ 1 MB each)"
+          hint="PNG files only • 512–1024px — drag & drop or pick multiple"
+        />
       </div>
 
       {/* ── Confirm remove dialog ── */}

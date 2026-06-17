@@ -241,6 +241,16 @@ body.music-active .main-content {
   margin-top: 8px;
   font-size: 13px;
   color: var(--text-secondary);
+  list-style: none;
+  padding: 0;
+  text-align: left;
+  max-height: 140px;
+  overflow-y: auto;
+}
+
+.music-drop-zone .drop-selected li {
+  padding: 2px 0;
+  word-break: break-all;
 }
 
 /* Upload actions row */

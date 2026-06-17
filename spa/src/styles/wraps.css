@@ -71,6 +71,11 @@
   opacity: 0.55;
 }
 
+.wraps-drop-zone.dragging {
+  border-color: var(--btn-primary-bg);
+  background: var(--surface-hover, rgba(127, 127, 127, 0.08));
+}
+
 .wraps-drop-inner {
   pointer-events: none;
 }

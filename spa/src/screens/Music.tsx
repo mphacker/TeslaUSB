@@ -23,6 +23,7 @@ export function Music() {
 
   // Storage info for the usage bar / stat tiles
   const [storageInfo, setStorageInfo] = useState<StorageInfo | null>(null);
+  const [dragging, setDragging] = useState(false);
   useEffect(() => {
     const ctrl = new AbortController();
     api
@@ -636,25 +637,58 @@ export function Music() {
             . Uploading music momentarily ejects the USB drive.
           </p>
 
-          <div class="music-drop-zone" data-testid="music-dropzone">
+          <div
+            class={`music-drop-zone${dragging ? " dragging" : ""}`}
+            data-testid="music-dropzone"
+            onClick={() => {
+              if (!lib.uploading) lib.fileInputRef.current?.click();
+            }}
+            onDragOver={(e) => {
+              e.preventDefault();
+              if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+            }}
+            onDragEnter={(e) => {
+              e.preventDefault();
+              if (!lib.uploading) setDragging(true);
+            }}
+            onDragLeave={(e) => {
+              e.preventDefault();
+              // Only clear when leaving the zone itself, not a child element.
+              if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+                setDragging(false);
+              }
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragging(false);
+              if (lib.uploading) return;
+              const files = Array.from(e.dataTransfer?.files ?? []);
+              if (files.length > 0) lib.onFilesDropped(files);
+            }}
+          >
             <Icon name="music" class="drop-icon" />
             <div class="drop-label">Drop files here or click to choose</div>
             <div class="drop-hint">
-              Allowed: mp3, flac, wav, aac, m4a. Max 10 MB.
+              Allowed: mp3, flac, wav, aac, m4a. Max 10 MB each.
             </div>
             <input
               ref={lib.fileInputRef}
               type="file"
               accept=".mp3,.flac,.wav,.aac,.m4a"
+              multiple
               onChange={lib.onFileChange}
+              onClick={(e) => e.stopPropagation()}
               disabled={lib.uploading}
-              aria-label="Choose music file"
+              aria-label="Choose music files"
             />
-            {lib.selectedFile && (
-              <div class="drop-selected">
-                {lib.selectedFile.name} (
-                {fmtBytes(lib.selectedFile.size)})
-              </div>
+            {lib.selectedFiles.length > 0 && (
+              <ul class="drop-selected" data-testid="music-selected-files">
+                {lib.selectedFiles.map((f) => (
+                  <li key={`${f.name}:${f.size}`}>
+                    {f.name} ({fmtBytes(f.size)})
+                  </li>
+                ))}
+              </ul>
             )}
           </div>
 
@@ -668,17 +702,23 @@ export function Music() {
             <button
               type="button"
               class="action-btn"
-              disabled={!lib.selectedFile || lib.uploading}
+              disabled={lib.selectedFiles.length === 0 || lib.uploading}
               onClick={lib.onUploadSubmit}
               aria-busy={lib.uploading}
               data-testid="music-upload-btn"
             >
-              {lib.uploading ? "Uploading…" : "Upload"}
+              {lib.uploading
+                ? lib.uploadProgress
+                  ? `Uploading ${lib.uploadProgress.done}/${lib.uploadProgress.total}…`
+                  : "Uploading…"
+                : lib.selectedFiles.length > 1
+                  ? `Upload ${lib.selectedFiles.length} files`
+                  : "Upload"}
             </button>
             <button
               type="button"
               class="action-btn danger"
-              disabled={!lib.selectedFile || lib.uploading}
+              disabled={lib.selectedFiles.length === 0 || lib.uploading}
               onClick={lib.clearSelectedFile}
               data-testid="music-clear-btn"
             >

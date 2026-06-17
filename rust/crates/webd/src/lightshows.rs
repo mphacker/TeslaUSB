@@ -20,11 +20,15 @@ use crate::media_upload::{
 const PARTITION_MEDIA: u8 = 2;
 const LIGHTSHOW_DIR: &str = "LightShow";
 
-/// Maximum accepted light show file size (5 MiB).
-const LIGHTSHOW_MAX_BYTES: usize = 5 * 1024 * 1024;
+/// Maximum accepted light show file size (32 MiB). Light shows ship with full
+/// song audio (`.mp3`/`.wav`), which routinely exceeds 10 MiB; 32 MiB covers a
+/// full-length WAV with headroom while staying small against the ~1 GiB
+/// `media.img`.
+const LIGHTSHOW_MAX_BYTES: usize = 32 * 1024 * 1024;
 
-/// Axum `DefaultBodyLimit` for the POST route (16 MiB — defence-in-depth).
-pub(crate) const LIGHTSHOW_BODY_LIMIT: usize = 16 * 1024 * 1024;
+/// Axum `DefaultBodyLimit` for the POST route (34 MiB — `LIGHTSHOW_MAX_BYTES`
+/// plus a 2 MiB margin for multipart framing; defence-in-depth).
+pub(crate) const LIGHTSHOW_BODY_LIMIT: usize = 34 * 1024 * 1024;
 
 const LIGHTSHOW_EXTENSIONS: &[&str] = &["fseq", "mp3", "wav"];
 

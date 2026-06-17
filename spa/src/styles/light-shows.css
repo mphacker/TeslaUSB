@@ -57,6 +57,11 @@
   margin-bottom: 20px;
 }
 
+.light-shows-drop-zone.dragging {
+  border-color: var(--btn-primary-bg);
+  background: var(--surface-hover, rgba(127, 127, 127, 0.08));
+}
+
 .light-shows-drop-zone-content {
   pointer-events: none;
 }

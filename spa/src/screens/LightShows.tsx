@@ -2,6 +2,8 @@ import { Icon } from "../components/Icon";
 import { MediaPills } from "../components/MediaPills";
 import { BulkDeleteBar } from "../components/BulkDeleteBar";
 import { useScreenHook } from "../components/screenHook";
+import { useFullWidthScreen } from "../hooks/useFullWidthScreen";
+import { MediaUploadZone } from "../components/MediaUploadZone";
 import { api } from "../api/client";
 import { fmtBytes, useMediaCategory } from "../hooks/useMediaCategory";
 import "../styles/light-shows.css";
@@ -19,12 +21,14 @@ function isPlayableAudio(name: string): boolean {
  */
 export function LightShows() {
   useScreenHook("light-shows");
+  useFullWidthScreen();
 
   const cat = useMediaCategory({
     fetchList: api.lightshows,
     install: api.installLightshow,
     remove: api.removeLightshow,
     bulkDelete: api.bulkDeleteLightshows,
+    accept: [".fseq", ".mp3", ".wav"],
   });
 
   return (
@@ -67,45 +71,14 @@ export function LightShows() {
 
       {/* ── Upload area ── */}
       <div class="light-shows-folder-controls">
-        <form
-          class="light-shows-drop-zone"
-          onSubmit={cat.onUploadSubmit}
-          aria-busy={cat.uploading}
-          data-testid="light-shows-dropzone"
-        >
-          <div class="light-shows-drop-zone-content">
-            <Icon name="cloud-upload" class="drop-icon" />
-            <p class="drop-title">Choose a light show file (≤ 5 MB)</p>
-            <p class="drop-formats">Supports: .fseq, .mp3, .wav</p>
-            <input
-              ref={cat.fileInputRef}
-              type="file"
-              accept=".fseq,.mp3,.wav"
-              onChange={cat.onFileChange}
-              disabled={cat.uploading}
-              aria-label="Choose light show file"
-            />
-            {cat.selectedFile && (
-              <p>{cat.selectedFile.name} ({fmtBytes(cat.selectedFile.size)})</p>
-            )}
-          </div>
-          {cat.uploadFail && (
-            <p role="alert" style="color: var(--accent-error); margin: 8px 0;">
-              {cat.uploadFail.message}
-              {cat.uploadFail.retryable && (
-                <> <button type="submit" class="action-btn" disabled={!cat.selectedFile}>Retry</button></>
-              )}
-            </p>
-          )}
-          <button
-            type="submit"
-            class="action-btn"
-            disabled={!cat.selectedFile || cat.uploading}
-            aria-busy={cat.uploading}
-          >
-            {cat.uploading ? "Installing…" : "Install"}
-          </button>
-        </form>
+        <MediaUploadZone
+          cat={cat}
+          testId="light-shows-dropzone"
+          accept=".fseq,.mp3,.wav"
+          icon="cloud-upload"
+          title="Choose light show files (≤ 5 MB each)"
+          hint="Supports: .fseq, .mp3, .wav — drag & drop or pick multiple"
+        />
       </div>
 
       {/* ── Confirm remove dialog ── */}

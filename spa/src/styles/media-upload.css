@@ -1,0 +1,153 @@
+/*
+ * Shared upload-zone styling for the media category screens (Boombox, Light
+ * Shows, Wraps, License Plates). One component + one stylesheet keeps the drop
+ * zone, staged-file list, progress indicator, and Upload button identical
+ * across all four screens.
+ */
+
+.media-upload-zone {
+  display: block;
+  border: 2px dashed var(--border-input);
+  border-radius: 8px;
+  padding: 28px 20px;
+  text-align: center;
+  background: var(--form-input-bg);
+  transition: border-color 0.2s ease, background-color 0.2s ease;
+  margin-bottom: 20px;
+}
+
+.media-upload-zone.dragging {
+  border-color: var(--btn-primary-bg);
+  background: var(--surface-hover, rgba(127, 127, 127, 0.08));
+}
+
+.media-upload-icon {
+  display: block;
+  width: 40px;
+  height: 40px;
+  color: var(--btn-primary-bg);
+  margin: 0 auto 10px;
+}
+
+.media-upload-title {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0 0 4px;
+  color: var(--text-primary);
+}
+
+.media-upload-hint {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin: 0 0 12px;
+}
+
+.media-upload-zone input[type="file"] {
+  display: block;
+  margin: 0 auto 8px;
+  max-width: 100%;
+}
+
+.media-upload-progress {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 8px 0;
+}
+
+.media-upload-list {
+  list-style: none;
+  margin: 12px auto;
+  padding: 0;
+  max-width: 560px;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.media-upload-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-input);
+  border-radius: 6px;
+  background: var(--surface, transparent);
+  font-size: 13px;
+}
+
+.media-upload-row .muf-status {
+  width: 1em;
+  text-align: center;
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+}
+
+.media-upload-row .muf-name {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+
+.media-upload-row .muf-size {
+  color: var(--text-secondary);
+  flex: 0 0 auto;
+}
+
+.media-upload-row .muf-remove {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  padding: 0 4px;
+  flex: 0 0 auto;
+}
+
+.media-upload-row .muf-remove:hover {
+  color: var(--accent-error);
+}
+
+.media-upload-row .muf-error {
+  flex-basis: 100%;
+  color: var(--accent-error);
+  font-size: 12px;
+}
+
+.media-upload-row.status-uploading {
+  border-color: var(--btn-primary-bg);
+}
+
+.media-upload-row.status-uploading .muf-status {
+  color: var(--btn-primary-bg);
+}
+
+.media-upload-row.status-done {
+  border-color: var(--accent-success, #2e7d32);
+}
+
+.media-upload-row.status-done .muf-status {
+  color: var(--accent-success, #2e7d32);
+}
+
+.media-upload-row.status-error {
+  border-color: var(--accent-error);
+}
+
+.media-upload-row.status-error .muf-status {
+  color: var(--accent-error);
+}
+
+.media-upload-error {
+  color: var(--accent-error);
+  margin: 8px 0;
+}
+
+.media-upload-submit {
+  margin-top: 8px;
+}

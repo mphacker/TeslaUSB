@@ -159,4 +159,98 @@ test.describe("light shows UAT", () => {
     await expect(page.locator(".media-pills")).toBeVisible();
     await captureScreenshot(page, testInfo, SCREEN);
   });
+
+  test("drag-and-drop — dropping a file stages it for upload", async ({
+    page,
+  }) => {
+    await gotoScreen(page, PATH, SCREEN);
+    const zone = page.locator("[data-testid=light-shows-dropzone]");
+    await expect(zone).toBeVisible();
+    await zone.evaluate((el) => {
+      const dt = new DataTransfer();
+      dt.items.add(new File([new Uint8Array([1, 2, 3])], "dropped.fseq", {
+        type: "application/octet-stream",
+      }));
+      for (const t of ["dragenter", "dragover", "drop"]) {
+        const ev = new DragEvent(t, { bubbles: true, cancelable: true });
+        Object.defineProperty(ev, "dataTransfer", { value: dt });
+        el.dispatchEvent(ev);
+      }
+    });
+    await expect(page.getByText("dropped.fseq", { exact: false })).toBeVisible();
+  });
+
+  test("upload button label is 'Upload' (not 'Install')", async ({ page }) => {
+    await gotoScreen(page, PATH, SCREEN);
+    const zone = page.locator("[data-testid=light-shows-dropzone]");
+    await expect(zone.getByRole("button", { name: "Upload" })).toBeVisible();
+    await expect(zone).not.toContainText("Install");
+  });
+
+  test("drag-and-drop — multiple files stage and the button reflects the count", async ({
+    page,
+  }) => {
+    await gotoScreen(page, PATH, SCREEN);
+    const zone = page.locator("[data-testid=light-shows-dropzone]");
+    await zone.evaluate((el) => {
+      const dt = new DataTransfer();
+      for (const n of ["multi-a.fseq", "multi-b.fseq"]) {
+        dt.items.add(
+          new File([new Uint8Array([1, 2, 3])], n, {
+            type: "application/octet-stream",
+          }),
+        );
+      }
+      for (const t of ["dragenter", "dragover", "drop"]) {
+        const ev = new DragEvent(t, { bubbles: true, cancelable: true });
+        Object.defineProperty(ev, "dataTransfer", { value: dt });
+        el.dispatchEvent(ev);
+      }
+    });
+    await expect(page.getByText("multi-a.fseq", { exact: false })).toBeVisible();
+    await expect(page.getByText("multi-b.fseq", { exact: false })).toBeVisible();
+    await expect(
+      zone.getByRole("button", { name: "Upload 2 files" }),
+    ).toBeVisible();
+  });
+
+  test("oversize file — a 413 surfaces a friendly 'too large' message, not a connection error", async ({
+    page,
+  }) => {
+    await page.route("**/api/lightshows", (route) => {
+      if (route.request().method() === "GET") {
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ items: [] }),
+        });
+      }
+      // Mimic webd's DefaultBodyLimit rejection (plain-text 413).
+      return route.fulfill({
+        status: 413,
+        contentType: "text/plain",
+        body: "length limit exceeded",
+      });
+    });
+    await gotoScreen(page, PATH, SCREEN);
+    const zone = page.locator("[data-testid=light-shows-dropzone]");
+    await zone.evaluate((el) => {
+      const dt = new DataTransfer();
+      dt.items.add(
+        new File([new Uint8Array([1, 2, 3])], "huge.mp3", {
+          type: "audio/mpeg",
+        }),
+      );
+      for (const t of ["dragenter", "dragover", "drop"]) {
+        const ev = new DragEvent(t, { bubbles: true, cancelable: true });
+        Object.defineProperty(ev, "dataTransfer", { value: dt });
+        el.dispatchEvent(ev);
+      }
+    });
+    await zone.getByRole("button", { name: "Upload" }).click();
+    await expect(
+      page.getByText("That file is too large to upload", { exact: false }).first(),
+    ).toBeVisible();
+    await expect(page.getByText("Couldn't reach the device", { exact: false })).toHaveCount(0);
+  });
 });

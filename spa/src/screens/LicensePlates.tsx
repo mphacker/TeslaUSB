@@ -2,6 +2,8 @@ import { Icon } from "../components/Icon";
 import { MediaPills } from "../components/MediaPills";
 import { BulkDeleteBar } from "../components/BulkDeleteBar";
 import { useScreenHook } from "../components/screenHook";
+import { useFullWidthScreen } from "../hooks/useFullWidthScreen";
+import { MediaUploadZone } from "../components/MediaUploadZone";
 import { api } from "../api/client";
 import { fmtBytes, useMediaCategory } from "../hooks/useMediaCategory";
 import "../styles/license-plates.css";
@@ -15,12 +17,14 @@ import "../styles/license-plates.css";
  */
 export function LicensePlates() {
   useScreenHook("plates");
+  useFullWidthScreen();
 
   const cat = useMediaCategory({
     fetchList: api.plates,
     install: api.installPlate,
     remove: api.removePlate,
     bulkDelete: api.bulkDeletePlates,
+    accept: [".png"],
   });
 
   return (
@@ -75,46 +79,14 @@ export function LicensePlates() {
       )}
 
       {/* ── Upload zone ── */}
-      <form
-        class="license-plates-drop-zone"
-        onSubmit={cat.onUploadSubmit}
-        aria-busy={cat.uploading}
-        data-testid="license-plates-dropzone"
-      >
-        <div class="license-plates-drop-content">
-          <Icon name="image" class="license-plates-drop-icon" />
-          <p class="license-plates-drop-title">Choose a PNG file (≤ 512 KB)</p>
-          <p class="license-plates-drop-hint">PNG only. Tesla output: 420x75 or 492x75.</p>
-          <input
-            ref={cat.fileInputRef}
-            type="file"
-            accept=".png,image/png"
-            onChange={cat.onFileChange}
-            disabled={cat.uploading}
-            aria-label="Choose license plate PNG"
-          />
-          {cat.selectedFile && (
-            <p>{cat.selectedFile.name} ({fmtBytes(cat.selectedFile.size)})</p>
-          )}
-        </div>
-        {cat.uploadFail && (
-          <p role="alert" style="color: var(--accent-error); margin: 8px 0;">
-            {cat.uploadFail.message}
-            {cat.uploadFail.retryable && (
-              <> <button type="submit" class="action-btn" disabled={!cat.selectedFile}>Retry</button></>
-            )}
-          </p>
-        )}
-        <button
-          type="submit"
-          class="action-btn"
-          disabled={!cat.selectedFile || cat.uploading}
-          aria-busy={cat.uploading}
-          style="margin-top: 8px;"
-        >
-          {cat.uploading ? "Installing…" : "Install"}
-        </button>
-      </form>
+      <MediaUploadZone
+        cat={cat}
+        testId="license-plates-dropzone"
+        accept=".png,image/png"
+        icon="image"
+        title="Choose PNG files (≤ 512 KB each)"
+        hint="PNG only. Tesla output: 420x75 or 492x75 — drag & drop or pick multiple"
+      />
 
       {/* ── Confirm remove dialog ── */}
       {cat.confirmRemoveName && (

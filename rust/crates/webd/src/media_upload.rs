@@ -103,6 +103,13 @@ pub(crate) async fn read_file_upload(
             )
         })? {
             if buf.len() + chunk.len() > max_bytes {
+                // Drain the rest of this field before responding. Returning
+                // early while the client is still streaming the body causes the
+                // connection to be reset mid-upload, which the browser surfaces
+                // as a network failure ("couldn't reach the device") rather than
+                // the real 422. The remaining bytes are bounded by the route's
+                // `DefaultBodyLimit`, so this drain is cheap.
+                while let Ok(Some(_)) = stream.chunk().await {}
                 return Err(ApiError::status(
                     StatusCode::UNPROCESSABLE_ENTITY,
                     "file_too_large",

@@ -2499,7 +2499,7 @@ async fn boombox_upload_rejected_when_too_large() {
         Reply::Json(json!({ "state": "queued", "job_id": "m-1" })),
         &[],
     );
-    let oversize = vec![0_u8; 1024 * 1024 + 1];
+    let oversize = vec![0_u8; 8 * 1024 * 1024 + 1];
     let (status, body) = post_boombox(
         &fx.app,
         multipart_body_with_filename("big.mp3", &[("file", &oversize)]),

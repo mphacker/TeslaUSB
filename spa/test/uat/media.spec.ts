@@ -678,6 +678,21 @@ test.describe("media (lock chimes) UAT", () => {
     console.log(`[uat][screenshot:media:${testInfo.project.name}] ${shot}`);
   });
 
+  test("full-width — main-content cap removed so the card fills the width", async ({
+    page,
+  }) => {
+    await gotoMedia(page);
+    await expect(page.locator(".media-pills")).toBeVisible();
+    const hasClass = await page.evaluate(() =>
+      document.body.classList.contains("screen-fullwidth"),
+    );
+    expect(hasClass, "body should carry the screen-fullwidth class").toBe(true);
+    const maxWidth = await page
+      .locator(".main-content")
+      .evaluate((el) => getComputedStyle(el).maxWidth);
+    expect(maxWidth, ".main-content max-width must be uncapped").toBe("none");
+  });
+
   test.describe("Set Active — auto-refresh", () => {
     const SCHED_MENUS = {
       holidays: [],

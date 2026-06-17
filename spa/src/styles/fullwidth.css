@@ -1,0 +1,12 @@
+/*
+ * Full-width media screens.
+ *
+ * The global base stylesheet caps `.main-content` at 1200px. Media screens that
+ * present wide tables / galleries (Chimes, Boombox, Light Shows, Wraps, License
+ * Plates — and Music via its own `.music-active` class) opt out so their cards
+ * fill the browser width. Scoped to the `screen-fullwidth` body class toggled by
+ * `useFullWidthScreen()`, so non-media screens keep the centred 1200px column.
+ */
+body.screen-fullwidth .main-content {
+  max-width: none;
+}

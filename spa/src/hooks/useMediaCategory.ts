@@ -28,6 +28,14 @@ export interface MediaFailure {
   retryable: boolean;
 }
 
+/** Per-file row state shown in the upload zone during a multi-file upload. */
+export interface UploadItem {
+  name: string;
+  size: number;
+  status: "pending" | "uploading" | "done" | "error";
+  error?: string;
+}
+
 /** Map an install/remove rejection to operator-facing UI state. */
 export function classifyMediaFailure(err: unknown): MediaFailure {
   if (err instanceof ApiError) {
@@ -45,6 +53,12 @@ export function classifyMediaFailure(err: unknown): MediaFailure {
       return {
         message: "The device service is unavailable. Try again once it's back.",
         retryable: true,
+      };
+    }
+    if (err.status === 413 || err.code === "file_too_large") {
+      return {
+        message: "That file is too large to upload. Choose a smaller file and try again.",
+        retryable: false,
       };
     }
     if (err.status === 400 || err.status === 422) {
@@ -97,14 +111,23 @@ interface UseMediaCategoryOptions {
     names: string[],
     signal?: AbortSignal,
   ) => Promise<{ state?: string }>;
+  /**
+   * Lowercase file extensions (e.g. `[".png"]`) accepted by this category.
+   * Dropped files are filtered against this client-side (the native input's
+   * `accept` attribute only governs the picker, not drag-and-drop). Omit to
+   * accept anything the server will validate.
+   */
+  accept?: string[];
 }
 
 export interface UseMediaCategory {
   state: LoadState;
   // Upload
   fileInputRef: RefObject<HTMLInputElement>;
-  selectedFile: File | null;
+  selectedFiles: File[];
   uploading: boolean;
+  uploadProgress: { current: number; total: number } | null;
+  uploadItems: UploadItem[];
   uploadFail: MediaFailure | null;
   notice: string | null;
   // Remove
@@ -119,7 +142,9 @@ export interface UseMediaCategory {
   bulkFail: MediaFailure | null;
   // Handlers
   onFileChange: (e: Event) => void;
-  onUploadSubmit: (e: Event) => void;
+  onFilesDropped: (files: File[]) => void;
+  removeStagedFile: (name: string) => void;
+  onUploadSubmit: (e?: Event) => void;
   onRequestRemove: (name: string) => void;
   onCancelRemove: () => void;
   onConfirmRemove: () => void;
@@ -138,11 +163,17 @@ export function useMediaCategory({
   install,
   remove,
   bulkDelete,
+  accept,
 }: UseMediaCategoryOptions): UseMediaCategory {
   const [state, setState] = useState<LoadState>({ tag: "loading" });
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<{
+    current: number;
+    total: number;
+  } | null>(null);
+  const [uploadItems, setUploadItems] = useState<UploadItem[]>([]);
   const [uploadFail, setUploadFail] = useState<MediaFailure | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [confirmRemoveName, setConfirmRemoveName] = useState<string | null>(
@@ -207,43 +238,141 @@ export function useMediaCategory({
     [],
   );
 
+  /** Filter incoming files to the accepted extensions and de-dupe by name+size. */
+  function acceptFiles(incoming: File[]) {
+    const exts = accept?.map((e) => e.toLowerCase());
+    setSelectedFiles((prev) => {
+      const seen = new Set(prev.map((f) => `${f.name}:${f.size}`));
+      const next = [...prev];
+      for (const f of incoming) {
+        if (exts && exts.length > 0) {
+          const lower = f.name.toLowerCase();
+          if (!exts.some((ext) => lower.endsWith(ext))) continue;
+        }
+        const key = `${f.name}:${f.size}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        next.push(f);
+      }
+      return next;
+    });
+  }
+
   function onFileChange(e: Event) {
     setUploadFail(null);
     setNotice(null);
     const input = e.currentTarget as HTMLInputElement;
-    const file = input.files?.[0] ?? null;
-    setSelectedFile(file);
+    const files = input.files ? Array.from(input.files) : [];
+    acceptFiles(files);
+    // Clear so re-selecting the same file fires another change.
+    input.value = "";
   }
 
-  async function onUploadSubmit(e: Event) {
-    e.preventDefault();
-    if (!selectedFile || uploading) return;
+  function onFilesDropped(files: File[]) {
+    if (uploading) return;
+    setUploadFail(null);
+    setNotice(null);
+    acceptFiles(files);
+  }
+
+  function removeStagedFile(name: string) {
+    if (uploading) return;
+    setSelectedFiles((prev) => prev.filter((f) => f.name !== name));
+  }
+
+  async function onUploadSubmit(e?: Event) {
+    e?.preventDefault();
+    if (selectedFiles.length === 0 || uploading) return;
+    const files = selectedFiles;
     setUploading(true);
     setUploadFail(null);
     setNotice(null);
+    setUploadItems(
+      files.map((f) => ({ name: f.name, size: f.size, status: "pending" })),
+    );
+    setUploadProgress({ current: 0, total: files.length });
+
     const ac = new AbortController();
     uploadAbortRef.current = ac;
-    try {
-      const res = await install(selectedFile, ac.signal);
-      const name = selectedFile.name;
-      setSelectedFile(null);
-      if (fileInputRef.current) fileInputRef.current.value = "";
-      setNotice(
-        isQueued(res)
-          ? `Saved "${name}" — syncing to the car.`
-          : `Installed "${name}".`,
+
+    const succeeded: string[] = [];
+    const failed: { name: string; fail: MediaFailure }[] = [];
+    let anyQueued = false;
+
+    for (let i = 0; i < files.length; i++) {
+      if (ac.signal.aborted) break;
+      const f = files[i];
+      setUploadItems((prev) =>
+        prev.map((it) =>
+          it.name === f.name ? { ...it, status: "uploading" } : it,
+        ),
       );
-      const refetchCtrl = new AbortController();
-      listAbortRef.current?.abort();
-      listAbortRef.current = refetchCtrl;
-      doFetch(refetchCtrl.signal);
-    } catch (err) {
-      if (ac.signal.aborted) return;
-      setUploadFail(classifyMediaFailure(err));
-    } finally {
-      if (uploadAbortRef.current === ac) uploadAbortRef.current = null;
-      setUploading(false);
+      setUploadProgress({ current: i + 1, total: files.length });
+      try {
+        const res = await install(f, ac.signal);
+        if (isQueued(res)) anyQueued = true;
+        succeeded.push(f.name);
+        setUploadItems((prev) =>
+          prev.map((it) =>
+            it.name === f.name ? { ...it, status: "done" } : it,
+          ),
+        );
+        // Live update: refetch after each file so it appears in the list
+        // immediately (the SSE catalog-change stream also nudges this).
+        const refetchCtrl = new AbortController();
+        listAbortRef.current?.abort();
+        listAbortRef.current = refetchCtrl;
+        doFetch(refetchCtrl.signal);
+      } catch (err) {
+        if (ac.signal.aborted) break;
+        const fail = classifyMediaFailure(err);
+        failed.push({ name: f.name, fail });
+        setUploadItems((prev) =>
+          prev.map((it) =>
+            it.name === f.name
+              ? { ...it, status: "error", error: fail.message }
+              : it,
+          ),
+        );
+      }
     }
+
+    if (uploadAbortRef.current === ac) uploadAbortRef.current = null;
+    if (ac.signal.aborted) {
+      setUploading(false);
+      return;
+    }
+
+    // Keep only the failed files staged so Retry re-runs just those.
+    const failedNames = new Set(failed.map((x) => x.name));
+    setSelectedFiles((prev) => prev.filter((f) => failedNames.has(f.name)));
+    if (fileInputRef.current) fileInputRef.current.value = "";
+
+    if (succeeded.length > 0) {
+      setNotice(
+        succeeded.length === 1
+          ? anyQueued
+            ? `Saved "${succeeded[0]}" — syncing to the car.`
+            : `Uploaded "${succeeded[0]}".`
+          : anyQueued
+            ? `Saved ${succeeded.length} files — syncing to the car.`
+            : `Uploaded ${succeeded.length} files.`,
+      );
+    }
+    if (failed.length > 0) {
+      setUploadFail({
+        message:
+          failed.length === 1
+            ? failed[0].fail.message
+            : `${failed.length} file(s) failed to upload. ${failed[0].fail.message}`,
+        retryable: failed.some((x) => x.fail.retryable),
+      });
+    } else {
+      setUploadItems([]);
+    }
+
+    setUploadProgress(null);
+    setUploading(false);
   }
 
   function onRequestRemove(name: string) {
@@ -361,8 +490,10 @@ export function useMediaCategory({
   return {
     state,
     fileInputRef,
-    selectedFile,
+    selectedFiles,
     uploading,
+    uploadProgress,
+    uploadItems,
     uploadFail,
     notice,
     confirmRemoveName,
@@ -374,6 +505,8 @@ export function useMediaCategory({
     bulkDeleting,
     bulkFail,
     onFileChange,
+    onFilesDropped,
+    removeStagedFile,
     onUploadSubmit,
     onRequestRemove,
     onCancelRemove,

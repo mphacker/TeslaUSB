@@ -26,6 +26,14 @@ export { classifyMediaFailure };
 const POLL_INTERVAL_MS = 2000;
 const POLL_MAX_MS = 45000;
 
+const MUSIC_EXTENSIONS = ["mp3", "flac", "wav", "aac", "m4a"];
+
+function isAllowedMusicFile(f: File): boolean {
+  const dot = f.name.lastIndexOf(".");
+  if (dot < 0) return false;
+  return MUSIC_EXTENSIONS.includes(f.name.slice(dot + 1).toLowerCase());
+}
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export type LibraryLoadState =
@@ -204,10 +212,12 @@ export interface UseMusicLibrary {
 
   // Upload
   fileInputRef: RefObject<HTMLInputElement>;
-  selectedFile: File | null;
+  selectedFiles: File[];
   uploading: boolean;
+  uploadProgress: { done: number; total: number } | null;
   uploadFail: MediaFailure | null;
   onFileChange: (e: Event) => void;
+  onFilesDropped: (files: File[]) => void;
   onUploadSubmit: () => void;
   clearSelectedFile: () => void;
 
@@ -255,8 +265,12 @@ export function useMusicLibrary(): UseMusicLibrary {
 
   // Upload
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<{
+    done: number;
+    total: number;
+  } | null>(null);
   const [uploadFail, setUploadFail] = useState<MediaFailure | null>(null);
 
   // Create folder
@@ -500,39 +514,93 @@ export function useMusicLibrary(): UseMusicLibrary {
 
   // ── Upload ───────────────────────────────────────────────────────────────────
 
-  function onFileChange(e: Event) {
+  function acceptFiles(incoming: File[]) {
     setUploadFail(null);
+    const allowed = incoming.filter(isAllowedMusicFile);
+    const rejected = incoming.length - allowed.length;
+    if (rejected > 0) {
+      setUploadFail({
+        message: `${rejected} file${rejected === 1 ? "" : "s"} skipped — only mp3, flac, wav, aac, and m4a are allowed.`,
+        retryable: false,
+      });
+    }
+    if (allowed.length === 0) return;
+    setSelectedFiles((prev) => {
+      const seen = new Set(prev.map((f) => `${f.name}:${f.size}`));
+      const merged = [...prev];
+      for (const f of allowed) {
+        const key = `${f.name}:${f.size}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          merged.push(f);
+        }
+      }
+      return merged;
+    });
+  }
+
+  function onFileChange(e: Event) {
     const input = e.currentTarget as HTMLInputElement;
-    setSelectedFile(input.files?.[0] ?? null);
+    acceptFiles(Array.from(input.files ?? []));
+    // Reset so re-selecting the same file(s) fires onChange again.
+    input.value = "";
+  }
+
+  function onFilesDropped(files: File[]) {
+    if (uploading) return;
+    acceptFiles(files);
   }
 
   async function onUploadSubmit() {
-    if (!selectedFile || uploading) return;
+    if (selectedFiles.length === 0 || uploading) return;
     setUploading(true);
     setUploadFail(null);
-    const file = selectedFile;
+    const files = selectedFiles;
     const folder =
       currentPath.length === 0 ? undefined : currentPath.join("/");
     const ac = new AbortController();
+    setUploadProgress({ done: 0, total: files.length });
+    const remaining: File[] = [];
+    let firstFail: MediaFailure | null = null;
+    let queuedAny = false;
     try {
-      await api.installMusic(file, ac.signal, folder);
-      setSelectedFile(null);
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        try {
+          await api.installMusic(file, ac.signal, folder);
+          const targetPath = folder
+            ? `Music/${folder}/${file.name}`
+            : `Music/${file.name}`;
+          addPendingOp({ kind: "upload", label: file.name, targetPath });
+          queuedAny = true;
+        } catch (err) {
+          if (ac.signal.aborted) return;
+          remaining.push(file);
+          if (!firstFail) firstFail = classifyMediaFailure(err);
+        }
+        setUploadProgress({ done: i + 1, total: files.length });
+      }
+      setSelectedFiles(remaining);
       if (fileInputRef.current) fileInputRef.current.value = "";
-      const targetPath = folder
-        ? `Music/${folder}/${file.name}`
-        : `Music/${file.name}`;
-      addPendingOp({ kind: "upload", label: file.name, targetPath });
-      triggerPoll();
-    } catch (err) {
-      if (ac.signal.aborted) return;
-      setUploadFail(classifyMediaFailure(err));
+      if (firstFail) {
+        setUploadFail(
+          remaining.length === files.length
+            ? firstFail
+            : {
+                message: `${remaining.length} of ${files.length} file${files.length === 1 ? "" : "s"} failed: ${firstFail.message}`,
+                retryable: firstFail.retryable,
+              },
+        );
+      }
+      if (queuedAny) triggerPoll();
     } finally {
       setUploading(false);
+      setUploadProgress(null);
     }
   }
 
   function clearSelectedFile() {
-    setSelectedFile(null);
+    setSelectedFiles([]);
     setUploadFail(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
@@ -695,10 +763,12 @@ export function useMusicLibrary(): UseMusicLibrary {
     enterFolder,
     navigateTo,
     fileInputRef,
-    selectedFile,
+    selectedFiles,
     uploading,
+    uploadProgress,
     uploadFail,
     onFileChange,
+    onFilesDropped,
     onUploadSubmit,
     clearSelectedFile,
     createFolderBusy,

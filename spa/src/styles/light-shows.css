@@ -138,6 +138,10 @@
   border-bottom: 0;
 }
 
+.light-shows-video-table .bulk-check-col {
+  width: 44px;
+}
+
 .light-shows-video-table .show-name-column {
   width: 25%;
 }

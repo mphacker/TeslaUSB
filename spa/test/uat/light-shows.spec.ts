@@ -253,4 +253,40 @@ test.describe("light shows UAT", () => {
     ).toBeVisible();
     await expect(page.getByText("Couldn't reach the device", { exact: false })).toHaveCount(0);
   });
+
+  test("layout — row checkbox sits in its own column, not over the show name", async ({
+    page,
+  }) => {
+    await page.route("**/api/lightshows", (route) => {
+      if (route.request().method() !== "GET") return route.continue();
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          items: [
+            {
+              name: "CYBERTRUCK - A Very Long Light Show Name That Wraps.fseq",
+              rel_path: "LightShow/CYBERTRUCK - A Very Long Light Show Name That Wraps.fseq",
+              size_bytes: 1153434,
+              modified: "2024-06-01T07:15:00Z",
+            },
+          ],
+        }),
+      });
+    });
+    await gotoScreen(page, PATH, SCREEN);
+    const checkbox = page.locator(".light-shows-video-table tbody .bulk-row-check").first();
+    const nameCell = page
+      .locator(".light-shows-video-table tbody tr")
+      .first()
+      .locator("td")
+      .nth(1);
+    await expect(checkbox).toBeVisible();
+    const cb = await checkbox.boundingBox();
+    const name = await nameCell.boundingBox();
+    expect(cb).not.toBeNull();
+    expect(name).not.toBeNull();
+    // The checkbox must finish before the name cell begins — i.e. its own column.
+    expect(cb!.x + cb!.width).toBeLessThanOrEqual(name!.x + 1);
+  });
 });

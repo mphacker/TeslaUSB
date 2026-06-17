@@ -124,7 +124,7 @@ export function LightShows() {
               <tbody>
                 {cat.state.items.length === 0 ? (
                   <tr>
-                    <td colSpan={4}>
+                    <td colSpan={5}>
                       <div class="light-shows-empty" data-testid="light-shows-empty">
                         <Icon name="sparkles" class="empty-icon" />
                         <p>No light show files installed yet.</p>

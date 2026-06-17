@@ -188,12 +188,6 @@
   line-height: 1.5;
 }
 
-@media (max-width: 768px) {
-  .wraps-table {
-    min-width: 620px;
-  }
-}
-
 @media (max-width: 480px) {
   .wraps-info-box {
     padding: 18px;

@@ -606,6 +606,69 @@ pub fn resolve_active(
     })
 }
 
+/// Resolve the chime that should be active at device boot.
+///
+/// Same evaluation as [`resolve_active`], except that `Interval::OnBoot`
+/// recurring schedules are treated as triggered at boot (trigger minute 0,
+/// boundary 0). If no schedule wins and `random_members` provides candidates,
+/// return the lowest-priority random-on-boot default seeded by `boot_seed`.
+#[must_use]
+pub fn resolve_boot(
+    now: CivilTime,
+    schedules: &[Schedule],
+    active_chime: Option<&str>,
+    library: &[String],
+    random_members: Option<&[String]>,
+    boot_seed: u64,
+) -> Option<Pick> {
+    let now_min = now.minute_of_day();
+    let mut best: Option<(&Schedule, u32, u32)> = None;
+    for sched in schedules.iter().filter(|s| s.enabled) {
+        let Some((trigger, boundary)) = trigger_today_boot(&sched.kind, now) else {
+            continue;
+        };
+        if trigger > now_min {
+            continue;
+        }
+        let candidate = (sched, trigger, boundary);
+        best = Some(match best {
+            None => candidate,
+            Some(cur) => pick_winner(cur, candidate),
+        });
+    }
+
+    if let Some((winner, _trigger, boundary)) = best {
+        let chime_filename = resolve_chime(winner, boundary, active_chime, library)?;
+        return Some(Pick {
+            schedule_id: winner.id.clone(),
+            schedule_name: winner.name.clone(),
+            chime_filename,
+        });
+    }
+
+    let members = random_members.filter(|m| !m.is_empty())?;
+    let pool: Vec<&String> = members
+        .iter()
+        .filter(|f| Some(f.as_str()) != active_chime)
+        .collect();
+    let pool = if pool.is_empty() {
+        members.iter().collect::<Vec<_>>()
+    } else {
+        pool
+    };
+    let seed = seed_for("random-on-boot", 0)
+        .wrapping_mul(0x0000_0100_0000_01b3)
+        .wrapping_add(boot_seed);
+    let len = u64::try_from(pool.len()).unwrap_or(1).max(1);
+    let idx = usize::try_from(seed % len).unwrap_or(0);
+    let chime_filename = (*pool.get(idx)?).clone();
+    Some(Pick {
+        schedule_id: "random-on-boot".to_owned(),
+        schedule_name: "Random on boot".to_owned(),
+        chime_filename,
+    })
+}
+
 /// Choose the winning schedule between two eligible candidates: later trigger
 /// wins; on a tie, higher priority; on a further tie, lexicographically larger
 /// id (total order → deterministic).
@@ -615,6 +678,15 @@ fn pick_winner<'a>(
 ) -> (&'a Schedule, u32, u32) {
     let key = |c: &(&Schedule, u32, u32)| (c.1, c.0.kind.priority(), c.0.id.clone());
     if key(&b) > key(&a) { b } else { a }
+}
+
+/// The trigger minute-of-day for boot evaluation, where `OnBoot` recurring
+/// schedules are eligible at trigger minute 0.
+fn trigger_today_boot(kind: &ScheduleKind, now: CivilTime) -> Option<(u32, u32)> {
+    match kind {
+        ScheduleKind::Recurring { interval } if interval.minutes().is_none() => Some((0, 0)),
+        _ => trigger_today(kind, now),
+    }
 }
 
 /// The trigger minute-of-day for `kind` *today* (if it applies today), plus a
@@ -910,6 +982,73 @@ mod tests {
         };
         let lib = vec!["A.wav".to_owned()];
         assert!(resolve_active(ct(2026, 1, 1, 12, 0), &[s], None, &lib).is_none());
+    }
+
+    #[test]
+    fn resolve_boot_fires_on_boot_recurring() {
+        let s = Schedule {
+            id: "boot".to_owned(),
+            name: "boot".to_owned(),
+            chime: ChimeRef::Random,
+            kind: ScheduleKind::Recurring {
+                interval: Interval::OnBoot,
+            },
+            enabled: true,
+        };
+        let lib = vec!["A.wav".to_owned(), "B.wav".to_owned()];
+        let pick = resolve_boot(ct(2026, 1, 1, 12, 0), &[s], None, &lib, None, 0).unwrap();
+        assert!(lib.contains(&pick.chime_filename));
+    }
+
+    #[test]
+    fn resolve_boot_random_default_when_no_schedule() {
+        let members = vec!["X.wav".to_owned(), "Y.wav".to_owned()];
+        let pick = resolve_boot(ct(2026, 1, 1, 12, 0), &[], None, &[], Some(&members), 7).unwrap();
+        assert_eq!(pick.schedule_id, "random-on-boot");
+        assert!(members.contains(&pick.chime_filename));
+    }
+
+    #[test]
+    fn resolve_boot_schedule_beats_random_default() {
+        let sched = weekly("weekly", "Specific.wav", &[Weekday::Thursday], 12, 0);
+        let members = vec!["X.wav".to_owned(), "Y.wav".to_owned()];
+        let pick = resolve_boot(ct(2026, 1, 1, 12, 0), &[sched], None, &[], Some(&members), 9).unwrap();
+        assert_eq!(pick.chime_filename, "Specific.wav");
+    }
+
+    #[test]
+    fn resolve_boot_random_excludes_active() {
+        let members = vec!["A.wav".to_owned(), "B.wav".to_owned()];
+        let pick = resolve_boot(ct(2026, 1, 1, 12, 0), &[], Some("A.wav"), &members, Some(&members), 1).unwrap();
+        assert_eq!(pick.chime_filename, "B.wav");
+    }
+
+    #[test]
+    fn resolve_boot_none_when_nothing() {
+        assert!(resolve_boot(ct(2026, 1, 1, 12, 0), &[], None, &[], None, 0).is_none());
+    }
+
+    #[test]
+    fn resolve_boot_seed_is_stable() {
+        let members = vec!["A.wav".to_owned(), "B.wav".to_owned()];
+        let a = resolve_boot(ct(2026, 1, 1, 12, 0), &[], None, &members, Some(&members), 7).unwrap();
+        let b = resolve_boot(ct(2026, 1, 1, 12, 0), &[], None, &members, Some(&members), 7).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn resolve_active_random_is_stable_without_active_exclusion() {
+        // Regression: the chime enforcer must pass `active_chime=None` on each
+        // tick. With a constant seed (same id/day/boundary) a RANDOM schedule
+        // then resolves the SAME file every call, so the enforcer dedupes to a
+        // no-op (no per-minute gadgetd handoff). Feeding the previous pick back
+        // as `active_chime` would instead flip the pick every tick.
+        let s = weekly("rnd", "RANDOM", &[Weekday::Thursday], 8, 0);
+        let lib = vec!["A.wav".to_owned(), "B.wav".to_owned(), "C.wav".to_owned()];
+        let now = ct(2026, 1, 1, 12, 0);
+        let first = resolve_active(now, std::slice::from_ref(&s), None, &lib).unwrap();
+        let second = resolve_active(now, std::slice::from_ref(&s), None, &lib).unwrap();
+        assert_eq!(first.chime_filename, second.chime_filename);
     }
 
     #[test]

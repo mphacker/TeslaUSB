@@ -123,6 +123,7 @@ interface Captured {
   randomMode: { enabled: boolean; groupId?: string | null }[];
   libraryPost: string[];
   libraryDelete: string[];
+  libraryBulkDelete: string[][];
   libraryActivate: string[];
 }
 
@@ -134,6 +135,7 @@ async function installScheduler(
   onUpload?: (entry: LibEntry, snap: Snapshot) => void,
   onGet?: (snap: Snapshot, readCount: number) => void,
   onDelete?: (filename: string, snap: Snapshot) => void,
+  onBulkDelete?: (names: string[], snap: Snapshot) => void,
 ) {
   const snap: Snapshot = JSON.parse(JSON.stringify(initial));
   const cap: Captured = {
@@ -145,6 +147,7 @@ async function installScheduler(
     randomMode: [],
     libraryPost: [],
     libraryDelete: [],
+    libraryBulkDelete: [],
     libraryActivate: [],
   };
   let seq = 0;
@@ -282,6 +285,23 @@ async function installScheduler(
       status: 202,
       contentType: "application/json",
       body: JSON.stringify({ state: "queued", job_id: "m-act-1" }),
+    });
+  });
+
+  // Library bulk delete (POST .../library/bulk-delete). Registered last so it
+  // takes priority over the `library/*` glob for the batch POST. Hardware
+  // coalesces the batch into ONE gadgetd handoff (202 queued); the rows leave
+  // the catalog only on a LATER scannerd rescan, driven via `onBulkDelete`.
+  await page.route("**/api/chime-scheduler/library/bulk-delete", (route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    const body = route.request().postDataJSON() as { names: string[] };
+    cap.libraryBulkDelete.push(body.names);
+    if (onBulkDelete) onBulkDelete(body.names, snap);
+    else snap.library = snap.library.filter((c) => !body.names.includes(c.filename));
+    return route.fulfill({
+      status: 202,
+      contentType: "application/json",
+      body: JSON.stringify({ state: "queued", job_id: "m-bulk-1" }),
     });
   });
 
@@ -926,6 +946,64 @@ test.describe("chime scheduler UAT (A3b)", () => {
 
     await page.clock.fastForward(2001);
     await expect(page.locator("[data-testid=library-row]")).toHaveCount(1);
+    assertCleanConsole(probe);
+  });
+
+  test("library bulk delete — select all removes both in ONE handoff and converges", async ({
+    page,
+    probe,
+  }) => {
+    await page.clock.install({ time: new Date("2024-01-01T00:00:00Z") });
+    const { cap } = await installScheduler(page, populatedSnapshot());
+    await gotoScheduler(page);
+
+    await expect(page.locator("[data-testid=library-row]")).toHaveCount(2);
+
+    // Tick "select all" in the bulk toolbar, then Delete selected → confirm.
+    await page.locator("[data-testid=library-bulk-bar] .bulk-select-all input").check();
+    const delBtn = page.locator("[data-testid=library-bulk-delete-btn]");
+    await expect(delBtn).toContainText("(2)");
+    await delBtn.click();
+    await page.locator("[data-testid=library-bulk-confirm-btn]").click();
+
+    // Exactly ONE bulk-delete POST carrying BOTH names — not two per-row DELETEs.
+    await expect.poll(() => cap.libraryBulkDelete.length).toBe(1);
+    expect([...cap.libraryBulkDelete[0]].sort()).toEqual(["Chime2.wav", "Sparkle.wav"]);
+    expect(cap.libraryDelete).toEqual([]);
+
+    // Both rows show "Removing…" then converge away on the next catalog poll.
+    await expect(page.locator("[data-testid~=library-row-deleting]")).toHaveCount(2);
+    await page.clock.fastForward(2001);
+    await expect(page.locator("[data-testid=library-empty]")).toBeVisible();
+    await expect(page.locator("[data-testid=library-notice]")).toContainText("removed");
+    assertCleanConsole(probe);
+  });
+
+  test("library bulk delete — per-row checkbox selects a single chime to delete", async ({
+    page,
+    probe,
+  }) => {
+    await page.clock.install({ time: new Date("2024-01-01T00:00:00Z") });
+    const { cap } = await installScheduler(page, populatedSnapshot());
+    await gotoScheduler(page);
+
+    await expect(page.locator("[data-testid=library-row]")).toHaveCount(2);
+
+    // Tick just the first row's checkbox (its own dedicated column).
+    await page
+      .locator("[data-testid=library-row]")
+      .first()
+      .locator(".bulk-row-check")
+      .check();
+    await page.locator("[data-testid=library-bulk-delete-btn]").click();
+    await page.locator("[data-testid=library-bulk-confirm-btn]").click();
+
+    await expect.poll(() => cap.libraryBulkDelete.length).toBe(1);
+    expect(cap.libraryBulkDelete[0]).toEqual(["Sparkle.wav"]);
+
+    await page.clock.fastForward(2001);
+    await expect(page.locator("[data-testid=library-row]")).toHaveCount(1);
+    await expect(page.locator("[data-testid=library-row]")).toContainText("Chime2.wav");
     assertCleanConsole(probe);
   });
 

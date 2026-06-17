@@ -174,10 +174,6 @@
     margin-top: 40px;
     overflow-x: auto;
   }
-
-  .license-plates-table {
-    min-width: 620px;
-  }
 }
 
 @media (max-width: 480px) {

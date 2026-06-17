@@ -109,7 +109,7 @@ export function LightShows() {
         {cat.state.tag === "ready" && (
           <>
             <BulkDeleteBar cat={cat} noun="shows" />
-            <table class="light-shows-video-table">
+            <table class="light-shows-video-table media-card-table">
               <thead>
                 <tr>
                   {cat.state.items.length > 0 && (
@@ -136,7 +136,7 @@ export function LightShows() {
                     const checked = cat.selected.has(item.name);
                     return (
                       <tr key={item.rel_path} class={checked ? "media-row-selected" : undefined}>
-                        <td>
+                        <td class="bulk-check-col">
                           <input
                             type="checkbox"
                             class="bulk-row-check"
@@ -146,9 +146,9 @@ export function LightShows() {
                             aria-label={`Select ${item.name}`}
                           />
                         </td>
-                        <td>{item.name}</td>
-                        <td>{fmtBytes(item.size_bytes)}</td>
-                        <td>
+                        <td class="media-card-title">{item.name}</td>
+                        <td data-label="Size">{fmtBytes(item.size_bytes)}</td>
+                        <td class="media-card-player">
                           {isPlayableAudio(item.name) ? (
                             <audio
                               class="media-row-player"
@@ -161,7 +161,7 @@ export function LightShows() {
                             <span aria-hidden="true">—</span>
                           )}
                         </td>
-                        <td>
+                        <td class="media-card-actions">
                           <button
                             class="action-btn"
                             onClick={() => cat.onRequestRemove(item.name)}

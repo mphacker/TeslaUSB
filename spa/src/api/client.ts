@@ -695,6 +695,15 @@ export const api = {
     ),
 
   /**
+   * Bulk-delete several library chimes in ONE gadgetd handoff
+   * (`POST /api/chime-scheduler/library/bulk-delete`, body `{ names: [...] }`) —
+   * one eject/remount for the batch, not one per file. Mirrors the toybox media
+   * `bulkDelete*` methods; returns the terminal handoff state.
+   */
+  bulkDeleteLibraryChimes: (names: string[], signal?: AbortSignal) =>
+    bulkDelete("/api/chime-scheduler/library/bulk-delete", names, signal),
+
+  /**
    * Promote a library chime to the car's active `LockChime.wav`
    * (`POST /api/chime-scheduler/library/:filename/activate`). webd reads the
    * library file, re-validates the WAV, and routes it through the SAME

@@ -121,7 +121,7 @@ export function Wraps() {
         {cat.state.tag === "ready" && (
           <>
             <BulkDeleteBar cat={cat} noun="wraps" />
-            <table class="wraps-table">
+            <table class="wraps-table media-card-table">
               <thead>
                 <tr>
                   {cat.state.items.length > 0 && (
@@ -148,7 +148,7 @@ export function Wraps() {
                     const checked = cat.selected.has(item.name);
                     return (
                       <tr key={item.rel_path} class={checked ? "media-row-selected" : undefined}>
-                        <td>
+                        <td class="bulk-check-col">
                           <input
                             type="checkbox"
                             class="bulk-row-check"
@@ -158,7 +158,7 @@ export function Wraps() {
                             aria-label={`Select ${item.name}`}
                           />
                         </td>
-                        <td>
+                        <td class="media-card-preview">
                           <img
                             class="media-thumb"
                             src={api.mediaContentUrl(item.rel_path, item.modified)}
@@ -169,9 +169,9 @@ export function Wraps() {
                             data-testid="wraps-thumb"
                           />
                         </td>
-                        <td>{item.name}</td>
-                        <td>{fmtBytes(item.size_bytes)}</td>
-                        <td>
+                        <td class="media-card-title">{item.name}</td>
+                        <td data-label="Size">{fmtBytes(item.size_bytes)}</td>
+                        <td class="media-card-actions">
                           <button
                             class="action-btn"
                             onClick={() => cat.onRequestRemove(item.name)}

@@ -108,6 +108,11 @@
 .media-page .chime-library tbody tr:last-child td {
   border-bottom: none;
 }
+/* Dedicated bulk-select checkbox column, matching the other media tables. */
+.media-page .chime-library .bulk-check-col {
+  width: 44px;
+  text-align: center;
+}
 .media-page .chime-cell-name {
   color: var(--text-primary);
   font-weight: 600;

@@ -11,7 +11,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use teslausb_core::chime::{CivilTime, Pick, resolve_active};
+use teslausb_core::chime::{CivilTime, Pick, resolve_active, resolve_boot};
 
 use crate::model::{
     ChimeGroup, GroupInput, RandomMode, ScheduleInput, StoredSchedule, ValidationError,
@@ -254,6 +254,41 @@ impl Store {
         resolve_active(now, &core, active_chime, library)
     }
 
+    /// Evaluate the boot-time chime: schedules (including `OnBoot` recurring)
+    /// plus the random-on-boot fallback drawn from the configured group.
+    #[must_use]
+    pub fn evaluate_boot(
+        &self,
+        now: CivilTime,
+        active_chime: Option<&str>,
+        library: &[String],
+        boot_seed: u64,
+    ) -> Option<Pick> {
+        let core: Vec<_> = self
+            .state
+            .schedules
+            .iter()
+            .filter_map(|s| s.input.validate(&s.id).ok())
+            .collect();
+        let members = self.random_members(library);
+        resolve_boot(now, &core, active_chime, library, members.as_deref(), boot_seed)
+    }
+
+    fn random_members(&self, library: &[String]) -> Option<Vec<String>> {
+        if !self.state.random_mode.enabled {
+            return None;
+        }
+        let gid = self.state.random_mode.group_id.as_deref()?;
+        let group = self.state.groups.iter().find(|g| g.id == gid)?;
+        let members = group
+            .chimes
+            .iter()
+            .filter(|name| library.contains(*name))
+            .cloned()
+            .collect::<Vec<_>>();
+        (!members.is_empty()).then_some(members)
+    }
+
     /// Persist the state atomically: sibling temp file → fsync → rename →
     /// directory fsync.
     ///
@@ -467,6 +502,50 @@ mod tests {
         assert_eq!(pick.chime_filename, "Classic.wav");
         // Before the trigger time → nothing active.
         assert!(store.evaluate(ct(2026, 1, 1, 8, 0), None, &[]).is_none());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn evaluate_boot_uses_random_group() {
+        let path = tmp_path("bootgroup");
+        let mut store = Store::load(path.clone());
+        let group = store
+            .add_group(GroupInput {
+                name: "Boot".to_owned(),
+                description: String::new(),
+                chimes: vec!["G1.wav".to_owned(), "G2.wav".to_owned()],
+            })
+            .unwrap();
+        store
+            .set_random_mode(RandomMode {
+                enabled: true,
+                group_id: Some(group.id.clone()),
+            })
+            .unwrap();
+        let members = vec!["G1.wav".to_owned(), "G2.wav".to_owned()];
+        let pick = store.evaluate_boot(ct(2026, 1, 1, 12, 0), None, &members, 7).unwrap();
+        assert!(members.contains(&pick.chime_filename));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn evaluate_boot_skips_missing_members() {
+        let path = tmp_path("bootmiss");
+        let mut store = Store::load(path.clone());
+        let group = store
+            .add_group(GroupInput {
+                name: "Boot".to_owned(),
+                description: String::new(),
+                chimes: vec!["Missing.wav".to_owned()],
+            })
+            .unwrap();
+        store
+            .set_random_mode(RandomMode {
+                enabled: true,
+                group_id: Some(group.id.clone()),
+            })
+            .unwrap();
+        assert!(store.evaluate_boot(ct(2026, 1, 1, 12, 0), None, &[], 1).is_none());
         let _ = std::fs::remove_file(path);
     }
 

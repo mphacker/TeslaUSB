@@ -31,6 +31,7 @@
 
 mod boombox;
 mod catalog;
+mod chime_enforcer;
 mod chime_library;
 mod chime_scheduler;
 mod chimes;
@@ -205,5 +206,8 @@ fn router_with_clients(
         media_events,
         chime_library_dir,
     };
+    if std::env::var_os("WEBD_CHIME_ENFORCER").is_some() {
+        chime_enforcer::spawn(state.clone());
+    }
     route::router(state, static_dir)
 }

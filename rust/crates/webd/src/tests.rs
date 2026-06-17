@@ -3115,6 +3115,45 @@ async fn chime_scheduler_library_delete_queues_media_remove() {
 }
 
 #[tokio::test]
+async fn chime_scheduler_library_bulk_delete_enqueues_one_mutation() {
+    let fx = library_fixture(Reply::Json(json!({ "state": "queued", "job_id": "m-bulk" })));
+    let (status, body) = post_json(
+        &fx.app,
+        "/api/chime-scheduler/library/bulk-delete",
+        json!({ "names": ["Horn.wav", "Airhorn.wav"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(body["state"], "queued");
+    assert_eq!(body["job_id"], "m-bulk");
+
+    // gadgetd saw exactly ONE enqueue carrying BOTH derived `Chimes/` paths
+    // (one eject/remount for the batch, not one per file).
+    let req = fx.last.lock().unwrap().clone().unwrap();
+    assert_eq!(req["cmd"], "enqueue_mutation");
+    assert_eq!(req["partition"], 2);
+    assert_eq!(req["mutation"]["op"], "delete_paths");
+    let paths = req["mutation"]["rel_paths"].as_array().unwrap();
+    assert_eq!(paths.len(), 2);
+    assert_eq!(paths[0], "Chimes/Horn.wav");
+    assert_eq!(paths[1], "Chimes/Airhorn.wav");
+}
+
+#[tokio::test]
+async fn chime_scheduler_library_bulk_delete_rejects_traversal_before_handoff() {
+    let fx = library_fixture(Reply::Json(json!({ "state": "queued", "job_id": "m-1" })));
+    let (status, body) = post_json(
+        &fx.app,
+        "/api/chime-scheduler/library/bulk-delete",
+        json!({ "names": ["ok.wav", ".."] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["code"], "invalid_filename");
+    assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");
+}
+
+#[tokio::test]
 async fn chime_scheduler_library_delete_rejects_invalid_name_before_handoff() {
     let fx = library_fixture(Reply::Json(json!({ "state": "queued", "job_id": "m-1" })));
     let (status, body) = delete_json(&fx.app, "/api/chime-scheduler/library/../bad.wav").await;

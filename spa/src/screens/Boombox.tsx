@@ -149,7 +149,7 @@ export function Boombox() {
       {cat.state.tag === "ready" && cat.state.items.length > 0 && (
         <>
           <BulkDeleteBar cat={cat} noun="sounds" />
-          <table class="settings-table" data-testid="boombox-list">
+          <table class="settings-table media-card-table" data-testid="boombox-list">
             <thead>
               <tr>
                 <th class="bulk-check-col" aria-label="Select"></th>
@@ -164,7 +164,7 @@ export function Boombox() {
                 const checked = cat.selected.has(item.name);
                 return (
                   <tr key={item.rel_path} class={checked ? "media-row-selected" : undefined}>
-                    <td>
+                    <td class="bulk-check-col">
                       <input
                         type="checkbox"
                         class="bulk-row-check"
@@ -174,9 +174,9 @@ export function Boombox() {
                         aria-label={`Select ${item.name}`}
                       />
                     </td>
-                    <td>{item.name}</td>
-                    <td>{fmtBytes(item.size_bytes)}</td>
-                    <td>
+                    <td class="media-card-title">{item.name}</td>
+                    <td data-label="Size">{fmtBytes(item.size_bytes)}</td>
+                    <td class="media-card-player">
                       <audio
                         class="media-row-player"
                         controls
@@ -185,7 +185,7 @@ export function Boombox() {
                         src={api.mediaContentUrl(item.rel_path, item.modified)}
                       />
                     </td>
-                    <td>
+                    <td class="media-card-actions">
                       <button
                         class="action-btn"
                         onClick={() => cat.onRequestRemove(item.name)}

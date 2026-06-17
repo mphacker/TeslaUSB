@@ -2687,13 +2687,10 @@ details summary span:first-of-type {
 /* Media Hub Pills */
 .media-pills {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   padding: 12px 0 16px;
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
-  scrollbar-width: none;
 }
-.media-pills::-webkit-scrollbar { display: none; }
 
 .media-pill {
   display: inline-flex;

@@ -428,7 +428,7 @@ export function Music() {
                 <>
                   <div class="video-table-container">
                     <table
-                      class="settings-table"
+                      class="settings-table media-card-table"
                       data-testid="music-list"
                       style="table-layout: fixed;"
                     >
@@ -459,7 +459,7 @@ export function Music() {
                                 checked ? "media-row-selected" : undefined
                               }
                             >
-                              <td>
+                              <td class="bulk-check-col">
                                 <input
                                   type="checkbox"
                                   class="bulk-row-check"
@@ -471,7 +471,7 @@ export function Music() {
                                   aria-label={`Select ${item.name}`}
                                 />
                               </td>
-                              <td style="word-break: break-all;">
+                              <td class="media-card-title" style="word-break: break-all;">
                                 {item.name}
                                 {removing && (
                                   <span class="music-op-status">
@@ -484,8 +484,8 @@ export function Music() {
                                   </span>
                                 )}
                               </td>
-                              <td>{fmtBytes(item.size_bytes)}</td>
-                              <td>
+                              <td data-label="Size">{fmtBytes(item.size_bytes)}</td>
+                              <td class="media-card-actions">
                                 <audio
                                   class="media-row-player"
                                   controls

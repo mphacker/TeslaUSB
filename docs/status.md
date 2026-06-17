@@ -666,11 +666,63 @@ LUNs) is the single make-or-break that still needs the car.**
   `files/hw-sourcename-1280.png`.**
 - [ ] Groups (create/edit/delete; persist `chime_groups.json`). **(partial: A3 UI +
   schedulerd render proven; verify CRUD round-trip)**
-- [ ] Schedules (weekly/date/holiday/recurring; CRUD+enable; `chime_schedules.json`). **(partial:
-  A3 rule engine + schedulerd serve + UI proven; **enforcement loop** A3d gated:F4)**
-- [ ] Random mode from a group (`chime_random_config.json`); rotates active chime. **(partial: model exists; enforcement gated:F4)**
-- [ ] **Enforcement loop** (per-minute: swap `LockChime.wav` when a rule fires via a
-  gadgetd handoff + re-enumeration). **(A3d, gated:F4 + §1.1)**
+- [x] Schedules (weekly/date/holiday/recurring; CRUD+enable; `chime_schedules.json`). **(CRUD+UI
+  proven; **now ENFORCED** via the webd enforcer — A3d DONE 2026-06-17, live-proven on hardware)**
+- [x] Random mode from a group (`chime_random_config.json`); rotates active chime. **(model+UI
+  persist proven; **now ENFORCED** — random-on-boot live-picked EngineRev from group "Fun" on the
+  device, see A3d.2/A3d.4 + `files/hw-results.md`)**
+
+#### A3d · Enforcement loop — make schedules & random mode actually change the car's chime
+
+> **Why this exists.** Verification 2026-06-17 confirmed the chime *config/state* layer
+> is fully functional (CRUD persists + serves), but **no schedule or random-mode setting
+> ever changes `LockChime.wav` on the car** — the actuation layer is unbuilt. The
+> `Evaluate` IPC command (`schedulerd/ipc.rs`) has **zero callers**, `store.evaluate()`
+> omits `random_mode`/`groups`, `Interval::OnBoot` returns `None` from `trigger_today`,
+> and nothing enqueues the gadgetd `LockChime.wav` swap on a fired rule.
+> **No longer gated on F4/F5** — both are `[x]` done and the **Set Active** path already
+> swaps `LockChime.wav` via the gadgetd queue, live-proven (§4.5 "Set active"). A3d reuses
+> that proven path on a timer. Only the car-side re-enum (A3d.5) is Tier-C/`gated:C6`+§1.1.
+
+> **DONE 2026-06-17 — enforcement built, Linux-validated, and LIVE-PROVEN on hardware.**
+> Architecture decision (vs. the original A3d.1/A3d.4 wording): the per-minute tick + boot
+> hook live in **webd** (`chime_enforcer.rs`), which already owns the gadgetd activate path,
+> the media-backed library, the schedulerd client, and a tokio runtime. **schedulerd stays a
+> pure state/decision owner** — it gained an `Evaluate{library}` + `EvaluateBoot` IPC; core
+> gained `resolve_boot`. Enforcer is guarded by `WEBD_CHIME_ENFORCER=1` (tests never fire).
+> Spec: `docs/specs/schedulerd.md` (GPT-5.5 design + diff + deploy reviews reconciled).
+> Linux: core 343 / schedulerd 29 / webd 259 green; clippy-clean on new code.
+> **Hardware (cybertruckusb.local, see `files/hw-results.md` "Lock Chime enforcement (A3d)"):**
+> schedule path installed tesla-tron **byte-identically** (`7c1dfc0c`, 231730 B) at the fired
+> trigger; random-on-boot picked **EngineRev** (505564 B) from group "Fun" on reboot; **no
+> churn** (stable mtime, zero gadgetd handoff spam). Active chime lives on the gadget loopback
+> partition `/run/teslausb/media-ro/LockChime.wav` (loop0p1 exfat) — NOT the stale
+> `/srv/teslausb/media/` mirror. Shipped **enabled** (`WEBD_CHIME_ENFORCER=1` in `webd.service`).
+
+- [x] **A3d.0 · schedulerd-enforcement spec.** `docs/specs/schedulerd.md` written; GPT-5.5
+  design review reconciled (Some(empty) library authoritative; tick `active_chime=None`;
+  empty-skip; membership guard). Defines tick cadence, evaluate→activate contract, idempotency,
+  random-on-boot, `OnBoot` handling.
+- [x] **A3d.1 · Enforcement tick (in webd, not schedulerd).** `chime_enforcer.rs` `enforce_tick`
+  runs per-minute (+ once at boot) calling schedulerd `Evaluate`; guarded by `WEBD_CHIME_ENFORCER`.
+  Green host unit tests; LIVE-PROVEN no-churn on device.
+- [x] **A3d.2 · `random_mode` + `groups` in the evaluator.** schedulerd `store.evaluate_boot()` +
+  `random_members()` (group `chimes` ∩ library); `resolve_boot` in core picks deterministically
+  per `boot_seed`. LIVE: random-on-boot picked EngineRev from group "Fun".
+- [x] **A3d.3 · Activation enqueue on pick-change.** `install_library_chime_as_active()` reuses
+  the proven Set-Active gadgetd write path; idempotent vs in-memory `last_enforced` (1 handoff
+  per pick change). LIVE: no thrash over a 90 s soak.
+- [x] **A3d.4 · Boot-time hook.** webd `enforce_boot()` at startup evaluates `EvaluateBoot`
+  (schedule-at-boot **beats** random; random pick when no eligible schedule + `random_mode` on).
+  core `resolve_boot` + `trigger_today_boot` handle `OnBoot`. LIVE: EngineRev installed on reboot.
+- [ ] **A3d.5 · Car pickup of an active-chime change.** A `LockChime.wav` swap needs the
+  **full USB re-enumeration** path (§1.1 #2 / `tesla_gadget_rebind.sh` behavior), not the
+  soft medium-change. Wire the enforcement activation to request it; **hardware-verify the
+  car re-reads the new chime.** **(gated:C6 + §1.1 — Tier-C/at-vehicle, not started autonomously)**
+- [x] **A3d.6 · Tests + proof.** Host unit/integration green (core/schedulerd/webd); **Playwright**
+  46/46 chime-scheduler UAT green on desktop-1280 + mobile-375 (perf, clean-console, wiring,
+  screenshots); **hardware-test** proved schedule + random-on-boot swap `LockChime.wav` with no
+  churn. Evidence: `files/hw-results.md`, `spa/test/uat/artifacts/chime-scheduler-{desktop,mobile}*.png`.
 
 ### 4.6 Music — `Requirements.md` §4.6
 
@@ -887,7 +939,9 @@ LUNs) is the single make-or-break that still needs the car.**
    lightshow ZIP, plate cropper) — needs the multi-file gadgetd op.
 6. **SMB (§2) + Settings (§4.15) + Storage Settings (§4.11/B5).**
 7. **uploadd/cloud (B3, gated C5) · wifid/captive portal (B4, WiFi-gated) ·
-   chime enforcement loop (A3d) · Failed Jobs richness (A8/B7).**
+   chime enforcement loop (A3d — bench-unblocked now F4/F5 are done; reuses the
+   proven Set-Active gadgetd path; only A3d.5 car re-enum is Tier-C/C6) · Failed
+   Jobs richness (A8/B7).**
 8. **Remaining Tier-C at-vehicle (after C1):** migration F1 → calibration C2 →
    real-footage C3 → change-propagation C6.
 

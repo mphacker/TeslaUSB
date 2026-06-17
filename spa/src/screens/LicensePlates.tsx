@@ -119,7 +119,7 @@ export function LicensePlates() {
         {cat.state.tag === "ready" && (
           <>
             <BulkDeleteBar cat={cat} noun="plates" />
-            <table class="license-plates-table" style="table-layout: fixed;">
+            <table class="license-plates-table media-card-table" style="table-layout: fixed;">
               <thead>
                 <tr>
                   {cat.state.items.length > 0 && (
@@ -149,7 +149,7 @@ export function LicensePlates() {
                     const checked = cat.selected.has(item.name);
                     return (
                       <tr key={item.rel_path} class={checked ? "media-row-selected" : undefined}>
-                        <td>
+                        <td class="bulk-check-col">
                           <input
                             type="checkbox"
                             class="bulk-row-check"
@@ -159,7 +159,7 @@ export function LicensePlates() {
                             aria-label={`Select ${item.name}`}
                           />
                         </td>
-                        <td>
+                        <td class="media-card-preview">
                           <img
                             class="media-thumb"
                             src={api.mediaContentUrl(item.rel_path, item.modified)}
@@ -170,9 +170,9 @@ export function LicensePlates() {
                             data-testid="plates-thumb"
                           />
                         </td>
-                        <td>{item.name}</td>
-                        <td>{fmtBytes(item.size_bytes)}</td>
-                        <td>
+                        <td class="media-card-title">{item.name}</td>
+                        <td data-label="Size">{fmtBytes(item.size_bytes)}</td>
+                        <td class="media-card-actions">
                           <button
                             class="action-btn"
                             onClick={() => cat.onRequestRemove(item.name)}

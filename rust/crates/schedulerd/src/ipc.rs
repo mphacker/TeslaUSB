@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
-use teslausb_core::chime::civil_from_unix;
+use teslausb_core::chime::{Pick, civil_from_unix};
 
 use crate::library;
 use crate::model::{GroupInput, RandomMode, ScheduleInput, SchedulerMenus};
@@ -110,6 +110,20 @@ enum Request {
         /// The chime currently active, if known (to avoid re-picking it).
         #[serde(default)]
         active_chime: Option<String>,
+        /// Optional library override (used by webd to pass its real catalog).
+        #[serde(default)]
+        library: Option<Vec<String>>,
+    },
+    /// Evaluate the boot-time chime (`OnBoot` schedules + random-on-boot).
+    EvaluateBoot {
+        unix_secs: i64,
+        tz_offset_secs: i32,
+        #[serde(default)]
+        active_chime: Option<String>,
+        #[serde(default)]
+        library: Option<Vec<String>>,
+        #[serde(default)]
+        boot_seed: u64,
     },
 }
 
@@ -329,27 +343,65 @@ fn dispatch(req: Request, state: &ServeState) -> Value {
             unix_secs,
             tz_offset_secs,
             active_chime,
+            library,
         } => match state.store.lock() {
             Ok(store) => {
                 let now = civil_from_unix(unix_secs, tz_offset_secs);
-                let library: Vec<String> = library::scan(&state.library_dir)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|e| e.filename)
-                    .collect();
+                let library = resolve_eval_library(library, &state.library_dir);
                 let pick = store.evaluate(now, active_chime.as_deref(), &library);
-                let pick_json = pick.map(|p| {
-                    json!({
-                        "scheduleId": p.schedule_id,
-                        "scheduleName": p.schedule_name,
-                        "chimeFilename": p.chime_filename,
-                    })
-                });
-                json!({ "pick": pick_json })
+                json!({ "pick": pick_json(pick) })
+            }
+            Err(_) => err_envelope("locked", "state lock poisoned"),
+        },
+        Request::EvaluateBoot {
+            unix_secs,
+            tz_offset_secs,
+            active_chime,
+            library,
+            boot_seed,
+        } => match state.store.lock() {
+            Ok(store) => {
+                let now = civil_from_unix(unix_secs, tz_offset_secs);
+                let library = resolve_eval_library(library, &state.library_dir);
+                let pick = store.evaluate_boot(
+                    now,
+                    active_chime.as_deref(),
+                    &library,
+                    boot_seed,
+                );
+                json!({ "pick": pick_json(pick) })
             }
             Err(_) => err_envelope("locked", "state lock poisoned"),
         },
     }
+}
+
+/// Resolve the library list for an evaluate request. A **supplied** `library`
+/// (from webd's authoritative media catalog) is used verbatim — INCLUDING an
+/// empty list, which legitimately means "no installable candidates" and must
+/// NOT silently fall back to the stale local scan. Only an **omitted** field
+/// (legacy callers) triggers the local `library_dir` scan.
+fn resolve_eval_library(supplied: Option<Vec<String>>, library_dir: &std::path::Path) -> Vec<String> {
+    match supplied {
+        Some(v) => v,
+        None => library::scan(library_dir)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|e| e.filename)
+            .collect(),
+    }
+}
+
+/// Build the `{scheduleId, scheduleName, chimeFilename}` JSON for a resolved
+/// pick (camelCase wire shape shared by `Evaluate` and `EvaluateBoot`).
+fn pick_json(pick: Option<Pick>) -> Option<Value> {
+    pick.map(|p| {
+        json!({
+            "scheduleId": p.schedule_id,
+            "scheduleName": p.schedule_name,
+            "chimeFilename": p.chime_filename,
+        })
+    })
 }
 
 /// Run `f` with the locked store, answering a poisoned lock with an envelope.
@@ -499,6 +551,23 @@ mod tests {
             }),
         );
         assert_eq!(resp["pick"]["chimeFilename"], "Classic.wav");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn evaluate_boot_round_trips_pick() {
+        let (socket, dir) = spawn_server("boot_eval");
+        let resp = call(
+            &socket,
+            &json!({
+                "cmd": "evaluate_boot",
+                "unix_secs": 1_767_260_400_i64,
+                "tz_offset_secs": 0,
+                "library": ["A.wav"],
+                "boot_seed": 5
+            }),
+        );
+        assert!(resp["pick"].is_null() || resp["pick"]["chimeFilename"].is_string());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

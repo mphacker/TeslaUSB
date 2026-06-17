@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { api, ApiError } from "../api/client";
+import { Icon } from "../components/Icon";
 import { subscribeMediaEvents } from "../api/mediaEvents";
 import type {
   ChimeGroup,
@@ -165,6 +166,15 @@ export function ChimeScheduler({
     pendingDeletesRef.current = pendingDeletes;
   }, [pendingDeletes]);
 
+  // ── Bulk library selection / delete (parity with the toybox media screens) ──
+  // `selected` holds library filenames ticked for bulk removal. A bulk delete
+  // coalesces into ONE gadgetd handoff via `POST …/library/bulk-delete`, then
+  // reuses the same `pendingDeletes` convergence the per-row delete uses.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [confirmBulk, setConfirmBulk] = useState(false);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkFail, setBulkFail] = useState<string | null>(null);
+
   const reload = async (signal?: AbortSignal): Promise<SchedulerSnapshot | null> => {
     try {
       const s = await api.scheduler(signal);
@@ -203,6 +213,22 @@ export function ChimeScheduler({
   useEffect(() => {
     if (snap) onLibraryLoaded?.(snap.library);
   }, [snap, onLibraryLoaded]);
+
+  // Drop any bulk-selected filenames that have left the catalog (e.g. after a
+  // delete converges or the library is reloaded) so a stale tick can't linger.
+  useEffect(() => {
+    if (!snap) return;
+    const present = new Set(snap.library.map((entry) => entry.filename));
+    setSelected((prev) => {
+      let changed = false;
+      const next = new Set<string>();
+      for (const filename of prev) {
+        if (present.has(filename)) next.add(filename);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [snap]);
 
   useEffect(() => {
     if (!pendingUpload) {
@@ -542,6 +568,66 @@ export function ChimeScheduler({
     setDeleteToken((t) => t + 1);
   }
 
+  function toggleSelect(filename: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(filename)) next.delete(filename);
+      else next.add(filename);
+      return next;
+    });
+  }
+
+  function selectAllChimes(filenames: string[]) {
+    setSelected(new Set(filenames));
+  }
+
+  function clearChimeSelection() {
+    setSelected(new Set());
+  }
+
+  // Bulk-remove the ticked library chimes in ONE handoff, then hand the names to
+  // the shared `pendingDeletes` convergence (same path the per-row delete uses).
+  async function bulkDeleteSelected() {
+    if (bulkBusy) return;
+    const names = [...selected].filter(
+      (filename) =>
+        !pendingDeletesRef.current.some((d) => d.filename === filename) &&
+        !deleteInFlightRef.current.has(filename),
+    );
+    if (names.length === 0) {
+      setConfirmBulk(false);
+      return;
+    }
+    setBulkBusy(true);
+    setBulkFail(null);
+    setLibError(null);
+    setLibNotice(null);
+    try {
+      await api.bulkDeleteLibraryChimes(names);
+    } catch (err) {
+      setBulkFail(failMessage(err, "Couldn't remove the selected chimes."));
+      setBulkBusy(false);
+      return;
+    }
+    setPendingDeletes((prev) => {
+      const startedAt = Date.now();
+      const additions = names
+        .filter((filename) => !prev.some((d) => d.filename === filename))
+        .map((filename) => ({
+          filename,
+          phase: "removing" as const,
+          startedAt,
+        }));
+      const next = [...prev, ...additions];
+      pendingDeletesRef.current = next;
+      return next;
+    });
+    setDeleteToken((t) => t + 1);
+    setSelected(new Set());
+    setConfirmBulk(false);
+    setBulkBusy(false);
+  }
+
   async function refreshPendingNow() {
     if (!pending) return;
     const snapshot = await reload();
@@ -623,6 +709,18 @@ export function ChimeScheduler({
     }
     return unique;
   })();
+  // Library rows eligible for bulk selection: real, settled files (not an
+  // in-flight upload row and not already being deleted).
+  const selectableChimes = displayLibrary
+    .filter(
+      (c) =>
+        !(c as LibraryRow).pending &&
+        !pendingDeletes.some((d) => d.filename === c.filename),
+    )
+    .map((c) => c.filename);
+  const selectedChimeCount = selectableChimes.filter((f) => selected.has(f)).length;
+  const allChimesSelected =
+    selectableChimes.length > 0 && selectedChimeCount === selectableChimes.length;
   const isRecurring = sForm.scheduleType === "recurring";
   const showTime =
     sForm.scheduleType === "weekly" || sForm.scheduleType === "date";
@@ -1139,16 +1237,99 @@ export function ChimeScheduler({
               above and it will appear here.
             </p>
           ) : (
-            <table class="chime-library" data-testid="library-table">
-              <thead>
-                <tr>
-                  <th>Filename</th>
-                  <th>Size</th>
-                  <th>Status</th>
-                  <th>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
+            <>
+              <div class="bulk-delete-bar" data-testid="library-bulk-bar">
+                <div class="bulk-delete-toolbar">
+                  <label class="bulk-select-all">
+                    <input
+                      type="checkbox"
+                      checked={allChimesSelected}
+                      ref={(el) => {
+                        if (el)
+                          el.indeterminate =
+                            selectedChimeCount > 0 && !allChimesSelected;
+                      }}
+                      onChange={() =>
+                        allChimesSelected
+                          ? clearChimeSelection()
+                          : selectAllChimes(selectableChimes)
+                      }
+                      aria-label={allChimesSelected ? "Deselect all" : "Select all"}
+                      disabled={bulkBusy || selectableChimes.length === 0}
+                    />
+                    <span>
+                      {selectedChimeCount > 0
+                        ? `${selectedChimeCount} selected`
+                        : `Select all ${selectableChimes.length} chimes`}
+                    </span>
+                  </label>
+                  <button
+                    type="button"
+                    class="action-btn danger"
+                    data-testid="library-bulk-delete-btn"
+                    onClick={() => {
+                      setBulkFail(null);
+                      setConfirmBulk(true);
+                    }}
+                    disabled={selectedChimeCount === 0 || bulkBusy}
+                    aria-label={`Delete ${selectedChimeCount} selected chimes`}
+                  >
+                    <Icon name="trash-2" style="width: 14px; height: 14px;" />{" "}
+                    Delete selected
+                    {selectedChimeCount > 0 ? ` (${selectedChimeCount})` : ""}
+                  </button>
+                </div>
+
+                {confirmBulk && (
+                  <div
+                    class="settings-section"
+                    role="dialog"
+                    aria-label="Confirm bulk remove"
+                    data-testid="library-bulk-confirm"
+                  >
+                    <p>
+                      Remove <strong>{selectedChimeCount}</strong> chimes? This
+                      ejects the USB drive momentarily — all {selectedChimeCount}{" "}
+                      are removed in one operation.
+                    </p>
+                    {bulkFail && (
+                      <p role="alert" style="color: var(--accent-error);">
+                        {bulkFail}
+                      </p>
+                    )}
+                    <button
+                      type="button"
+                      class="action-btn danger"
+                      onClick={() => void bulkDeleteSelected()}
+                      disabled={bulkBusy}
+                      aria-busy={bulkBusy}
+                      data-testid="library-bulk-confirm-btn"
+                    >
+                      {bulkBusy ? "Removing…" : `Remove ${selectedChimeCount}`}
+                    </button>{" "}
+                    <button
+                      type="button"
+                      class="action-btn"
+                      onClick={() => setConfirmBulk(false)}
+                      disabled={bulkBusy}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              <table class="chime-library media-card-table" data-testid="library-table">
+                <thead>
+                  <tr>
+                    <th class="bulk-check-col" aria-label="Select" />
+                    <th>Filename</th>
+                    <th>Size</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
                 {displayLibrary.map((c) => {
                   const pendingRow = Boolean((c as LibraryRow).pending);
                   const deletePhase = pendingDeletes.find((d) => d.filename === c.filename)?.phase;
@@ -1167,6 +1348,7 @@ export function ChimeScheduler({
                   return (
                     <tr
                       key={c.filename}
+                      class={selected.has(c.filename) ? "media-row-selected" : undefined}
                       data-testid={
                         pendingRow
                           ? "library-row library-row-pending"
@@ -1175,14 +1357,24 @@ export function ChimeScheduler({
                             : "library-row"
                       }
                     >
-                      <td class="chime-cell-name">{c.filename}</td>
-                      <td>{Math.max(1, Math.round(c.bytes / 1024))} KB</td>
-                      <td data-testid={pendingStatusTestId}>
+                      <td class="bulk-check-col">
+                        <input
+                          type="checkbox"
+                          class="bulk-row-check"
+                          checked={selected.has(c.filename)}
+                          disabled={rowLocked}
+                          onChange={() => toggleSelect(c.filename)}
+                          aria-label={`Select ${c.filename}`}
+                        />
+                      </td>
+                      <td class="chime-cell-name media-card-title">{c.filename}</td>
+                      <td data-label="Size">{Math.max(1, Math.round(c.bytes / 1024))} KB</td>
+                      <td data-label="Status" data-testid={pendingStatusTestId}>
                         <span class={pendingRow || deleting ? "chime-status-pending" : "chime-status-valid"}>
                           {statusLabel}
                         </span>
                       </td>
-                      <td>
+                      <td class="media-card-actions">
                         <div class="chime-row-actions">
                           <audio
                             controls={!rowLocked}
@@ -1246,7 +1438,8 @@ export function ChimeScheduler({
                   );
                 })}
               </tbody>
-            </table>
+              </table>
+            </>
           )}
         </div>
       </details>

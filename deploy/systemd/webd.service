@@ -52,6 +52,8 @@ Environment=WEBD_CACHE_DIR=/data/teslausb/cache
 # to this same path in the binary, set explicitly here so the two daemons can
 # never drift.
 Environment=WEBD_CHIME_LIBRARY_DIR=/data/teslausb/chimes
+Environment=WEBD_CHIME_ENFORCER=1
+# Environment=WEBD_TZ_OFFSET_SECS=
 ExecStart=/usr/local/bin/webd
 Restart=on-failure
 RestartSec=5s

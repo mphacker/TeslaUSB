@@ -37,7 +37,9 @@ use serde_json::Value;
 use crate::AppState;
 use crate::dto::MediaListDto;
 use crate::error::ApiError;
-use crate::media_upload::{check_extension, read_file_upload, sanitise_filename};
+use crate::media_upload::{
+    BulkDeleteRequest, check_extension, plan_bulk_delete, read_file_upload, sanitise_filename,
+};
 
 /// The MEDIA partition wire index (`gadgetd` `Partition::P2`) — matches
 /// [`crate::chimes`].
@@ -76,6 +78,7 @@ pub(crate) fn routes() -> Router<AppState> {
                 .post(upload_library)
                 .layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)),
         )
+        .route("/chimes/library/bulk-delete", post(bulk_delete_library))
         .route("/chimes/library/{name}", delete(remove_library))
         .route("/chimes/library/{name}/audio", get(serve_audio))
         .route("/chimes/library/{name}/download", get(serve_download))
@@ -85,6 +88,10 @@ pub(crate) fn routes() -> Router<AppState> {
             get(list_library)
                 .post(upload_library)
                 .layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)),
+        )
+        .route(
+            "/chime-scheduler/library/bulk-delete",
+            post(bulk_delete_library),
         )
         .route("/chime-scheduler/library/{filename}", delete(remove_library))
         .route(
@@ -144,6 +151,20 @@ pub(crate) async fn remove_library(
     crate::route::run_remove(state, "chime_library_remove", PARTITION_MEDIA, rel_path).await
 }
 
+/// `POST /api/chime-scheduler/library/bulk-delete` — remove several library
+/// chimes in ONE `gadgetd` handoff (one eject/remount for the batch, not one
+/// per file). Body: `{ "names": ["Horn.wav", …] }`. Each name is a bare file
+/// name; the handler rebuilds `Chimes/<name>`, so a client can never address a
+/// file outside the library folder. Mirrors the toybox media bulk-delete
+/// endpoints; `run_remove_many` chunks internally (≤16 paths per enqueue).
+pub(crate) async fn bulk_delete_library(
+    State(state): State<AppState>,
+    Json(req): Json<BulkDeleteRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let rel_paths = plan_bulk_delete(CHIMES_DIR, &req.names)?;
+    crate::route::run_remove_many(state, "chime_library_remove", PARTITION_MEDIA, rel_paths).await
+}
+
 /// `GET …/library/{filename}/audio`: stream the library chime inline (the
 /// per-row `<audio>` preview).
 pub(crate) async fn serve_audio(
@@ -162,29 +183,29 @@ pub(crate) async fn serve_download(
     serve_bytes(&state, &filename, true).await
 }
 
+/// Install the named library chime as the car's active `LockChime.wav` via the
+/// frictionless `gadgetd` queue. Returns the same `202 {state:"queued"}` /
+/// `200 {state:"done"}` shape as a direct chime upload; the change applies at
+/// the next safe window.
+pub(crate) async fn install_library_chime_as_active(
+    state: AppState,
+    kind: &'static str,
+    name: &str,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let path = resolve_library_file(&state, name)?;
+    let bytes = read_capped(&path).await?;
+    crate::chimes::validate_lock_chime_wav(&bytes)
+        .map_err(|msg| ApiError::status(StatusCode::UNPROCESSABLE_ENTITY, "invalid_wav", msg))?;
+    crate::route::run_install(state, kind, PARTITION_MEDIA, CHIME_REL_PATH.to_owned(), bytes).await
+}
+
 /// `POST …/library/{filename}/activate`: install the named library chime as the
-/// car's active `LockChime.wav` via the frictionless `gadgetd` queue. Returns
-/// the same `202 {state:"queued"}` / `200 {state:"done"}` shape as a direct
-/// chime upload; the change applies at the next safe window.
+/// car's active `LockChime.wav` via the frictionless `gadgetd` queue.
 pub(crate) async fn activate(
     State(state): State<AppState>,
     Path(filename): Path<String>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    let path = resolve_library_file(&state, &filename)?;
-    let bytes = read_capped(&path).await?;
-    // Re-validate on the way to the car: a library file could have been written
-    // before a stricter rule, or torn by a concurrent overwrite. webd remains
-    // the authority for what reaches the MEDIA partition.
-    crate::chimes::validate_lock_chime_wav(&bytes)
-        .map_err(|msg| ApiError::status(StatusCode::UNPROCESSABLE_ENTITY, "invalid_wav", msg))?;
-    crate::route::run_install(
-        state,
-        "chime_set_active",
-        PARTITION_MEDIA,
-        CHIME_REL_PATH.to_owned(),
-        bytes,
-    )
-    .await
+    install_library_chime_as_active(state, "chime_set_active", &filename).await
 }
 
 /// Read a validated library file fully (chimes are ≤1 MiB) and build a `200`

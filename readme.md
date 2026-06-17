@@ -2,6 +2,9 @@
 
 Transform your Raspberry Pi into a smart USB drive for Tesla dashcam recordings with a map-centric dashboard, GPS trip visualization, telemetry-rich video playback, and automated maintenance.
 
+** Note **
+Due to performance issues with the Raspberry Pi Zero 2W, I have had to go back to the drawing board about how video files are handled. I am currently working on a full rewrite of the underlying systems to try to address these challenges. I don't have an ETA on when this will be ready, but have been actively working on this daily.  As soon as I have any updates I will post them.
+
 > **🚨 IMPORTANT - CHANGES FOR EXISTING USERS 🚨**
 >
 > Significant changes have been made to the application. All configuration is now centralized in a single `config.yaml` file. Please read the [Configuration](#configuration) section for details on updating your setup.  You may want to restart from a clean Raspberry PI OS image and follow the [Installation](#installation) steps again to ensure everything is set up correctly. If you do not want to do that, ensure that the config.yaml file is created and updated with your desired settings and then run the `setup_usb.sh` script again to apply the new configuration structure.

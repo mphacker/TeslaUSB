@@ -364,7 +364,7 @@
       "route": "/light_shows/",
       "bonus": false,
       "shares_page_with": null,
-      "note": "Light show manager (media/LightShow/*.fseq + audio, lightshow_active.json).",
+      "note": "Light show manager (media/LightShow/*.fseq + audio; no active-show selection \u2014 just a directory the car lists).",
       "viewports": {
         "mobile-375": {
           "width": 375,

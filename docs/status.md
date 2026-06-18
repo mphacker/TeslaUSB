@@ -957,7 +957,6 @@ LUNs) is the single make-or-break that still needs the car.**
   exactly one player [`.fseq` has none] + no content-fetch on render; 14 passed.
   Table column widths rebalanced for the new Play column [visual gate].)**
 - [ ] Upload `.fseq`/audio single ≤100 MB, or **ZIP ≤500 MB** auto-extracted+flattened. **(gated: ZIP upload backend — Tier-C A1)**
-- [ ] Set active show (`lightshow_active.json`). **(not started)**
 - [x] Delete files/shows (incl. bulk). **(bulk-delete proven)**
 
 ### 4.9 Wraps & License Plates — `Requirements.md` §4.9

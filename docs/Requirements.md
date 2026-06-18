@@ -306,7 +306,8 @@ The user can:
 - **Upload** `.fseq` and audio (`.mp3`/`.wav`) files — single files up to **100 MB**,
   or a **ZIP up to 500 MB** that is auto-extracted and flattened. *Outcome:* files
   written into `LightShow/`; appear in the list; car re-reads on medium-change.
-- **Set an active show** *(active selection persisted in `lightshow_active.json`)*.
+  (There is no "active show" selection — `LightShow/` is just a directory of files
+  the car lists for the driver to pick and play.)
 - **Delete** files / shows (including bulk delete). *Outcome:* removed from
   `LightShow/`.
 

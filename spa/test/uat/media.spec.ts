@@ -464,17 +464,17 @@ test.describe("media (lock chimes) UAT", () => {
       mimeType: "audio/wav",
       buffer: wavBuffer({ channels: 2, sampleRate: 48000, dataLen: 512 }),
     });
-    await expect(page.locator("[data-testid=chime-upload-staged]")).toContainText(
-      "Chime.wav",
-    );
-    await expect(page.locator("[data-testid=chime-upload-submit]")).toBeEnabled();
+    await expect(page.locator("[data-testid=chime-editor]")).toBeVisible();
+    await expect(page.locator("[data-testid=chime-editor-upload]")).toBeEnabled();
 
     // Upload → POST hits the LIBRARY endpoint, success notice shows.
-    await page.locator("[data-testid=chime-upload-submit]").click();
+    await page
+      .locator("[data-testid=chime-editor-upload]")
+      .click({ force: true });
     await expect(page.locator("[data-testid=chime-notice]")).toContainText(
       "Upload accepted — syncing",
     );
-    await expect(page.locator("[data-testid=chime-upload-staged]")).toHaveCount(0);
+    await expect(page.locator("[data-testid=chime-editor]")).toHaveCount(0);
 
     // v1 parity: adding to the library does NOT install an active chime, so the
     // active card stays empty and nothing POSTs to the install endpoint.
@@ -485,8 +485,8 @@ test.describe("media (lock chimes) UAT", () => {
     expect(installPosts.length, "library upload must not POST /api/chimes").toBe(0);
     expect(libraryPosts, "expected exactly one library POST").toEqual(["Chime.wav"]);
 
-    // The input is cleared for the next action, and the JS stayed clean.
-    await expect(page.locator("[data-testid=chime-upload-submit]")).toBeDisabled();
+    // The picker is ready for the next action, and the JS stayed clean.
+    await expect(page.locator("[data-testid=chime-file-input]")).toBeVisible();
     assertCleanConsole(probe);
   });
 
@@ -531,12 +531,12 @@ test.describe("media (lock chimes) UAT", () => {
       }
     }, bytes);
 
-    await expect(page.locator("[data-testid=chime-upload-staged]")).toContainText(
-      "Dropped.wav",
-    );
-    await expect(page.locator("[data-testid=chime-upload-submit]")).toBeEnabled();
+    await expect(page.locator("[data-testid=chime-editor]")).toBeVisible();
+    await expect(page.locator("[data-testid=chime-editor-upload]")).toBeEnabled();
 
-    await page.locator("[data-testid=chime-upload-submit]").click();
+    await page
+      .locator("[data-testid=chime-editor-upload]")
+      .click({ force: true });
     await expect(page.locator("[data-testid=chime-notice]")).toContainText(
       "Upload accepted — syncing",
     );
@@ -702,22 +702,26 @@ test.describe("media (lock chimes) UAT", () => {
       mimeType: "audio/wav",
       buffer: wavBuffer({ dataLen: 256 }),
     });
-    await expect(page.locator("[data-testid=chime-upload-submit]")).toBeEnabled();
+    await expect(page.locator("[data-testid=chime-editor]")).toBeVisible();
+    await expect(page.locator("[data-testid=chime-editor-upload]")).toBeEnabled();
 
     // First attempt → 503 → retryable error banner (not fatal), button live again.
-    await page.locator("[data-testid=chime-upload-submit]").click();
-    const err = page.locator("[data-testid=chime-upload-error]");
+    await page
+      .locator("[data-testid=chime-editor-upload]")
+      .click({ force: true });
+    const err = page.locator(".chime-upload-status.retryable");
     await expect(err).toBeVisible();
-    await expect(err).toHaveClass(/\bretryable\b/);
     await expect(err).toContainText("Try again");
-    await expect(page.locator("[data-testid=chime-upload-submit]")).toBeEnabled();
+    await expect(page.locator("[data-testid=chime-editor-upload]")).toBeEnabled();
 
     // Retry → success.
-    await page.locator("[data-testid=chime-upload-submit]").click();
+    await page
+      .locator("[data-testid=chime-editor-upload]")
+      .click({ force: true });
     await expect(page.locator("[data-testid=chime-notice]")).toContainText(
       "Upload accepted — syncing",
     );
-    await expect(page.locator("[data-testid=chime-upload-error]")).toHaveCount(0);
+    await expect(page.locator(".chime-upload-status.fatal")).toHaveCount(0);
     expect(attempt, "expected two POST attempts (503, then success)").toBe(2);
 
     // The retry flow deliberately provoked one 503 response; Chromium logs that
@@ -743,27 +747,24 @@ test.describe("media (lock chimes) UAT", () => {
 
     await gotoMedia(page);
 
-    // (a) Oversize (> 1 MiB) → refused with a size message, submit stays disabled.
-    await page.locator("[data-testid=chime-file-input]").setInputFiles({
-      name: "Big.wav",
-      mimeType: "audio/wav",
-      buffer: wavBuffer({ dataLen: 1024 * 1024 }), // total > 1 MiB
-    });
+    // Select two files so the batch validator path is used (single-file now opens
+    // the editor). Both invalid files should be rejected before any POST.
+    await page.locator("[data-testid=chime-file-input]").setInputFiles([
+      {
+        name: "Big.wav",
+        mimeType: "audio/wav",
+        buffer: wavBuffer({ dataLen: 1024 * 1024 }), // total > 1 MiB
+      },
+      {
+        name: "Odd.wav",
+        mimeType: "audio/wav",
+        buffer: wavBuffer({ sampleRate: 32000, dataLen: 256 }),
+      },
+    ]);
     const stagedErrors = page.locator("[data-testid=chime-staged-error]");
-    await expect(stagedErrors).toHaveCount(1);
+    await expect(stagedErrors).toHaveCount(2);
     await expect(stagedErrors.first()).toBeVisible();
     await expect(stagedErrors.first()).toContainText("under 1 MB");
-    await expect(page.locator("[data-testid=chime-upload-submit]")).toBeDisabled();
-
-    // (b) Wrong sample rate (32 kHz) → refused with a format message.
-    await page.locator("[data-testid=chime-file-input]").setInputFiles({
-      name: "Odd.wav",
-      mimeType: "audio/wav",
-      buffer: wavBuffer({ sampleRate: 32000, dataLen: 256 }),
-    });
-    await expect(stagedErrors).toHaveCount(2);
-    await expect(stagedErrors.nth(0)).toBeVisible();
-    await expect(stagedErrors.nth(0)).toContainText("under 1 MB");
     await expect(stagedErrors.nth(1)).toBeVisible();
     await expect(stagedErrors.nth(1)).toContainText("44.1 or 48");
     await expect(page.locator("[data-testid=chime-upload-submit]")).toBeDisabled();

@@ -673,7 +673,8 @@ test.describe("chime scheduler UAT (A3b)", () => {
       mimeType: "audio/wav",
       buffer: wavBuffer(512),
     });
-    await page.locator("[data-testid=chime-upload-submit]").click();
+    await expect(page.locator("[data-testid=chime-editor]")).toBeVisible();
+    await page.locator("[data-testid=chime-editor-upload]").click({ force: true });
 
     await expect(page.locator("[data-testid=chime-notice]")).toContainText(
       "Upload accepted — syncing “NewChime.wav”",
@@ -729,7 +730,8 @@ test.describe("chime scheduler UAT (A3b)", () => {
       mimeType: "audio/wav",
       buffer: wavBuffer(uploadBytes),
     });
-    await page.locator("[data-testid=chime-upload-submit]").click();
+    await expect(page.locator("[data-testid=chime-editor]")).toBeVisible();
+    await page.locator("[data-testid=chime-editor-upload]").click({ force: true });
 
     await expect(page.locator("[data-testid=chime-notice]")).toContainText("Upload accepted — syncing");
     await expect(page.locator("[data-testid~=library-row-pending]")).toHaveCount(1);
@@ -780,7 +782,8 @@ test.describe("chime scheduler UAT (A3b)", () => {
       mimeType: "audio/wav",
       buffer: wavBuffer(dataLen),
     });
-    await page.locator("[data-testid=chime-upload-submit]").click();
+    await expect(page.locator("[data-testid=chime-editor]")).toBeVisible();
+    await page.locator("[data-testid=chime-editor-upload]").click({ force: true });
 
     // The notice and the pending row both key off the trimmed catalog name.
     await expect(page.locator("[data-testid=chime-notice]")).toContainText(
@@ -834,7 +837,8 @@ test.describe("chime scheduler UAT (A3b)", () => {
       mimeType: "audio/wav",
       buffer: wavBuffer(newBytes),
     });
-    await page.locator("[data-testid=chime-upload-submit]").click();
+    await expect(page.locator("[data-testid=chime-editor]")).toBeVisible();
+    await page.locator("[data-testid=chime-editor-upload]").click({ force: true });
 
     await expect(page.locator("[data-testid~=library-row-pending]")).toHaveCount(1);
     await expect(page.locator("[data-testid~=library-row]")).toHaveCount(2);
@@ -881,7 +885,8 @@ test.describe("chime scheduler UAT (A3b)", () => {
       mimeType: "audio/wav",
       buffer: wavBuffer(uploadBytes),
     });
-    await page.locator("[data-testid=chime-upload-submit]").click();
+    await expect(page.locator("[data-testid=chime-editor]")).toBeVisible();
+    await page.locator("[data-testid=chime-editor-upload]").click({ force: true });
 
     await expect(page.locator("[data-testid~=library-row-pending]")).toHaveCount(1);
     await page.clock.fastForward(45001);

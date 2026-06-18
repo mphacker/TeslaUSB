@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { MediaPills } from "../components/MediaPills";
 import { Icon } from "../components/Icon";
+import { ChimeAudioEditor } from "../components/ChimeAudioEditor";
 import { ChimeScheduler } from "./ChimeScheduler";
 import { useFullWidthScreen } from "../hooks/useFullWidthScreen";
 import { useFileDrop } from "../hooks/useFileDrop";
@@ -109,6 +110,26 @@ function buildId(): string {
  */
 function catalogChimeName(raw: string): string {
   return (raw.split(/[\\/]/).pop() ?? raw).trim();
+}
+
+interface PendingUploadState {
+  filename: string;
+  bytes: number;
+  token: number;
+}
+
+function applySingleUploadSuccess(
+  filename: string,
+  bytes: number,
+  setPendingUpload: (value: PendingUploadState | ((prev: PendingUploadState | null) => PendingUploadState | null)) => void,
+  setNotice: (value: string | null | ((prev: string | null) => string | null)) => void,
+) {
+  setPendingUpload((prev) => ({
+    filename,
+    bytes,
+    token: (prev?.token ?? 0) + 1,
+  }));
+  setNotice(`Upload accepted — syncing “${filename}” to your chime library below…`);
 }
 
 /** A lock-chime byte count → compact human string (KB for the sub-1-MiB chimes). */
@@ -293,6 +314,7 @@ export function Media() {
   // ── Upload (install) state ──
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [staged, setStaged] = useState<StagedChime[]>([]);
+  const [editorFile, setEditorFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadItems, setUploadItems] = useState<ChimeUploadItem[]>([]);
   const [uploadProgress, setUploadProgress] = useState<{
@@ -388,10 +410,25 @@ export function Media() {
     }
   }
 
+  async function handleSelectedFiles(incoming: File[]) {
+    if (incoming.length === 0) return;
+    setUploadFail(null);
+    setNotice(null);
+    setUploadItems([]);
+    setUploadProgress(null);
+    if (incoming.length === 1) {
+      setEditorFile(incoming[0]);
+      setStaged([]);
+      return;
+    }
+    setEditorFile(null);
+    await stageFiles(incoming);
+  }
+
   async function onFileSelected(e: Event) {
     const input = e.currentTarget as HTMLInputElement;
     const files = input.files ? Array.from(input.files) : [];
-    await stageFiles(files);
+    await handleSelectedFiles(files);
     input.value = "";
   }
 
@@ -402,7 +439,7 @@ export function Media() {
 
   const chimeDrop = useFileDrop(
     (files) => {
-      void stageFiles(files);
+      void handleSelectedFiles(files);
     },
     { disabled: uploading },
   );
@@ -471,16 +508,16 @@ export function Media() {
 
     if (succeeded.length > 0) {
       const last = succeeded[succeeded.length - 1];
-      setPendingUpload((prev) => ({
-        filename: last.name,
-        bytes: last.bytes,
-        token: (prev?.token ?? 0) + 1,
-      }));
-      setNotice(
-        succeeded.length === 1
-          ? `Upload accepted — syncing “${last.name}” to your chime library below…`
-          : `Upload accepted — syncing ${succeeded.length} chimes to your chime library below…`,
-      );
+      if (succeeded.length === 1) {
+        applySingleUploadSuccess(last.name, last.bytes, setPendingUpload, setNotice);
+      } else {
+        setPendingUpload((prev) => ({
+          filename: last.name,
+          bytes: last.bytes,
+          token: (prev?.token ?? 0) + 1,
+        }));
+        setNotice(`Upload accepted — syncing ${succeeded.length} chimes to your chime library below…`);
+      }
     }
     if (failed.length > 0) {
       setUploadFail({
@@ -495,6 +532,35 @@ export function Media() {
     }
     setUploadProgress(null);
     setUploading(false);
+  }
+
+  async function handleEditorUpload(uploadFile: File) {
+    setUploading(true);
+    setUploadFail(null);
+    setNotice(null);
+    const ac = new AbortController();
+    uploadAbortRef.current = ac;
+    try {
+      await api.uploadLibraryChime(uploadFile, ac.signal);
+      applySingleUploadSuccess(catalogChimeName(uploadFile.name), uploadFile.size, setPendingUpload, setNotice);
+      setEditorFile(null);
+      setUploadItems([]);
+      setUploadProgress(null);
+    } catch (err) {
+      if (!ac.signal.aborted) {
+        const fail = classifyChimeFailure(err);
+        setUploadFail(fail);
+        const editorError = new Error(fail.message) as Error & {
+          retryable?: boolean;
+        };
+        editorError.retryable = fail.retryable;
+        throw editorError;
+      }
+      throw err;
+    } finally {
+      if (uploadAbortRef.current === ac) uploadAbortRef.current = null;
+      setUploading(false);
+    }
   }
 
   function onChimeActivated(filename: string, bytes: number) {
@@ -681,7 +747,18 @@ export function Media() {
       <details class="settings-section" id="chimeUploadControls" open>
         <summary>Upload New Chime</summary>
         <div class="section-content">
-          <form class="chime-upload" onSubmit={onUploadSubmit} novalidate>
+          {editorFile ? (
+            <ChimeAudioEditor
+              file={editorFile}
+              onUpload={handleEditorUpload}
+              onCancel={() => {
+                setEditorFile(null);
+                setUploadFail(null);
+                setNotice(null);
+              }}
+            />
+          ) : (
+            <form class="chime-upload" onSubmit={onUploadSubmit} novalidate>
             <div
               class={`chime-dropzone${chimeDrop.dragging ? " dragging" : ""}`}
               data-testid="chime-dropzone"
@@ -697,7 +774,7 @@ export function Media() {
                   id="chime_file"
                   name="file"
                   class="chime-file-input"
-                  accept=".wav,audio/wav,audio/x-wav,audio/wave,audio/vnd.wave"
+                  accept="audio/*,.wav,.mp3,.m4a,.aac,.ogg,.flac"
                   data-testid="chime-file-input"
                   multiple
                   onChange={onFileSelected}
@@ -810,6 +887,7 @@ export function Media() {
               </p>
             )}
           </form>
+          )}
         </div>
       </details>
 

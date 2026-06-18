@@ -418,3 +418,148 @@
   gap: 8px;
   flex-shrink: 0;
 }
+
+.media-page .chime-editor-card {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+}
+.media-page .chime-editor-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: 0.95rem;
+}
+.media-page .chime-editor-waveform-wrap {
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-primary);
+  padding: 8px;
+}
+.media-page .chime-editor-waveform {
+  display: block;
+  width: 100%;
+  height: 160px;
+  background: var(--bg-primary);
+}
+.media-page .chime-editor-controls,
+.media-page .chime-editor-row,
+.media-page .chime-editor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+.media-page .chime-editor-field {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  flex: 1 1 180px;
+}
+.media-page .chime-editor-field.wide {
+  flex-basis: 100%;
+}
+.media-page .chime-editor-field input[type="text"] {
+  width: 100%;
+  padding: 9px 10px;
+  font-size: 0.9rem;
+  color: var(--text-primary);
+  background: var(--form-input-bg, var(--bg-primary));
+  border: 1px solid var(--border-input, var(--border-color));
+  border-radius: 6px;
+}
+.media-page .chime-editor-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+.media-page .chime-editor-slider {
+  width: 100%;
+}
+.media-page .chime-editor-readout {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}
+.media-page .chime-editor-preset-details,
+.media-page .chime-editor-notes {
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+.media-page .chime-editor-notes p,
+.media-page .chime-editor-preset-details p {
+  margin: 4px 0;
+}
+.media-page .chime-editor-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+.media-page .chime-editor-stats > div {
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 10px;
+  background: var(--bg-primary);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.media-page .chime-editor-stats-label {
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.media-page .chime-editor-filename-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.media-page .chime-editor-filename-suffix {
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.media-page .chime-editor-actions button,
+.media-page .chime-editor-fallback button {
+  min-height: 40px;
+  border-radius: 6px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  cursor: pointer;
+  padding: 8px 12px;
+}
+.media-page .chime-editor-actions button:disabled,
+.media-page .chime-editor-fallback button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+@media (max-width: 768px) {
+  .media-page .chime-editor-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .media-page .chime-editor-waveform {
+    height: 130px;
+  }
+  .media-page .chime-editor-actions button {
+    flex: 1 1 160px;
+  }
+}
+@media (max-width: 480px) {
+  .media-page .chime-editor-stats {
+    grid-template-columns: 1fr;
+  }
+  .media-page .chime-editor-filename-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .media-page .chime-editor-filename-suffix {
+    align-self: flex-end;
+  }
+}

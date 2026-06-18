@@ -254,6 +254,33 @@ rationale), to avoid gold-plating; each is a noted follow-up, not a blocker:
 - **Clock-not-ready at boot:** the per-minute tick self-corrects once NTP sets the
   clock, so no explicit gate is built; noted.
 
+### 3.7 Library rename / delete cascade (chime library ↔ schedules + groups)
+
+A library chime is referenced by name from two places in the schedulerd state:
+`schedule.chime_filename` and each `group.chimes[]` member. Renaming or deleting a
+chime must keep these references consistent, owned by schedulerd (the state owner);
+`webd` performs the file mutation, then issues the reference cascade over IPC.
+
+- **Rename** (`webd` `POST …/library/rename` `{from,to}`): `webd` reads the source
+  bytes and enqueues an **InstallFile of the destination copy only** (mirrors
+  `move_music`); it does **not** delete the source. After the destination converges in
+  the catalog, the **SPA** deletes the source via `DELETE …/library/{from}?cascade=false`
+  (file-only — it must NOT re-scrub references the rename just moved). Ordering: enqueue
+  the file op **first**, then call the schedulerd `RenameChimeReferences {from,to}` IPC.
+  - schedulerd rewrites `schedule.chime_filename` and every `group.chimes` member that
+    matches `from` **case-insensitively**, writing `to` **verbatim**, and de-duplicates
+    group members case-insensitively (collapsing both `from` and any pre-existing
+    different-case spelling of `to` to verbatim `to`).
+  - Validation (`webd`): unknown `from` → 404; malformed `to` → 400; case-only same-name
+    (`from`≡`to` ignoring case) → 400; destination already exists → 409.
+- **Delete cascade** (`webd` `DELETE …/library/{name}`, default `cascade=true`): after
+  the file remove is enqueued, `webd` calls schedulerd `RemoveChimeReferences {name}`,
+  which **deletes schedules** that reference `name`, **scrubs** it from groups, **deletes
+  emptied groups**, and **resets `random_mode` to default** if it pointed at a deleted
+  group (mirrors `delete_group`). `cascade=false` skips the reference scrub (used by the
+  rename source cleanup). **Bulk delete** cascades on the **sanitized basenames** actually
+  removed (the same paths the file op uses), so the file op and the cascade always agree.
+
 ## 4. Acceptance tests (the implementation contract)
 
 ### 4.1 Core (`teslausb-core/src/chime.rs`, host unit tests)

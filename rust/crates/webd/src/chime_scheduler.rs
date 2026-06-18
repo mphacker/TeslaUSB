@@ -126,6 +126,33 @@ pub(crate) async fn set_random_mode(
     Ok(Json(resp))
 }
 
+/// Cascade a chime rename through the scheduler state (schedules + groups).
+pub(crate) async fn rename_chime_references(
+    state: &AppState,
+    from: &str,
+    to: &str,
+) -> Result<(), ApiError> {
+    call(
+        state,
+        json!({ "cmd": "rename_chime_references", "from": from, "to": to }),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Cascade a chime delete through the scheduler state.
+pub(crate) async fn remove_chime_references(
+    state: &AppState,
+    filenames: &[String],
+) -> Result<(), ApiError> {
+    call(
+        state,
+        json!({ "cmd": "remove_chime_references", "filenames": filenames }),
+    )
+    .await?;
+    Ok(())
+}
+
 /// Forward one request to `schedulerd` on a blocking task, relaying the JSON
 /// answer or mapping the `{error:{code,message}}` envelope / transport failure
 /// onto an [`ApiError`].
@@ -180,4 +207,3 @@ fn status_for(code: &str) -> StatusCode {
         _ => StatusCode::UNPROCESSABLE_ENTITY,
     }
 }
-

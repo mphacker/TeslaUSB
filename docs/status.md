@@ -679,7 +679,25 @@ LUNs) is the single make-or-break that still needs the car.**
   auto-removed with notice at ~11 s, gone from `/api/chime-scheduler`, active
   LockChime.wav untouched, console clean — `files/hw-delete-notice-1280.png`,
   `files/hw-results.md`.)**
-- [ ] Rename a chime (v1 rename API). **(not started)**
+- [x] Rename a chime (v1 rename API). **(DONE 2026-06-18 — inline rename in the
+  Lock Chimes library: webd reads the source bytes and enqueues an InstallFile of the
+  destination copy (mirrors `move_music`), the SPA deletes the source via
+  `DELETE …/library/{name}?cascade=false` after the copy converges, and schedulerd
+  rewrites every reference — `schedule.chime_filename` and `group.chimes` (case-insensitive
+  match, verbatim write, case-insensitive member dedupe). Validation: bad `from`→404,
+  bad `to`→400, case-only same-name→400, dest exists→409. Companion **delete cascade**:
+  deleting a library chime now removes dependent schedules, scrubs groups, deletes emptied
+  groups, and resets `random_mode` if it pointed at a deleted group (default `cascade=true`;
+  `bulk_delete` cascades on sanitized basenames so file-op and cascade agree). Verified:
+  podman `cargo test -p teslausb-core -p schedulerd -p webd` green (schedulerd 39, webd 274,
+  core 343; new tests incl. `rename_canonicalizes_existing_target_case`,
+  `bulk_delete_library_cascades_sanitised_basenames`, schedulerd cascade store/ipc tests),
+  clippy clean on touched code, GPT-5.5 adversarial review reconciled (2 findings fixed +
+  regressions). Playwright UAT green — 56/56 both viewports incl. rename cascade convergence,
+  inline-editor visual+perf, client validation, delete cascade; rename screen ready ~207 ms,
+  FCP 96 ms, clean console — `spa/test/uat/chime-scheduler.spec.ts`,
+  `spa/test/uat/artifacts/chime-rename-{desktop-1280,mobile-375}.png`,
+  `perf-chime-rename-*.json`.)**
 - [x] **Set active** → copy library file to media-root `LockChime.wav`, applied
   **immediately** (per-partition hot-handoff on P2; no manual replug); UI shows which
   library chime is active. **(DONE 2026-06-15 bench-proven — `POST …/library/{name}/activate`

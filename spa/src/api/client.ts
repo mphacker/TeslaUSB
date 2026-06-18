@@ -701,11 +701,42 @@ export const api = {
     return assertAccepted(res, "upload");
   },
 
+  /**
+   * Rename a library chime (`POST /api/chime-scheduler/library/rename`,
+   * body `{ from, to }`). Returns the same handoff envelope as the upload /
+   * install flows (`state:"queued"` or `"done"`).
+   */
+  renameLibraryChime: async (
+    from: string,
+    to: string,
+    signal?: AbortSignal,
+  ): Promise<ChimeHandoffResult> => {
+    const res = await request<ChimeHandoffResult>(
+      "POST",
+      "/api/chime-scheduler/library/rename",
+      signal,
+      JSON.stringify({ from, to }),
+      "application/json",
+    );
+    return assertAccepted(res, "rename");
+  },
+
   /** Remove a library chime by filename (`DELETE /api/chime-scheduler/library/:filename`). */
   deleteLibraryChime: (filename: string, signal?: AbortSignal) =>
     request<{ ok?: boolean }>(
       "DELETE",
       `/api/chime-scheduler/library/${encodeURIComponent(filename)}`,
+      signal,
+    ),
+
+  /**
+   * File-only delete used by the rename flow to remove the old source file after
+   * the copy lands; does NOT scrub scheduler references (the rename already moved them).
+   */
+  renameCleanupLibraryChime: (filename: string, signal?: AbortSignal) =>
+    request<{ ok?: boolean }>(
+      "DELETE",
+      `/api/chime-scheduler/library/${encodeURIComponent(filename)}?cascade=false`,
       signal,
     ),
 

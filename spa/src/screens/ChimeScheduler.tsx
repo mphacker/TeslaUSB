@@ -82,6 +82,10 @@ function pad2(n: number): string {
   return n.toString().padStart(2, "0");
 }
 
+function sameFilename(a: string, b: string): boolean {
+  return a.toLowerCase() === b.toLowerCase();
+}
+
 /** Human label for a schedule row's trigger (e.g. "Mon, Fri at 09:00"). */
 function describeSchedule(s: StoredSchedule): string {
   const time = `${pad2(s.hour ?? 0)}:${pad2(s.minute ?? 0)}`;
@@ -141,16 +145,36 @@ export function ChimeScheduler({
   const [tzError, setTzError] = useState<string | null>(null);
   const [tzNotice, setTzNotice] = useState<string | null>(null);
 
-  // ── Library row actions (Set Active / Delete) ──
+  // ── Library row actions (Set Active / Rename / Delete) ──
   const [libError, setLibError] = useState<string | null>(null);
   const [libNotice, setLibNotice] = useState<string | null>(null);
   const [activating, setActivating] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState<{ from: string; value: string } | null>(null);
+  const [renameBusy, setRenameBusy] = useState<string | null>(null);
   const [pending, setPending] = useState<{
     filename: string;
     bytes: number;
     token: number;
     phase: "syncing" | "waiting";
   } | null>(null);
+  const [pendingRename, setPendingRename] = useState<{
+    from: string;
+    to: string;
+    bytes: number;
+    phase: "copying" | "removing";
+    startedAt: number;
+  } | null>(null);
+  const [renameWaiting, setRenameWaiting] = useState(false);
+  const pendingRenameRef = useRef<typeof pendingRename>(null);
+  const renameCleanupInFlightRef = useRef<string | null>(null);
+  useEffect(() => {
+    pendingRenameRef.current = pendingRename;
+    if (!pendingRename) {
+      setRenameWaiting(false);
+      renameCleanupInFlightRef.current = null;
+    }
+  }, [pendingRename]);
+
   // ── Pending library deletes (auto-refresh: wait for the row to leave the
   // catalog) ──
   // Each entry carries its OWN `startedAt` so a sibling delete that converges
@@ -335,6 +359,114 @@ export function ChimeScheduler({
       stopPolling();
     };
   }, [pendingUpload?.token]);
+
+  useEffect(() => {
+    if (!pendingRename || !snap) return;
+
+    const hasSource = snap.library.some((entry) => sameFilename(entry.filename, pendingRename.from));
+    const copied = snap.library.some(
+      (entry) => sameFilename(entry.filename, pendingRename.to) && entry.bytes === pendingRename.bytes,
+    );
+    if (pendingRename.phase === "copying") {
+      if (!copied || renameCleanupInFlightRef.current) return;
+      const renameFrom = pendingRename.from;
+      const renameTo = pendingRename.to;
+      renameCleanupInFlightRef.current = renameFrom;
+      void (async () => {
+        try {
+          await api.renameCleanupLibraryChime(renameFrom);
+          setPendingRename((current) =>
+            current &&
+            sameFilename(current.from, renameFrom) &&
+            sameFilename(current.to, renameTo) &&
+            current.phase === "copying"
+              ? { ...current, phase: "removing" }
+              : current,
+          );
+        } catch (err) {
+          const current = pendingRenameRef.current;
+          if (
+            current &&
+            sameFilename(current.from, renameFrom) &&
+            sameFilename(current.to, renameTo)
+          ) {
+            setLibError(failMessage(err, "Couldn't finish renaming the chime."));
+            setPendingRename(null);
+          }
+        } finally {
+          if (
+            renameCleanupInFlightRef.current &&
+            sameFilename(renameCleanupInFlightRef.current, renameFrom)
+          ) {
+            renameCleanupInFlightRef.current = null;
+          }
+        }
+      })();
+      return;
+    }
+
+    if (!hasSource) {
+      setPendingRename(null);
+      setLibNotice(`“${pendingRename.from}” renamed to “${pendingRename.to}”.`);
+      void reload();
+    }
+  }, [pendingRename, snap]);
+
+  useEffect(() => {
+    if (!pendingRename || renameWaiting) return;
+
+    let cancelled = false;
+    const ctrl = new AbortController();
+    let pollId: ReturnType<typeof setTimeout> | null = null;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+    const stop = () => {
+      if (pollId) clearTimeout(pollId);
+      if (timeoutId) clearTimeout(timeoutId);
+      pollId = null;
+      timeoutId = null;
+    };
+
+    const timedOut = () => Date.now() - pendingRename.startedAt >= POLL_MAX_MS - POLL_INTERVAL_MS;
+
+    const runPoll = async () => {
+      if (cancelled) return;
+      if (timedOut()) {
+        setRenameWaiting(true);
+        stop();
+        return;
+      }
+      await reload(ctrl.signal);
+      if (cancelled) return;
+      if (timedOut()) {
+        setRenameWaiting(true);
+        stop();
+        return;
+      }
+      pollId = setTimeout(() => void runPoll(), POLL_INTERVAL_MS);
+    };
+
+    const remainingMs = Math.max(0, POLL_MAX_MS - (Date.now() - pendingRename.startedAt));
+    timeoutId = setTimeout(() => {
+      if (cancelled) return;
+      ctrl.abort();
+      setRenameWaiting(true);
+      stop();
+    }, remainingMs);
+    pollId = setTimeout(() => void runPoll(), POLL_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      ctrl.abort();
+      stop();
+    };
+  }, [
+    pendingRename?.from,
+    pendingRename?.to,
+    pendingRename?.phase,
+    pendingRename?.startedAt,
+    renameWaiting,
+  ]);
 
   useEffect(() => {
     if (deleteToken === 0) return;
@@ -585,6 +717,71 @@ export function ChimeScheduler({
     }
   }
 
+  function startRename(filename: string) {
+    const baseName = filename.replace(/\.wav$/i, "");
+    setLibError(null);
+    setLibNotice(null);
+    setSelected((prev) => {
+      if (!prev.has(filename)) return prev;
+      const next = new Set(prev);
+      next.delete(filename);
+      return next;
+    });
+    setRenameDraft({ from: filename, value: baseName });
+  }
+
+  async function submitRename(from: string, bytes: number) {
+    if (!snap || renameBusy || pendingRenameRef.current) return;
+    if (!renameDraft || !sameFilename(renameDraft.from, from)) return;
+
+    let next = renameDraft.value.trim();
+    if (!next.toLowerCase().endsWith(".wav")) {
+      next = `${next}.wav`;
+    }
+    if (!next || next === ".wav") {
+      setLibError("Enter a chime name.");
+      return;
+    }
+    if (/[<>:"|?*/\\]/.test(next)) {
+      setLibError("Chime names can’t include < > : \" | ? * / \\.");
+      return;
+    }
+    if (sameFilename(next, from)) {
+      setRenameDraft(null);
+      return;
+    }
+    if (
+      snap.library.some(
+        (entry) => !sameFilename(entry.filename, from) && sameFilename(entry.filename, next),
+      )
+    ) {
+      setLibError("That chime name already exists.");
+      return;
+    }
+
+    setRenameBusy(from);
+    setLibError(null);
+    setLibNotice(null);
+    try {
+      await api.renameLibraryChime(from, next);
+    } catch (err) {
+      setLibError(failMessage(err, "Couldn't rename the chime."));
+      return;
+    } finally {
+      setRenameBusy(null);
+    }
+
+    setRenameDraft(null);
+    setRenameWaiting(false);
+    setPendingRename({
+      from,
+      to: next,
+      bytes,
+      phase: "copying",
+      startedAt: Date.now(),
+    });
+  }
+
   async function removeLibraryChime(filename: string) {
     setLibError(null);
     setLibNotice(null);
@@ -635,6 +832,12 @@ export function ChimeScheduler({
     const names = [...selected].filter(
       (filename) =>
         !pendingDeletesRef.current.some((d) => d.filename === filename) &&
+        !(
+          pendingRenameRef.current &&
+          (sameFilename(filename, pendingRenameRef.current.from) ||
+            sameFilename(filename, pendingRenameRef.current.to))
+        ) &&
+        !(renameBusy && sameFilename(filename, renameBusy)) &&
         !deleteInFlightRef.current.has(filename),
     );
     if (names.length === 0) {
@@ -682,6 +885,11 @@ export function ChimeScheduler({
       setPending(null);
       setLibNotice(`“${pending.filename}” added to your chime library.`);
     }
+  }
+
+  async function refreshRenameNow() {
+    if (!pendingRenameRef.current) return;
+    await reload();
   }
 
   async function refreshDeletesNow() {
@@ -752,12 +960,19 @@ export function ChimeScheduler({
     }
     return unique;
   })();
+  const renameTargetsRow = (filename: string): boolean =>
+    !!(
+      pendingRename &&
+      (sameFilename(filename, pendingRename.from) || sameFilename(filename, pendingRename.to))
+    );
   // Library rows eligible for bulk selection: real, settled files (not an
-  // in-flight upload row and not already being deleted).
+  // in-flight upload row, not already being deleted, and not mid-rename).
   const selectableChimes = displayLibrary
     .filter(
       (c) =>
         !(c as LibraryRow).pending &&
+        !(renameBusy && sameFilename(c.filename, renameBusy)) &&
+        !renameTargetsRow(c.filename) &&
         !pendingDeletes.some((d) => d.filename === c.filename),
     )
     .map((c) => c.filename);
@@ -1414,7 +1629,14 @@ export function ChimeScheduler({
                   const pendingRow = Boolean((c as LibraryRow).pending);
                   const deletePhase = pendingDeletes.find((d) => d.filename === c.filename)?.phase;
                   const deleting = deletePhase !== undefined;
-                  const rowLocked = pendingRow || deleting;
+                  const renamePhase = renameTargetsRow(c.filename) ? pendingRename?.phase : undefined;
+                  const renaming = renamePhase !== undefined;
+                  const renameSaving = renameBusy !== null && sameFilename(renameBusy, c.filename);
+                  const rowLocked = pendingRow || deleting || renaming;
+                  const actionLocked = rowLocked || renameSaving;
+                  const renameWaitingRow = renaming && renameWaiting;
+                  const editingRename =
+                    renameDraft !== null && sameFilename(renameDraft.from, c.filename);
                   const statusLabel = pendingRow
                     ? c.phase === "waiting"
                       ? "Waiting for media scan…"
@@ -1423,8 +1645,17 @@ export function ChimeScheduler({
                       ? deletePhase === "waiting"
                         ? "Removing — waiting for scan…"
                         : "Removing…"
+                      : renaming || renameSaving
+                        ? renameWaitingRow
+                          ? renamePhase === "removing"
+                            ? "Cleaning up — waiting for scan…"
+                            : "Renaming — waiting for scan…"
+                          : renamePhase === "removing"
+                            ? "Cleaning up…"
+                            : "Renaming…"
                       : "Valid";
-                  const pendingStatusTestId = pendingRow ? "library-pending-status" : undefined;
+                  const pendingStatusTestId =
+                    pendingRow || renaming ? "library-pending-status" : undefined;
                   return (
                     <tr
                       key={c.filename}
@@ -1434,6 +1665,8 @@ export function ChimeScheduler({
                           ? "library-row library-row-pending"
                           : deleting
                             ? "library-row library-row-deleting"
+                            : renaming
+                              ? "library-row library-row-renaming"
                             : "library-row"
                       }
                     >
@@ -1442,7 +1675,7 @@ export function ChimeScheduler({
                           type="checkbox"
                           class="bulk-row-check"
                           checked={selected.has(c.filename)}
-                          disabled={rowLocked}
+                          disabled={actionLocked}
                           onChange={() => toggleSelect(c.filename)}
                           aria-label={`Select ${c.filename}`}
                         />
@@ -1450,26 +1683,32 @@ export function ChimeScheduler({
                       <td class="chime-cell-name media-card-title">{c.filename}</td>
                       <td data-label="Size">{Math.max(1, Math.round(c.bytes / 1024))} KB</td>
                       <td data-label="Status" data-testid={pendingStatusTestId}>
-                        <span class={pendingRow || deleting ? "chime-status-pending" : "chime-status-valid"}>
+                        <span
+                          class={
+                            pendingRow || deleting || renaming || renameSaving
+                              ? "chime-status-pending"
+                              : "chime-status-valid"
+                          }
+                        >
                           {statusLabel}
                         </span>
                       </td>
                       <td class="media-card-actions">
                         <div class="chime-row-actions">
                           <audio
-                            controls={!rowLocked}
+                            controls={!actionLocked}
                             preload="none"
                             data-testid="library-audio"
                             src={api.libraryAudioUrl(c.filename)}
-                            aria-disabled={rowLocked ? "true" : undefined}
+                            aria-disabled={actionLocked ? "true" : undefined}
                           />
                           <div class="chime-row-buttons">
                             <a
                               class="action-btn"
                               data-testid="library-download"
-                              href={rowLocked ? undefined : api.libraryDownloadUrl(c.filename)}
-                              aria-disabled={rowLocked ? "true" : undefined}
-                              onClick={rowLocked ? (e: Event) => e.preventDefault() : undefined}
+                              href={actionLocked ? undefined : api.libraryDownloadUrl(c.filename)}
+                              aria-disabled={actionLocked ? "true" : undefined}
+                              onClick={actionLocked ? (e: Event) => e.preventDefault() : undefined}
                             >
                               Download
                             </a>
@@ -1477,27 +1716,87 @@ export function ChimeScheduler({
                               type="button"
                               class="action-btn primary"
                               data-testid="library-set-active"
-                              disabled={rowLocked || activating !== null || activationBusy}
+                              disabled={actionLocked || activating !== null || activationBusy}
                               onClick={() => void setActiveChime(c.filename, c.bytes)}
                             >
                               {activating === c.filename ? "Syncing…" : "Set Active"}
                             </button>
                             <button
                               type="button"
+                              class="action-btn"
+                              data-testid="library-rename"
+                              disabled={actionLocked || (renameBusy !== null && !renameSaving)}
+                              onClick={() => startRename(c.filename)}
+                            >
+                              {renameSaving ? "Saving…" : "Rename"}
+                            </button>
+                            <button
+                              type="button"
                               class="action-btn danger"
                               data-testid="library-delete"
-                              disabled={rowLocked}
+                              disabled={actionLocked}
                               onClick={() => void removeLibraryChime(c.filename)}
                             >
                               {deleting ? "Removing…" : "Delete"}
                             </button>
                           </div>
+                          {editingRename && (
+                            <form
+                              class="chime-row-buttons"
+                              onSubmit={(e: Event) => {
+                                e.preventDefault();
+                                void submitRename(c.filename, c.bytes);
+                              }}
+                            >
+                              <input
+                                type="text"
+                                value={renameDraft?.value ?? ""}
+                                disabled={renameSaving}
+                                onInput={(e) =>
+                                  setRenameDraft((current) =>
+                                    current && sameFilename(current.from, c.filename)
+                                      ? {
+                                          ...current,
+                                          value: (e.currentTarget as HTMLInputElement).value,
+                                        }
+                                      : current,
+                                  )
+                                }
+                                aria-label={`Rename ${c.filename}`}
+                              />
+                              <button
+                                type="submit"
+                                class="action-btn primary"
+                                disabled={renameSaving}
+                              >
+                                Save
+                              </button>
+                              <button
+                                type="button"
+                                class="action-btn"
+                                disabled={renameSaving}
+                                onClick={() => setRenameDraft(null)}
+                              >
+                                Cancel
+                              </button>
+                            </form>
+                          )}
                           {pendingRow && c.phase === "waiting" && (
                             <button
                               type="button"
                               class="action-btn"
                               data-testid="library-refresh-now"
                               onClick={() => void refreshPendingNow()}
+                            >
+                              Refresh now
+                            </button>
+                          )}
+                          {renaming && renameWaitingRow && (
+                            <button
+                              type="button"
+                              class="action-btn"
+                              data-testid="library-rename-refresh-now"
+                              onClick={() => void refreshRenameNow()}
                             >
                               Refresh now
                             </button>

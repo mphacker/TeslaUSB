@@ -125,6 +125,7 @@ interface Captured {
   libraryDelete: string[];
   libraryBulkDelete: string[][];
   libraryActivate: string[];
+  libraryRename: { from: string; to: string }[];
 }
 
 /** Install the stateful scheduler mock. Returns the live snapshot + captured
@@ -136,6 +137,7 @@ async function installScheduler(
   onGet?: (snap: Snapshot, readCount: number) => void,
   onDelete?: (filename: string, snap: Snapshot) => void,
   onBulkDelete?: (names: string[], snap: Snapshot) => void,
+  onRename?: (from: string, to: string, snap: Snapshot) => void,
 ) {
   const snap: Snapshot = JSON.parse(JSON.stringify(initial));
   const cap: Captured = {
@@ -149,10 +151,29 @@ async function installScheduler(
     libraryDelete: [],
     libraryBulkDelete: [],
     libraryActivate: [],
+    libraryRename: [],
   };
   let seq = 0;
   let getCount = 0;
   const tail = (url: string) => decodeURIComponent(url.split("?")[0].split("/").pop() ?? "");
+  const ci = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+
+  /** Mirror schedulerd's rename cascade: rewrite schedule + group references
+   *  (case-insensitive match, verbatim write, case-insensitive member dedupe). */
+  function cascadeRename(from: string, to: string) {
+    for (const s of snap.schedules) {
+      if (ci(s.chimeFilename, from)) s.chimeFilename = to;
+    }
+    for (const g of snap.groups) {
+      if (!g.chimes.some((c) => ci(c, from))) continue;
+      const next: string[] = [];
+      for (const m of g.chimes) {
+        const mapped = ci(m, from) ? to : m;
+        if (!next.some((x) => ci(x, mapped))) next.push(mapped);
+      }
+      g.chimes = next;
+    }
+  }
 
   // Snapshot read (exact path only).
   await page.route("**/api/chime-scheduler", (route) => {
@@ -302,6 +323,31 @@ async function installScheduler(
       status: 202,
       contentType: "application/json",
       body: JSON.stringify({ state: "queued", job_id: "m-bulk-1" }),
+    });
+  });
+
+  // Library rename (POST .../library/rename, body {from,to}). Registered after
+  // the `library/*` glob so it wins priority for this sub-path. Mirrors webd's
+  // move-style rename: enqueue the destination COPY (the new name lands in the
+  // catalog) and synchronously cascade the scheduler references — the SPA then
+  // file-only-deletes the source (`?cascade=false`) once the copy converges.
+  await page.route("**/api/chime-scheduler/library/rename", (route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    const body = route.request().postDataJSON() as { from: string; to: string };
+    cap.libraryRename.push({ from: body.from, to: body.to });
+    if (onRename) {
+      onRename(body.from, body.to, snap);
+    } else {
+      const src = snap.library.find((e) => ci(e.filename, body.from));
+      if (src && !snap.library.some((e) => ci(e.filename, body.to))) {
+        snap.library.push({ filename: body.to, bytes: src.bytes });
+      }
+      cascadeRename(body.from, body.to);
+    }
+    return route.fulfill({
+      status: 202,
+      contentType: "application/json",
+      body: JSON.stringify({ state: "queued", job_id: `m-ren-${++seq}` }),
     });
   });
 
@@ -1099,5 +1145,156 @@ test.describe("chime scheduler UAT (A3b)", () => {
       (e) => !(/Failed to load resource/i.test(e.text) && e.text.includes("status of 503")),
     );
     expect(leaked, `unexpected console error(s): ${JSON.stringify(leaked)}`).toEqual([]);
+  });
+
+  // ── Gate 12: rename a library chime — cascade + copy→remove convergence ───
+  test("rename — referenced chime cascades through schedule + group and the file converges", async ({
+    page,
+    probe,
+  }) => {
+    await page.clock.install({ time: new Date("2024-01-01T00:00:00Z") });
+    const { cap } = await installScheduler(page, populatedSnapshot());
+    await gotoScheduler(page);
+
+    // Seeded schedule + group both reference Sparkle.wav.
+    await expect(page.locator("[data-testid=library-row]")).toHaveCount(2);
+    await expect(page.locator("[data-testid=schedule-item]")).toContainText("Sparkle.wav");
+    await expect(page.locator(".group-chimes .chime-tag")).toHaveText("Sparkle.wav");
+
+    const sparkleRow = page.locator("[data-testid=library-row]", { hasText: "Sparkle.wav" });
+    await sparkleRow.locator("[data-testid=library-rename]").click();
+    const input = sparkleRow.locator("input[aria-label='Rename Sparkle.wav']");
+    await expect(input).toBeVisible();
+    await input.fill("Bell");
+    await sparkleRow.locator("form button[type=submit]").click();
+
+    // The rename POST carried {from,to} (with the auto-appended .wav).
+    await expect.poll(() => cap.libraryRename.length).toBe(1);
+    expect(cap.libraryRename[0]).toEqual({ from: "Sparkle.wav", to: "Bell.wav" });
+
+    // Drive the copy→remove convergence polling (2s interval).
+    await page.clock.fastForward(2001);
+    await page.clock.fastForward(2001);
+    await page.clock.fastForward(2001);
+    await page.clock.fastForward(2001);
+
+    // The library now holds the new name only; the old source is gone.
+    await expect(
+      page.locator("[data-testid=library-row]", { hasText: "Bell.wav" }),
+    ).toHaveCount(1);
+    await expect(
+      page.locator("[data-testid=library-row]", { hasText: "Sparkle.wav" }),
+    ).toHaveCount(0);
+    await expect(page.locator("[data-testid=library-notice]")).toContainText("renamed");
+
+    // The cascade is reflected in the UI: schedule + group now point at Bell.wav.
+    await expect(page.locator("[data-testid=schedule-item]")).toContainText("Bell.wav");
+    await expect(page.locator("[data-testid=schedule-item]")).not.toContainText("Sparkle.wav");
+    await expect(page.locator(".group-chimes .chime-tag")).toHaveText("Bell.wav");
+
+    // The source cleanup DELETE is file-only (cascade=false) — it must NOT
+    // re-scrub the references the rename just moved. Asserted after convergence
+    // so the async cleanup request is guaranteed recorded.
+    await expect
+      .poll(() =>
+        probe.requests.some(
+          (r) =>
+            r.method === "DELETE" &&
+            r.url.includes("/library/Sparkle.wav") &&
+            r.url.includes("cascade=false"),
+        ),
+      )
+      .toBe(true);
+
+    assertCleanConsole(probe);
+  });
+
+  test("rename — inline editor renders and captures perf + screenshot", async ({
+    page,
+    probe,
+  }, testInfo) => {
+    await installScheduler(page, populatedSnapshot());
+    await gotoScheduler(page);
+
+    const sparkleRow = page.locator("[data-testid=library-row]", { hasText: "Sparkle.wav" });
+    await sparkleRow.locator("[data-testid=library-rename]").click();
+    await expect(sparkleRow.locator("input[aria-label='Rename Sparkle.wav']")).toBeVisible();
+    await expect(sparkleRow.locator("form button[type=submit]")).toHaveText("Save");
+
+    await capturePerf(page, testInfo, "chime-rename");
+    await captureScreenshot(page, testInfo, "chime-rename");
+    assertCleanConsole(probe);
+  });
+
+  test("rename — client-side validation rejects illegal characters and duplicates", async ({
+    page,
+    probe,
+  }) => {
+    const { cap } = await installScheduler(page, populatedSnapshot());
+    await gotoScheduler(page);
+
+    const sparkleRow = page.locator("[data-testid=library-row]", { hasText: "Sparkle.wav" });
+    await sparkleRow.locator("[data-testid=library-rename]").click();
+    const input = sparkleRow.locator("input[aria-label='Rename Sparkle.wav']");
+
+    // Illegal character → inline error, no network call.
+    await input.fill("bad/name");
+    await sparkleRow.locator("form button[type=submit]").click();
+    await expect(page.locator("[data-testid=library-error]")).toContainText("can’t include");
+    expect(cap.libraryRename).toEqual([]);
+
+    // Collision with an existing library name → inline error, still no call.
+    await input.fill("Chime2");
+    await sparkleRow.locator("form button[type=submit]").click();
+    await expect(page.locator("[data-testid=library-error]")).toContainText("already exists");
+    expect(cap.libraryRename).toEqual([]);
+
+    assertCleanConsole(probe);
+  });
+
+  // ── Gate 13: delete cascade — removing a referenced chime scrubs the rest ──
+  test("delete cascade — removing a referenced chime drops its schedule and empties its group", async ({
+    page,
+    probe,
+  }) => {
+    await page.clock.install({ time: new Date("2024-01-01T00:00:00Z") });
+    const { cap } = await installScheduler(
+      page,
+      populatedSnapshot(),
+      undefined,
+      undefined,
+      // Model webd's DEFAULT (cascade=true) delete: drop the file, delete every
+      // schedule that referenced it, scrub it from groups, and delete any group
+      // left empty.
+      (filename, snap) => {
+        const ciEq = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+        snap.library = snap.library.filter((c) => !ciEq(c.filename, filename));
+        snap.schedules = snap.schedules.filter((s) => !ciEq(s.chimeFilename, filename));
+        for (const g of snap.groups) g.chimes = g.chimes.filter((c) => !ciEq(c, filename));
+        snap.groups = snap.groups.filter((g) => g.chimes.length > 0);
+      },
+    );
+    await gotoScheduler(page);
+
+    await expect(page.locator("[data-testid=schedule-item]")).toHaveCount(1);
+    await expect(page.locator("[data-testid=group-card]")).toHaveCount(1);
+
+    const sparkleRow = page.locator("[data-testid=library-row]", { hasText: "Sparkle.wav" });
+    await sparkleRow.locator("[data-testid=library-delete]").click();
+    expect(cap.libraryDelete).toEqual(["Sparkle.wav"]);
+
+    // Converge: the row leaves the catalog and the snapshot refetch shows the
+    // dependent schedule deleted and the now-empty group gone.
+    await page.clock.fastForward(2001);
+    await page.clock.fastForward(2001);
+
+    await expect(
+      page.locator("[data-testid=library-row]", { hasText: "Sparkle.wav" }),
+    ).toHaveCount(0);
+    await expect(page.locator("[data-testid=schedule-item]")).toHaveCount(0);
+    await expect(page.locator("[data-testid=schedules-empty]")).toBeVisible();
+    await expect(page.locator("[data-testid=group-card]")).toHaveCount(0);
+    await expect(page.locator("[data-testid=groups-empty]")).toBeVisible();
+    assertCleanConsole(probe);
   });
 });

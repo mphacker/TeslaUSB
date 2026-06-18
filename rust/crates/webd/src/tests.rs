@@ -3268,10 +3268,11 @@ fn library_fixture(gadget_reply: Reply) -> LibraryFixture {
         reply: gadget_reply,
         last: Arc::clone(&last),
     });
-    // schedulerd is unused by the file-backed routes; a dead socket would do,
-    // but a mock keeps an accidental call loud.
+    // Library delete/bulk-delete cascade scheduler reference cleanup, so the
+    // mock answers successfully; dedicated cascade-assertion coverage lives in
+    // `chime_library::handler_tests`.
     let scheduler: Arc<dyn SchedulerClient> = Arc::new(MockScheduler {
-        reply: SchedReply::Unavailable,
+        reply: SchedReply::Json(json!({ "changed": 0 })),
         last: Arc::new(Mutex::new(None)),
         staged_existed: Arc::new(Mutex::new(None)),
     });

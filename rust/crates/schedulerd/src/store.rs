@@ -213,6 +213,88 @@ impl Store {
         Ok(removed)
     }
 
+    /// Rewrite every schedule/group reference to `from` as `to` (case-insensitive
+    /// match on `from`, written verbatim as `to`; group members are de-duplicated
+    /// case-insensitively, preserving order). Returns the number of schedules plus
+    /// groups changed. Persists only if something changed.
+    ///
+    /// # Errors
+    /// [`StoreError::Io`] on persistence failure.
+    pub fn rename_chime_references(&mut self, from: &str, to: &str) -> Result<usize, StoreError> {
+        let mut changed = 0usize;
+        for sched in &mut self.state.schedules {
+            if sched.input.chime_filename.eq_ignore_ascii_case(from) {
+                to.clone_into(&mut sched.input.chime_filename);
+                changed += 1;
+            }
+        }
+        for group in &mut self.state.groups {
+            if !group.chimes.iter().any(|m| m.eq_ignore_ascii_case(from)) {
+                continue;
+            }
+            let mut next: Vec<String> = Vec::with_capacity(group.chimes.len());
+            for member in &group.chimes {
+                let mapped = if member.eq_ignore_ascii_case(from) || member.eq_ignore_ascii_case(to)
+                {
+                    to.to_owned()
+                } else {
+                    member.clone()
+                };
+                if !next.iter().any(|m| m.eq_ignore_ascii_case(&mapped)) {
+                    next.push(mapped);
+                }
+            }
+            group.chimes = next;
+            changed += 1;
+        }
+        if changed > 0 {
+            self.persist()?;
+        }
+        Ok(changed)
+    }
+
+    /// Remove every reference to any name in `filenames` (case-insensitive):
+    /// delete schedules whose chime is one of them; drop them from each group's
+    /// members; delete any group left empty, disabling random mode if it pointed
+    /// at a deleted group (mirroring [`Store::delete_group`]). Returns the number
+    /// of schedules plus groups removed/changed. Persists only if something changed.
+    ///
+    /// # Errors
+    /// [`StoreError::Io`] on persistence failure.
+    pub fn remove_chime_references(&mut self, filenames: &[String]) -> Result<usize, StoreError> {
+        let matches = |name: &str| filenames.iter().any(|f| f.eq_ignore_ascii_case(name));
+        let mut changed = 0usize;
+
+        let before = self.state.schedules.len();
+        self.state.schedules.retain(|s| !matches(&s.input.chime_filename));
+        changed += before - self.state.schedules.len();
+
+        let mut emptied: Vec<String> = Vec::new();
+        for group in &mut self.state.groups {
+            let before = group.chimes.len();
+            group.chimes.retain(|m| !matches(m));
+            if group.chimes.len() != before {
+                changed += 1;
+                if group.chimes.is_empty() {
+                    emptied.push(group.id.clone());
+                }
+            }
+        }
+        if !emptied.is_empty() {
+            self.state.groups.retain(|g| !emptied.contains(&g.id));
+            if let Some(gid) = self.state.random_mode.group_id.clone() {
+                if emptied.contains(&gid) {
+                    self.state.random_mode = RandomMode::default();
+                }
+            }
+        }
+
+        if changed > 0 {
+            self.persist()?;
+        }
+        Ok(changed)
+    }
+
     /// Set the random-on-boot mode. A referenced group must exist.
     ///
     /// # Errors
@@ -498,6 +580,132 @@ mod tests {
         // Deleting that group disables random mode.
         assert!(store.delete_group(&g.id).unwrap());
         assert!(!store.random_mode().enabled);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn rename_updates_schedule_and_group() {
+        let path = tmp_path("rename-sched-group");
+        let mut store = Store::load(path.clone());
+        store
+            .add_schedule(weekly("A", "Old.wav", "Monday", 8))
+            .unwrap();
+        let group = store
+            .add_group(GroupInput {
+                name: "Grp".to_owned(),
+                description: String::new(),
+                chimes: vec!["Old.wav".to_owned(), "Keep.wav".to_owned()],
+            })
+            .unwrap();
+
+        let changed = store
+            .rename_chime_references("old.wav", "New.wav")
+            .unwrap();
+        assert_eq!(changed, 2);
+        assert_eq!(store.schedules()[0].input.chime_filename, "New.wav");
+        let updated = store.groups().iter().find(|g| g.id == group.id).unwrap();
+        assert_eq!(updated.chimes, vec!["New.wav".to_owned(), "Keep.wav".to_owned()]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn rename_dedups_when_target_already_in_group() {
+        let path = tmp_path("rename-dedup");
+        let mut store = Store::load(path.clone());
+        let group = store
+            .add_group(GroupInput {
+                name: "Grp".to_owned(),
+                description: String::new(),
+                chimes: vec!["A.wav".to_owned(), "B.wav".to_owned()],
+            })
+            .unwrap();
+
+        let changed = store.rename_chime_references("A.wav", "B.wav").unwrap();
+        assert_eq!(changed, 1);
+        let updated = store.groups().iter().find(|g| g.id == group.id).unwrap();
+        assert_eq!(updated.chimes, vec!["B.wav".to_owned()]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn rename_canonicalizes_existing_target_case() {
+        let path = tmp_path("rename-canon-case");
+        let mut store = Store::load(path.clone());
+        let group = store
+            .add_group(GroupInput {
+                name: "Grp".to_owned(),
+                description: String::new(),
+                chimes: vec!["BELL.wav".to_owned(), "old.wav".to_owned()],
+            })
+            .unwrap();
+
+        // Renaming `old.wav` to a different-case spelling of the existing member
+        // must collapse to the verbatim `to`, not preserve the old spelling.
+        let changed = store.rename_chime_references("old.wav", "bell.wav").unwrap();
+        assert_eq!(changed, 1);
+        let updated = store.groups().iter().find(|g| g.id == group.id).unwrap();
+        assert_eq!(updated.chimes, vec!["bell.wav".to_owned()]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn rename_noop_returns_zero() {
+        let path = tmp_path("rename-noop");
+        let mut store = Store::load(path.clone());
+        store
+            .add_group(GroupInput {
+                name: "Grp".to_owned(),
+                description: String::new(),
+                chimes: vec!["A.wav".to_owned()],
+            })
+            .unwrap();
+        assert_eq!(store.rename_chime_references("Missing.wav", "New.wav").unwrap(), 0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn remove_deletes_dependent_schedule_and_scrubs_group() {
+        let path = tmp_path("remove-sched-group");
+        let mut store = Store::load(path.clone());
+        store.add_schedule(weekly("A", "X.wav", "Monday", 8)).unwrap();
+        let group = store
+            .add_group(GroupInput {
+                name: "Grp".to_owned(),
+                description: String::new(),
+                chimes: vec!["X.wav".to_owned(), "Y.wav".to_owned()],
+            })
+            .unwrap();
+
+        let changed = store.remove_chime_references(&["x.wav".to_owned()]).unwrap();
+        assert_eq!(changed, 2);
+        assert!(store.schedules().is_empty());
+        let updated = store.groups().iter().find(|g| g.id == group.id).unwrap();
+        assert_eq!(updated.chimes, vec!["Y.wav".to_owned()]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn remove_deletes_emptied_group_and_disables_random_mode() {
+        let path = tmp_path("remove-emptied-group");
+        let mut store = Store::load(path.clone());
+        let group = store
+            .add_group(GroupInput {
+                name: "Grp".to_owned(),
+                description: String::new(),
+                chimes: vec!["Z.wav".to_owned()],
+            })
+            .unwrap();
+        store
+            .set_random_mode(RandomMode {
+                enabled: true,
+                group_id: Some(group.id.clone()),
+            })
+            .unwrap();
+
+        let changed = store.remove_chime_references(&["Z.wav".to_owned()]).unwrap();
+        assert_eq!(changed, 1);
+        assert!(store.groups().iter().all(|g| g.id != group.id));
+        assert_eq!(store.random_mode(), &RandomMode::default());
         let _ = std::fs::remove_file(path);
     }
 

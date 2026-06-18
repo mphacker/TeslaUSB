@@ -28,7 +28,7 @@ use serde_json::{Value, json};
 use teslausb_core::chime::{Pick, civil_from_unix};
 
 use crate::library;
-use crate::model::{GroupInput, RandomMode, ScheduleInput, SchedulerMenus};
+use crate::model::{GroupInput, RandomMode, ScheduleInput, SchedulerMenus, validate_chime_filename};
 use crate::store::Store;
 
 /// Maximum accepted frame size. Schedule/group payloads are tiny; library
@@ -88,6 +88,19 @@ enum Request {
     SetRandomMode {
         /// The new random-mode configuration.
         mode: RandomMode,
+    },
+    /// Rewrite all schedule/group references from one chime filename to another.
+    RenameChimeReferences {
+        /// Current filename.
+        from: String,
+        /// Replacement filename.
+        to: String,
+    },
+    /// Remove all references to the given chime filenames (delete dependent
+    /// schedules, drop from groups, delete emptied groups).
+    RemoveChimeReferences {
+        /// Filenames being removed from the library.
+        filenames: Vec<String>,
     },
     /// Adopt a staged temp file into the library under `filename`.
     AddLibraryFile {
@@ -331,6 +344,32 @@ fn dispatch(req: Request, state: &ServeState) -> Value {
                 .set_random_mode(mode)
                 .map_or_else(|e| store_err(&e), |()| json!({ "ok": true }))
         }),
+        Request::RenameChimeReferences { from, to } => {
+            if from.eq_ignore_ascii_case(&to) {
+                err_envelope("bad_request", "source and destination are the same")
+            } else if let Err(e) = validate_chime_filename(&from) {
+                err_envelope(e.code, &e.message)
+            } else if let Err(e) = validate_chime_filename(&to) {
+                err_envelope(e.code, &e.message)
+            } else {
+                with_store(state, |store| {
+                    store
+                        .rename_chime_references(&from, &to)
+                        .map_or_else(|e| store_err(&e), |n| json!({ "changed": n }))
+                })
+            }
+        }
+        Request::RemoveChimeReferences { filenames } => {
+            if let Some(e) = filenames.iter().find_map(|f| validate_chime_filename(f).err()) {
+                err_envelope(e.code, &e.message)
+            } else {
+                with_store(state, |store| {
+                    store
+                        .remove_chime_references(&filenames)
+                        .map_or_else(|e| store_err(&e), |n| json!({ "changed": n }))
+                })
+            }
+        }
         Request::AddLibraryFile {
             staged_path,
             filename,
@@ -528,6 +567,21 @@ mod tests {
     fn bad_request_returns_envelope() {
         let (socket, dir) = spawn_server("bad");
         let resp = call(&socket, &json!({ "cmd": "no_such_command" }));
+        assert_eq!(resp["error"]["code"], "bad_request");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rename_chime_references_rejects_same_name() {
+        let (socket, dir) = spawn_server("rename_same");
+        let resp = call(
+            &socket,
+            &json!({
+                "cmd": "rename_chime_references",
+                "from": "A.wav",
+                "to": "a.wav"
+            }),
+        );
         assert_eq!(resp["error"]["code"], "bad_request");
         let _ = std::fs::remove_dir_all(&dir);
     }

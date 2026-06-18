@@ -391,14 +391,19 @@ test.describe("chime scheduler UAT (A3b)", () => {
     expect(options).not.toContain("posixrules");
     expect(options).not.toContain("zone.tab");
 
-    const current = await select.inputValue();
-    // The select renders whenever zones are non-empty. `current` is the system's
-    // detected zone, which is legitimately empty on the UAT host (no timedatectl /
-    // /etc/localtime); when present it must be one of the offered options. Real
-    // current-zone + set behavior is verified on hardware.
-    if (current) {
-      expect(options).toContain(current);
-    }
+    // Assert the raw GET contract directly rather than the select's resolved
+    // value (which is tautological — the browser coerces an unmatched `current`
+    // to the first option). `current` is the system's detected zone; it is
+    // legitimately null on the UAT host (no timedatectl / /etc/localtime), and
+    // when non-null MUST be one of the enumerated zones. Real current-zone + set
+    // behavior is verified on hardware.
+    const apiResponse = await page.request.get("/api/system/timezone");
+    expect(apiResponse.status()).toBe(200);
+    const payload = (await apiResponse.json()) as { current: string | null; zones: string[] };
+    expect(Array.isArray(payload.zones)).toBe(true);
+    expect(payload.zones).toContain("America/New_York");
+    expect(payload.zones).not.toContain("posixrules");
+    expect(payload.current === null || payload.zones.includes(payload.current)).toBe(true);
 
     const timezoneRequests = probe.requests.filter((r) => r.url.includes("/api/system/timezone"));
     const timezoneResponses = probe.responses.filter((r) => r.url.includes("/api/system/timezone"));

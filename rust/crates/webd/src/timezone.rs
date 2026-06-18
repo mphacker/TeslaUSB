@@ -179,6 +179,13 @@ fn current_from_localtime() -> Option<String> {
 
 fn enumerate_zones(base: &Path) -> Vec<String> {
     let mut zones = Vec::new();
+    // Canonicalize the base once: this normalises any symlink components in the
+    // base path itself (so the per-entry confinement check below compares like
+    // with like) and gives us the real root that every accepted zone file must
+    // live under. If the base can't be resolved there are no zones to offer.
+    let Ok(canonical_base) = fs::canonicalize(base) else {
+        return zones;
+    };
     let mut stack = vec![base.to_path_buf()];
 
     while let Some(dir) = stack.pop() {
@@ -188,17 +195,35 @@ fn enumerate_zones(base: &Path) -> Vec<String> {
 
         for entry in entries.flatten() {
             let path = entry.path();
-            let Ok(meta) = fs::metadata(&path) else {
+            // Classify WITHOUT following symlinks: a symlinked directory must
+            // never drive recursion (it could escape the base or form a cycle).
+            // Only real directories are descended into.
+            let Ok(link_meta) = fs::symlink_metadata(&path) else {
                 continue;
             };
-            if meta.is_dir() {
+            if link_meta.is_dir() {
                 stack.push(path);
                 continue;
             }
-            if !meta.is_file() || !has_tzif_magic(&path) {
+
+            // Candidate file (regular, or a symlink to a file — zoneinfo ships
+            // legitimate alias symlinks such as `US/Eastern`). Resolve its real
+            // target and require it to stay under the canonical base so a stray
+            // symlink can't surface a file from outside the zoneinfo tree, then
+            // require the TZif magic.
+            let Ok(canonical) = fs::canonicalize(&path) else {
+                continue;
+            };
+            if !canonical.starts_with(&canonical_base) {
+                continue;
+            }
+            if !canonical.is_file() || !has_tzif_magic(&canonical) {
                 continue;
             }
 
+            // The zone NAME is the lexical path under the original base (e.g.
+            // `US/Eastern`), not the symlink target — that's what timedatectl
+            // expects and what the allow-list gate compares against.
             let Ok(rel) = path.strip_prefix(base) else {
                 continue;
             };
@@ -376,6 +401,51 @@ mod tests {
                 if status == StatusCode::INTERNAL_SERVER_ERROR && code == "timezone_set_failed"
         ));
         assert_eq!(fake.calls.lock().unwrap().as_slice(), ["America/New_York"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn enumerate_zones_keeps_in_tree_alias_but_rejects_escaping_and_dir_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path();
+        fs::create_dir_all(base.join("America")).expect("America");
+        write_tzif(base.join("America/New_York"));
+
+        // A real TZif file outside the base, and an "Etc" dir we will reach only
+        // via a directory symlink (must NOT be followed).
+        let outside = tempdir().expect("outside");
+        write_tzif(outside.path().join("secret"));
+
+        // In-tree alias symlink (like `US/Eastern` -> `America/New_York`): KEPT,
+        // named by its lexical path.
+        symlink(base.join("America/New_York"), base.join("US-Eastern"))
+            .expect("alias symlink");
+        // File symlink escaping the base: REJECTED (target not under base).
+        symlink(outside.path().join("secret"), base.join("escape"))
+            .expect("escape symlink");
+        // Directory symlink: must not be recursed into.
+        fs::create_dir_all(outside.path().join("Subdir")).expect("subdir");
+        write_tzif(outside.path().join("Subdir/Buried"));
+        symlink(outside.path().join("Subdir"), base.join("DirLink"))
+            .expect("dir symlink");
+
+        let zones = enumerate_zones(base);
+
+        assert!(zones.contains(&"America/New_York".to_owned()));
+        assert!(
+            zones.contains(&"US-Eastern".to_owned()),
+            "in-tree alias symlink should be kept: {zones:?}"
+        );
+        assert!(
+            !zones.iter().any(|z| z == "escape"),
+            "symlink whose target escapes the base must be excluded: {zones:?}"
+        );
+        assert!(
+            !zones.iter().any(|z| z.starts_with("DirLink")),
+            "directory symlinks must not be followed: {zones:?}"
+        );
     }
 
     fn write_tzif(path: std::path::PathBuf) {

@@ -136,6 +136,23 @@ desired). Device `cybertruckusb.local` healthy: SSH + wlan0 connected, boot
   `GET /api/system/timezone` load fetch. **Live:** deployed `index-BUoGmtG_.js` to
   `cybertruckusb.local` (additive asset swap, sha256-verified, webd restarted; device
   Playwright gate 14/14 both viewports, dead-man cancelled clean). Commit `c6fd682`.
+- **Multi-file upload — chime upload** (2026-06-18): generalized the "Upload New Chime"
+  panel from one file to N. The file picker gained `multiple` and the `.chime-dropzone`
+  now accepts multiple dropped `.wav` files (parity with the Music/Boombox multi-file
+  flow). Each file is staged with a stable id and async-validated (tri-state:
+  validating/valid/error); submit is disabled while any row is still validating so a
+  file is never uploaded before validation resolves. Valid files upload sequentially
+  with per-file status (pending/uploading/done/error) + a progress counter; on partial
+  failure only the failed rows stay staged for retry, and any unattempted row (still
+  validating or invalid) is preserved rather than silently dropped. The single-file
+  success path is byte-identical (notice text + last-file `pendingUpload` convergence),
+  so chime-scheduler UAT stays untouched. SPA-only (no daemon change). `npm run build`
+  clean; media UAT = **46 passed** (incl. new multi-file drop + unattempted-preservation
+  tests) + chime-scheduler UAT **56 passed**, both viewports, console clean. Reviewed by
+  GPT-5.5 (one Important finding — upload-before-validated — fixed + regression-tested).
+  **Live:** deployed `index-BkOitv39.js` + `index-BjyEKgIf.css` to `cybertruckusb.local`
+  (additive asset swap, sha256-verified, webd restarted; non-destructive device gate
+  10/10 both viewports, dead-man cancelled clean). Commit `b3660d2`.
   License Plates now fill the browser width like Music — their `.container` cards were
   capped at the global 1200px `.main-content` width, crunching the tables/galleries.
   Added a reusable `useFullWidthScreen()` hook (ref-counted body-class toggle) +

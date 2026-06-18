@@ -153,7 +153,27 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 10px;
-  margin-bottom: 10px;
+  margin-bottom: 0;
+}
+.media-page .chime-dropzone {
+  border: 2px dashed var(--border-input, var(--border-color));
+  border-radius: 8px;
+  padding: 16px;
+  background: var(--form-input-bg, var(--bg-primary));
+  transition: border-color 0.2s ease, background-color 0.2s ease;
+  margin-bottom: 12px;
+}
+.media-page .chime-dropzone.dragging {
+  border-color: var(--btn-primary-bg, var(--accent-primary));
+  background: var(--surface-hover, rgba(127, 127, 127, 0.08));
+}
+.media-page .chime-dropzone-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 10px;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
 }
 .media-page .chime-file-input {
   flex: 1 1 250px;

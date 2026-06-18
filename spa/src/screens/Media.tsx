@@ -3,6 +3,7 @@ import { MediaPills } from "../components/MediaPills";
 import { Icon } from "../components/Icon";
 import { ChimeScheduler } from "./ChimeScheduler";
 import { useFullWidthScreen } from "../hooks/useFullWidthScreen";
+import { useFileDrop } from "../hooks/useFileDrop";
 import { api, ApiError, CHIME_MAX_BYTES } from "../api/client";
 import type { Chimes, InstalledChime, LibraryEntry } from "../api/types";
 import "../styles/media.css";
@@ -335,11 +336,9 @@ export function Media() {
     };
   }, []);
 
-  async function onFileSelected(e: Event) {
+  async function selectChimeFile(file: File | null) {
     setUploadFail(null);
     setNotice(null);
-    const input = e.currentTarget as HTMLInputElement;
-    const file = input.files?.[0] ?? null;
     if (!file) {
       setSelectedFile(null);
       setValidationError(null);
@@ -349,11 +348,28 @@ export function Media() {
     setValidationError(await validateChimeWav(file));
   }
 
+  async function onFileSelected(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    await selectChimeFile(input.files?.[0] ?? null);
+  }
+
   function resetUpload() {
     setSelectedFile(null);
     setValidationError(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
+
+  const chimeDrop = useFileDrop(
+    (files) => {
+      if (!files[0]) return;
+      // A dropped file becomes the selection: clear any stale picker value so
+      // the shown file matches what will upload and re-picking that file still
+      // fires `change`.
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      void selectChimeFile(files[0]);
+    },
+    { disabled: uploading },
+  );
 
   async function onUploadSubmit(e: Event) {
     e.preventDefault();
@@ -565,36 +581,45 @@ export function Media() {
         <summary>Upload New Chime</summary>
         <div class="section-content">
           <form class="chime-upload" onSubmit={onUploadSubmit} novalidate>
-            <div class="chime-upload-row">
-              <input
-                ref={fileInputRef}
-                type="file"
-                id="chime_file"
-                name="file"
-                class="chime-file-input"
-                accept=".wav,audio/wav,audio/x-wav,audio/wave,audio/vnd.wave"
-                data-testid="chime-file-input"
-                onChange={onFileSelected}
-                disabled={uploading}
-              />
-              <button
-                type="submit"
-                class="action-btn primary chime-upload-btn"
-                data-testid="chime-upload-submit"
-                disabled={!selectedFile || !!validationError || uploading}
-                aria-busy={uploading ? "true" : "false"}
-              >
-                {uploading ? (
-                  <>
-                    <span class="chime-spinner" aria-hidden="true" /> Uploading
-                    {"\u2026"}
-                  </>
-                ) : (
-                  <>
-                    <Icon name="upload" class="chime-btn-icon" /> Upload
-                  </>
-                )}
-              </button>
+            <div
+              class={`chime-dropzone${chimeDrop.dragging ? " dragging" : ""}`}
+              data-testid="chime-dropzone"
+              {...chimeDrop.dropHandlers}
+            >
+              <p class="chime-dropzone-label">
+                <Icon name="upload" class="chime-btn-icon" /> Drag &amp; drop a .wav here, or choose a file
+              </p>
+              <div class="chime-upload-row">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  id="chime_file"
+                  name="file"
+                  class="chime-file-input"
+                  accept=".wav,audio/wav,audio/x-wav,audio/wave,audio/vnd.wave"
+                  data-testid="chime-file-input"
+                  onChange={onFileSelected}
+                  disabled={uploading}
+                />
+                <button
+                  type="submit"
+                  class="action-btn primary chime-upload-btn"
+                  data-testid="chime-upload-submit"
+                  disabled={!selectedFile || !!validationError || uploading}
+                  aria-busy={uploading ? "true" : "false"}
+                >
+                  {uploading ? (
+                    <>
+                      <span class="chime-spinner" aria-hidden="true" /> Uploading
+                      {"\u2026"}
+                    </>
+                  ) : (
+                    <>
+                      <Icon name="upload" class="chime-btn-icon" /> Upload
+                    </>
+                  )}
+                </button>
+              </div>
             </div>
             <p class="chime-upload-hint">
               A finished 16-bit PCM WAV — mono or stereo, 44.1 or 48&nbsp;kHz,

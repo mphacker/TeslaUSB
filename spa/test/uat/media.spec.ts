@@ -339,9 +339,14 @@ test.describe("media (lock chimes) UAT", () => {
     expect(sockets, `websocket(s) opened: ${JSON.stringify(sockets)}`).toEqual([]);
 
     // The ONLY /api/ requests on load are the read-only `GET /api/chimes` (active
-    // chime) and `GET /api/chime-scheduler` (the embedded scheduler snapshot);
-    // both are GETs, same-origin, and nothing else hits /api/.
-    const allowedReads = new Set(["GET /api/chimes", "GET /api/chime-scheduler"]);
+    // chime), `GET /api/chime-scheduler` (the embedded scheduler snapshot), and
+    // `GET /api/system/timezone` (the scheduler's clock/timezone gate); all are
+    // GETs, same-origin, and nothing else hits /api/.
+    const allowedReads = new Set([
+      "GET /api/chimes",
+      "GET /api/chime-scheduler",
+      "GET /api/system/timezone",
+    ]);
     for (const req of probe.requests) {
       const u = new URL(req.url);
       expect(u.origin, `off-origin request to ${req.url}`).toBe(origin);
@@ -481,6 +486,62 @@ test.describe("media (lock chimes) UAT", () => {
 
     // The input is cleared for the next action, and the JS stayed clean.
     await expect(page.locator("[data-testid=chime-upload-submit]")).toBeDisabled();
+    assertCleanConsole(probe);
+  });
+
+  test("library upload via drag-and-drop — dropping a valid WAV stages it and uploads", async ({
+    page,
+    probe,
+  }) => {
+    const libraryPosts: string[] = [];
+
+    await page.route("**/api/chime-scheduler/library", (route) => {
+      if (route.request().method() !== "POST") return route.continue();
+      const post = route.request().postData() ?? "";
+      const m = post.match(/filename="([^"]+)"/);
+      libraryPosts.push(m ? m[1] : "Dropped.wav");
+      return route.fulfill({
+        status: 202,
+        contentType: "application/json",
+        body: JSON.stringify({ state: "queued", job_id: "job-dnd" }),
+      });
+    });
+    await page.route("**/api/chimes", (route) => {
+      if (route.request().method() === "GET") return jsonRoute(route, 200, { installed: null });
+      return route.continue();
+    });
+
+    await gotoMedia(page);
+    const zone = page.locator("[data-testid=chime-dropzone]");
+    await expect(zone).toBeVisible();
+
+    // Drop a structurally-valid WAV onto the zone → client validation passes,
+    // it stages exactly like the file picker does and enables Upload.
+    const bytes = Array.from(wavBuffer({ channels: 2, sampleRate: 48000, dataLen: 512 }));
+    await zone.evaluate((el, b) => {
+      const dt = new DataTransfer();
+      dt.items.add(
+        new File([new Uint8Array(b as number[])], "Dropped.wav", { type: "audio/wav" }),
+      );
+      for (const t of ["dragenter", "dragover", "drop"]) {
+        const ev = new DragEvent(t, { bubbles: true, cancelable: true });
+        Object.defineProperty(ev, "dataTransfer", { value: dt });
+        el.dispatchEvent(ev);
+      }
+    }, bytes);
+
+    await expect(page.locator("[data-testid=chime-upload-selected]")).toContainText(
+      "Dropped.wav",
+    );
+    await expect(page.locator("[data-testid=chime-upload-submit]")).toBeEnabled();
+
+    await page.locator("[data-testid=chime-upload-submit]").click();
+    await expect(page.locator("[data-testid=chime-notice]")).toContainText(
+      "Upload accepted — syncing",
+    );
+    expect(libraryPosts, "expected one library POST from the dropped file").toEqual([
+      "Dropped.wav",
+    ]);
     assertCleanConsole(probe);
   });
 

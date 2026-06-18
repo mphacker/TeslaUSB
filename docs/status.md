@@ -82,6 +82,18 @@ desired). Device `cybertruckusb.local` healthy: SSH + wlan0 connected, boot
 `degraded` (pre-existing benign zram timer), webd serving the latest SPA bundle.
 
 **Shipped + LIVE-PROVEN today (newest first):**
+- **Boombox page accuracy: size text + folder wording** (2026-06-18): the Boombox
+  requirements card and upload zone still advertised a **1 MB** per-file limit even
+  though `BOOMBOX_MAX_BYTES` was raised to **8 MiB** on 06-17 — the page text was
+  never updated. Corrected the card + zone (1 MB → 8 MB, both MP3 and WAV; the
+  WAV validator caps format only, not size), clarified the folder line to
+  `Boombox/` at the media-drive root (storage location was already correct — no
+  backend change), and surfaced the enforced WAV spec (16-bit PCM, 44.1/48 kHz,
+  mono/stereo). `docs/Requirements.md` §4.7 stale "≤ 1 MB" → "≤ 8 MB" with the
+  LockChime-conflation rationale. Build clean; `boombox.spec.ts` **24/24** both
+  viewports. Commit `00d7200`. DEPLOYED to `cybertruckusb.local` (SPA-only,
+  `index-gZ53aHov.js`, sha256-verified additive swap, webd active); device
+  Playwright gate **14/14** both viewports, console clean.
 - **Light-show + boombox upload size raised + clean over-limit errors** (2026-06-17):
   light shows ship with full-song audio (`.mp3`/`.wav`) that routinely exceeds the
   old **5 MiB** cap, so legit files (7–13 MB) were rejected. Raised

@@ -34,15 +34,17 @@ The orchestrator is **Claude Opus 4.8**; it owns the session and routes work:
   designs the approach, owns `todos`/`todo_deps`/`plan.md`, sequences
   dependencies, and makes the final reconciled call. Opus does not delegate
   planning.
-- **Write code → `mai-code-1-flash-internal` (background sub-agent).** All
+- **Write code → `gpt-5.3-codex` (background sub-agent).** All
   substantive implementation (features, multi-file changes, porting v1 behavior)
   is delegated with a self-contained prompt: exact files, the contract, the
   constraints (this file + charter), and the acceptance tests to pass. Opus may
-  make only trivial/surgical edits directly.
+  make only trivial/surgical edits directly. (Superseded `mai-code-1-flash-internal`
+  on 2026-06-18 by operator directive — mai produced unreliable self-reported
+  verification and unscoped workspace-wide reformatting; do NOT use mai for code.)
 - **Review → `gpt-5.5` (background sub-agent).** The single reviewer of record
   for adversarial reviews, second opinions, and pre-deploy plan reviews.
 
-Delegation routes work, not judgment: Opus verifies mai's diff (builds/tests/
+Delegation routes work, not judgment: Opus verifies the coder's diff (builds/tests/
 reads it) and reconciles GPT-5.5's findings against the artifact rather than
 rubber-stamping them.
 
@@ -60,10 +62,10 @@ runs the loop and routes each step per "Model division of labor":
    (`todos`/`todo_deps`). **Check for an existing spec/task/ADR first** and
    validate it still aligns with the open item; **if it has drifted, fix the
    spec/task before coding.** Write one if none exists.
-3. **Implement (mai).** Delegate the code to a `mai-code-1-flash-internal`
+3. **Implement (GPT-5.3-codex).** Delegate the code to a `gpt-5.3-codex`
    sub-agent with the acceptance tests it must make pass.
-4. **Review (GPT-5.5).** Adversarially review mai's diff; reconcile findings;
-   **send issues back to mai and re-review until clean** (bounded — escalate to
+4. **Review (GPT-5.5).** Adversarially review the coder's diff; reconcile findings;
+   **send issues back to the coder and re-review until clean** (bounded — escalate to
    the operator if it doesn't converge in a few cycles).
 5. **Validate by test.** Unit/integration for logic; **Playwright for any UI
    change** (see below); the hardware-test skill for device behavior. A box is
@@ -85,7 +87,7 @@ Run as many items in parallel as can proceed **without collision or rework**:
 - **One writer per shared artifact.** `status.md`, `plan.md`, and each spec/
   contract have a single writer; Opus serializes edits and merges sub-agent
   results.
-- **One self-contained mai lane per item**, each with its own files + tests;
+- **One self-contained coder lane per item**, each with its own files + tests;
   reviews fan out to GPT-5.5 per lane. Opus tracks lanes (`lanes`/`todos`),
   reconciles, and updates `status.md` once per completed item.
 - **When unsure whether two items collide, assume they do and serialize.**
@@ -100,7 +102,7 @@ conclusion while you form yours. Then **reconcile**: surface your view, GPT-5.5'
 view, and the reconciled conclusion so the operator sees the reasoning; treat
 disagreement as a reason to dig deeper. Re-check the final fix/plan with GPT-5.5
 before anything risky (live-hardware or recording-critical). Any non-trivial
-code in the fix is implemented by mai, then reviewed by GPT-5.5.
+code in the fix is implemented by GPT-5.3-codex, then reviewed by GPT-5.5.
 
 ## UI work — Playwright verification is non-optional (binding)
 

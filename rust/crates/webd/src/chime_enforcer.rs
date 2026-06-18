@@ -6,6 +6,20 @@ use serde_json::{Value, json};
 
 use crate::AppState;
 
+/// Unix seconds for 2026-01-01T00:00:00Z is well past; we use 2024-01-01Z as the
+/// floor. A clock reporting earlier than this is implausible on this hardware
+/// (it predates the project), so schedule matching against it is unsafe.
+const PLAUSIBLE_EPOCH_FLOOR_SECS: u64 = 1_704_067_200;
+
+/// Tracks whether the "tick skipped: clock implausible" line has been logged, so
+/// a persistently-unsynced clock does not spam stderr every 60s. Reset to false
+/// once the clock becomes plausible again (so a later desync logs once more).
+static TICK_SKIP_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Tracks whether the boot-time "clockless" line has been logged (boot runs once,
+/// but a static keeps it symmetric and guards against any future re-invocation).
+static BOOT_SKIP_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Spawn the background chime-enforcement task when the production env is enabled.
 pub(crate) fn spawn(state: AppState) {
     tokio::spawn(async move {
@@ -33,16 +47,32 @@ async fn enforce_boot(state: &AppState) -> Option<String> {
     if library.is_empty() {
         return None;
     }
+    // Establish clock trust BEFORE reading the time/offset: if NTP steps the clock
+    // between these reads, we must not evaluate schedules against the pre-step value.
+    let plausible = clock_is_plausible();
+    if !plausible && !BOOT_SKIP_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        let _ = writeln!(
+            std::io::stderr(),
+            "chime enforcer: clock not plausible at boot; evaluating clock-independent schedules + random-on-boot only"
+        );
+    }
     let tz = local_offset_secs();
     let seed = boot_seed();
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
-    let now = i64::try_from(now).unwrap_or(i64::MAX);
+    // Never abort boot on a pre-epoch/garbage clock: the clockless path needs only
+    // a placeholder timestamp (OnBoot + random-on-boot are clock-independent). A
+    // plausible clock is always >= the 2024 floor, so this fallback (0) can only
+    // ever fire when `plausible` is already false — boot must still proceed there.
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+        .unwrap_or(0);
     let request = json!({
         "cmd": "evaluate_boot",
         "unix_secs": now,
         "tz_offset_secs": tz,
         "library": library,
         "boot_seed": seed,
+        "clock_plausible": plausible,
     });
     let pick = call_scheduler(state, request).await?;
     let name = pick_name(&pick)?;
@@ -62,6 +92,20 @@ async fn enforce_boot(state: &AppState) -> Option<String> {
 async fn enforce_tick(state: &AppState, last_enforced: Option<&str>) -> Option<String> {
     let library = library_names(state).await?;
     if library.is_empty() {
+        return None;
+    }
+    // The tick path is purely schedule (time) based — there is no random fallback.
+    // If the clock is not trustworthy, skip the tick entirely (logging once per
+    // skip-transition), and reset the latch when the clock is trustworthy again.
+    if clock_is_plausible() {
+        TICK_SKIP_LOGGED.store(false, std::sync::atomic::Ordering::Relaxed);
+    } else {
+        if !TICK_SKIP_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "chime enforcer: clock not plausible (NTP unsynced); skipping schedule tick"
+            );
+        }
         return None;
     }
     let tz = local_offset_secs();
@@ -181,6 +225,67 @@ fn boot_seed() -> u64 {
     0
 }
 
+/// Decide whether the system clock can be trusted for time-based schedule
+/// enforcement. A no-RTC device boots with a bogus clock until NTP syncs; we
+/// must not match schedules against it. An explicit `WEBD_CLOCK_PLAUSIBLE`
+/// override (for tests/ops) wins when present and recognized.
+fn clock_is_plausible() -> bool {
+    if let Ok(v) = std::env::var("WEBD_CLOCK_PLAUSIBLE") {
+        if let Some(forced) = parse_plausible_override(&v) {
+            return forced;
+        }
+    }
+    let year_ok = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() >= PLAUSIBLE_EPOCH_FLOOR_SECS)
+        .unwrap_or(false);
+    // Short-circuit before shelling out to `timedatectl`: if the year floor fails
+    // the clock is implausible regardless of NTP state, and during the no-RTC
+    // boot window (year always bad) this avoids a per-tick subprocess that could
+    // hang and block the enforcer.
+    if !year_ok {
+        return false;
+    }
+    plausibility_from(year_ok, ntp_synchronized())
+}
+
+/// Pure plausibility decision: a trustworthy clock requires a sane year AND an
+/// affirmative `NTPSynchronized=yes`. When `timedatectl` is unavailable or
+/// reports unsynced (`None`/`Some(false)`) we FAIL CLOSED and skip schedule
+/// enforcement; the `WEBD_CLOCK_PLAUSIBLE` env override is the escape hatch.
+fn plausibility_from(year_ok: bool, ntp: Option<bool>) -> bool {
+    year_ok && ntp == Some(true)
+}
+
+/// Parse the `WEBD_CLOCK_PLAUSIBLE` override. Accepts 1/0, true/false, yes/no
+/// (case-insensitive, trimmed). Unrecognized values → `None` (override ignored).
+fn parse_plausible_override(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" => Some(true),
+        "0" | "false" | "no" => Some(false),
+        _ => None,
+    }
+}
+
+/// Query systemd for NTP synchronization. `Some(true)`/`Some(false)` when
+/// `timedatectl` answers `yes`/`no`; `None` when it is missing, fails, or emits
+/// an unparseable value.
+fn ntp_synchronized() -> Option<bool> {
+    let output = std::process::Command::new("timedatectl")
+        .args(["show", "-p", "NTPSynchronized", "--value"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = std::str::from_utf8(&output.stdout).ok()?.trim().to_ascii_lowercase();
+    match text.as_str() {
+        "yes" => Some(true),
+        "no" => Some(false),
+        _ => None,
+    }
+}
+
 #[derive(Default)]
 struct Fnv1a {
     state: u64,
@@ -201,7 +306,7 @@ impl Hasher for Fnv1a {
 
 #[cfg(test)]
 mod tests {
-    use super::next_action;
+    use super::{next_action, parse_plausible_override, plausibility_from};
 
     #[test]
     fn next_action_truth_table() {
@@ -210,5 +315,26 @@ mod tests {
         assert_eq!(next_action(Some("B"), Some("A")), Some("B".to_owned()));
         assert_eq!(next_action(None, Some("A")), None);
         assert_eq!(next_action(None, None), None);
+    }
+
+    #[test]
+    fn plausibility_from_truth_table() {
+        assert!(!plausibility_from(false, Some(true)));
+        assert!(!plausibility_from(false, None));
+        assert!(plausibility_from(true, Some(true)));
+        assert!(!plausibility_from(true, Some(false)));
+        assert!(!plausibility_from(true, None));
+    }
+
+    #[test]
+    fn parse_plausible_override_truth_table() {
+        assert_eq!(parse_plausible_override("1"), Some(true));
+        assert_eq!(parse_plausible_override("true"), Some(true));
+        assert_eq!(parse_plausible_override("YES"), Some(true));
+        assert_eq!(parse_plausible_override("0"), Some(false));
+        assert_eq!(parse_plausible_override("false"), Some(false));
+        assert_eq!(parse_plausible_override(" no "), Some(false));
+        assert_eq!(parse_plausible_override("maybe"), None);
+        assert_eq!(parse_plausible_override(""), None);
     }
 }

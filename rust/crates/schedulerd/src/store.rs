@@ -11,7 +11,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use teslausb_core::chime::{CivilTime, Pick, resolve_active, resolve_boot};
+use teslausb_core::chime::{CivilTime, Pick, ScheduleKind, resolve_active, resolve_boot};
 
 use crate::model::{
     ChimeGroup, GroupInput, RandomMode, ScheduleInput, StoredSchedule, ValidationError,
@@ -272,6 +272,33 @@ impl Store {
             .collect();
         let members = self.random_members(library);
         resolve_boot(now, &core, active_chime, library, members.as_deref(), boot_seed)
+    }
+
+    /// Evaluate the boot-time chime when the system clock is NOT yet trustworthy
+    /// (no-RTC device before NTP sync). Time-windowed schedules (weekly/date/
+    /// holiday/timed-recurring) are skipped because matching them against a bogus
+    /// clock is unsafe; clock-INDEPENDENT behaviors are preserved: `Interval::OnBoot`
+    /// recurring schedules (boot-event-driven, eligible at minute 0) and the
+    /// random-on-boot fallback.
+    #[must_use]
+    pub fn evaluate_boot_clockless(
+        &self,
+        now: CivilTime,
+        active_chime: Option<&str>,
+        library: &[String],
+        boot_seed: u64,
+    ) -> Option<Pick> {
+        let onboot: Vec<_> = self
+            .state
+            .schedules
+            .iter()
+            .filter_map(|s| s.input.validate(&s.id).ok())
+            .filter(
+                |s| matches!(&s.kind, ScheduleKind::Recurring { interval } if interval.minutes().is_none()),
+            )
+            .collect();
+        let members = self.random_members(library);
+        resolve_boot(now, &onboot, active_chime, library, members.as_deref(), boot_seed)
     }
 
     fn random_members(&self, library: &[String]) -> Option<Vec<String>> {
@@ -546,6 +573,89 @@ mod tests {
             })
             .unwrap();
         assert!(store.evaluate_boot(ct(2026, 1, 1, 12, 0), None, &[], 1).is_none());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn evaluate_boot_clockless_skips_time_windowed_schedules() {
+        let path = tmp_path("clockless-weekly");
+        let mut store = Store::load(path.clone());
+        store
+            .add_schedule(weekly("Sched", "Sched.wav", "Thursday", 9))
+            .unwrap();
+        let group = store
+            .add_group(GroupInput {
+                name: "Boot".to_owned(),
+                description: String::new(),
+                chimes: vec!["Rand.wav".to_owned()],
+            })
+            .unwrap();
+        store
+            .set_random_mode(RandomMode {
+                enabled: true,
+                group_id: Some(group.id.clone()),
+            })
+            .unwrap();
+
+        // Thursday 09:30 → the weekly schedule WOULD be eligible, but the clockless
+        // path skips time-windowed schedules → falls through to random Rand.wav.
+        let pick = store
+            .evaluate_boot_clockless(
+                ct(2026, 1, 1, 9, 30),
+                None,
+                &["Sched.wav".to_owned(), "Rand.wav".to_owned()],
+                7,
+            )
+            .unwrap();
+        assert_eq!(pick.chime_filename, "Rand.wav");
+        assert_ne!(pick.chime_filename, "Sched.wav");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn evaluate_boot_clockless_honors_onboot_recurring_schedule() {
+        let path = tmp_path("clockless-onboot");
+        let mut store = Store::load(path.clone());
+        store
+            .add_schedule(ScheduleInput {
+                name: "Boot".to_owned(),
+                chime_filename: "Boot.wav".to_owned(),
+                schedule_type: ScheduleType::Recurring,
+                days: vec![],
+                month: None,
+                day: None,
+                holiday: None,
+                interval: Some("on_boot".to_owned()),
+                hour: None,
+                minute: None,
+                enabled: true,
+            })
+            .unwrap();
+        let group = store
+            .add_group(GroupInput {
+                name: "Boot".to_owned(),
+                description: String::new(),
+                chimes: vec!["Rand.wav".to_owned()],
+            })
+            .unwrap();
+        store
+            .set_random_mode(RandomMode {
+                enabled: true,
+                group_id: Some(group.id.clone()),
+            })
+            .unwrap();
+
+        // OnBoot recurring schedule is clock-independent → it is honored even on a
+        // bogus clock, beating the random fallback.
+        let pick = store
+            .evaluate_boot_clockless(
+                ct(2026, 1, 1, 12, 0),
+                None,
+                &["Boot.wav".to_owned(), "Rand.wav".to_owned()],
+                7,
+            )
+            .unwrap();
+        assert_eq!(pick.chime_filename, "Boot.wav");
         let _ = std::fs::remove_file(path);
     }
 

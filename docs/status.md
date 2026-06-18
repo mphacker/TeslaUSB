@@ -12,34 +12,36 @@
 > [`adr/`](./adr/) (locked architecture, incl. [`ADR-0003`](./adr/0003-media-read-path.md)
 > media read path).
 
-## ⏯️ Resume here — DEVICE TIMEZONE done + deployed; A3e.4 (no-RTC gate) is the open follow-up (2026-06-18)
+## ⏯️ Resume here — A3e.4 (no-RTC clock-plausibility gate) DONE + live-proven; pick next item (2026-06-18)
 
-**Branch `mhackermsft/b1-clean`.** The device-timezone / DST-correct-enforcement work
-(A3e) is **DONE and live on hardware** as of 2026-06-18:
-- Commits: `fff2ba9` (timezone feature) + `6d64913` (enumerate_zones symlink hardening +
-  UAT strengthening). NOT pushed.
-- **Deployed to `cybertruckusb.local`** (cross-built aarch64 webd via podman, sha
-  d35adc81…) under hardware-test rails: removed the DST-defeating
-  `WEBD_TZ_OFFSET_SECS=-14400` drop-in (kept `WEBD_CHIME_ENFORCER=1`), deployed new
-  webd + SPA. **LIVE-PROVEN:** GET/PUT `/api/system/timezone` work (round-trip + 422
-  on invalid); selector renders on the real page (mobile+desktop, console-clean);
-  `date +%z=-0400` DST-aware via system tz America/Detroit; enforcement actuates on
-  boot; survived a clean reboot (running, no failed units, SSH/WiFi up). Evidence:
-  `files/hw-results.md` "A3e.3" + `files/tz-deploy/` screenshots.
-
-**Why this work existed.** The enforcer evaluated schedules with a **fixed** UTC offset:
-`chime_enforcer::local_offset_secs()` read `WEBD_TZ_OFFSET_SECS` BEFORE the DST-aware
-`date +%z` fallback, and production shipped a hardcoded `WEBD_TZ_OFFSET_SECS=-14400`
-drop-in — **defeating DST**. Fixed by dropping that override + adding a web UI to set the
-system timezone via `timedatectl`. **Pi Zero 2 W has NO RTC/clock battery/fake-hwclock**
-→ time is NTP-only at boot (follow-up A3e.4).
+**Branch `mhackermsft/b1-clean`.** A3e (device timezone / DST-correct enforcement) and its
+follow-up **A3e.4 (no-RTC clock-plausibility gate) are both DONE and live on hardware**:
+- **A3e.4 deployed + live-proven 2026-06-18** (cross-built aarch64 webd+schedulerd via podman,
+  atomic-mv under dead-man rails). With `WEBD_CLOCK_PLAUSIBLE=0` the device logged the boot +
+  tick skip lines (once each), the active LockChime stayed unchanged (time-windowed schedule
+  skipped, random-on-boot preserved), and normal enforcement resumed cleanly on removal; no
+  reboot, no failed units, SSH/WiFi up. Coded by GPT-5.3-codex to an Opus spec; GPT-5.5
+  adversarial code + deploy-plan reviews reconciled. Tests: core 343 / schedulerd 32 / webd 265
+  (5 new). Evidence: `files/hw-results.md` "A3e.4" + `files/hw-a3e4-clockgate-journal-*.log`.
+  See full §4.5 A3e.4 entry below.
+- **Coder switch (2026-06-18):** retired `mai-code-1-flash-internal` for coding (unscoped
+  workspace-wide `cargo fmt` + unreliable self-reported tests); coder is now **GPT-5.3-codex**
+  (well-defined coding tasks only — Opus owns all planning/reasoning/review-reconciliation).
+  Recorded in `.github/copilot-instructions.md`.
+- **Review-speed policy (2026-06-18):** risk-tiered reviews — trivial→Opus-only, small+green→one
+  scoped medium-effort review run in parallel with tests, high-risk/live-hardware→full adversarial
+  + cross-model. Reviews scoped to changed hunks (not full-file re-derivation), run parallel to
+  podman verification.
 
 **NEXT STEPS when resuming:**
-1. Commit `docs/status.md` + `files/` evidence for the deploy (this update).
-2. **Open question for the user:** implement the no-RTC clock-plausibility gate
-   (A3e.4 — skip time-based enforcement until clock is NTP-synced/plausible) now, or
-   defer? Surfaced; awaiting operator decision.
-3. Then pick the next unchecked `status.md` item per the normal loop.
+1. Commit `docs/status.md` + `.github/copilot-instructions.md` + the 3 A3e.4 rust files + `files/`
+   evidence (this update). NOT pushed unless asked.
+2. Pick the next unchecked `status.md` item per the normal loop (partition non-colliding items
+   into parallel lanes for throughput).
+
+**Prior A3e timezone work** (DONE, live): commits `fff2ba9` + `6d64913`; deployed under hw rails
+(removed DST-defeating `WEBD_TZ_OFFSET_SECS=-14400` drop-in, system tz America/Detroit,
+`date +%z=-0400`). Evidence: `files/hw-results.md` "A3e.3" + `files/tz-deploy/`.
 
 ---
 
@@ -755,7 +757,7 @@ LUNs) is the single make-or-break that still needs the car.**
   screenshots); **hardware-test** proved schedule + random-on-boot swap `LockChime.wav` with no
   churn. Evidence: `files/hw-results.md`, `spa/test/uat/artifacts/chime-scheduler-{desktop,mobile}*.png`.
 
-#### A3e · Device timezone setting + DST-correct enforcement — DONE (deployed + live-proven 2026-06-18; A3e.4 follow-up open)
+#### A3e · Device timezone setting + DST-correct enforcement — DONE (deployed + live-proven 2026-06-18; A3e.4 no-RTC gate also DONE + live-proven 2026-06-18)
 
 > **Why this exists.** The enforcer evaluated schedules against a **fixed** UTC offset:
 > `chime_enforcer::local_offset_secs()` reads `WEBD_TZ_OFFSET_SECS` (a fixed value) BEFORE
@@ -802,10 +804,29 @@ LUNs) is the single make-or-break that still needs the car.**
   `chime_enforcer.rs` byte-identical to proven 617bce7; enforcement actuates (active LockChime set
   at boot time by random-on-boot); survived a clean reboot (is-system-running=running, no failed
   units, SSH/WiFi up). **(DONE — see `files/hw-results.md` "A3e.3".)**
-- [ ] **A3e.4 · No-RTC clock-plausibility gate (follow-up, high priority).** Pi has no RTC; the
-  enforcer should **skip time-based enforcement until the clock is NTP-synced/plausible**
-  (e.g. gate on `timedatectl` `NTPSynchronized=yes` or a sane year), optionally add fake-hwclock
-  to persist last-known time across power cycles. **(design pending; surface go/defer to user)**
+- [x] **A3e.4 · No-RTC clock-plausibility gate (follow-up, high priority).** Pi has no RTC; the
+  enforcer now **skips time-based enforcement until the clock is NTP-synced/plausible**.
+  Plausibility is **fail-closed**: trustworthy requires year ≥ 2024-01-01Z floor **AND**
+  `timedatectl NTPSynchronized=yes`; missing/garbage/`no` → not plausible (`WEBD_CLOCK_PLAUSIBLE`
+  env override is the escape hatch). Clock trust is decided in **webd** (owns the real clock);
+  core resolvers stay pure. **Tick path** (schedule-only, no random fallback) is skipped entirely
+  when implausible, logging once per skip-transition (latch resets when plausible again).
+  **Boot path** is NOT short-circuited — clock-INDEPENDENT behaviors still fire: random-on-boot
+  AND `Interval::OnBoot` recurring schedules (eligible at minute 0); only time-WINDOWED schedules
+  (weekly/date/holiday/timed-recurring) are skipped via `schedulerd.evaluate_boot_clockless`
+  (filters to OnBoot-recurring only — NOT an empty list). `clock_plausible: Option<bool>` is
+  `#[serde(default)]` on `EvaluateBoot` only (backward-compat; omitted/None preserves behavior).
+  **(DONE — coded by GPT-5.3-codex to an Opus-authored spec, GPT-5.5 adversarial code + deploy-plan
+  reviews reconciled (2 code fixes: boot-path pre-epoch `?` short-circuit → `0` fallback; skip
+  `timedatectl` when year floor already fails). Tests: core 343 / schedulerd 32 / webd 265 all pass
+  incl. 5 new (`plausibility_from_truth_table`, `parse_plausible_override_truth_table`,
+  `evaluate_boot_clock_implausible_skips_schedule`, `evaluate_boot_clockless_skips_time_windowed_schedules`,
+  `evaluate_boot_clockless_honors_onboot_recurring_schedule`); schedulerd clippy clean.
+  LIVE-PROVEN on hardware 2026-06-18: cross-built aarch64 webd+schedulerd, atomic-mv deploy under
+  dead-man rails; with `WEBD_CLOCK_PLAUSIBLE=0` the device logged the boot + tick skip lines (once),
+  the active LockChime stayed unchanged — time-windowed "Evening Chime" schedule correctly skipped
+  while random-on-boot preserved — and normal enforcement resumed cleanly after removal; no reboot,
+  no failed units, SSH/WiFi up. See `files/hw-results.md` "A3e.4" + `files/hw-a3e4-clockgate-journal-*.log`.)**
 
 ### 4.6 Music — `Requirements.md` §4.6
 

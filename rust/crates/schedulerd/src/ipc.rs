@@ -124,6 +124,11 @@ enum Request {
         library: Option<Vec<String>>,
         #[serde(default)]
         boot_seed: u64,
+        /// Whether the system clock is trustworthy for schedule matching. When
+        /// `Some(false)` the boot evaluation skips time-windowed schedules and
+        /// keeps only clock-independent behavior (`OnBoot` schedules + random).
+        #[serde(default)]
+        clock_plausible: Option<bool>,
     },
 }
 
@@ -359,16 +364,21 @@ fn dispatch(req: Request, state: &ServeState) -> Value {
             active_chime,
             library,
             boot_seed,
+            clock_plausible,
         } => match state.store.lock() {
             Ok(store) => {
                 let now = civil_from_unix(unix_secs, tz_offset_secs);
                 let library = resolve_eval_library(library, &state.library_dir);
-                let pick = store.evaluate_boot(
-                    now,
-                    active_chime.as_deref(),
-                    &library,
-                    boot_seed,
-                );
+                let pick = if clock_plausible == Some(false) {
+                    store.evaluate_boot_clockless(
+                        now,
+                        active_chime.as_deref(),
+                        &library,
+                        boot_seed,
+                    )
+                } else {
+                    store.evaluate_boot(now, active_chime.as_deref(), &library, boot_seed)
+                };
                 json!({ "pick": pick_json(pick) })
             }
             Err(_) => err_envelope("locked", "state lock poisoned"),
@@ -568,6 +578,70 @@ mod tests {
             }),
         );
         assert!(resp["pick"].is_null() || resp["pick"]["chimeFilename"].is_string());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn evaluate_boot_clock_implausible_skips_schedule() {
+        let (socket, dir) = spawn_server("boot_clock");
+        call(
+            &socket,
+            &json!({
+                "cmd": "add_schedule",
+                "input": {
+                    "name": "Morn",
+                    "chimeFilename": "Sched.wav",
+                    "scheduleType": "weekly",
+                    "days": ["Thursday"],
+                    "hour": 9,
+                    "minute": 0,
+                    "enabled": true
+                }
+            }),
+        );
+        let group = call(
+            &socket,
+            &json!({
+                "cmd": "add_group",
+                "input": { "name": "Boot", "description": "", "chimes": ["Rand.wav"] }
+            }),
+        );
+        call(
+            &socket,
+            &json!({
+                "cmd": "set_random_mode",
+                "mode": { "enabled": true, "groupId": group["group"]["id"] }
+            }),
+        );
+
+        // 2026-01-01T09:30:00Z is a Thursday after 09:00 → the weekly schedule is
+        // eligible. With clock_plausible=false it must be SKIPPED → random Rand.wav.
+        let implausible = call(
+            &socket,
+            &json!({
+                "cmd": "evaluate_boot",
+                "unix_secs": 1_767_260_400_i64 + 1800,
+                "tz_offset_secs": 0,
+                "library": ["Sched.wav", "Rand.wav"],
+                "boot_seed": 7,
+                "clock_plausible": false
+            }),
+        );
+        assert_eq!(implausible["pick"]["chimeFilename"], "Rand.wav");
+
+        // Same request with clock_plausible=true → schedule wins (Sched.wav).
+        let plausible = call(
+            &socket,
+            &json!({
+                "cmd": "evaluate_boot",
+                "unix_secs": 1_767_260_400_i64 + 1800,
+                "tz_offset_secs": 0,
+                "library": ["Sched.wav", "Rand.wav"],
+                "boot_seed": 7,
+                "clock_plausible": true
+            }),
+        );
+        assert_eq!(plausible["pick"]["chimeFilename"], "Sched.wav");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

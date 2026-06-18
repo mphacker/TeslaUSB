@@ -464,7 +464,7 @@ test.describe("media (lock chimes) UAT", () => {
       mimeType: "audio/wav",
       buffer: wavBuffer({ channels: 2, sampleRate: 48000, dataLen: 512 }),
     });
-    await expect(page.locator("[data-testid=chime-upload-selected]")).toContainText(
+    await expect(page.locator("[data-testid=chime-upload-staged]")).toContainText(
       "Chime.wav",
     );
     await expect(page.locator("[data-testid=chime-upload-submit]")).toBeEnabled();
@@ -474,6 +474,7 @@ test.describe("media (lock chimes) UAT", () => {
     await expect(page.locator("[data-testid=chime-notice]")).toContainText(
       "Upload accepted — syncing",
     );
+    await expect(page.locator("[data-testid=chime-upload-staged]")).toHaveCount(0);
 
     // v1 parity: adding to the library does NOT install an active chime, so the
     // active card stays empty and nothing POSTs to the install endpoint.
@@ -530,7 +531,7 @@ test.describe("media (lock chimes) UAT", () => {
       }
     }, bytes);
 
-    await expect(page.locator("[data-testid=chime-upload-selected]")).toContainText(
+    await expect(page.locator("[data-testid=chime-upload-staged]")).toContainText(
       "Dropped.wav",
     );
     await expect(page.locator("[data-testid=chime-upload-submit]")).toBeEnabled();
@@ -542,6 +543,131 @@ test.describe("media (lock chimes) UAT", () => {
     expect(libraryPosts, "expected one library POST from the dropped file").toEqual([
       "Dropped.wav",
     ]);
+    assertCleanConsole(probe);
+  });
+
+  test("library upload — multiple WAVs via drag-and-drop upload sequentially", async ({
+    page,
+    probe,
+  }) => {
+    const libraryPosts: string[] = [];
+
+    await page.route("**/api/chime-scheduler/library", (route) => {
+      if (route.request().method() !== "POST") return route.continue();
+      const post = route.request().postData() ?? "";
+      const m = post.match(/filename="([^"]+)"/);
+      libraryPosts.push(m ? m[1] : "Chime.wav");
+      return route.fulfill({
+        status: 202,
+        contentType: "application/json",
+        body: JSON.stringify({ state: "queued", job_id: "job-multi" }),
+      });
+    });
+    await page.route("**/api/chimes", (route) => {
+      if (route.request().method() === "GET") return jsonRoute(route, 200, { installed: null });
+      return route.continue();
+    });
+
+    await gotoMedia(page);
+    const zone = page.locator("[data-testid=chime-dropzone]");
+    await expect(zone).toBeVisible();
+
+    const first = Array.from(wavBuffer({ channels: 2, sampleRate: 48000, dataLen: 256 }));
+    const second = Array.from(wavBuffer({ channels: 1, sampleRate: 44100, dataLen: 128 }));
+    await zone.evaluate((el, files) => {
+      const dt = new DataTransfer();
+      for (const [name, bytes] of files as Array<[string, number[]]>) {
+        dt.items.add(
+          new File([new Uint8Array(bytes)], name, { type: "audio/wav" }),
+        );
+      }
+      for (const t of ["dragenter", "dragover", "drop"]) {
+        const ev = new DragEvent(t, { bubbles: true, cancelable: true });
+        Object.defineProperty(ev, "dataTransfer", { value: dt });
+        el.dispatchEvent(ev);
+      }
+    }, [
+      ["First.wav", first],
+      ["Second.wav", second],
+    ]);
+
+    await expect(page.locator("[data-testid=chime-upload-staged]")).toContainText(
+      "First.wav",
+    );
+    await expect(page.locator("[data-testid=chime-upload-staged]")).toContainText(
+      "Second.wav",
+    );
+    await expect(page.locator("[data-testid=chime-upload-submit]")).toContainText(
+      "Upload 2 chimes",
+    );
+    await expect(page.locator("[data-testid=chime-upload-submit]")).toBeEnabled();
+
+    await page.locator("[data-testid=chime-upload-submit]").click();
+    await expect(page.locator("[data-testid=chime-notice]")).toContainText(
+      "Upload accepted — syncing 2 chimes",
+    );
+    expect(libraryPosts, "expected two sequential library POSTs").toEqual([
+      "First.wav",
+      "Second.wav",
+    ]);
+    assertCleanConsole(probe);
+  });
+
+  test("library upload — an unattempted (invalid) staged file is not dropped after a sibling uploads", async ({
+    page,
+    probe,
+  }) => {
+    const libraryPosts: string[] = [];
+    await page.route("**/api/chime-scheduler/library", (route) => {
+      if (route.request().method() !== "POST") return route.continue();
+      const post = route.request().postData() ?? "";
+      const m = post.match(/filename="([^"]+)"/);
+      libraryPosts.push(m ? m[1] : "Chime.wav");
+      return route.fulfill({
+        status: 202,
+        contentType: "application/json",
+        body: JSON.stringify({ state: "queued", job_id: "job-keep" }),
+      });
+    });
+    await page.route("**/api/chimes", (route) => {
+      if (route.request().method() === "GET") return jsonRoute(route, 200, { installed: null });
+      return route.continue();
+    });
+
+    await gotoMedia(page);
+
+    // Stage one oversized (invalid) file alongside one valid file. The invalid
+    // file is never uploaded; it must survive the post-upload staged cleanup so
+    // the operator still sees (and can remove/fix) it.
+    await page.locator("[data-testid=chime-file-input]").setInputFiles([
+      {
+        name: "TooBig.wav",
+        mimeType: "audio/wav",
+        buffer: wavBuffer({ dataLen: 1024 * 1024 }), // > 1 MiB → rejected client-side
+      },
+      {
+        name: "Good.wav",
+        mimeType: "audio/wav",
+        buffer: wavBuffer({ dataLen: 256 }),
+      },
+    ]);
+
+    await expect(page.locator("[data-testid=chime-staged-error]")).toHaveCount(1);
+    // validCount === 1 → singular "Upload" label, enabled (no row still validating).
+    await expect(page.locator("[data-testid=chime-upload-submit]")).toContainText("Upload");
+    await expect(page.locator("[data-testid=chime-upload-submit]")).toBeEnabled();
+
+    await page.locator("[data-testid=chime-upload-submit]").click();
+    await expect(page.locator("[data-testid=chime-notice]")).toContainText(
+      "Upload accepted — syncing",
+    );
+
+    // Only the valid file was POSTed; the invalid row remains staged.
+    expect(libraryPosts).toEqual(["Good.wav"]);
+    const staged = page.locator("[data-testid=chime-upload-staged]");
+    await expect(staged).toContainText("TooBig.wav");
+    await expect(staged).not.toContainText("Good.wav");
+    await expect(page.locator("[data-testid=chime-staged-error]")).toHaveCount(1);
     assertCleanConsole(probe);
   });
 
@@ -606,13 +732,12 @@ test.describe("media (lock chimes) UAT", () => {
     probe,
   }) => {
     const posts: string[] = [];
+    await page.route("**/api/chime-scheduler/library", (route) => {
+      if (route.request().method() === "POST") posts.push("POST");
+      return route.continue();
+    });
     await page.route("**/api/chimes", (route) => {
-      const m = route.request().method();
-      if (m === "GET") return jsonRoute(route, 200, { installed: null });
-      if (m === "POST") {
-        posts.push("POST");
-        return jsonRoute(route, 200, { handoff_id: "x", state: "done" });
-      }
+      if (route.request().method() === "GET") return jsonRoute(route, 200, { installed: null });
       return route.continue();
     });
 
@@ -624,9 +749,10 @@ test.describe("media (lock chimes) UAT", () => {
       mimeType: "audio/wav",
       buffer: wavBuffer({ dataLen: 1024 * 1024 }), // total > 1 MiB
     });
-    const validation = page.locator("[data-testid=chime-upload-validation]");
-    await expect(validation).toBeVisible();
-    await expect(validation).toContainText("under 1 MB");
+    const stagedErrors = page.locator("[data-testid=chime-staged-error]");
+    await expect(stagedErrors).toHaveCount(1);
+    await expect(stagedErrors.first()).toBeVisible();
+    await expect(stagedErrors.first()).toContainText("under 1 MB");
     await expect(page.locator("[data-testid=chime-upload-submit]")).toBeDisabled();
 
     // (b) Wrong sample rate (32 kHz) → refused with a format message.
@@ -635,17 +761,12 @@ test.describe("media (lock chimes) UAT", () => {
       mimeType: "audio/wav",
       buffer: wavBuffer({ sampleRate: 32000, dataLen: 256 }),
     });
-    await expect(validation).toContainText("44.1 or 48");
+    await expect(stagedErrors).toHaveCount(2);
+    await expect(stagedErrors.nth(0)).toBeVisible();
+    await expect(stagedErrors.nth(0)).toContainText("under 1 MB");
+    await expect(stagedErrors.nth(1)).toBeVisible();
+    await expect(stagedErrors.nth(1)).toContainText("44.1 or 48");
     await expect(page.locator("[data-testid=chime-upload-submit]")).toBeDisabled();
-
-    // (c) A valid WAV clears the error and enables Upload.
-    await page.locator("[data-testid=chime-file-input]").setInputFiles({
-      name: "Good.wav",
-      mimeType: "audio/wav",
-      buffer: wavBuffer({ dataLen: 256 }),
-    });
-    await expect(page.locator("[data-testid=chime-upload-validation]")).toHaveCount(0);
-    await expect(page.locator("[data-testid=chime-upload-submit]")).toBeEnabled();
 
     // No POST was ever attempted for the rejected files (only client validation).
     expect(posts, `unexpected POST(s): ${JSON.stringify(posts)}`).toEqual([]);

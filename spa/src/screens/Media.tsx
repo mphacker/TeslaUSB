@@ -132,6 +132,22 @@ interface ChimeFailure {
   retryable: boolean;
 }
 
+interface StagedChime {
+  id: number;
+  file: File;
+  name: string;
+  size: number;
+  error: string | null | undefined;
+}
+
+interface ChimeUploadItem {
+  id: number;
+  name: string;
+  size: number;
+  status: "pending" | "uploading" | "done" | "error";
+  error?: string;
+}
+
 /**
  * Map an install/remove rejection to operator-facing UI state, keyed on the HTTP
  * `status` (and `code` where it sharpens the message). Mirrors the contract's
@@ -276,9 +292,13 @@ export function Media() {
 
   // ── Upload (install) state ──
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [validationError, setValidationError] = useState<string | null>(null);
+  const [staged, setStaged] = useState<StagedChime[]>([]);
   const [uploading, setUploading] = useState(false);
+  const [uploadItems, setUploadItems] = useState<ChimeUploadItem[]>([]);
+  const [uploadProgress, setUploadProgress] = useState<{
+    current: number;
+    total: number;
+  } | null>(null);
   const [uploadFail, setUploadFail] = useState<ChimeFailure | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [pendingUpload, setPendingUpload] = useState<{
@@ -303,6 +323,7 @@ export function Media() {
     bytes: number;
   } | null>(null);
 
+  const nextStagedIdRef = useRef(0);
   const uploadAbortRef = useRef<AbortController | null>(null);
   const activationAbortRef = useRef<AbortController | null>(null);
 
@@ -336,67 +357,144 @@ export function Media() {
     };
   }, []);
 
-  async function selectChimeFile(file: File | null) {
+  async function stageFiles(incoming: File[]) {
+    if (incoming.length === 0) return;
     setUploadFail(null);
     setNotice(null);
-    if (!file) {
-      setSelectedFile(null);
-      setValidationError(null);
-      return;
+    const additions: StagedChime[] = incoming.map((file) => ({
+      id: nextStagedIdRef.current++,
+      file,
+      name: file.name,
+      size: file.size,
+      error: undefined,
+    }));
+    setStaged((prev) => {
+      const seen = new Set(prev.map((item) => `${item.name}:${item.size}`));
+      const next = [...prev];
+      for (const item of additions) {
+        const key = `${item.name}:${item.size}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        next.push(item);
+      }
+      return next;
+    });
+
+    for (const item of additions) {
+      const error = await validateChimeWav(item.file);
+      setStaged((prev) =>
+        prev.map((row) => (row.id === item.id ? { ...row, error } : row)),
+      );
     }
-    setSelectedFile(file);
-    setValidationError(await validateChimeWav(file));
   }
 
   async function onFileSelected(e: Event) {
     const input = e.currentTarget as HTMLInputElement;
-    await selectChimeFile(input.files?.[0] ?? null);
+    const files = input.files ? Array.from(input.files) : [];
+    await stageFiles(files);
+    input.value = "";
   }
 
-  function resetUpload() {
-    setSelectedFile(null);
-    setValidationError(null);
-    if (fileInputRef.current) fileInputRef.current.value = "";
+  function removeStagedFile(id: number) {
+    if (uploading) return;
+    setStaged((prev) => prev.filter((item) => item.id !== id));
   }
 
   const chimeDrop = useFileDrop(
     (files) => {
-      if (!files[0]) return;
-      // A dropped file becomes the selection: clear any stale picker value so
-      // the shown file matches what will upload and re-picking that file still
-      // fires `change`.
-      if (fileInputRef.current) fileInputRef.current.value = "";
-      void selectChimeFile(files[0]);
+      void stageFiles(files);
     },
     { disabled: uploading },
   );
 
   async function onUploadSubmit(e: Event) {
     e.preventDefault();
-    if (!selectedFile || validationError || uploading) return;
+    const valid = staged.filter((item) => item.error === null);
+    if (valid.length === 0 || uploading) return;
     setUploading(true);
     setUploadFail(null);
     setNotice(null);
+    setUploadItems(
+      valid.map((item) => ({
+        id: item.id,
+        name: item.name,
+        size: item.size,
+        status: "pending" as const,
+      })),
+    );
+    setUploadProgress({ current: 0, total: valid.length });
     const ac = new AbortController();
     uploadAbortRef.current = ac;
-    try {
-      // The 202 response carries no filename/size — use the client-known file
-      // identity so the pending-row match works on real hardware (not just the
-      // mock). The catalog reports webd's sanitised name, so mirror that
-      // transform here. Capture before resetUpload() clears selectedFile.
-      const name = catalogChimeName(selectedFile.name);
-      const bytes = selectedFile.size;
-      await api.uploadLibraryChime(selectedFile, ac.signal);
-      resetUpload();
-      setPendingUpload((prev) => ({ filename: name, bytes, token: (prev?.token ?? 0) + 1 }));
-      setNotice(`Upload accepted — syncing “${name}” to your chime library below…`);
-    } catch (err) {
-      if (ac.signal.aborted) return; // silent: user/unmount cancelled
-      setUploadFail(classifyChimeFailure(err));
-    } finally {
-      if (uploadAbortRef.current === ac) uploadAbortRef.current = null;
-      setUploading(false);
+    const succeeded: { name: string; bytes: number }[] = [];
+    const failed: { id: number; name: string; fail: ChimeFailure }[] = [];
+    for (let i = 0; i < valid.length; i++) {
+      if (ac.signal.aborted) break;
+      const item = valid[i];
+      setUploadItems((prev) =>
+        prev.map((entry) =>
+          entry.id === item.id ? { ...entry, status: "uploading" } : entry,
+        ),
+      );
+      setUploadProgress({ current: i + 1, total: valid.length });
+      try {
+        await api.uploadLibraryChime(item.file, ac.signal);
+        succeeded.push({ name: catalogChimeName(item.name), bytes: item.size });
+        setUploadItems((prev) =>
+          prev.map((entry) => (entry.id === item.id ? { ...entry, status: "done" } : entry)),
+        );
+      } catch (err) {
+        if (ac.signal.aborted) break;
+        const fail = classifyChimeFailure(err);
+        failed.push({ id: item.id, name: item.name, fail });
+        setUploadItems((prev) =>
+          prev.map((entry) =>
+            entry.id === item.id
+              ? { ...entry, status: "error", error: fail.message }
+              : entry,
+          ),
+        );
+      }
     }
+    if (uploadAbortRef.current === ac) uploadAbortRef.current = null;
+    if (ac.signal.aborted) {
+      setUploading(false);
+      return;
+    }
+    const failedIds = new Set(failed.map((entry) => entry.id));
+    // Keep rows that failed (for retry) AND any row we never attempted — files
+    // still validating or invalid at submit time must not be silently dropped.
+    const attemptedIds = new Set(valid.map((item) => item.id));
+    setStaged((prev) =>
+      prev.filter((item) => failedIds.has(item.id) || !attemptedIds.has(item.id)),
+    );
+    if (fileInputRef.current) fileInputRef.current.value = "";
+
+    if (succeeded.length > 0) {
+      const last = succeeded[succeeded.length - 1];
+      setPendingUpload((prev) => ({
+        filename: last.name,
+        bytes: last.bytes,
+        token: (prev?.token ?? 0) + 1,
+      }));
+      setNotice(
+        succeeded.length === 1
+          ? `Upload accepted — syncing “${last.name}” to your chime library below…`
+          : `Upload accepted — syncing ${succeeded.length} chimes to your chime library below…`,
+      );
+    }
+    if (failed.length > 0) {
+      setUploadFail({
+        message:
+          failed.length === 1
+            ? failed[0].fail.message
+            : `${failed.length} file(s) failed to upload. ${failed[0].fail.message}`,
+        retryable: failed.some((entry) => entry.fail.retryable),
+      });
+    } else {
+      setUploadItems([]);
+    }
+    setUploadProgress(null);
+    setUploading(false);
   }
 
   function onChimeActivated(filename: string, bytes: number) {
@@ -493,6 +591,9 @@ export function Media() {
       if (activationAbortRef.current === ctrl) activationAbortRef.current = null;
     };
   }, [pendingActivation?.token]);
+
+  const validCount = staged.filter((item) => item.error === null).length;
+  const validating = staged.some((item) => item.error === undefined);
 
   return (
     <div class="container media-page" data-page="media" data-screen="media">
@@ -598,6 +699,7 @@ export function Media() {
                   class="chime-file-input"
                   accept=".wav,audio/wav,audio/x-wav,audio/wave,audio/vnd.wave"
                   data-testid="chime-file-input"
+                  multiple
                   onChange={onFileSelected}
                   disabled={uploading}
                 />
@@ -605,7 +707,7 @@ export function Media() {
                   type="submit"
                   class="action-btn primary chime-upload-btn"
                   data-testid="chime-upload-submit"
-                  disabled={!selectedFile || !!validationError || uploading}
+                  disabled={validCount === 0 || uploading || validating}
                   aria-busy={uploading ? "true" : "false"}
                 >
                   {uploading ? (
@@ -615,35 +717,76 @@ export function Media() {
                     </>
                   ) : (
                     <>
-                      <Icon name="upload" class="chime-btn-icon" /> Upload
+                      <Icon name="upload" class="chime-btn-icon" /> {validCount > 1 ? `Upload ${validCount} chimes` : "Upload"}
                     </>
                   )}
                 </button>
               </div>
             </div>
             <p class="chime-upload-hint">
-              A finished 16-bit PCM WAV — mono or stereo, 44.1 or 48&nbsp;kHz,
-              under 1&nbsp;MB. It’s added to your chime library below; use
-              “Set Active” to make it the car’s lock chime.
+              Add one or more valid .wav files. Uploads run one by one and show
+              progress below.
             </p>
 
-            {selectedFile && !validationError && !uploading && !uploadFail && (
-              <p
-                class="chime-upload-selected"
-                data-testid="chime-upload-selected"
-              >
-                Ready to add <strong>{selectedFile.name}</strong> (
-                {chimeSize(selectedFile.size)}) to your library.
-              </p>
+            {!uploading && staged.length > 0 && (
+              <ul class="chime-staged-list" data-testid="chime-upload-staged">
+                {staged.map((item) => (
+                  <li
+                    class="chime-staged-row"
+                    data-testid="chime-staged-row"
+                    key={item.id}
+                  >
+                    <strong>{item.name}</strong>
+                    <span>({chimeSize(item.size)})</span>
+                    {typeof item.error === "string" ? (
+                      <span class="chime-staged-error" role="alert" data-testid="chime-staged-error">
+                        {item.error}
+                      </span>
+                    ) : (
+                      <span class="chime-staged-ok">{item.error === undefined ? "checking…" : "ready"}</span>
+                    )}
+                    <button
+                      type="button"
+                      class="chime-staged-remove"
+                      data-testid="chime-staged-remove"
+                      aria-label={`Remove ${item.name}`}
+                      onClick={() => removeStagedFile(item.id)}
+                    >
+                      ×
+                    </button>
+                  </li>
+                ))}
+              </ul>
             )}
 
-            {validationError && (
-              <p
-                class="chime-upload-status fatal"
-                role="alert"
-                data-testid="chime-upload-validation"
-              >
-                {validationError}
+            {uploadItems.length > 0 && (
+              <ul class="chime-upload-list" data-testid="chime-upload-progress-list">
+                {uploadItems.map((item) => (
+                  <li
+                    class={`chime-upload-item status-${item.status}`}
+                    data-testid="chime-upload-item"
+                    key={item.id}
+                  >
+                    <span aria-hidden="true">
+                      {item.status === "uploading"
+                        ? "↻"
+                        : item.status === "done"
+                          ? "✓"
+                          : item.status === "error"
+                            ? "✗"
+                            : "•"}
+                    </span>
+                    <span>{item.name}</span>
+                    <span>({chimeSize(item.size)})</span>
+                    {item.error && <span>{item.error}</span>}
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            {uploadProgress && (
+              <p class="chime-upload-status" role="status" data-testid="chime-upload-progress">
+                Uploading {uploadProgress.current}/{uploadProgress.total}…
               </p>
             )}
 

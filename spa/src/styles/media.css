@@ -206,12 +206,48 @@
   line-height: 1.45;
   color: var(--text-secondary);
 }
-.media-page .chime-upload-selected {
-  margin: 0 0 6px;
-  font-size: 0.85rem;
-  color: var(--text-primary);
+.media-page .chime-staged-list,
+.media-page .chime-upload-list {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
-
+.media-page .chime-staged-row,
+.media-page .chime-upload-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+  flex-wrap: wrap;
+}
+.media-page .chime-staged-error {
+  color: var(--accent-danger, #dc3545);
+}
+.media-page .chime-staged-ok {
+  color: var(--text-secondary);
+}
+.media-page .chime-staged-remove {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0;
+}
+.media-page .chime-upload-item.status-error {
+  color: var(--accent-danger, #dc3545);
+}
+.media-page .chime-upload-item.status-done {
+  color: var(--accent-success, #2ea043);
+}
+ 
 /* Status banners — success / retryable / fatal. Themed via tokens; the warning
  * and danger tints fall back to fixed rgba so they read in every theme. */
 .media-page .chime-upload-status {

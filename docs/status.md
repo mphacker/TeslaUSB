@@ -123,7 +123,19 @@ desired). Device `cybertruckusb.local` healthy: SSH + wlan0 connected, boot
   mobile-375), each incl. a new real-`DragEvent` drop test asserting the file stages.
   **Live:** deployed `index-j1JdIkyN.js` to `cybertruckusb.local` (file swap,
   webd/gadgetd untouched + active).
-- **Full-width media cards** (2026-06-17): Chimes, Boombox, Light Shows, Wraps, and
+- **Drag-and-drop upload — chime upload** (2026-06-18): the "Upload New Chime" panel
+  on the Lock Chimes screen now accepts a dragged `.wav` as well as the file picker
+  (previously click-to-choose only). Reused the same `useFileDrop()` hook as the other
+  media screens, wired into the chime upload's existing single-WAV path: picker + drop
+  share one `selectChimeFile()` (same `validateChimeWav`), single-file (first dropped
+  file), inert while uploading, and a drop clears any stale picker value. New
+  `.chime-dropzone` dashed zone + `.dragging` highlight. SPA-only (no daemon change).
+  `npm run build` clean; media UAT = **42 passed** (incl. a new real-`DragEvent`
+  drop→stage→upload test) + chime-scheduler UAT **56 passed**, both viewports, console
+  clean. Also unblocked the media read-only allowlist for the already-shipped
+  `GET /api/system/timezone` load fetch. **Live:** deployed `index-BUoGmtG_.js` to
+  `cybertruckusb.local` (additive asset swap, sha256-verified, webd restarted; device
+  Playwright gate 14/14 both viewports, dead-man cancelled clean). Commit `c6fd682`.
   License Plates now fill the browser width like Music — their `.container` cards were
   capped at the global 1200px `.main-content` width, crunching the tables/galleries.
   Added a reusable `useFullWidthScreen()` hook (ref-counted body-class toggle) +

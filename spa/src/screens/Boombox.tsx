@@ -62,14 +62,17 @@ export function Boombox() {
         </p>
         <ul>
           <li>
-            <strong>Folder:</strong> <code>/Boombox</code> at the root of the
-            media partition (managed for you)
+            <strong>Folder:</strong> <code>Boombox/</code> at the root of the
+            media drive — the same drive the car reads Music and the lock chime
+            from (managed for you)
           </li>
           <li>
-            <strong>Format:</strong> MP3 or WAV only
+            <strong>Format:</strong> MP3 or WAV only (WAV must be 16-bit PCM,
+            44.1 or 48&nbsp;kHz, mono or stereo)
           </li>
           <li>
-            <strong>Size:</strong> 1 MB maximum (≤ 5 seconds recommended)
+            <strong>Size:</strong> 8 MB maximum per file (short clips of a few
+            seconds are best)
           </li>
           <li>
             <strong>Filename:</strong> ASCII letters, numbers, spaces, underscores,
@@ -108,7 +111,7 @@ export function Boombox() {
         testId="boombox-dropzone"
         accept=".wav,.mp3"
         icon="upload"
-        title="Choose WAV or MP3 files (≤ 1 MB each)"
+        title="Choose WAV or MP3 files (≤ 8 MB each)"
         hint="Supports: .wav, .mp3 — drag & drop or pick multiple"
       />
 

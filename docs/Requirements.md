@@ -285,9 +285,13 @@ The user can:
 The user can:
 
 - **List / play** the current Boombox sounds.
-- **Upload** sounds (`.mp3`, `.wav`), limited to **≤ 1 MB each** and **at most 5
-  files total**. *Outcome:* validated and written to `Boombox/`; rejected with a
-  clear message if over size or over the 5-file cap.
+- **Upload** sounds (`.mp3`, `.wav`), limited to **≤ 8 MB each** and **at most 5
+  files total**. *Outcome:* validated and written to `Boombox/` at the media-drive
+  root; rejected with a clear message if over size or over the 5-file cap. (The
+  earlier "≤ 1 MB" figure was carried over from the `LockChime.wav` cap; Tesla
+  imposes no documented 1 MB limit on Boombox sounds, so the appliance allows up
+  to 8 MB. WAV uploads must be 16-bit PCM, 44.1/48 kHz, mono/stereo — same
+  validator as the lock chime.)
 - **Delete** sounds (including bulk delete). *Outcome:* removed from `Boombox/`.
 
 ### 4.8 Light Shows

@@ -374,6 +374,41 @@ test.describe("chime scheduler UAT (A3b)", () => {
     assertCleanConsole(probe);
   });
 
+  test("timezone — select renders seeded zones from GET /api/system/timezone", async ({
+    page,
+    probe,
+  }) => {
+    await installScheduler(page, populatedSnapshot());
+
+    await gotoScheduler(page);
+
+    const select = page.locator('[data-testid="timezone-select"]');
+    await expect(select).toBeVisible();
+
+    const options = (await select.locator("option").allTextContents()).filter(Boolean);
+    expect(options).toContain("America/New_York");
+    expect(options).toContain("America/Los_Angeles");
+    expect(options).not.toContain("posixrules");
+    expect(options).not.toContain("zone.tab");
+
+    const current = await select.inputValue();
+    // The select renders whenever zones are non-empty. `current` is the system's
+    // detected zone, which is legitimately empty on the UAT host (no timedatectl /
+    // /etc/localtime); when present it must be one of the offered options. Real
+    // current-zone + set behavior is verified on hardware.
+    if (current) {
+      expect(options).toContain(current);
+    }
+
+    const timezoneRequests = probe.requests.filter((r) => r.url.includes("/api/system/timezone"));
+    const timezoneResponses = probe.responses.filter((r) => r.url.includes("/api/system/timezone"));
+    expect(timezoneRequests.some((r) => r.method === "GET")).toBe(true);
+    expect(timezoneResponses.some((r) => r.status === 200)).toBe(true);
+    expect(timezoneResponses.some((r) => r.contentType.includes("application/json"))).toBe(true);
+
+    assertCleanConsole(probe);
+  });
+
   // ── Gate 2: honest empty states ─────────────────────────────────────────
   test("empty — schedules/groups/library show honest empty states", async ({ page, probe }) => {
     await installScheduler(page); // empty snapshot

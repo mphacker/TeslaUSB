@@ -53,7 +53,9 @@ Environment=WEBD_CACHE_DIR=/data/teslausb/cache
 # never drift.
 Environment=WEBD_CHIME_LIBRARY_DIR=/data/teslausb/chimes
 Environment=WEBD_CHIME_ENFORCER=1
-# Environment=WEBD_TZ_OFFSET_SECS=
+# WEBD_TZ_OFFSET_SECS is a TEST-ONLY override; production derives the offset
+# from the system timezone (DST-aware via the OS) and sets it through the web UI
+# at PUT /api/system/timezone. Do not set a fixed offset here.
 ExecStart=/usr/local/bin/webd
 Restart=on-failure
 RestartSec=5s

@@ -10,6 +10,7 @@ import type {
   ScheduleType,
   SchedulerSnapshot,
   StoredSchedule,
+  TimezoneInfo,
 } from "../api/types";
 
 /**
@@ -134,6 +135,12 @@ export function ChimeScheduler({
   const [randomBusy, setRandomBusy] = useState(false);
   const [randomError, setRandomError] = useState<string | null>(null);
 
+  // ── Device timezone ──
+  const [timezoneInfo, setTimezoneInfo] = useState<TimezoneInfo | null>(null);
+  const [tzBusy, setTzBusy] = useState(false);
+  const [tzError, setTzError] = useState<string | null>(null);
+  const [tzNotice, setTzNotice] = useState<string | null>(null);
+
   // ── Library row actions (Set Active / Delete) ──
   const [libError, setLibError] = useState<string | null>(null);
   const [libNotice, setLibNotice] = useState<string | null>(null);
@@ -192,6 +199,23 @@ export function ChimeScheduler({
     const ctrl = new AbortController();
     void reload(ctrl.signal);
     return () => ctrl.abort();
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const ctrl = new AbortController();
+    void (async () => {
+      try {
+        const info = await api.getTimezone(ctrl.signal);
+        if (!cancelled) setTimezoneInfo(info);
+      } catch {
+        if (!cancelled) setTimezoneInfo(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      ctrl.abort();
+    };
   }, []);
 
   // Realtime: silently reload the scheduler snapshot (which carries the chime
@@ -525,6 +549,25 @@ export function ChimeScheduler({
       setRandomError(failMessage(err, "Couldn't update random mode."));
     } finally {
       setRandomBusy(false);
+    }
+  }
+
+  async function updateTimezone(value: string) {
+    setTzBusy(true);
+    setTzError(null);
+    setTzNotice(null);
+    try {
+      const res = await api.setTimezone(value);
+      setTimezoneInfo((prev) =>
+        prev
+          ? { ...prev, current: res.current, zones: prev.zones }
+          : { current: res.current, zones: [] },
+      );
+      setTzNotice(`Timezone updated to ${res.current}.`);
+    } catch (err) {
+      setTzError(failMessage(err, "Couldn't update the device timezone."));
+    } finally {
+      setTzBusy(false);
     }
   }
 
@@ -1071,6 +1114,43 @@ export function ChimeScheduler({
                 </li>
               ))}
             </ul>
+          )}
+
+          {timezoneInfo && timezoneInfo.zones.length > 0 && (
+            <div class="scheduler-field" style="margin-top: 12px;">
+              <label for="timezone-select">Device timezone</label>
+              <select
+                id="timezone-select"
+                data-testid="timezone-select"
+                value={timezoneInfo.current ?? ""}
+                disabled={tzBusy}
+                onChange={(e) => void updateTimezone((e.currentTarget as HTMLSelectElement).value)}
+              >
+                {timezoneInfo.zones.map((zone) => (
+                  <option key={zone} value={zone}>
+                    {zone}
+                  </option>
+                ))}
+              </select>
+              <p class="scheduler-hint">Schedules run in this timezone.</p>
+              {tzError && (
+                <p class="chime-upload-status fatal" role="alert" data-testid="timezone-error">
+                  {tzError}
+                </p>
+              )}
+              {tzNotice && (
+                <p class="chime-upload-status success" role="status" data-testid="timezone-notice">
+                  {tzNotice}{" "}
+                  <button
+                    type="button"
+                    class="group-btn group-btn-edit"
+                    onClick={() => setTzNotice(null)}
+                  >
+                    Dismiss
+                  </button>
+                </p>
+              )}
+            </div>
           )}
 
           <div class="scheduler-howto">

@@ -308,6 +308,12 @@ export interface Chimes {
   installed: InstalledChime | null;
 }
 
+/** `GET /api/system/timezone`. */
+export interface TimezoneInfo {
+  current: string | null;
+  zones: string[];
+}
+
 // ── Chime scheduler (GET/POST/PUT/DELETE /api/chime-scheduler/*) ──
 // webd is a pure proxy to schedulerd; these mirror `schedulerd::model`
 // (camelCase JSON). The SPA forwards inputs verbatim and renders the snapshot.

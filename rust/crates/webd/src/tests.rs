@@ -3646,6 +3646,7 @@ async fn folder_delete_traversal_path_is_400() {
     assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn folder_delete_symlinked_folder_is_404_and_not_followed() {
     // Defence-in-depth: a folder that is a symlink (diverging canonical vs lexical

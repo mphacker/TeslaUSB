@@ -31,6 +31,7 @@ const CACHE_DIR = resolve(ART, "cache");
 // (the catalog has no media rows, so the thumbnail UAT injects the matching list
 // entries via page.route and lets the real read path serve these).
 const MEDIA_RO_ROOT = resolve(ART, "media-ro");
+const ZONEINFO_DIR = resolve(ART, "zoneinfo");
 const FIXTURE_MP4 = resolve(SPA, "test", "fixtures", "clip.mp4");
 const FIXTURE_PNG = resolve(SPA, "test", "fixtures", "thumb.png");
 // Mirrors build-db.mjs CLIPS canonical_key list + ANGLES camera list (6×4=24).
@@ -153,6 +154,23 @@ function populateMediaRoot() {
   }
 }
 
+function populateZoneinfo() {
+  mkdirSync(ZONEINFO_DIR, { recursive: true });
+  const tzif = Buffer.from("TZif2\0\0\0\0", "binary");
+  for (const rel of [
+    "America/New_York",
+    "America/Los_Angeles",
+    "Europe/Paris",
+    "UTC",
+  ] as const) {
+    const file = resolve(ZONEINFO_DIR, rel);
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, tzif);
+  }
+  writeFileSync(resolve(ZONEINFO_DIR, "posixrules"), tzif);
+  writeFileSync(resolve(ZONEINFO_DIR, "zone.tab"), "x");
+}
+
 export default async function globalSetup() {
   mkdirSync(ART, { recursive: true });
 
@@ -167,6 +185,8 @@ export default async function globalSetup() {
 
   // Archive media must exist before webd spawns (see populateArchive docs).
   populateArchive();
+  // Seed the fixture zoneinfo directory for the timezone selector UAT.
+  populateZoneinfo();
   // Seed the read-only MEDIA mount for thumbnail serving (same eager-canonicalise
   // constraint — the directory must exist before webd spawns).
   populateMediaRoot();
@@ -209,6 +229,7 @@ export default async function globalSetup() {
       WEBD_ARCHIVE_ROOT: ARCHIVE_ROOT,
       WEBD_CACHE_DIR: CACHE_DIR,
       WEBD_MEDIA_RO_ROOT: MEDIA_RO_ROOT,
+      WEBD_ZONEINFO_DIR: ZONEINFO_DIR,
       RUST_LOG: process.env.RUST_LOG ?? "warn",
     },
     stdio: ["ignore", logFd, logFd],

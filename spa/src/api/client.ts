@@ -32,6 +32,7 @@ import type {
   StoredSchedule,
   SystemHealth,
   SystemMetrics,
+  TimezoneInfo,
   Trip,
   TripDetail,
 } from "./types";
@@ -660,6 +661,20 @@ export const api = {
       "/api/chime-scheduler/random-mode",
       signal,
       JSON.stringify(mode),
+      "application/json",
+    ),
+
+  /** Read the device timezone + available IANA zones (`GET /api/system/timezone`). */
+  getTimezone: (signal?: AbortSignal) =>
+    getJson<TimezoneInfo>("/api/system/timezone", signal),
+
+  /** Set the device timezone (`PUT /api/system/timezone`). 422 on an unknown zone. */
+  setTimezone: (timezone: string, signal?: AbortSignal) =>
+    request<{ current: string }>(
+      "PUT",
+      "/api/system/timezone",
+      signal,
+      JSON.stringify({ timezone }),
       "application/json",
     ),
 

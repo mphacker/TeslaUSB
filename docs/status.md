@@ -12,7 +12,53 @@
 > [`adr/`](./adr/) (locked architecture, incl. [`ADR-0003`](./adr/0003-media-read-path.md)
 > media read path).
 
-## ⏯️ Resume here — REALTIME MEDIA UPDATES LIVE (webd SSE push, replaces list polling) (2026-06-17)
+## ⏯️ Resume here — DEVICE TIMEZONE setting IN PROGRESS (DST-correct enforcement) (2026-06-17, evening)
+
+**Paused for the night 2026-06-17 ~18:36.** Branch `mhackermsft/b1-clean`.
+**Working tree has UNCOMMITTED timezone work** (do NOT lose it): new
+`rust/crates/webd/src/timezone.rs` + edits to `lib.rs`, `route.rs`, `tests.rs`,
+`spa/src/{api/types.ts,api/client.ts,screens/ChimeScheduler.tsx}`,
+`spa/test/uat/{global-setup.ts,chime-scheduler.spec.ts}`, `deploy/systemd/webd.service`.
+(The prior Lock-Chime-enforcement work IS committed as `617bce7`; the realtime-media
+work described further below is older committed history.)
+
+**Why this work.** Verification found the chime enforcer evaluated schedules with a
+**fixed** UTC offset: `chime_enforcer::local_offset_secs()` reads `WEBD_TZ_OFFSET_SECS`
+(a fixed value) BEFORE the DST-aware `date +%z` fallback, and production shipped a
+hardcoded `WEBD_TZ_OFFSET_SECS=-14400` device drop-in — **defeating DST**. Fix =
+drop the fixed override + add a web UI to set the *system* timezone via `timedatectl`,
+so the offset is derived DST-aware. **Pi Zero 2 W has NO RTC/clock battery/fake-hwclock**
+→ time is NTP-only at boot (separate follow-up A3e.4).
+
+**State of the timezone feature (see A3e below):**
+- Backend `timezone.rs` (`GET/PUT /api/system/timezone`) + SPA "Device timezone"
+  selector on the Lock Chimes screen — **built & host-validated**.
+- `cargo test -p webd` **260 green**; `timezone.rs` **clippy-clean**; `tsc` clean;
+  **Playwright `chime-scheduler` 48/48** (desktop-1280 + mobile-375, console-clean,
+  render+exclusion+network asserted).
+- GPT-5.5 **round-1** review reconciled (posixrules exclusion, `/etc/localtime`
+  fallback, UAT coverage all fixed by mai); caught & reverted a mai overreach that
+  fabricated `current` to pass a test (`current` must honestly be `null`).
+  GPT-5.5 **round-2** re-review of the corrected delta was **in flight at pause** —
+  agent `tz-rereview`; **read its findings first thing tomorrow** and reconcile.
+
+**NEXT STEPS when resuming (in order):**
+1. Read GPT-5.5 round-2 (`tz-rereview`) findings; reconcile → if substantive, send
+   back to mai, re-review until clean.
+2. **Deploy (A3e.3, hardware rails):** cross-build aarch64 webd via podman; on
+   `cybertruckusb.local` **remove `WEBD_TZ_OFFSET_SECS=-14400`** from the device
+   drop-in `/etc/systemd/system/webd.service.d/enforcer.conf` (KEEP
+   `WEBD_CHIME_ENFORCER=1`); deploy webd + SPA; verify `PUT /api/system/timezone`
+   works, `local_offset_secs()` is now DST-aware, and Playwright vs the live page
+   (mobile+desktop screenshots).
+3. Update `docs/status.md` (tick A3e.1–A3e.3) + append `files/hw-results.md`; commit
+   (no push unless asked).
+4. **Open question for the user:** implement the no-RTC clock-plausibility gate
+   (A3e.4) now, or defer?
+
+---
+
+## (history) REALTIME MEDIA UPDATES LIVE (webd SSE push, replaces list polling) (2026-06-17)
 
 **Shipped + live on hardware.** Media lists across all six screens (Music,
 Boombox, Light Shows, Wraps, License Plates, Lock Chimes library) now refresh the
@@ -723,6 +769,51 @@ LUNs) is the single make-or-break that still needs the car.**
   46/46 chime-scheduler UAT green on desktop-1280 + mobile-375 (perf, clean-console, wiring,
   screenshots); **hardware-test** proved schedule + random-on-boot swap `LockChime.wav` with no
   churn. Evidence: `files/hw-results.md`, `spa/test/uat/artifacts/chime-scheduler-{desktop,mobile}*.png`.
+
+#### A3e · Device timezone setting + DST-correct enforcement — IN PROGRESS (host-validated, NOT yet on hardware)
+
+> **Why this exists.** The enforcer evaluated schedules against a **fixed** UTC offset:
+> `chime_enforcer::local_offset_secs()` reads `WEBD_TZ_OFFSET_SECS` (a fixed value) BEFORE
+> the DST-aware `date +%z` fallback, and production shipped a hardcoded
+> `WEBD_TZ_OFFSET_SECS=-14400` device drop-in — **defeating DST** (chimes would fire an hour
+> off across a DST boundary). Root fix: **drop the fixed prod override** so the offset is
+> derived DST-aware from the system tz, and add a **web UI to set the system timezone**
+> (`timedatectl set-timezone`). `webd` runs as root today, so it can set the system tz directly;
+> a future non-root transition swaps the injectable `TimezoneSetter` impl.
+> **Pi Zero 2 W has NO RTC / clock battery / fake-hwclock** → time is NTP-only at boot; a
+> no-network boot evaluates schedules against a bogus clock (separate follow-up **A3e.4**).
+>
+> **Working-tree state (UNCOMMITTED at 2026-06-17 pause):** new `webd/src/timezone.rs` +
+> `lib.rs`/`route.rs`/`tests.rs` + SPA `api/{types,client}.ts` + `screens/ChimeScheduler.tsx`
+> + `test/uat/{global-setup,chime-scheduler.spec}.ts` + `deploy/systemd/webd.service`.
+> Host: `cargo test -p webd` **260 green**, `timezone.rs` clippy-clean, `tsc` clean,
+> **Playwright `chime-scheduler` 48/48** (desktop+mobile, console-clean). GPT-5.5 round-1
+> reconciled; **round-2 re-review (`tz-rereview`) was in flight at pause — read it first.**
+
+- [ ] **A3e.1 · `GET/PUT /api/system/timezone` (webd).** New `timezone.rs`: GET →
+  `{current: string|null, zones[]}` (allow-list enumerated from TZif-magic files under the
+  zoneinfo base; excludes `posix/`, `right/`, `posixrules`, `*.tab`/`*.zi`/`*.list`,
+  leapseconds, etc.). PUT validates the requested zone against the **fresh** allow-list (422
+  `invalid_timezone` on unknown; rejects empty/NUL/`..`/leading-`/`) then `timedatectl
+  set-timezone <zone>` (args passed directly, **no shell**); 500 `timezone_set_failed` on
+  failure. Blocking work (subprocess + ~600-file fs walk) runs in `spawn_blocking`; injectable
+  `TimezoneSetter` trait + pure `put_timezone_with` core; `WEBD_ZONEINFO_DIR` test override.
+  **(host-validated; NOT deployed — A3e.3 gates the check)**
+- [ ] **A3e.2 · "Device timezone" selector (SPA).** ChimeScheduler screen: loads zones on
+  mount, shows `current` selected, PUTs on change, error + dismissible success notice, and
+  **hides gracefully** when `zones` is empty / GET fails (degrades, never throws). **(Playwright
+  chime-scheduler 48/48 desktop+mobile, console-clean, render+exclusion+network asserted;
+  live hardware screenshots pending A3e.3)**
+- [ ] **A3e.3 · Deploy + DST-correct enforcement proof (hardware).** Cross-build aarch64 webd
+  (podman); on `cybertruckusb.local` **REMOVE `WEBD_TZ_OFFSET_SECS=-14400`** from the device
+  drop-in `/etc/systemd/system/webd.service.d/enforcer.conf` (**keep `WEBD_CHIME_ENFORCER=1`**);
+  deploy webd + SPA under the hardware-test rails; verify `PUT` sets the zone, `local_offset_secs()`
+  is DST-aware, schedules fire at correct local time, and Playwright vs the live page (mobile +
+  desktop screenshots). **(gated:A3e.1/A3e.2 — Tier-C hardware step, pending)**
+- [ ] **A3e.4 · No-RTC clock-plausibility gate (follow-up, high priority).** Pi has no RTC; the
+  enforcer should **skip time-based enforcement until the clock is NTP-synced/plausible**
+  (e.g. gate on `timedatectl` `NTPSynchronized=yes` or a sane year), optionally add fake-hwclock
+  to persist last-known time across power cycles. **(design pending; surface go/defer to user)**
 
 ### 4.6 Music — `Requirements.md` §4.6
 

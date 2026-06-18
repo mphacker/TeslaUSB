@@ -82,6 +82,20 @@ desired). Device `cybertruckusb.local` healthy: SSH + wlan0 connected, boot
 `degraded` (pre-existing benign zram timer), webd serving the latest SPA bundle.
 
 **Shipped + LIVE-PROVEN today (newest first):**
+- **Lock-chime client-side audio editor (V1 parity)** (2026-06-18, commit `22bd73e`):
+  single-file chime upload now opens an in-browser editor matching the V1 UX — trim,
+  optional LUFS normalization (Broadcast/Streaming/Loud/Maximum presets), and re-encode
+  to 16-bit PCM WAV — while 2+ files keep the batch path. All processing is client-side
+  via the Web Audio API; the webd contract (16-bit PCM WAV, mono/stereo, 44.1/48 kHz,
+  ≤1 MiB) is unchanged. Output is frame-clamped to `maxFrames` and double size-asserted
+  ≤1 MiB before POST; the fallback (Web Audio unavailable) only uploads an already-valid
+  WAV and refuses oversize sources; retryable (503/network) failures render retryable not
+  fatal; decode races are job-token guarded. New `spa/src/audio/{wav-core,chime-engine}.ts`
+  + `ChimeAudioEditor.tsx`. GPT-5.5 reviewed (1 blocker + 2 should-fix found and fixed,
+  re-review clean). Build clean; 120 Playwright tests pass. Live on `cybertruckusb.local`
+  under hardware rails (additive sha256-verified asset swap, atomic index flip, webd
+  restart): device gate **20/20** both viewports, console clean, warm screen-ready ~300 ms.
+  Evidence: `files/hw-results.md`, `files/chime-editor-device-{desktop-1280,mobile-375}.png`.
 - **Boombox page accuracy: size text + folder wording** (2026-06-18): the Boombox
   requirements card and upload zone still advertised a **1 MB** per-file limit even
   though `BOOMBOX_MAX_BYTES` was raised to **8 MiB** on 06-17 — the page text was
@@ -708,10 +722,14 @@ LUNs) is the single make-or-break that still needs the car.**
   media-backed handler. LIVE-PROVEN 2026-06-15: `testchime.wav` listed from the media
   catalog and its row rendered with a Valid badge + Download/Set Active/Delete on the live
   `/media` page, console clean. See `files/hw-results.md` "Phase 2".)**
-- [ ] Upload chime(s) `.wav` (+`.mp3`→WAV), ≤1 MB & ≤5 s; added to `Chimes/`. **(partial:
-  single-file `.wav` install into `media.img` `Chimes/` LIVE-PROVEN 2026-06-15 [job done
-  ~3 s, byte-identical on the RO media mount; `files/hw-results.md` "Phase 2"]; multi-file
-  + mp3 transcode + 5 s/normalize still to verify)**
+- [x] Upload chime(s) `.wav` (+`.mp3`→WAV), ≤1 MB & ≤5 s; added to `Chimes/`. **(DONE
+  2026-06-18 — single-file `.wav` install into `media.img` `Chimes/` LIVE-PROVEN 2026-06-15;
+  multi-file batch SHIPPED 2026-06-18; and the **client-side audio editor** (commit `22bd73e`)
+  now closes mp3→WAV transcode + trim + normalize: selecting a single file opens an in-browser
+  editor (Web Audio API) that decodes any format, trims, optionally LUFS-normalizes, and
+  re-encodes to a 16-bit PCM WAV frame-clamped ≤1 MiB before POST — the backend contract is
+  unchanged. Device gate 20/20 both viewports, console clean, auto-fit-on-decode trims an
+  oversize source to 1.00 MiB → Ready. See `files/hw-results.md` "Chime audio editor".)**
 - [x] Delete library chime. **(SHIPPED — optimistic "Removing…" + bounded poll
   (2 s/45 s) until the chime leaves the catalog, then auto-drop + "removed" notice,
   no manual refresh; timeout → "Refresh now"; per-entry budgets for concurrent

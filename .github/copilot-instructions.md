@@ -19,12 +19,68 @@ Python (verbatim or line-translated) or reintroduce any Python.
 
 ## Builds — podman only, never local WSL (binding)
 
-All cross-builds run through **podman on the Windows host**:
-`release/build-release.sh --cross-podman` (debian:bookworm, `gcc-aarch64-linux-gnu`
-cross linker, target `aarch64-unknown-linux-gnu`, toolchain 1.85.0). Podman is
-installed (`podman.exe`, `podman-machine-default`). For a one-off scoped build,
-mirror the same container recipe — **do not** drop to local WSL (slow, not
-reproducible).
+All cross-builds run through **podman on the Windows host** (debian:bookworm,
+`gcc-aarch64-linux-gnu` cross linker, target `aarch64-unknown-linux-gnu`,
+toolchain 1.85.0). Podman is installed (`podman.exe`, `podman-machine-default`).
+**Do not** drop to local WSL (slow, not reproducible).
+
+### Critical gotcha — invoke podman from PowerShell, not WSL bash (saves trial-and-error)
+
+`release/build-release.sh --cross-podman` **fails on this host** because the only
+`bash` is **WSL** (`bash --version` → `x86_64-pc-linux-gnu`, paths are `/mnt/c/...`):
+the script's `command -v podman` doesn't find the Windows `podman.exe` inside WSL
+(→ `ERROR: podman not found`), and even if shimmed, podman.exe bind mounts need
+**Windows paths** (`C:\...`), not WSL `/mnt/c/...` paths. So:
+
+- **Run the container recipe directly via `podman.exe` from PowerShell** with
+  `C:\...` bind-mount sources. This is the documented "mirror the container
+  recipe" path and is the fast, reliable way here.
+- Reuse the **warm named volumes** so rebuilds are ~seconds, not minutes:
+  `teslausb-cargo-target`, `teslausb-cargo-home`, `teslausb-rustup` (cross-build);
+  `teslausb-test-target` + `teslausb-cargo-home` (tests).
+- **Build only the changed crates** with `-p <crate>` (e.g. `-p webd -p schedulerd`).
+- If you pipe a host-authored `.sh` into the container, **strip CR first**
+  (`tr -d '\r' < script.sh | bash`) — Windows-created files are CRLF and bash
+  chokes on `\r`.
+
+**Canonical cross-build (aarch64 bins) — PowerShell, warm volumes:**
+```powershell
+$repo = (Get-Location).Path           # C:\...\TeslaUSB
+$out  = "$repo\release\.build\aarch64-bin"   # holds bin/<crate>
+podman run --rm `
+  --mount "type=bind,source=$repo,target=/src,ro" `
+  --mount "type=bind,source=$out,target=/out" `
+  --mount "type=volume,source=teslausb-cargo-target,target=/cargo-target" `
+  --mount "type=volume,source=teslausb-cargo-home,target=/root/.cargo" `
+  --mount "type=volume,source=teslausb-rustup,target=/root/.rustup" `
+  docker.io/library/debian:bookworm bash -lc "tr -d '\r' < /out/build.sh | bash"
+```
+where `/out/build.sh` mirrors `build-release.sh`'s inner recipe: apt-install
+`build-essential pkg-config gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu file`,
+rustup 1.85.0 + `rustup target add aarch64-unknown-linux-gnu`, copy `/src/rust`
+to `/work/rust`, then
+`export CARGO_TARGET_DIR=/cargo-target`,
+`export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc`,
+`export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc`,
+`cargo build --release --target aarch64-unknown-linux-gnu -p <crates>`, assert each
+output is aarch64 (`aarch64-linux-gnu-readelf -h | grep AArch64`), `install -m0755`
+to `/out/bin/<crate>`, and `sha256sum` it. First cold run does the apt+rustup
+install into the volumes; subsequent runs skip it.
+
+**Canonical test recipe (host-arch unit tests) — PowerShell, warm volumes:**
+```powershell
+podman run --rm -v "${PWD}:/work" `
+  -v teslausb-cargo-home:/cargo-home -v teslausb-test-target:/test-target `
+  -e CARGO_HOME=/cargo-home -e CARGO_TARGET_DIR=/test-target `
+  -w /work/rust docker.io/library/rust:1.85-bookworm `
+  bash -c "cargo test -p teslausb-core -p schedulerd -p webd"
+```
+(Unix-socket crates don't build on Windows host cargo — use the container.)
+
+For a full signed/manifested release artifact, `release/build-release.sh` is still
+the source of truth for the staging/manifest/verify steps; run it where a Linux
+`bash` *and* a PATH-visible `podman` coexist (its `--cross-podman` step is the same
+recipe above). For a one-off scoped binary deploy, the direct podman call is enough.
 
 ## Model division of labor (binding)
 

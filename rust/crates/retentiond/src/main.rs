@@ -18,6 +18,9 @@
 // console output is the intended logging path for the daemon entrypoint only.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
+#[cfg(unix)]
+mod live;
+
 use std::process::ExitCode;
 
 fn main() -> ExitCode {

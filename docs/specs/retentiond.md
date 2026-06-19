@@ -73,6 +73,17 @@ group by event timestamp folder and copy whatever camera files are present.
 > event eligible for car-side deletion. If the manifest changes mid-copy, the
 > pass is restarted, not marked verified.
 
+> **`ContentHash` = SHA-256 (binding).** The per-file content hash carried in the
+> directory manifest and computed by the live `ArchiveStore` (copy-then-re-hash at
+> the destination, and source re-validation) is **SHA-256**. This matches the
+> identity scheme already used on the upload path (`uploadd` compares local vs
+> remote objects via `rclone hashsum sha256`), so an archived clip's stored hash is
+> directly comparable to its eventual cloud object without re-hashing under a
+> second scheme. The live store streams the hash over the file in bounded chunks
+> (never buffering a whole clip) and copies via a temp file + `sync_all` + atomic
+> rename + parent-dir fsync before reading the destination bytes back to hash them,
+> so a partial or corrupt write is caught rather than silently "verified".
+
 ### 3.1 `SavedClips` — highest value
 - **Trigger:** user pressed Save (or honk) — explicitly wanted footage.
 - **Archive:** copy each complete event folder to the archive **and verify**

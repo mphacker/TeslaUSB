@@ -6,14 +6,18 @@
 #![allow(dead_code)]
 
 use std::ffi::CString;
-use std::fs::File;
-use std::io::{self, Read};
+use std::ffi::OsString;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufReader, Read, Write};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use retentiond::archive::ArchiveStore;
 use retentiond::delete::RandGen;
 use retentiond::governor::Statfs;
-use retentiond::io::FsStat;
+use retentiond::io::{ContentHash, FileIdentity, FsStat};
 use retentiond::time::{BootId, Clock, MonoMs};
+use sha2::{Digest, Sha256};
 
 pub(crate) struct LiveClock;
 
@@ -174,6 +178,286 @@ where
     }
 }
 
+const COPY_BUFFER_SIZE: usize = 64 * 1024;
+static COPY_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Live Unix `ArchiveStore` seam.
+///
+/// `ContentHash` values from this store are SHA-256 digests of file contents.
+///
+/// # Security invariant
+///
+/// Containment relies on two trust-boundary invariants, not solely on the
+/// lexical path jail and `canonicalize` checks below:
+///
+/// * `archive_root` is **service-owned** and writable **only** by `retentiond`,
+///   which is the sole writer/deleter of the Pi-side archive. No untrusted actor
+///   may create entries inside it concurrently with an archive pass. (An actor
+///   that *could* would already be able to corrupt or delete archives directly,
+///   so the residual create/rename TOCTOU window grants no extra capability.)
+/// * `source_root` is a **read-only exFAT** mount of the car-visible volume,
+///   which cannot hold symlinks; source-side symlink injection is not possible.
+///
+/// Under those invariants the lexical [`jailed_join`] (rejects `..`/absolute),
+/// [`canonicalize_under_root`] containment check, [`validate_archive_parent_path`]
+/// symlink-component rejection, and the post-rename re-anchor in
+/// [`ArchiveStore::copy_and_hash_dest`] are sufficient. If `archive_root` ever
+/// becomes writable by an untrusted actor, switch the create/rename/read-back to
+/// dir-fd-anchored `openat`/`renameat` with `O_NOFOLLOW` semantics.
+pub(crate) struct LiveArchiveStore {
+    source_root: PathBuf,
+    archive_root: PathBuf,
+}
+
+impl LiveArchiveStore {
+    #[must_use]
+    pub(crate) fn new(source_root: impl Into<PathBuf>, archive_root: impl Into<PathBuf>) -> Self {
+        Self {
+            source_root: source_root.into(),
+            archive_root: archive_root.into(),
+        }
+    }
+}
+
+impl ArchiveStore for LiveArchiveStore {
+    fn copy_and_hash_dest(&self, src_rel: &str, dest_rel: &str) -> io::Result<ContentHash> {
+        let source_path = jailed_join(&self.source_root, src_rel)?;
+        let source_path = canonicalize_under_root(&self.source_root, &source_path)?;
+        let dest_path = jailed_join(&self.archive_root, dest_rel)?;
+        let parent = dest_path.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "destination path must include a parent directory",
+            )
+        })?;
+        validate_archive_parent_path(&self.archive_root, parent)?;
+        fs::create_dir_all(parent)?;
+        let canonical_parent = canonicalize_under_root(&self.archive_root, parent)?;
+        sync_dir_chain(&self.archive_root, &canonical_parent)?;
+
+        let temp_path = make_temp_path(&dest_path)?;
+        let result = (|| -> io::Result<ContentHash> {
+            copy_streaming(&source_path, &temp_path)?;
+            fs::rename(&temp_path, &dest_path)?;
+            sync_dir(&canonical_parent)?;
+            // Re-anchor before reading the bytes back: re-resolve the landed path
+            // and re-assert archive-root containment. If a parent component was
+            // raced into a symlink between validation and the rename, this turns a
+            // silent jail escape into a detected error rather than hashing (and
+            // reporting "verified") bytes that landed outside the archive.
+            let landed = canonicalize_under_root(&self.archive_root, &dest_path)?;
+            hash_file_sha256(&landed)
+        })();
+
+        if result.is_err() {
+            let _ = fs::remove_file(&temp_path);
+        }
+        result
+    }
+
+    fn source_identity(&self, src_rel: &str) -> io::Result<FileIdentity> {
+        let source_path = jailed_join(&self.source_root, src_rel)?;
+        let source_path = canonicalize_under_root(&self.source_root, &source_path)?;
+        let source_file = File::open(&source_path)?;
+        let size = source_file.metadata()?.len();
+        let mut reader = BufReader::with_capacity(COPY_BUFFER_SIZE, source_file);
+        let hash = hash_reader_sha256(&mut reader)?;
+        Ok(FileIdentity { size, hash })
+    }
+
+    fn list_source_rel_names(&self, src_dir: &str) -> io::Result<Vec<String>> {
+        let source_dir = jailed_join(&self.source_root, src_dir)?;
+        let source_dir = canonicalize_under_root(&self.source_root, &source_dir)?;
+        let mut names = Vec::new();
+        for entry_result in fs::read_dir(source_dir)? {
+            let entry = entry_result?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let name = entry.file_name().into_string().map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "source entry name is not valid UTF-8",
+                )
+            })?;
+            names.push(name);
+        }
+        Ok(names)
+    }
+}
+
+fn jailed_join(root: &Path, rel: &str) -> io::Result<PathBuf> {
+    let mut path = root.to_path_buf();
+    for component in Path::new(rel).components() {
+        match component {
+            Component::Normal(name) => path.push(name),
+            Component::Prefix(_)
+            | Component::RootDir
+            | Component::CurDir
+            | Component::ParentDir => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("relative path escapes jail: {rel}"),
+                ));
+            }
+        }
+    }
+    Ok(path)
+}
+
+fn copy_streaming(src: &Path, dest: &Path) -> io::Result<()> {
+    let source_file = File::open(src)?;
+    let mut reader = BufReader::with_capacity(COPY_BUFFER_SIZE, source_file);
+    let mut writer = OpenOptions::new().create_new(true).write(true).open(dest)?;
+    let mut buffer = vec![0_u8; COPY_BUFFER_SIZE];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        let chunk = buffer
+            .get(..read)
+            .ok_or_else(|| io::Error::other("copy read exceeded buffer size"))?;
+        writer.write_all(chunk)?;
+    }
+    writer.sync_all()
+}
+
+fn validate_archive_parent_path(root: &Path, parent: &Path) -> io::Result<()> {
+    let rel_parent = parent.strip_prefix(root).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "destination parent is outside archive root (root={}, parent={})",
+                root.display(),
+                parent.display()
+            ),
+        )
+    })?;
+    let mut current = root.to_path_buf();
+    for component in rel_parent.components() {
+        let Component::Normal(name) = component else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("destination parent contains invalid component: {component:?}"),
+            ));
+        };
+        current.push(name);
+        match fs::symlink_metadata(&current) {
+            Ok(meta) => {
+                let file_type = meta.file_type();
+                if file_type.is_symlink() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "destination parent contains symlink component: {}",
+                            current.display()
+                        ),
+                    ));
+                }
+                if !file_type.is_dir() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "destination parent component is not a directory: {}",
+                            current.display()
+                        ),
+                    ));
+                }
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => break,
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(())
+}
+
+fn canonicalize_under_root(root: &Path, path: &Path) -> io::Result<PathBuf> {
+    let canonical_root = root.canonicalize()?;
+    let canonical_path = path.canonicalize()?;
+    if canonical_path.starts_with(&canonical_root) {
+        Ok(canonical_path)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "path escapes jail (root={}, path={})",
+                root.display(),
+                path.display()
+            ),
+        ))
+    }
+}
+
+fn sync_dir_chain(root: &Path, leaf: &Path) -> io::Result<()> {
+    let canonical_root = root.canonicalize()?;
+    let mut current = leaf.to_path_buf();
+    if !current.starts_with(&canonical_root) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "directory escapes jail during sync (root={}, path={})",
+                canonical_root.display(),
+                current.display()
+            ),
+        ));
+    }
+    loop {
+        sync_dir(&current)?;
+        if current == canonical_root {
+            break;
+        }
+        let Some(parent) = current.parent() else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("directory {} has no parent while syncing", current.display()),
+            ));
+        };
+        current = parent.to_path_buf();
+    }
+    Ok(())
+}
+
+fn make_temp_path(dest_path: &Path) -> io::Result<PathBuf> {
+    let Some(file_name) = dest_path.file_name() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "destination path must include a file name",
+        ));
+    };
+    let unique = COPY_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut temp_name = OsString::from(file_name);
+    temp_name.push(format!(".tmp-{}-{unique}", std::process::id()));
+    Ok(dest_path.with_file_name(temp_name))
+}
+
+fn sync_dir(path: &Path) -> io::Result<()> {
+    File::open(path)?.sync_all()
+}
+
+fn hash_file_sha256(path: &Path) -> io::Result<ContentHash> {
+    let file = File::open(path)?;
+    let mut reader = BufReader::with_capacity(COPY_BUFFER_SIZE, file);
+    hash_reader_sha256(&mut reader)
+}
+
+fn hash_reader_sha256(reader: &mut dyn Read) -> io::Result<ContentHash> {
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; COPY_BUFFER_SIZE];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        let chunk = buffer
+            .get(..read)
+            .ok_or_else(|| io::Error::other("hash read exceeded buffer size"))?;
+        hasher.update(chunk);
+    }
+    let out: [u8; 32] = hasher.finalize().into();
+    Ok(ContentHash::new(out))
+}
+
 pub(crate) struct LiveStatfs;
 
 impl Statfs for LiveStatfs {
@@ -211,11 +495,49 @@ impl Statfs for LiveStatfs {
 }
 
 #[cfg(all(test, unix))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::{LiveClock, LiveRand, LiveStatfs};
+    use std::fs;
+    use std::os::unix::fs::symlink;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use sha2::{Digest, Sha256};
+
+    use super::{LiveArchiveStore, LiveClock, LiveRand, LiveStatfs};
+    use retentiond::archive::ArchiveStore;
     use retentiond::delete::RandGen;
     use retentiond::governor::Statfs;
+    use retentiond::io::ContentHash;
     use retentiond::time::Clock;
+
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn new_temp_dir() -> PathBuf {
+        let unique = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let name = format!(
+            "retentiond-live-{}-{}",
+            std::process::id(),
+            unique
+        );
+        let dir = std::env::temp_dir().join(name);
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    fn write_file(path: &Path, bytes: &[u8]) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create parent dir");
+        }
+        fs::write(path, bytes).expect("write test file");
+    }
+
+    fn hash_bytes(bytes: &[u8]) -> ContentHash {
+        let digest = Sha256::digest(bytes);
+        let mut out = [0_u8; 32];
+        out.copy_from_slice(&digest);
+        ContentHash::new(out)
+    }
 
     #[test]
     fn live_clock_is_monotonic() {
@@ -275,5 +597,182 @@ mod tests {
         let statfs = LiveStatfs;
         let result = statfs.statfs("a\0b");
         assert!(result.is_err(), "interior NUL path should return an error");
+    }
+
+    #[test]
+    fn copy_and_hash_dest_copies_and_hashes_landed_bytes() {
+        let root = new_temp_dir();
+        let source_root = root.join("source");
+        let archive_root = root.join("archive");
+        fs::create_dir_all(&source_root).expect("create source root");
+        fs::create_dir_all(&archive_root).expect("create archive root");
+
+        let bytes = b"hello";
+        write_file(&source_root.join("RecentClips/clip.mp4"), bytes);
+
+        let store = LiveArchiveStore::new(&source_root, &archive_root);
+        let hash = store
+            .copy_and_hash_dest("RecentClips/clip.mp4", "RecentClips/clip.mp4")
+            .expect("copy succeeds");
+
+        assert_eq!(hash, hash_bytes(bytes));
+        let dest_path = archive_root.join("RecentClips/clip.mp4");
+        assert!(dest_path.exists(), "dest file should exist");
+        assert_eq!(fs::read(dest_path).expect("read dest"), bytes);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn source_identity_matches_size_and_hash() {
+        let root = new_temp_dir();
+        let source_root = root.join("source");
+        let archive_root = root.join("archive");
+        fs::create_dir_all(&source_root).expect("create source root");
+        fs::create_dir_all(&archive_root).expect("create archive root");
+
+        let bytes = b"retention";
+        write_file(&source_root.join("SavedClips/a.mp4"), bytes);
+
+        let store = LiveArchiveStore::new(&source_root, &archive_root);
+        let copied_hash = store
+            .copy_and_hash_dest("SavedClips/a.mp4", "SavedClips/a.mp4")
+            .expect("copy succeeds");
+        let identity = store
+            .source_identity("SavedClips/a.mp4")
+            .expect("source identity succeeds");
+
+        assert_eq!(identity.size, bytes.len() as u64);
+        assert_eq!(identity.hash, copied_hash);
+        assert_eq!(identity.hash, hash_bytes(bytes));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn list_source_rel_names_lists_only_direct_files() {
+        let root = new_temp_dir();
+        let source_root = root.join("source");
+        let archive_root = root.join("archive");
+        fs::create_dir_all(&source_root).expect("create source root");
+        fs::create_dir_all(&archive_root).expect("create archive root");
+
+        let dir = source_root.join("SentryClips/ev1");
+        fs::create_dir_all(dir.join("nested")).expect("create nested dir");
+        write_file(&dir.join("a.mp4"), b"a");
+        write_file(&dir.join("b.mp4"), b"b");
+        write_file(&dir.join("nested/c.mp4"), b"c");
+
+        let store = LiveArchiveStore::new(&source_root, &archive_root);
+        let mut names = store
+            .list_source_rel_names("SentryClips/ev1")
+            .expect("list succeeds");
+        names.sort_unstable();
+        assert_eq!(names, vec!["a.mp4".to_owned(), "b.mp4".to_owned()]);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn path_jail_rejects_parent_components() {
+        let root = new_temp_dir();
+        let source_root = root.join("source");
+        let archive_root = root.join("archive");
+        fs::create_dir_all(&source_root).expect("create source root");
+        fs::create_dir_all(&archive_root).expect("create archive root");
+        write_file(&root.join("escape"), b"escape");
+
+        let store = LiveArchiveStore::new(&source_root, &archive_root);
+        let source_err = store
+            .source_identity("../escape")
+            .expect_err("source path must be rejected");
+        assert_eq!(source_err.kind(), std::io::ErrorKind::InvalidInput);
+
+        let copy_err = store
+            .copy_and_hash_dest("../escape", "RecentClips/clip.mp4")
+            .expect_err("copy path must be rejected");
+        assert_eq!(copy_err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            !archive_root.join("RecentClips/clip.mp4").exists(),
+            "should not write outside jailed roots"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn copy_missing_source_returns_error_without_temp_or_dest() {
+        let root = new_temp_dir();
+        let source_root = root.join("source");
+        let archive_root = root.join("archive");
+        fs::create_dir_all(&source_root).expect("create source root");
+        fs::create_dir_all(&archive_root).expect("create archive root");
+
+        let store = LiveArchiveStore::new(&source_root, &archive_root);
+        let err = store
+            .copy_and_hash_dest("RecentClips/missing.mp4", "RecentClips/out.mp4")
+            .expect_err("missing source should fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+
+        let out_path = archive_root.join("RecentClips/out.mp4");
+        assert!(
+            !out_path.exists(),
+            "dest should not exist after copy failure"
+        );
+        let temp_parent = archive_root.join("RecentClips");
+        if temp_parent.exists() {
+            for entry in fs::read_dir(&temp_parent).expect("read temp parent") {
+                let entry = entry.expect("read dir entry");
+                let name = entry.file_name().to_string_lossy().into_owned();
+                assert!(
+                    !name.contains(".tmp-"),
+                    "temp file should be cleaned up: {name}"
+                );
+            }
+        }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn path_jail_rejects_symlink_escape() {
+        let root = new_temp_dir();
+        let source_root = root.join("source");
+        let archive_root = root.join("archive");
+        let outside = root.join("outside");
+        fs::create_dir_all(&source_root).expect("create source root");
+        fs::create_dir_all(&archive_root).expect("create archive root");
+        fs::create_dir_all(&outside).expect("create outside root");
+        write_file(&outside.join("escape.mp4"), b"outside");
+        write_file(&source_root.join("in.mp4"), b"inside");
+
+        symlink(&outside, source_root.join("symlink-out")).expect("create source symlink");
+        symlink(&outside, archive_root.join("symlink-out")).expect("create dest symlink");
+
+        let store = LiveArchiveStore::new(&source_root, &archive_root);
+        let source_err = store
+            .source_identity("symlink-out/escape.mp4")
+            .expect_err("symlink source escape must be rejected");
+        assert_eq!(source_err.kind(), std::io::ErrorKind::InvalidInput);
+
+        let dest_err = store
+            .copy_and_hash_dest("in.mp4", "symlink-out/escape.mp4")
+            .expect_err("symlink destination escape must be rejected");
+        assert_eq!(dest_err.kind(), std::io::ErrorKind::InvalidInput);
+
+        let nested_err = store
+            .copy_and_hash_dest("in.mp4", "symlink-out/newdir/escape.mp4")
+            .expect_err("symlink destination with missing nested dir must be rejected");
+        assert_eq!(nested_err.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(
+            fs::read(outside.join("escape.mp4")).expect("read outside file"),
+            b"outside"
+        );
+        assert!(
+            !outside.join("newdir").exists(),
+            "must not create directories outside archive jail"
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 }

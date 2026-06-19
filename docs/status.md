@@ -1,36 +1,45 @@
 # TeslaUSB B-1 — Build Status (vs. `Requirements.md`)
 
-> ## ⏯️ RESUME HERE (2026-06-19 EOD) — retentiond B1 archive loop, ALL BUILD LANES DONE
+> ## ⏯️ RESUME HERE (2026-06-20) — Phase-1b mount-free rework DONE + committed; hardware deploy is next
 >
 > **Phase-1 (archive-only, non-destructive) is CODE-COMPLETE + host-green; on-device
 > verification is what remains.** The operator-approved two-phase plan split the
 > recording-critical deleter (Phase-2, deferred + gated) from a safe archive-only first
-> slice (Phase-1) that copies completed RecentClips off the RO car partition into the
+> slice (Phase-1) that copies completed RecentClips off the car partition into the
 > Pi-side archive and registers `view_kind='archive'` with indexd so webd can stream them.
 > This unblocks §4.2 #2 (live-clip map playback) without deleting anything.
 >
-> **Phase-1 build lanes — ALL DONE, each committed (NOT pushed), each GPT-5.5-reviewed:**
-> - `p1-indexd-register` — indexd archive-registration RPC server (flips scanner clip's
->   angle ro_usb→archive). Committed.
-> - `p1-archive-store` — `LiveArchiveStore` (SHA-256, atomic verified copy, path-jail).
->   Committed `20884b2`.
-> - `p1-register-client` — `UnixRegisterClient` over `/run/teslausb/indexd.sock`.
->   Committed `257675a`.
-> - `p1-recent-facts` — pure `RecentFactsGatherer` (stable-pass segment completeness).
->   Committed `6fe9d33`.
-> - `p1-archive-driver` — pure `archive_recent_once` core + `LiveRecentDirReader` +
->   `main.rs serve --archive-recent-only --no-delete` loop (signal-safe shutdown,
->   pending-register retry queue, raced-delete tolerance). Committed `6808c76`.
->   Verified in podman: 112 lib + 15 bin tests, clippy `-D warnings` clean.
+> **⚠️ Phase-1b correction (ADR-0004).** The first Phase-1 retentiond read the car
+> partition by **mounting `teslacam.img`**, violating ADR-0003's #1 invariant (the Pi
+> must NEVER mount the live car image). Caught during hardware prep, reconciled with
+> GPT-5.5, and re-implemented mount-free. The source-read layer now: inventory ← a
+> **read-only `indexd` SQLite** candidate query (webd's connect pattern); bytes ← a new
+> **`scannerd` `ReadFile` socket** (`/run/teslausb/scannerd-read.sock`) that serves raw
+> exFAT windows via `pread` with targeted descent + identity fence, never mounting.
+> See [`adr/0004`](./adr/0004-retentiond-archive-read-path.md) +
+> [`contracts/scannerd-readfile.md`](./specs/contracts/scannerd-readfile.md).
+>
+> **Phase-1b lanes — DONE, committed (NOT pushed), each GPT-5.5-reviewed:**
+> - `049605d feat(scannerd)` — `ReadFile` socket: targeted component descent (no full
+>   walk), per-component torn-entry→NotFound, `valid_data_length` clamp, bounded
+>   window read, identity fence + post-read re-resolve. Podman: 90 tests, clippy clean.
+> - `a015941 refactor(retentiond)` — mount-free archive driver: read-only indexd SQLite
+>   candidates + streaming `ReadFile` copy (never buffers a whole clip) + temp/fsync/
+>   atomic-rename + orphan-angle rollback on abort. Podman: 122 tests, clippy clean.
+> - `f1b6d3d docs(adr)` — ADR-0004 + spec alignment. Wire fixtures match byte-for-byte
+>   across both crates.
+> - (Earlier mount-era lanes `20884b2`/`257675a`/`6fe9d33`/`6808c76` superseded by the above.)
 >
 > **NEXT (Phase-1 verification, in order):**
-> 1. `p1-integration-tests` — archive-only fixture + loop-image test (fake RO source →
->    run a cycle → assert copy lands + register fires + downstream stream path resolves).
-> 2. `p1-hw-deploy` — deploy archive-only binary under the dead-man rails (hardware-test
->    skill); adds-only, low risk (no deleter). BINDING DEPLOY INVARIANT: retentiond
->    `--archive-root` MUST be the same on-disk dir as webd `WEBD_ARCHIVE_ROOT`
->    (default `/data/teslausb/archive`).
-> 3. `p1-playwright` — verify §4.2 trip-map clip playback end-to-end against
+> 1. `p1-hw-deploy` — cross-build aarch64 (indexd + scannerd + retentiond) via podman,
+>    then deploy under the dead-man rails (hardware-test skill). Adds-only, no deleter.
+>    Requires: gadget DOWN before staging synthetic footage onto `teslacam.img`; swap
+>    `indexd` (binds register socket) + `scannerd` (binds `scannerd-read.sock`) +
+>    `retentiond` (+ systemd unit). BINDING DEPLOY INVARIANT: retentiond `--archive-root`
+>    MUST equal webd `WEBD_ARCHIVE_ROOT` (default `/data/teslausb/archive`). MANDATORY:
+>    GPT-5.5-review the recording-critical deploy plan + snapshot `teslacam.img` + arm
+>    dead-man BEFORE touching the device.
+> 2. `p1-playwright` — verify §4.2 trip-map clip playback end-to-end against
 >    `cybertruckusb.local`; only then tick §4.2 #2 (line ~719) with linked evidence.
 >
 > **Phase-2 (the deleter) stays deferred + GATED** — leases/recovery, indexd delete-RPC,

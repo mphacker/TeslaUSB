@@ -228,6 +228,18 @@ essentials that bind this spec:
 1. **Archive selection & copy:** per §3, using `scannerd`'s **stable-clip** facts
    (only copy files proven complete) and copying via the **raw read path** —
    never mounting the Tesla FS RW.
+   - **Inventory source (what to archive):** the **`indexd` catalog, opened
+     read-only** (`SQLITE_OPEN_READ_ONLY` + `query_only`, WAL — the same seam
+     `webd` uses). `retentiond` selects `RecentClips` clips that are `present`
+     with a live `ro_usb` angle and **no archive backing yet**. It does **not**
+     re-scan a mounted directory — `teslacam.img` is **never mounted** (ADR-0003
+     #1 invariant).
+   - **Byte source (how to read the clip):** the dedicated **`scannerd`
+     `ReadFile` read socket** (`/run/teslausb/scannerd-read.sock`, raw `pread`,
+     no mount; see [`contracts/scannerd-readfile.md`](./contracts/scannerd-readfile.md)).
+     The per-request `ClipIdentity` fence guards against the car replacing a
+     clip mid-copy (`Changed` → abort the clip, never archive stitched bytes);
+     this **is** the "re-validate the source after the copy" requirement of §3.
 2. **Verification:** checksum each archived event before it counts as a "verified
    archive pass" that unlocks car-side deletion.
 3. **Empirical rotation tracking:** maintain the `RecentClips` window estimate and

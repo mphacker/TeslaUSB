@@ -3,9 +3,14 @@
 > Parent: [`scannerd.md`](../scannerd.md) ·
 > [`usb-io-and-archiving-architecture.md`](../usb-io-and-archiving-architecture.md) §0.1 ·
 > [`ADR-0003`](../../adr/0003-media-read-path.md)
-> Status: **DESIGN — SIMPLIFIED & RESCOPED (2026-06-12)**. Opus design,
-> reconciled with GPT-5.5 + mai adversarial reviews (ADR-0003). May be
-> **deferred** behind archive-first (§1).
+> Status: **ACTIVE — REQUIRED FOR PHASE-1 ARCHIVING (2026-06-19, ADR-0004)**.
+> Opus design, reconciled with GPT-5.5 adversarial reviews (ADR-0003/0004).
+> No longer deferred: this socket is the **byte source for `retentiond`'s
+> archive copy** (the Pi must never mount `teslacam.img`, so the archive loop
+> reads clip bytes through this seam). `webd`'s live-clip map fallback (§7) is
+> still a later task, but the socket + protocol below ship now for `retentiond`.
+> **Clients:** `retentiond` (archive copy — primary, now) and `webd` (live-clip
+> fallback — later).
 
 ## 1. Why (and why this is now small)
 

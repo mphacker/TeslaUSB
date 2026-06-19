@@ -1,5 +1,48 @@
 # TeslaUSB B-1 — Build Status (vs. `Requirements.md`)
 
+> ## ⏯️ RESUME HERE (2026-06-18 EOD) — retentiond B1 archive loop, scoping done
+>
+> **Last session shipped + closed:**
+> - **§4.5 Lock Chimes is COMPLETE.** Loudness-preset tick labels restored (V1 parity,
+>   deployed + device-gate 22/22). **Groups CRUD round-trip VERIFIED** (commit `806ac46`):
+>   added schedulerd `update_group_persists_across_reload` (write→reload-from-disk) +
+>   UAT "edit group"/"delete group" driving real webd on desktop+mobile. schedulerd 40
+>   passed; chime-scheduler UAT 60 passed. **Committed, NOT pushed** (per "commit each
+>   milestone; never push").
+>
+> **Next item = build-order step 3: `retentiond` serve loop (B1) → archive RecentClips.**
+> Scoping was done this session — **read this before starting tomorrow:**
+> - retentiond **policy core is DONE + host-tested**: `retentiond::serve::RetentionLoop`
+>   (recover→archive→mirror RecentClips→govern→health), all behind I/O seam traits.
+> - The gap is the **live `serve` wiring** (`rust/crates/retentiond/src/main.rs` `serve`
+>   is a stub that exits FAILURE). It needs live impls of 8 seams: `Clock`, `ArchiveStore`,
+>   `CarDeleteHandoff`, `Statfs`, `ArchiveDeleteOps`, `IndexClient`, `Catalog`, `RandGen`
+>   (see `Seams<'a>` in serve.rs) + the loop driver (cadence → build `CycleInputs` →
+>   `run_cycle` → act on `CycleReport`).
+> - **Key blocker discovered:** indexd is currently a *scannerd CLIENT* only (main.rs pulls
+>   scan batches → writes SQLite). It exposes **NO RPC/UDS server** for retentiond's
+>   `IndexClient`/`Catalog` seams to call (eviction_items, delete_request, recovery_rows,
+>   record_verified_pass, mark_recent_archived, delete-state transitions). The delete-state
+>   DB fns exist in `indexd/src/db/mutations.rs` but aren't reachable over IPC. So full
+>   wiring ALSO implies building an **indexd RPC surface** (or another DB-access design)
+>   + a **gadgetd delete-handoff client** (reuse/extend `webd/src/gadget.rs`) + shipping
+>   **CALIBRATION-GATED governor defaults** (storage.md §7, the C2 at-vehicle gate) +
+>   a **hardware deploy of a recording-critical deleter**.
+> - **OPEN DECISION put to operator (answer pending — operator chose to break):**
+>   scope = (1) **minimal archive-only slice first** [recommended] — archive RecentClips
+>   to Pi-side + register `view_kind='archive'` so webd can stream them, deferring
+>   eviction/delete + governor calibration → unblocks live-clip map playback (§4.2 #2)
+>   fastest; vs (2) full serve wiring lane; vs (3) plan-only.
+> - **A GPT-5.5 second-opinion agent (`retentiond-arch`) is IN FLIGHT** on the architecture
+>   fork: (A) how the live IndexClient/Catalog seams should access indexd's SQLite
+>   (new indexd RPC server vs direct DB vs hybrid — single-writer invariant), (B) whether
+>   a safe archive-only/no-evict first slice exists, (C) deploy-safety preconditions.
+>   **Fold its findings in before delegating to gpt-5.3-codex.**
+> - Reference reads for tomorrow: `rust/crates/retentiond/src/{lib.rs,serve.rs,io.rs}`,
+>   `docs/specs/{retentiond.md,indexd.md,storage.md}`, `docs/specs/contracts/scannerd-readfile.md`,
+>   `docs/adr/0003-media-read-path.md`. Build/test via podman (see copilot-instructions.md).
+
+
 > **What this is.** The single master checklist of *everything* needed to make
 > the B-1 (Rust) solution match [`Requirements.md`](./Requirements.md) — v1's
 > features and look-and-feel, re-implemented in Rust, more efficiently, with zero

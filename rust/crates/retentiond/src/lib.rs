@@ -46,6 +46,7 @@ pub mod io;
 pub mod lease;
 pub mod manifest;
 pub mod recent;
+pub mod register_client;
 pub mod serve;
 pub mod status;
 pub mod time;

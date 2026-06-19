@@ -111,6 +111,79 @@ impl<'r, R: BlockReader + ?Sized> Volume<'r, R> {
         Ok(out)
     }
 
+    /// Read a bounded window from a file chain without resolving the entire file.
+    ///
+    /// `readable_size` is the authoritative readable ceiling (`min(VDL, DataLength)`).
+    /// The resolved cluster working set is bounded to the clusters touched by
+    /// `[start_in_file, start_in_file + len)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same structural errors as [`Volume::follow_chain`] /
+    /// [`Volume::read_file_range`] when the on-disk chain is malformed.
+    pub fn read_file_window(
+        &self,
+        first_cluster: u32,
+        no_fat_chain: bool,
+        readable_size: u64,
+        start_in_file: u64,
+        len: usize,
+    ) -> Result<Vec<u8>, ScannerError> {
+        if len == 0 || start_in_file >= readable_size {
+            return Ok(Vec::new());
+        }
+        if !self.params.is_valid_cluster(first_cluster) {
+            return Err(ScannerError::InvalidCluster {
+                cluster: first_cluster,
+                reason: "chain start out of range",
+            });
+        }
+
+        let bpc = self.params.bytes_per_cluster().max(1);
+        let end = start_in_file
+            .saturating_add(len as u64)
+            .min(readable_size);
+        let window_len = end.saturating_sub(start_in_file);
+        if window_len == 0 {
+            return Ok(Vec::new());
+        }
+
+        let readable_clusters = readable_size.div_ceil(bpc);
+        let start_cluster_index = start_in_file / bpc;
+        let end_cluster_index = (end - 1) / bpc;
+        let clusters_needed = end_cluster_index
+            .saturating_sub(start_cluster_index)
+            .saturating_add(1);
+
+        if end_cluster_index >= readable_clusters {
+            return Err(ScannerError::ChainError {
+                first: first_cluster,
+                reason: "requested range exceeds readable-size cluster span",
+            });
+        }
+
+        let clusters = if no_fat_chain {
+            self.contiguous_chain_window(first_cluster, start_cluster_index, clusters_needed)?
+        } else {
+            self.fat_chain_window(
+                first_cluster,
+                start_cluster_index,
+                clusters_needed,
+                readable_clusters,
+            )?
+        };
+
+        let start_within_window = start_in_file % bpc;
+        self.read_file_range(
+            &clusters,
+            start_within_window,
+            usize::try_from(window_len).map_err(|_| ScannerError::ChainError {
+                first: first_cluster,
+                reason: "window length exceeds usize",
+            })?,
+        )
+    }
+
     /// Decode the FAT entry for `cluster`.
     fn fat_entry(&self, cluster: u32) -> Result<FatEntry, ScannerError> {
         let offset = self.params.fat_entry_byte_offset(cluster)?;
@@ -228,6 +301,87 @@ impl<'r, R: BlockReader + ?Sized> Volume<'r, R> {
             chain.push(cluster);
         }
         Ok(chain)
+    }
+
+    fn contiguous_chain_window(
+        &self,
+        first: u32,
+        start_cluster_index: u64,
+        clusters_needed: u64,
+    ) -> Result<Vec<u32>, ScannerError> {
+        let window_start = first
+            .checked_add(u32::try_from(start_cluster_index).map_err(|_| ScannerError::ChainError {
+                first,
+                reason: "window start exceeds u32",
+            })?)
+            .ok_or(ScannerError::ChainError {
+                first,
+                reason: "contiguous window start overflow",
+            })?;
+        self.contiguous_chain(window_start, clusters_needed)
+    }
+
+    fn fat_chain_window(
+        &self,
+        first: u32,
+        start_cluster_index: u64,
+        clusters_needed: u64,
+        readable_clusters: u64,
+    ) -> Result<Vec<u32>, ScannerError> {
+        if start_cluster_index.saturating_add(clusters_needed) > readable_clusters {
+            return Err(ScannerError::ChainError {
+                first,
+                reason: "requested range exceeds readable chain span",
+            });
+        }
+
+        let cap = readable_clusters
+            .min(u64::from(self.params.cluster_count).saturating_add(1))
+            .min(HARD_MAX_CHAIN_CLUSTERS);
+        let mut visited: HashSet<u32> = HashSet::new();
+        let mut cur = first;
+        let mut index = 0_u64;
+        let mut out = Vec::with_capacity(usize::try_from(clusters_needed).unwrap_or(0).min(1024));
+        let target_end = start_cluster_index.saturating_add(clusters_needed);
+
+        while index < target_end {
+            if index >= cap {
+                return Err(ScannerError::ChainError {
+                    first,
+                    reason: "chain exceeds cluster-count cap (unterminated/cyclic)",
+                });
+            }
+            if !visited.insert(cur) {
+                return Err(ScannerError::ChainError {
+                    first,
+                    reason: "FAT cycle detected",
+                });
+            }
+            if index >= start_cluster_index {
+                out.push(cur);
+            }
+            index = index.saturating_add(1);
+            if index >= target_end {
+                break;
+            }
+            cur = match self.fat_entry(cur)? {
+                FatEntry::EndOfChain => {
+                    return Err(ScannerError::ChainError {
+                        first,
+                        reason: "chain ended before requested window",
+                    });
+                }
+                FatEntry::Next(next) => next,
+                FatEntry::Invalid => {
+                    return Err(ScannerError::ChainError {
+                        first,
+                        reason: "free/bad/out-of-range cluster mid-chain",
+                    });
+                }
+            };
+        }
+
+        Ok(out)
     }
 }
 

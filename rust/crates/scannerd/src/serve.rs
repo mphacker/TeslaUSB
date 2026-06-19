@@ -44,6 +44,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use scannerd::produce::{DEFAULT_SEI_SAMPLE_RATE, ImageSource, produce};
@@ -51,6 +52,7 @@ use scannerd::proto::{Request, read_request, write_batch};
 use scannerd::stability::{StabilityConfig, StabilityTracker};
 
 use crate::io::PreadReader;
+use crate::readserve;
 
 /// Default control-socket path (matches the `gadgetd` runtime layout).
 const DEFAULT_SOCKET: &str = "/run/teslausb/scannerd.sock";
@@ -65,7 +67,8 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const READ_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Parse `scannerd serve <teslacam-image> [--media <media-image>]
-/// [--socket <path>] [--sample-rate <n>]` and run the daemon.
+/// [--socket <path>] [--read-socket <path>] [--sample-rate <n>]`
+/// and run the daemon.
 ///
 /// The first positional argument is the **`TeslaCam`** (dashcam) image; its
 /// single exFAT partition is stamped logical slot [`DASHCAM_SLOT`]. The
@@ -78,12 +81,14 @@ pub fn run_serve(args: &[String]) -> ExitCode {
     let Some(teslacam) = args.get(2) else {
         eprintln!(
             "usage: scannerd serve <teslacam-image> [--media <media-image>] \
-             [--socket <path>] [--sample-rate <n>]"
+             [--socket <path>] [--read-socket <path>] [--sample-rate <n>]"
         );
         return ExitCode::FAILURE;
     };
     let media_path = arg_value(args, "--media");
     let socket = arg_value(args, "--socket").unwrap_or_else(|| DEFAULT_SOCKET.to_owned());
+    let read_socket =
+        arg_value(args, "--read-socket").unwrap_or_else(|| readserve::DEFAULT_READ_SOCKET.to_owned());
     let sample_rate = arg_value(args, "--sample-rate")
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(DEFAULT_SEI_SAMPLE_RATE);
@@ -95,6 +100,7 @@ pub fn run_serve(args: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let teslacam_reader = Arc::new(teslacam_reader);
 
     // Open the media reader (if any) before building sources so both fds
     // outlive the borrow held by the `ImageSource` slice.
@@ -113,13 +119,22 @@ pub fn run_serve(args: &[String]) -> ExitCode {
         // Two single-partition images: stamp logical slots so the dashcam
         // image classifies as p1 and the media image as p2 downstream.
         Some(media) => vec![
-            ImageSource::with_slot(&teslacam_reader, DASHCAM_SLOT),
+            ImageSource::with_slot(teslacam_reader.as_ref(), DASHCAM_SLOT),
             ImageSource::with_slot(media, MEDIA_SLOT),
         ],
         // Legacy single combined image: keep each partition's native MBR
         // slot (p1=0 dashcam, p2=1 media).
-        None => vec![ImageSource::native(&teslacam_reader)],
+        None => vec![ImageSource::native(teslacam_reader.as_ref())],
     };
+
+    let _read_thread =
+        match readserve::start(Arc::clone(&teslacam_reader), Path::new(&read_socket)) {
+            Ok(handle) => handle,
+            Err(e) => {
+                eprintln!("scannerd serve: cannot start read socket {read_socket}: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
 
     match serve(&sources, Path::new(&socket), sample_rate) {
         Ok(()) => ExitCode::SUCCESS,

@@ -20,6 +20,9 @@ mod io;
 #[cfg(unix)]
 mod serve;
 
+#[cfg(unix)]
+mod readserve;
+
 #[cfg(not(unix))]
 fn main() -> ExitCode {
     eprintln!("scannerd: this binary runs on Linux (the Pi) only");
@@ -82,7 +85,7 @@ mod unix_app {
         let Some(path) = args.get(1) else {
             eprintln!(
                 "usage: scannerd <image-path> [--watch <interval_secs> <iterations>]\n       \
-                 scannerd serve <image-path> [--socket <path>] [--sample-rate <n>]"
+                 scannerd serve <image-path> [--socket <path>] [--read-socket <path>] [--sample-rate <n>]"
             );
             return ExitCode::FAILURE;
         };

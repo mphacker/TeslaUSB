@@ -32,6 +32,8 @@ pub const MAX_FRAME: u32 = 64 * 1024 * 1024;
 /// inbound frames far tighter than [`MAX_FRAME`]: a peer cannot force a
 /// large allocation before the request even parses.
 pub const MAX_REQUEST_FRAME: u32 = 64 * 1024;
+/// Maximum bytes requested/returned by one `ReadFile` window.
+pub const MAX_READ_LEN: u32 = 8 * 1024 * 1024;
 
 /// A client→server request. `scannerd` only answers scan requests; it
 /// holds no other state the client can mutate.
@@ -49,6 +51,59 @@ pub enum Request {
         /// Replay all currently-stable clips, not just newly-eligible ones.
         #[serde(default)]
         resync: bool,
+    },
+}
+
+/// First-chunk identity fence echoed across `ReadFile` windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClipIdentity {
+    /// First cluster of the resolved file.
+    pub first_cluster: u32,
+    /// Resolved `DataLength`.
+    pub total_size: u64,
+    /// exFAT `NameHash` of the resolved leaf.
+    pub name_hash: u32,
+}
+
+/// One `ReadFile` request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ReadFileRequest {
+    /// TeslaCam-volume-root-relative path.
+    pub path: String,
+    /// Byte offset in file.
+    pub offset: u64,
+    /// Requested byte length.
+    pub len: u32,
+    /// Optional identity from an earlier chunk.
+    pub handle: Option<ClipIdentity>,
+}
+
+/// `ReadFile` JSON response header.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ReadFileHeader {
+    /// Successful response metadata (followed by raw bytes).
+    Ok {
+        /// Current file identity.
+        identity: ClipIdentity,
+        /// Current readable ceiling.
+        readable_size: u64,
+        /// Whether the returned window reached EOF.
+        eof: bool,
+        /// Raw tail length.
+        byte_len: u32,
+    },
+    /// File changed since provided handle.
+    Changed,
+    /// Path not found or not a file.
+    NotFound,
+    /// Offset is beyond readable size.
+    OutOfRange,
+    /// Request failed.
+    Error {
+        /// Human-readable reason.
+        message: String,
     },
 }
 
@@ -144,8 +199,8 @@ mod tests {
     use std::io::Cursor;
 
     use super::{
-        MAX_FRAME, Request, read_batch, read_frame, read_request, write_batch, write_frame,
-        write_request,
+        ClipIdentity, MAX_FRAME, Request, ReadFileHeader, ReadFileRequest, read_batch, read_frame,
+        read_request, write_batch, write_frame, write_request,
     };
     use crate::record::{PROTOCOL_VERSION, ProducerStats, ScanBatch};
 
@@ -224,5 +279,69 @@ mod tests {
         write_batch(&mut buf, &batch).unwrap();
         let mut cur = Cursor::new(buf);
         assert_eq!(read_batch(&mut cur).unwrap(), batch);
+    }
+
+    #[test]
+    fn read_file_wire_json_matches_adr_0004_fixtures() {
+        let req = ReadFileRequest {
+            path: "TeslaCam/RecentClips/2026-06-19_10-00-00-front.mp4".to_owned(),
+            offset: 0,
+            len: 8_388_608,
+            handle: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&req).unwrap(),
+            "{\"path\":\"TeslaCam/RecentClips/2026-06-19_10-00-00-front.mp4\",\"offset\":0,\"len\":8388608,\"handle\":null}"
+        );
+
+        let identity = ClipIdentity {
+            first_cluster: 1234,
+            total_size: 2_097_152,
+            name_hash: 3_735_928_559,
+        };
+        let req_with_handle = ReadFileRequest {
+            path: "...".to_owned(),
+            offset: 8_388_608,
+            len: 8_388_608,
+            handle: Some(identity),
+        };
+        assert_eq!(
+            serde_json::to_string(&req_with_handle).unwrap(),
+            "{\"path\":\"...\",\"offset\":8388608,\"len\":8388608,\"handle\":{\"first_cluster\":1234,\"total_size\":2097152,\"name_hash\":3735928559}}"
+        );
+        assert_eq!(
+            serde_json::to_string(&identity).unwrap(),
+            "{\"first_cluster\":1234,\"total_size\":2097152,\"name_hash\":3735928559}"
+        );
+
+        assert_eq!(
+            serde_json::to_string(&ReadFileHeader::Ok {
+                identity,
+                readable_size: 2_097_152,
+                eof: true,
+                byte_len: 1_048_576,
+            })
+            .unwrap(),
+            "{\"status\":\"ok\",\"identity\":{\"first_cluster\":1234,\"total_size\":2097152,\"name_hash\":3735928559},\"readable_size\":2097152,\"eof\":true,\"byte_len\":1048576}"
+        );
+        assert_eq!(
+            serde_json::to_string(&ReadFileHeader::Changed).unwrap(),
+            "{\"status\":\"changed\"}"
+        );
+        assert_eq!(
+            serde_json::to_string(&ReadFileHeader::NotFound).unwrap(),
+            "{\"status\":\"not_found\"}"
+        );
+        assert_eq!(
+            serde_json::to_string(&ReadFileHeader::OutOfRange).unwrap(),
+            "{\"status\":\"out_of_range\"}"
+        );
+        assert_eq!(
+            serde_json::to_string(&ReadFileHeader::Error {
+                message: "...".to_owned()
+            })
+            .unwrap(),
+            "{\"status\":\"error\",\"message\":\"...\"}"
+        );
     }
 }

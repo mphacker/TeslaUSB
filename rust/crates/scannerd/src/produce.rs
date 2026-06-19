@@ -535,6 +535,7 @@ mod tests {
             partition_slot: slot,
             path: path.to_owned(),
             name: name.to_owned(),
+            name_hash: 0,
             first_cluster: 5,
             data_length: 1024,
             valid_data_length: 1024,

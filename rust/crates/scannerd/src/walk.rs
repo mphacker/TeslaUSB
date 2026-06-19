@@ -38,6 +38,8 @@ pub struct FileRecord {
     pub path: String,
     /// File name (last path component).
     pub name: String,
+    /// exFAT `NameHash` of the leaf file name.
+    pub name_hash: u32,
     /// First cluster of the file's data.
     pub first_cluster: u32,
     /// `DataLength` — total file size in bytes.
@@ -110,6 +112,7 @@ pub fn walk_volume<R: BlockReader + ?Sized>(
         for entry in entries {
             let DecodedExfatEntry::File {
                 name,
+                name_hash,
                 attributes,
                 timestamps,
                 first_cluster,
@@ -157,6 +160,7 @@ pub fn walk_volume<R: BlockReader + ?Sized>(
                 partition_slot,
                 path: child_path,
                 name,
+                name_hash: u32::from(name_hash),
                 first_cluster,
                 data_length,
                 valid_data_length,
@@ -169,6 +173,128 @@ pub fn walk_volume<R: BlockReader + ?Sized>(
     }
 
     Ok(records)
+}
+
+/// Resolve one file path by targeted component-by-component descent.
+///
+/// This reads only the directories named by `components`, never a full-tree walk.
+///
+/// # Errors
+///
+/// Propagates structural read failures and the same traversal caps as [`walk_volume`].
+pub fn resolve_file_by_components<R: BlockReader + ?Sized>(
+    volume: &Volume<'_, R>,
+    partition_slot: u8,
+    components: &[String],
+) -> Result<Option<FileRecord>, ScannerError> {
+    if components.is_empty() {
+        return Ok(None);
+    }
+
+    let mut dir_first_cluster = volume.params().first_root_cluster;
+    let mut dir_no_fat_chain = false;
+    let mut dir_contiguous_span: Option<u64> = None;
+    let mut path_prefix = String::new();
+    let mut dirs_seen = 0_usize;
+    let mut entries_seen = 0_usize;
+
+    for (index, component) in components.iter().enumerate() {
+        dirs_seen += 1;
+        if dirs_seen > MAX_DIRECTORIES {
+            return Err(ScannerError::LimitExceeded("directory count cap"));
+        }
+        let depth = u32::try_from(index).map_err(|_| ScannerError::LimitExceeded("directory depth cap"))?;
+        if depth >= MAX_DEPTH {
+            return Err(ScannerError::LimitExceeded("directory depth cap"));
+        }
+
+        let span = dir_contiguous_span
+            .unwrap_or_else(|| u64::from(volume.params().cluster_count).saturating_add(1));
+        let clusters = volume.follow_chain(dir_first_cluster, dir_no_fat_chain, span)?;
+        let entries = read_directory_entries(volume, &clusters)?;
+        entries_seen = entries_seen.saturating_add(entries.len());
+        if entries_seen > MAX_FILE_RECORDS {
+            return Err(ScannerError::LimitExceeded("file record cap"));
+        }
+
+        let mut matched: Option<(FileRecord, bool)> = None;
+        for entry in entries {
+            let DecodedExfatEntry::File {
+                name,
+                name_hash,
+                attributes,
+                timestamps,
+                first_cluster,
+                valid_data_length,
+                data_length,
+                no_fat_chain,
+                set_checksum_ok,
+                ..
+            } = entry
+            else {
+                continue;
+            };
+
+            let Some(name) = name else {
+                continue;
+            };
+            if !name.eq_ignore_ascii_case(component) {
+                continue;
+            }
+
+            let path = if path_prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{path_prefix}/{name}")
+            };
+            matched = Some((
+                FileRecord {
+                    partition_slot,
+                    path,
+                    name,
+                    name_hash: u32::from(name_hash),
+                    first_cluster,
+                    data_length,
+                    valid_data_length,
+                    no_fat_chain,
+                    timestamps,
+                    set_checksum_ok,
+                    dir_first_cluster,
+                },
+                attributes.directory,
+            ));
+            break;
+        }
+
+        let Some((record, is_directory)) = matched else {
+            return Ok(None);
+        };
+        if !record.set_checksum_ok {
+            return Ok(None);
+        }
+
+        let is_last = index + 1 == components.len();
+        if is_last {
+            if is_directory {
+                return Ok(None);
+            }
+            return Ok(Some(record));
+        }
+
+        if !is_directory {
+            return Ok(None);
+        }
+        if !volume.params().is_valid_cluster(record.first_cluster) {
+            return Ok(None);
+        }
+
+        dir_first_cluster = record.first_cluster;
+        dir_no_fat_chain = record.no_fat_chain;
+        dir_contiguous_span = Some(record.data_length.div_ceil(volume.params().bytes_per_cluster()));
+        path_prefix = record.path;
+    }
+
+    Ok(None)
 }
 
 /// Decode every entry of a directory given its cluster list, threading

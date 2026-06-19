@@ -37,6 +37,7 @@
 //! calibration only sets the values.
 
 pub mod archive;
+pub mod archive_driver;
 pub mod config;
 pub mod delete;
 pub mod durability;

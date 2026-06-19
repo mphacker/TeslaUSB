@@ -44,6 +44,7 @@ fn main() -> ExitCode {
 mod unix_app {
     use std::os::unix::net::UnixStream;
     use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
     use std::thread::sleep;
     use std::time::Duration;
 
@@ -51,6 +52,7 @@ mod unix_app {
     use indexd::db::mutations::BootContext;
     use indexd::db::{DbError, open};
     use indexd::derive::DeriveConfig;
+    use indexd::server;
     use scannerd::proto::{Request, read_batch, write_request};
 
     /// Default on-Pi DB path. ext4, Pi-side — NEVER inside `disk.img` / the
@@ -58,7 +60,10 @@ mod unix_app {
     const DEFAULT_DB_PATH: &str = "/var/lib/teslausb/index.sqlite3";
 
     /// Default `scannerd` control-socket path (matches `scannerd serve`).
-    const DEFAULT_SOCKET: &str = "/run/teslausb/scannerd.sock";
+    const DEFAULT_SCANNERD_SOCKET: &str = "/run/teslausb/scannerd.sock";
+
+    /// Default `indexd` control-socket path (`retentiond` registration RPC).
+    const DEFAULT_INDEXD_SOCKET: &str = "/run/teslausb/indexd.sock";
 
     /// Seconds between scan passes. Two stable observations spaced by the
     /// quiescence window gate a clip in.
@@ -75,48 +80,66 @@ mod unix_app {
     const IO_TIMEOUT: Duration = Duration::from_secs(60);
 
     /// Resolve config from args/env: `argv[1]` (or `INDEXD_DB`) = DB path;
-    /// `argv[2]` (or `INDEXD_SCANNERD_SOCKET`) = `scannerd` socket path.
-    fn resolve_paths() -> (PathBuf, PathBuf) {
+    /// `argv[2]` (or `INDEXD_SCANNERD_SOCKET`) = `scannerd` socket path;
+    /// `argv[3]` (or `INDEXD_SOCKET`) = `indexd` socket path.
+    fn resolve_paths() -> (PathBuf, PathBuf, PathBuf) {
         let mut args = std::env::args().skip(1);
         let db = args
             .next()
             .or_else(|| std::env::var("INDEXD_DB").ok())
             .unwrap_or_else(|| DEFAULT_DB_PATH.to_owned());
-        let socket = args
+        let scannerd_socket = args
             .next()
             .or_else(|| std::env::var("INDEXD_SCANNERD_SOCKET").ok())
-            .unwrap_or_else(|| DEFAULT_SOCKET.to_owned());
-        (PathBuf::from(db), PathBuf::from(socket))
+            .unwrap_or_else(|| DEFAULT_SCANNERD_SOCKET.to_owned());
+        let indexd_socket = args
+            .next()
+            .or_else(|| std::env::var("INDEXD_SOCKET").ok())
+            .unwrap_or_else(|| DEFAULT_INDEXD_SOCKET.to_owned());
+        (
+            PathBuf::from(db),
+            PathBuf::from(scannerd_socket),
+            PathBuf::from(indexd_socket),
+        )
     }
 
     /// Open the DB, reap stale leases, then run the connect/scan loop
     /// forever (the loop only returns on a fatal, non-recoverable error).
     pub fn run() -> Result<(), String> {
-        let (db_path, socket_path) = resolve_paths();
+        let (db_path, scannerd_socket_path, indexd_socket_path) = resolve_paths();
         let db_display = db_path.display().to_string();
-        let mut conn = open(&db_path).map_err(|e: DbError| format!("opening {db_display}: {e}"))?;
+        let conn = open(&db_path).map_err(|e: DbError| format!("opening {db_display}: {e}"))?;
+        let conn = Arc::new(Mutex::new(conn));
 
         // Single-writer hygiene: reap leases stranded by a previous boot.
         let boot = BootContext::new();
-        let reaped = boot
-            .reap(&conn)
-            .map_err(|e| format!("reaping stale leases: {e}"))?;
+        let reaped = {
+            let locked = conn
+                .lock()
+                .map_err(|_| "index database mutex is poisoned".to_owned())?;
+            boot.reap(&locked)
+                .map_err(|e| format!("reaping stale leases: {e}"))?
+        };
         println!(
             "indexd: boot {} ; reaped {reaped} stale lease(s)",
             boot.boot_id()
         );
 
-        let socket_display = socket_path.display().to_string();
+        let _server_thread =
+            server::spawn(&conn, &indexd_socket_path, IO_TIMEOUT)
+                .map_err(|e| format!("binding {}: {e}", indexd_socket_path.display()))?;
+
+        let socket_display = scannerd_socket_path.display().to_string();
         let derive_cfg = DeriveConfig::default();
         let mut generation: u64 = 0;
 
         println!("indexd: consuming scannerd at {socket_display} → {db_display}");
         loop {
-            match UnixStream::connect(&socket_path) {
+            match UnixStream::connect(&scannerd_socket_path) {
                 Ok(stream) => {
                     // A fresh connection: resync to recover any batch the
                     // previous connection produced but never committed.
-                    serve_connection(stream, &mut conn, derive_cfg, &mut generation);
+                    serve_connection(stream, &conn, derive_cfg, &mut generation);
                     eprintln!("indexd: scannerd connection closed; reconnecting");
                 }
                 Err(e) => {
@@ -132,7 +155,7 @@ mod unix_app {
     /// stays monotonic across reconnects for the whole process lifetime.
     fn serve_connection(
         mut stream: UnixStream,
-        conn: &mut rusqlite::Connection,
+        conn: &Arc<Mutex<rusqlite::Connection>>,
         derive_cfg: DeriveConfig,
         generation: &mut u64,
     ) {
@@ -175,7 +198,14 @@ mod unix_app {
                 );
                 return;
             }
-            match apply(conn, &batch, derive_cfg) {
+            let apply_result = {
+                let Ok(mut locked) = conn.lock() else {
+                    eprintln!("indexd: database mutex poisoned");
+                    return;
+                };
+                apply(&mut locked, &batch, derive_cfg)
+            };
+            match apply_result {
                 Ok(report) => {
                     println!(
                         "indexd: pass gen {want_generation} — {} clips, {} front, {} waypoints, \

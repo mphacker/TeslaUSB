@@ -26,12 +26,9 @@ path = "src/main.rs"
 teslausb-core = { path = "../teslausb-core" }
 scannerd = { path = "../scannerd" }
 rusqlite = { version = "0.32", features = ["bundled"] }
-thiserror = "1"
-
-[dev-dependencies]
-# Round-trips a ScanBatch through the wire codec in apply's parity tests,
-# proving the cross-process (socket) path applies identically to in-process.
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+thiserror = "1"
 
 [lints]
 workspace = true

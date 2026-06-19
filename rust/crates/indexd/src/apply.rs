@@ -38,8 +38,8 @@ use teslausb_core::sei::tesla::{AutopilotState, Gear};
 use crate::db::DbError;
 use crate::db::ingest::{
     AngleFacts, ClipFacts, MediaFacts, ensure_clip, load_derive_clips, prune_missing_clips,
-    prune_missing_media, rebuild_derived, replace_clip_waypoints, upsert_angle, upsert_clip,
-    upsert_media,
+    prune_missing_media, rebuild_derived, replace_clip_waypoints, upsert_angle_scan_preserving,
+    upsert_clip, upsert_media,
 };
 use crate::derive::{DeriveConfig, derive};
 use crate::model::{DeriveWaypoint, FolderClass};
@@ -160,11 +160,11 @@ fn apply_record(
         let clip_id = upsert_clip(conn, &facts)?;
         let derived: Vec<DeriveWaypoint> = record.waypoints.iter().map(map_waypoint).collect();
         replace_clip_waypoints(conn, clip_id, &derived)?;
-        upsert_angle(conn, clip_id, &angle)?;
+        upsert_angle_scan_preserving(conn, clip_id, &angle)?;
         Ok(derived.len())
     } else {
         let clip_id = ensure_clip(conn, &facts)?;
-        upsert_angle(conn, clip_id, &angle)?;
+        upsert_angle_scan_preserving(conn, clip_id, &angle)?;
         Ok(0)
     }
 }

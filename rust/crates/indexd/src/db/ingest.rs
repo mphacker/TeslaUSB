@@ -10,10 +10,11 @@
 //!     rebuildable from the media.
 //!   * **Durable control state** (`archive_items`, `eviction_tombstones`,
 //!     `leases`, `prefs`, and the `pinned` / `durable` / `delete_state`
-//!     columns) is NEVER touched here — a rebuild must preserve it (D1
-//!     §5/§6). Pruning a vanished clip therefore only `SET NULL`s the
-//!     `archive_items.clip_id` back-reference (via the schema FK), never
-//!     deletes the archive row.
+//!     columns) is never touched by the scan ingest path — a rebuild must
+//!     preserve it (D1 §5/§6). The explicit archive-registration mutation
+//!     is a separate entry point below. Pruning a vanished clip therefore
+//!     only `SET NULL`s the `archive_items.clip_id` back-reference (via the
+//!     schema FK), never deletes the archive row.
 //!
 //! Prune semantics mirror `mapping_index_prune.py`: rows for clips whose
 //! `canonical_key` is no longer present on the media are removed, and only
@@ -65,6 +66,55 @@ pub struct AngleFacts {
     pub duration_s: Option<f64>,
     /// File size in bytes, if known.
     pub size_bytes: Option<i64>,
+}
+
+/// One archive-backed angle attached during archive registration.
+#[derive(Debug, Clone)]
+pub struct ArchiveAngleRegistration {
+    /// Camera label (`front`, `back`, `left_repeater`, ...).
+    pub camera: String,
+    /// Archive-root-relative playable file reference.
+    pub file_ref: String,
+    /// Milliseconds relative to clip start.
+    pub offset_ms: i64,
+    /// Angle duration in seconds, when known.
+    pub duration_s: Option<f64>,
+    /// File size in bytes.
+    pub size_bytes: i64,
+}
+
+/// One archive item unit attached during archive registration.
+#[derive(Debug, Clone)]
+pub struct ArchiveUnitRegistration {
+    /// Deterministic archive-root-relative item path.
+    pub path: String,
+    /// Total bytes in the archive item.
+    pub size_bytes: i64,
+    /// Number of files in the archive item.
+    pub file_count: i64,
+    /// Wall-clock archive completion epoch seconds.
+    pub archived_at: i64,
+}
+
+/// Complete archive registration payload written in one DB transaction.
+#[derive(Debug, Clone)]
+pub struct ArchiveRegistration {
+    /// Clip identity key shared with scanner ingest.
+    pub canonical_key: String,
+    /// Source bucket classification (origin, not promotion target).
+    pub folder_class: FolderClass,
+    /// Source partition label.
+    pub partition: String,
+    /// Clip start epoch seconds.
+    pub started_at: i64,
+    /// Clip end epoch seconds.
+    pub ended_at: i64,
+    /// Clip duration in seconds when known.
+    pub duration_s: Option<f64>,
+    /// Archive item metadata.
+    pub archive: ArchiveUnitRegistration,
+    /// Camera angles to force archive-backed.
+    pub angles: Vec<ArchiveAngleRegistration>,
 }
 
 /// Upsert a clip by `canonical_key`, returning its DB id. `created_at` is
@@ -143,19 +193,31 @@ pub fn ensure_clip(conn: &Connection, facts: &ClipFacts) -> Result<i64, DbError>
     Ok(id)
 }
 
-/// Upsert one camera angle, keyed `UNIQUE(clip_id, camera)`.
+/// Upsert one camera angle for the scan path, keyed `UNIQUE(clip_id, camera)`.
+/// If the existing row is already archive-backed, preserve its `view_kind`
+/// + `file_ref` (Guard A) while still refreshing offset/duration/size.
 ///
 /// # Errors
 ///
 /// Returns [`DbError`] if the statement fails.
-pub fn upsert_angle(conn: &Connection, clip_id: i64, angle: &AngleFacts) -> Result<(), DbError> {
+pub fn upsert_angle_scan_preserving(
+    conn: &Connection,
+    clip_id: i64,
+    angle: &AngleFacts,
+) -> Result<(), DbError> {
     conn.execute(
         "INSERT INTO angles
              (clip_id, camera, file_ref, view_kind, offset_ms, duration_s, size_bytes)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(clip_id, camera) DO UPDATE SET
-             file_ref   = excluded.file_ref,
-             view_kind  = excluded.view_kind,
+             file_ref   = CASE
+                            WHEN angles.view_kind = 'archive' THEN angles.file_ref
+                            ELSE excluded.file_ref
+                          END,
+             view_kind  = CASE
+                            WHEN angles.view_kind = 'archive' THEN angles.view_kind
+                            ELSE excluded.view_kind
+                          END,
              offset_ms  = excluded.offset_ms,
              duration_s = excluded.duration_s,
              size_bytes = excluded.size_bytes",
@@ -170,6 +232,114 @@ pub fn upsert_angle(conn: &Connection, clip_id: i64, angle: &AngleFacts) -> Resu
         ],
     )?;
     Ok(())
+}
+
+/// Upsert one camera angle and force archive precedence.
+///
+/// # Errors
+///
+/// Returns [`DbError`] if the statement fails.
+pub fn upsert_angle_force_archive(
+    conn: &Connection,
+    clip_id: i64,
+    angle: &AngleFacts,
+) -> Result<(), DbError> {
+    conn.execute(
+        "INSERT INTO angles
+             (clip_id, camera, file_ref, view_kind, offset_ms, duration_s, size_bytes)
+         VALUES (?1, ?2, ?3, 'archive', ?4, ?5, ?6)
+         ON CONFLICT(clip_id, camera) DO UPDATE SET
+             file_ref   = excluded.file_ref,
+             view_kind  = 'archive',
+             offset_ms  = excluded.offset_ms,
+             duration_s = excluded.duration_s,
+             size_bytes = excluded.size_bytes",
+        params![
+            clip_id,
+            angle.camera,
+            angle.file_ref,
+            angle.offset_ms,
+            angle.duration_s,
+            angle.size_bytes,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Register one archived clip in a single transaction:
+/// ensure clip, upsert archive item (`LIVE`, `durable=0`), link
+/// `archive_item_clips`, and force angles to archive.
+///
+/// # Errors
+///
+/// Returns [`DbError`] if any statement fails (the transaction rolls back).
+pub fn register_archived_clip(
+    conn: &mut Connection,
+    registration: &ArchiveRegistration,
+) -> Result<(i64, i64), DbError> {
+    let now = now_epoch_s();
+    let tx = conn.transaction()?;
+    let clip_id = ensure_clip(
+        &tx,
+        &ClipFacts {
+            canonical_key: registration.canonical_key.clone(),
+            started_at: registration.started_at,
+            ended_at: Some(registration.ended_at),
+            partition: registration.partition.clone(),
+            folder_class: registration.folder_class,
+            duration_s: registration.duration_s,
+        },
+    )?;
+
+    let archive_item_id: i64 = tx.query_row(
+        "INSERT INTO archive_items
+             (folder_class, path, clip_id, size_bytes, file_count, archived_at,
+              delete_state, durable, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'LIVE', 0, ?7, ?7)
+         ON CONFLICT(path) DO UPDATE SET
+             size_bytes  = excluded.size_bytes,
+             file_count  = excluded.file_count,
+             archived_at = excluded.archived_at,
+             clip_id     = excluded.clip_id,
+             delete_state = 'LIVE',
+             durable     = 0,
+             updated_at  = excluded.updated_at
+         RETURNING id",
+        params![
+            registration.folder_class.as_db_str(),
+            registration.archive.path,
+            clip_id,
+            registration.archive.size_bytes,
+            registration.archive.file_count,
+            registration.archive.archived_at,
+            now,
+        ],
+        |r| r.get(0),
+    )?;
+
+    tx.execute(
+        "INSERT OR IGNORE INTO archive_item_clips (archive_item_id, clip_id)
+         VALUES (?1, ?2)",
+        params![archive_item_id, clip_id],
+    )?;
+
+    for angle in &registration.angles {
+        upsert_angle_force_archive(
+            &tx,
+            clip_id,
+            &AngleFacts {
+                camera: angle.camera.clone(),
+                file_ref: angle.file_ref.clone(),
+                view_kind: "archive".to_owned(),
+                offset_ms: angle.offset_ms,
+                duration_s: angle.duration_s,
+                size_bytes: Some(angle.size_bytes),
+            },
+        )?;
+    }
+
+    tx.commit()?;
+    Ok((clip_id, archive_item_id))
 }
 
 /// Replace the cached SEI telemetry for a clip (full delete + reinsert).
@@ -234,7 +404,7 @@ pub fn prune_missing_clips<S: std::hash::BuildHasher>(
         let mut stale = Vec::new();
         for row in rows {
             let (id, key) = row?;
-            if !present_keys.contains(&key) {
+            if !present_keys.contains(&key) && !has_archive_backing(conn, id)? {
                 stale.push(id);
             }
         }
@@ -244,6 +414,29 @@ pub fn prune_missing_clips<S: std::hash::BuildHasher>(
         conn.execute("DELETE FROM clips WHERE id = ?1", params![id])?;
     }
     Ok(stale.len())
+}
+
+fn has_archive_backing(conn: &Connection, clip_id: i64) -> Result<bool, DbError> {
+    let has_backing = conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1
+               FROM angles
+              WHERE clip_id = ?1 AND view_kind = 'archive'
+         ) OR EXISTS(
+             SELECT 1
+               FROM archive_items
+              WHERE clip_id = ?1 AND delete_state <> 'DELETED'
+         ) OR EXISTS(
+             SELECT 1
+               FROM archive_item_clips aic
+               JOIN archive_items ai ON ai.id = aic.archive_item_id
+              WHERE aic.clip_id = ?1
+                AND ai.delete_state <> 'DELETED'
+         )",
+        params![clip_id],
+        |r| r.get::<_, bool>(0),
+    )?;
+    Ok(has_backing)
 }
 
 /// One MEDIA-partition (p2) inventory fact: a file the read-only media
@@ -551,8 +744,10 @@ mod tests {
     use teslausb_core::sei::tesla::{AutopilotState, Gear};
 
     use super::{
-        AngleFacts, ClipFacts, load_derive_clips, prune_missing_clips, rebuild_all_from_db,
-        replace_clip_waypoints, upsert_angle, upsert_clip,
+        AngleFacts, ArchiveAngleRegistration, ArchiveRegistration, ArchiveUnitRegistration,
+        ClipFacts, load_derive_clips, prune_missing_clips, rebuild_all_from_db,
+        register_archived_clip, replace_clip_waypoints, upsert_angle_force_archive,
+        upsert_angle_scan_preserving, upsert_clip,
     };
     use crate::db::open_in_memory;
     use crate::derive::DeriveConfig;
@@ -587,6 +782,30 @@ mod tests {
         }
     }
 
+    fn archive_registration(key: &str, archive_path: &str, file_ref: &str) -> ArchiveRegistration {
+        ArchiveRegistration {
+            canonical_key: key.to_owned(),
+            folder_class: FolderClass::RecentClips,
+            partition: "slot0".to_owned(),
+            started_at: 1_718_805_600,
+            ended_at: 1_718_805_660,
+            duration_s: Some(60.0),
+            archive: ArchiveUnitRegistration {
+                path: archive_path.to_owned(),
+                size_bytes: 4096,
+                file_count: 4,
+                archived_at: 1_718_805_700,
+            },
+            angles: vec![ArchiveAngleRegistration {
+                camera: "front".to_owned(),
+                file_ref: file_ref.to_owned(),
+                offset_ms: 0,
+                duration_s: Some(60.0),
+                size_bytes: 1024,
+            }],
+        }
+    }
+
     #[test]
     fn upsert_clip_is_idempotent_by_canonical_key() {
         let conn = open_in_memory().unwrap();
@@ -615,15 +834,15 @@ mod tests {
         let angle = AngleFacts {
             camera: "front".to_owned(),
             file_ref: "a.mp4".to_owned(),
-            view_kind: "archive".to_owned(),
+            view_kind: "ro_usb".to_owned(),
             offset_ms: 0,
             duration_s: Some(60.0),
             size_bytes: Some(100),
         };
-        upsert_angle(&conn, id, &angle).unwrap();
+        upsert_angle_scan_preserving(&conn, id, &angle).unwrap();
         let mut a2 = angle.clone();
         a2.file_ref = "b.mp4".to_owned();
-        upsert_angle(&conn, id, &a2).unwrap();
+        upsert_angle_scan_preserving(&conn, id, &a2).unwrap();
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM angles", [], |r| r.get(0))
             .unwrap();
@@ -656,11 +875,196 @@ mod tests {
     }
 
     #[test]
-    fn prune_removes_vanished_and_preserves_archive_items() {
+    fn register_archived_clip_writes_rows_and_returns_ids() {
+        let mut conn = open_in_memory().unwrap();
+        let registration = archive_registration(
+            "slot0:TeslaCam/RecentClips/2026-06-19/clip-a",
+            "archive/2026-06-19/clip-a",
+            "archive/2026-06-19/clip-a/front.mp4",
+        );
+        let (clip_id, archive_item_id) = register_archived_clip(&mut conn, &registration).unwrap();
+        assert!(clip_id > 0);
+        assert!(archive_item_id > 0);
+
+        let (durable, delete_state, linked_clip): (i64, String, i64) = conn
+            .query_row(
+                "SELECT durable, delete_state, clip_id FROM archive_items WHERE id = ?1",
+                [archive_item_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(durable, 0);
+        assert_eq!(delete_state, "LIVE");
+        assert_eq!(linked_clip, clip_id);
+
+        let links: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM archive_item_clips WHERE archive_item_id = ?1 AND clip_id = ?2",
+                [archive_item_id, clip_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(links, 1);
+
+        let (view_kind, file_ref): (String, String) = conn
+            .query_row(
+                "SELECT view_kind, file_ref FROM angles WHERE clip_id = ?1 AND camera = 'front'",
+                [clip_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(view_kind, "archive");
+        assert_eq!(file_ref, "archive/2026-06-19/clip-a/front.mp4");
+    }
+
+    #[test]
+    fn guard_a_scan_preserves_archive_and_force_archive_overrides() {
+        let conn = open_in_memory().unwrap();
+        let clip_id = upsert_clip(
+            &conn,
+            &clip_facts(
+                "slot0:TeslaCam/RecentClips/2026-06-19/clip-guard-a",
+                1000,
+                FolderClass::RecentClips,
+            ),
+        )
+        .unwrap();
+
+        let archive = AngleFacts {
+            camera: "front".to_owned(),
+            file_ref: "archive/front.mp4".to_owned(),
+            view_kind: "archive".to_owned(),
+            offset_ms: 0,
+            duration_s: Some(60.0),
+            size_bytes: Some(200),
+        };
+        upsert_angle_force_archive(&conn, clip_id, &archive).unwrap();
+
+        let scan = AngleFacts {
+            camera: "front".to_owned(),
+            file_ref: "TeslaCam/RecentClips/front.mp4".to_owned(),
+            view_kind: "ro_usb".to_owned(),
+            offset_ms: 500,
+            duration_s: Some(59.0),
+            size_bytes: Some(190),
+        };
+        upsert_angle_scan_preserving(&conn, clip_id, &scan).unwrap();
+        let (view_kind, file_ref, offset_ms): (String, String, i64) = conn
+            .query_row(
+                "SELECT view_kind, file_ref, offset_ms FROM angles
+                  WHERE clip_id = ?1 AND camera = 'front'",
+                [clip_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(view_kind, "archive");
+        assert_eq!(file_ref, "archive/front.mp4");
+        assert_eq!(offset_ms, 500);
+
+        let forced = AngleFacts {
+            camera: "front".to_owned(),
+            file_ref: "archive/front-v2.mp4".to_owned(),
+            view_kind: "archive".to_owned(),
+            offset_ms: 750,
+            duration_s: Some(58.0),
+            size_bytes: Some(180),
+        };
+        upsert_angle_force_archive(&conn, clip_id, &forced).unwrap();
+        let (view_kind2, file_ref2): (String, String) = conn
+            .query_row(
+                "SELECT view_kind, file_ref FROM angles
+                  WHERE clip_id = ?1 AND camera = 'front'",
+                [clip_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(view_kind2, "archive");
+        assert_eq!(file_ref2, "archive/front-v2.mp4");
+    }
+
+    #[test]
+    fn guard_b_prune_skips_archived_clip_and_prunes_unbacked_ro_usb() {
+        let mut conn = open_in_memory().unwrap();
+        let archived_registration = archive_registration(
+            "slot0:TeslaCam/RecentClips/2026-06-19/clip-archived",
+            "archive/2026-06-19/clip-archived",
+            "archive/2026-06-19/clip-archived/front.mp4",
+        );
+        let (archived_clip_id, _) =
+            register_archived_clip(&mut conn, &archived_registration).unwrap();
+
+        let ro_usb_clip_id = upsert_clip(
+            &conn,
+            &clip_facts(
+                "slot0:TeslaCam/RecentClips/2026-06-19/clip-ro-usb",
+                2000,
+                FolderClass::RecentClips,
+            ),
+        )
+        .unwrap();
+        upsert_angle_scan_preserving(
+            &conn,
+            ro_usb_clip_id,
+            &AngleFacts {
+                camera: "front".to_owned(),
+                file_ref: "TeslaCam/RecentClips/clip-ro-usb/front.mp4".to_owned(),
+                view_kind: "ro_usb".to_owned(),
+                offset_ms: 0,
+                duration_s: Some(60.0),
+                size_bytes: Some(1000),
+            },
+        )
+        .unwrap();
+
+        let present: HashSet<String> = HashSet::new();
+        let pruned = prune_missing_clips(&conn, &present).unwrap();
+        assert_eq!(pruned, 1);
+
+        let archived_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM clips WHERE id = ?1",
+                [archived_clip_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let ro_usb_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM clips WHERE id = ?1",
+                [ro_usb_clip_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(archived_exists, 1);
+        assert_eq!(ro_usb_exists, 0);
+    }
+
+    #[test]
+    fn register_archived_clip_is_idempotent() {
+        let mut conn = open_in_memory().unwrap();
+        let registration = archive_registration(
+            "slot0:TeslaCam/RecentClips/2026-06-19/clip-idempotent",
+            "archive/2026-06-19/clip-idempotent",
+            "archive/2026-06-19/clip-idempotent/front.mp4",
+        );
+        let first = register_archived_clip(&mut conn, &registration).unwrap();
+        let second = register_archived_clip(&mut conn, &registration).unwrap();
+        assert_eq!(first, second);
+
+        for table in ["clips", "angles", "archive_items", "archive_item_clips"] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, 1, "expected one row in {table}");
+        }
+    }
+
+    #[test]
+    fn prune_preserves_clip_with_live_archive_item_backing() {
         let conn = open_in_memory().unwrap();
         let keep = upsert_clip(&conn, &clip_facts("keep", 1000, FolderClass::SavedClips)).unwrap();
         let gone = upsert_clip(&conn, &clip_facts("gone", 2000, FolderClass::SavedClips)).unwrap();
-        // A durable archive_item referencing the clip that will vanish.
+        // A live archive item referencing the clip that will vanish from
+        // `present_keys`; Guard B keeps the clip.
         conn.execute(
             "INSERT INTO archive_items (folder_class, path, clip_id, archived_at, created_at, updated_at)
              VALUES ('SavedClips', '/arch/gone', ?1, 0, 0, 0)",
@@ -671,14 +1075,14 @@ mod tests {
         let mut present = HashSet::new();
         present.insert("keep".to_owned());
         let pruned = prune_missing_clips(&conn, &present).unwrap();
-        assert_eq!(pruned, 1);
+        assert_eq!(pruned, 0);
 
         let clips: i64 = conn
             .query_row("SELECT COUNT(*) FROM clips", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(clips, 1);
-        let _ = keep;
-        // Archive item survives; its clip_id is SET NULL.
+        assert_eq!(clips, 2);
+        let _ = (keep, gone);
+        // Archive item remains linked.
         let (arch_count, clip_id): (i64, Option<i64>) = conn
             .query_row(
                 "SELECT COUNT(*), MAX(clip_id) FROM archive_items WHERE path = '/arch/gone'",
@@ -687,7 +1091,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(arch_count, 1);
-        assert_eq!(clip_id, None);
+        assert_eq!(clip_id, Some(gone));
     }
 
     #[test]

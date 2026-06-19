@@ -30,4 +30,7 @@ pub mod db;
 pub mod derive;
 pub mod geo;
 pub mod model;
+pub mod proto;
 pub mod scan;
+#[cfg(unix)]
+pub mod server;

@@ -39,12 +39,22 @@ filesystem** (Linux ext4), never inside the car's `disk.img` LUN.
 6. **Rebuildable:** the entire DB can be dropped and regenerated from the media;
    it is never authoritative over the video itself and never lives on the Tesla
    volume.
+7. **Mutation RPC server (`/run/teslausb/indexd.sock`):** as the sole writer,
+   accept serialized mutations from `retentiond` over a dedicated Unix socket.
+   Phase 1 exposes **`RegisterArchivedClip`** — promotes an archived `RecentClips`
+   segment's angle to `view_kind='archive'` so `webd` can play it (one
+   transaction: `ensure_clip` + `archive_items`(`LIVE`,`durable=0`) +
+   `archive_item_clips` + archive angles), with **archive-precedence guards** so a
+   later car rescan/prune can never downgrade or delete archive-backed state.
+   Full surface + invariants: [`contracts/indexd-archive-register.md`](./contracts/indexd-archive-register.md).
+   (Phase 2 adds delete-state / lease / checkpoint verbs on the same socket.)
 
 ## 3. Non-responsibilities
 
 - No raw parsing or SEI decoding (that is `scannerd`).
-- No HTTP/UI (that is `webd`); `indexd` only writes the DB and may expose a small
-  status/IPC for "index progress".
+- No HTTP/UI (that is `webd`); `indexd` only writes the DB and exposes a small
+  status/IPC for "index progress" plus the mutation socket (§2.7) — it never
+  decides retention policy or which segments to archive (that is `retentiond`).
 - No deletion of video files (that is `retentiond` via the `gadgetd` handoff).
 
 ## 4. Data model (indicative)

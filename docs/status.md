@@ -1,46 +1,43 @@
 # TeslaUSB B-1 — Build Status (vs. `Requirements.md`)
 
-> ## ⏯️ RESUME HERE (2026-06-18 EOD) — retentiond B1 archive loop, scoping done
+> ## ⏯️ RESUME HERE (2026-06-19 EOD) — retentiond B1 archive loop, ALL BUILD LANES DONE
 >
-> **Last session shipped + closed:**
-> - **§4.5 Lock Chimes is COMPLETE.** Loudness-preset tick labels restored (V1 parity,
->   deployed + device-gate 22/22). **Groups CRUD round-trip VERIFIED** (commit `806ac46`):
->   added schedulerd `update_group_persists_across_reload` (write→reload-from-disk) +
->   UAT "edit group"/"delete group" driving real webd on desktop+mobile. schedulerd 40
->   passed; chime-scheduler UAT 60 passed. **Committed, NOT pushed** (per "commit each
->   milestone; never push").
+> **Phase-1 (archive-only, non-destructive) is CODE-COMPLETE + host-green; on-device
+> verification is what remains.** The operator-approved two-phase plan split the
+> recording-critical deleter (Phase-2, deferred + gated) from a safe archive-only first
+> slice (Phase-1) that copies completed RecentClips off the RO car partition into the
+> Pi-side archive and registers `view_kind='archive'` with indexd so webd can stream them.
+> This unblocks §4.2 #2 (live-clip map playback) without deleting anything.
 >
-> **Next item = build-order step 3: `retentiond` serve loop (B1) → archive RecentClips.**
-> Scoping was done this session — **read this before starting tomorrow:**
-> - retentiond **policy core is DONE + host-tested**: `retentiond::serve::RetentionLoop`
->   (recover→archive→mirror RecentClips→govern→health), all behind I/O seam traits.
-> - The gap is the **live `serve` wiring** (`rust/crates/retentiond/src/main.rs` `serve`
->   is a stub that exits FAILURE). It needs live impls of 8 seams: `Clock`, `ArchiveStore`,
->   `CarDeleteHandoff`, `Statfs`, `ArchiveDeleteOps`, `IndexClient`, `Catalog`, `RandGen`
->   (see `Seams<'a>` in serve.rs) + the loop driver (cadence → build `CycleInputs` →
->   `run_cycle` → act on `CycleReport`).
-> - **Key blocker discovered:** indexd is currently a *scannerd CLIENT* only (main.rs pulls
->   scan batches → writes SQLite). It exposes **NO RPC/UDS server** for retentiond's
->   `IndexClient`/`Catalog` seams to call (eviction_items, delete_request, recovery_rows,
->   record_verified_pass, mark_recent_archived, delete-state transitions). The delete-state
->   DB fns exist in `indexd/src/db/mutations.rs` but aren't reachable over IPC. So full
->   wiring ALSO implies building an **indexd RPC surface** (or another DB-access design)
->   + a **gadgetd delete-handoff client** (reuse/extend `webd/src/gadget.rs`) + shipping
->   **CALIBRATION-GATED governor defaults** (storage.md §7, the C2 at-vehicle gate) +
->   a **hardware deploy of a recording-critical deleter**.
-> - **OPEN DECISION put to operator (answer pending — operator chose to break):**
->   scope = (1) **minimal archive-only slice first** [recommended] — archive RecentClips
->   to Pi-side + register `view_kind='archive'` so webd can stream them, deferring
->   eviction/delete + governor calibration → unblocks live-clip map playback (§4.2 #2)
->   fastest; vs (2) full serve wiring lane; vs (3) plan-only.
-> - **A GPT-5.5 second-opinion agent (`retentiond-arch`) is IN FLIGHT** on the architecture
->   fork: (A) how the live IndexClient/Catalog seams should access indexd's SQLite
->   (new indexd RPC server vs direct DB vs hybrid — single-writer invariant), (B) whether
->   a safe archive-only/no-evict first slice exists, (C) deploy-safety preconditions.
->   **Fold its findings in before delegating to gpt-5.3-codex.**
-> - Reference reads for tomorrow: `rust/crates/retentiond/src/{lib.rs,serve.rs,io.rs}`,
->   `docs/specs/{retentiond.md,indexd.md,storage.md}`, `docs/specs/contracts/scannerd-readfile.md`,
->   `docs/adr/0003-media-read-path.md`. Build/test via podman (see copilot-instructions.md).
+> **Phase-1 build lanes — ALL DONE, each committed (NOT pushed), each GPT-5.5-reviewed:**
+> - `p1-indexd-register` — indexd archive-registration RPC server (flips scanner clip's
+>   angle ro_usb→archive). Committed.
+> - `p1-archive-store` — `LiveArchiveStore` (SHA-256, atomic verified copy, path-jail).
+>   Committed `20884b2`.
+> - `p1-register-client` — `UnixRegisterClient` over `/run/teslausb/indexd.sock`.
+>   Committed `257675a`.
+> - `p1-recent-facts` — pure `RecentFactsGatherer` (stable-pass segment completeness).
+>   Committed `6fe9d33`.
+> - `p1-archive-driver` — pure `archive_recent_once` core + `LiveRecentDirReader` +
+>   `main.rs serve --archive-recent-only --no-delete` loop (signal-safe shutdown,
+>   pending-register retry queue, raced-delete tolerance). Committed `6808c76`.
+>   Verified in podman: 112 lib + 15 bin tests, clippy `-D warnings` clean.
+>
+> **NEXT (Phase-1 verification, in order):**
+> 1. `p1-integration-tests` — archive-only fixture + loop-image test (fake RO source →
+>    run a cycle → assert copy lands + register fires + downstream stream path resolves).
+> 2. `p1-hw-deploy` — deploy archive-only binary under the dead-man rails (hardware-test
+>    skill); adds-only, low risk (no deleter). BINDING DEPLOY INVARIANT: retentiond
+>    `--archive-root` MUST be the same on-disk dir as webd `WEBD_ARCHIVE_ROOT`
+>    (default `/data/teslausb/archive`).
+> 3. `p1-playwright` — verify §4.2 trip-map clip playback end-to-end against
+>    `cybertruckusb.local`; only then tick §4.2 #2 (line ~719) with linked evidence.
+>
+> **Phase-2 (the deleter) stays deferred + GATED** — leases/recovery, indexd delete-RPC,
+> gadgetd delete-handoff client, C2 governor calibration, safety gates + explicit operator
+> opt-in. Do NOT start autonomously.
+>
+> Build/test via podman from PowerShell (see copilot-instructions.md) — never local WSL/cargo.
 
 
 > **What this is.** The single master checklist of *everything* needed to make

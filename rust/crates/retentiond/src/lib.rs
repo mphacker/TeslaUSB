@@ -38,6 +38,7 @@
 
 pub mod archive;
 pub mod archive_driver;
+pub mod candidates;
 pub mod config;
 pub mod delete;
 pub mod durability;
@@ -47,7 +48,7 @@ pub mod io;
 pub mod lease;
 pub mod manifest;
 pub mod recent;
-pub mod recent_facts;
+pub mod read_client;
 pub mod register_client;
 pub mod serve;
 pub mod status;

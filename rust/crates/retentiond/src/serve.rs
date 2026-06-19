@@ -853,6 +853,9 @@ mod tests {
         fn list_source_rel_names(&self, _src_dir: &str) -> io::Result<Vec<String>> {
             Ok(self.files.keys().cloned().collect())
         }
+        fn remove_dest(&self, _dest_rel: &str) -> io::Result<()> {
+            Ok(())
+        }
     }
 
     struct FakeHandoff {

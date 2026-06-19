@@ -19,10 +19,14 @@ workspace = true
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 sha2 = "0.10"
+
+[dev-dependencies]
+indexd = { path = "../indexd" }
 
 [[bin]]
 name = "retentiond"

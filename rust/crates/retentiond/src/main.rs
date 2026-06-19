@@ -3,8 +3,6 @@
 //! Policy decisions live in the library crate; this binary wires CLI parsing and
 //! the unix-only live archive-recent driver loop.
 
-// systemd captures this binary's stdout/stderr into the journal, so direct
-// console output is the intended logging path for the daemon entrypoint only.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 #[cfg(unix)]
@@ -22,22 +20,22 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
-use live::{LiveArchiveStore, LiveRecentDirReader};
+use live::LiveArchiveStore;
 #[cfg(unix)]
 use retentiond::archive_driver::{DriverState, archive_recent_once};
 #[cfg(unix)]
-use retentiond::recent_facts::RecentFactsGatherer;
+use retentiond::candidates::SqliteCandidateReader;
+#[cfg(unix)]
+use retentiond::read_client::{SCANNERD_READ_SOCKET_PATH, UnixReadFileClient};
 #[cfg(unix)]
 use retentiond::register_client::{INDEXD_SOCKET_PATH, UnixRegisterClient};
 
 #[cfg(unix)]
 const DEFAULT_SLOT: u8 = 0;
 #[cfg(unix)]
-const DEFAULT_RECENTCLIPS_DIR: &str = "TeslaCam/RecentClips";
-#[cfg(unix)]
 const DEFAULT_INTERVAL_SECS: u64 = 20;
 #[cfg(unix)]
-const DEFAULT_REQUIRED_STABLE_PASSES: u32 = 2;
+const DEFAULT_INDEXD_DB_PATH: &str = "/var/lib/teslausb/index.sqlite3";
 
 #[cfg(unix)]
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
@@ -64,9 +62,8 @@ fn main() -> ExitCode {
 fn usage() -> String {
     "usage: retentiond <version|serve|help>\n\
      serve mode (phase-1): retentiond serve --archive-recent-only --no-delete \\\n\
-       --source-root <path> --archive-root <path> [--indexd-socket <path>] \\\n\
-       [--slot <u8>] [--recentclips-dir <path>] [--interval-secs <u64>] \\\n\
-       [--required-stable-passes <u32>]\n\
+       --archive-root <path> [--indexd-db <path>] [--scannerd-read-socket <path>] \\\n\
+       [--indexd-socket <path>] [--slot <u8>] [--interval-secs <u64>]\n\
      note: this build only supports non-destructive archive-recent-only serve mode."
         .to_owned()
 }
@@ -98,36 +95,34 @@ fn run_serve(args: &[String]) -> ExitCode {
         eprintln!("retentiond serve: phase-1 requires --no-delete.");
         return ExitCode::FAILURE;
     }
-    let Some(source_root) = parsed.source_root.clone() else {
-        eprintln!("retentiond serve: missing required --source-root <path>.");
-        return ExitCode::FAILURE;
-    };
     let Some(archive_root) = parsed.archive_root.clone() else {
         eprintln!("retentiond serve: missing required --archive-root <path>.");
         return ExitCode::FAILURE;
     };
 
+    let candidates = match SqliteCandidateReader::open(&parsed.indexd_db) {
+        Ok(reader) => reader,
+        Err(err) => {
+            eprintln!(
+                "retentiond serve: cannot open indexd DB read-only at {}: {err}",
+                parsed.indexd_db.display()
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+
     install_shutdown_handlers();
 
-    let mut gatherer = RecentFactsGatherer::new(parsed.required_stable_passes);
-    let store = LiveArchiveStore::new(&source_root, &archive_root);
+    let store = LiveArchiveStore::new(
+        Box::new(UnixReadFileClient::new(&parsed.scannerd_read_socket)),
+        &archive_root,
+    );
     let register = UnixRegisterClient::new(&parsed.indexd_socket);
-    let recentclips_dir = parsed.recentclips_dir.clone();
-    let reader = LiveRecentDirReader::new(&source_root, &recentclips_dir, parsed.slot);
     let mut state = DriverState::new();
 
     while !SHUTDOWN.load(Ordering::Relaxed) {
         let now_epoch_s = now_epoch_s_saturating();
-        match archive_recent_once(
-            &mut gatherer,
-            parsed.slot,
-            &recentclips_dir,
-            &reader,
-            &store,
-            &register,
-            &mut state,
-            now_epoch_s,
-        ) {
+        match archive_recent_once(&candidates, &store, &register, &mut state, now_epoch_s) {
             Ok(report) => {
                 let has_activity = report.observed > 0
                     || report.registered > 0
@@ -185,13 +180,12 @@ fn now_epoch_s_saturating() -> i64 {
 struct ServeArgs {
     archive_recent_only: bool,
     no_delete: bool,
-    source_root: Option<PathBuf>,
     archive_root: Option<PathBuf>,
+    indexd_db: PathBuf,
+    scannerd_read_socket: PathBuf,
     indexd_socket: PathBuf,
     slot: u8,
-    recentclips_dir: String,
     interval_secs: u64,
-    required_stable_passes: u32,
 }
 
 #[cfg(unix)]
@@ -200,13 +194,12 @@ impl Default for ServeArgs {
         Self {
             archive_recent_only: false,
             no_delete: false,
-            source_root: None,
             archive_root: None,
+            indexd_db: PathBuf::from(DEFAULT_INDEXD_DB_PATH),
+            scannerd_read_socket: PathBuf::from(SCANNERD_READ_SOCKET_PATH),
             indexd_socket: PathBuf::from(INDEXD_SOCKET_PATH),
             slot: DEFAULT_SLOT,
-            recentclips_dir: DEFAULT_RECENTCLIPS_DIR.to_owned(),
             interval_secs: DEFAULT_INTERVAL_SECS,
-            required_stable_passes: DEFAULT_REQUIRED_STABLE_PASSES,
         }
     }
 }
@@ -219,13 +212,17 @@ fn parse_serve_args(args: &[String]) -> Result<ServeArgs, String> {
         match arg.as_str() {
             "--archive-recent-only" => parsed.archive_recent_only = true,
             "--no-delete" => parsed.no_delete = true,
-            "--source-root" => {
-                let value = next_arg_value(&mut iter, "--source-root")?;
-                parsed.source_root = Some(PathBuf::from(value));
-            }
             "--archive-root" => {
                 let value = next_arg_value(&mut iter, "--archive-root")?;
                 parsed.archive_root = Some(PathBuf::from(value));
+            }
+            "--indexd-db" => {
+                let value = next_arg_value(&mut iter, "--indexd-db")?;
+                parsed.indexd_db = PathBuf::from(value);
+            }
+            "--scannerd-read-socket" => {
+                let value = next_arg_value(&mut iter, "--scannerd-read-socket")?;
+                parsed.scannerd_read_socket = PathBuf::from(value);
             }
             "--indexd-socket" => {
                 let value = next_arg_value(&mut iter, "--indexd-socket")?;
@@ -235,17 +232,9 @@ fn parse_serve_args(args: &[String]) -> Result<ServeArgs, String> {
                 let value = next_arg_value(&mut iter, "--slot")?;
                 parsed.slot = parse_arg::<u8>("--slot", &value)?;
             }
-            "--recentclips-dir" => {
-                parsed.recentclips_dir = next_arg_value(&mut iter, "--recentclips-dir")?;
-            }
             "--interval-secs" => {
                 let value = next_arg_value(&mut iter, "--interval-secs")?;
                 parsed.interval_secs = parse_arg::<u64>("--interval-secs", &value)?;
-            }
-            "--required-stable-passes" => {
-                let value = next_arg_value(&mut iter, "--required-stable-passes")?;
-                parsed.required_stable_passes =
-                    parse_arg::<u32>("--required-stable-passes", &value)?;
             }
             other => return Err(format!("retentiond serve: unknown option `{other}`.\n{}", usage())),
         }
@@ -283,8 +272,6 @@ extern "C" fn shutdown_signal_handler(_signal: libc::c_int) {
 #[allow(unsafe_code)]
 fn install_shutdown_handlers() {
     SHUTDOWN.store(false, Ordering::Relaxed);
-    // SAFETY: libc expects a C ABI function pointer. The handler only performs a
-    // single atomic store, which is signal-safe.
     unsafe {
         let handler = shutdown_signal_handler as libc::sighandler_t;
         let _ = libc::signal(libc::SIGTERM, handler);
@@ -293,7 +280,7 @@ fn install_shutdown_handlers() {
 }
 
 #[cfg(all(test, unix))]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::parse_serve_args;
 
@@ -301,10 +288,42 @@ mod tests {
     fn parse_serve_args_rejects_zero_interval_secs() {
         let args = vec!["--interval-secs".to_owned(), "0".to_owned()];
         let err = parse_serve_args(&args).err();
-        assert!(err.is_some(), "zero interval should be rejected");
+        assert!(err.is_some());
         assert!(
-            err.as_deref().is_some_and(|message| message.contains("--interval-secs")),
-            "error should mention the flag: {err:?}"
+            err.as_deref()
+                .is_some_and(|message| message.contains("--interval-secs"))
+        );
+    }
+
+    #[test]
+    fn parse_serve_args_parses_new_phase1_flags() {
+        let args = vec![
+            "--archive-recent-only".to_owned(),
+            "--no-delete".to_owned(),
+            "--archive-root".to_owned(),
+            "/data/teslausb/archive".to_owned(),
+            "--indexd-db".to_owned(),
+            "/var/lib/teslausb/index.sqlite3".to_owned(),
+            "--scannerd-read-socket".to_owned(),
+            "/run/teslausb/scannerd-read.sock".to_owned(),
+        ];
+        let parsed = match parse_serve_args(&args) {
+            Ok(parsed) => parsed,
+            Err(err) => panic!("parse args: {err}"),
+        };
+        assert!(parsed.archive_recent_only);
+        assert!(parsed.no_delete);
+        assert_eq!(
+            parsed.archive_root.as_deref().and_then(std::path::Path::to_str),
+            Some("/data/teslausb/archive")
+        );
+        assert_eq!(
+            parsed.indexd_db.to_str(),
+            Some("/var/lib/teslausb/index.sqlite3")
+        );
+        assert_eq!(
+            parsed.scannerd_read_socket.to_str(),
+            Some("/run/teslausb/scannerd-read.sock")
         );
     }
 }

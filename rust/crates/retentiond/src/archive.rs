@@ -52,6 +52,15 @@ pub trait ArchiveStore {
     /// # Errors
     /// Any underlying I/O failure reading the directory.
     fn list_source_rel_names(&self, src_dir: &str) -> std::io::Result<Vec<String>>;
+
+    /// Remove an already-archived destination file at `dest_rel`.
+    ///
+    /// Used by `RecentClips` archiving to roll back already-copied angles when a
+    /// multi-angle candidate aborts mid-copy.
+    ///
+    /// # Errors
+    /// Any underlying I/O failure removing the destination file.
+    fn remove_dest(&self, dest_rel: &str) -> std::io::Result<()>;
 }
 
 /// Terminal result of a car-side delete handoff request (`gadgetd` is the final
@@ -381,6 +390,9 @@ mod tests {
         }
         fn list_source_rel_names(&self, _src_dir: &str) -> std::io::Result<Vec<String>> {
             Ok(self.listing.clone())
+        }
+        fn remove_dest(&self, _dest_rel: &str) -> std::io::Result<()> {
+            Ok(())
         }
     }
 

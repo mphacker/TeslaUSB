@@ -485,6 +485,27 @@
   color: var(--text-secondary);
   font-size: 0.85rem;
 }
+.media-page .chime-editor-preset-ticks {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
+  margin-top: 4px;
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+}
+.media-page .chime-editor-preset-tick {
+  text-align: center;
+}
+.media-page .chime-editor-preset-tick:first-child {
+  text-align: left;
+}
+.media-page .chime-editor-preset-tick:last-child {
+  text-align: right;
+}
+.media-page .chime-editor-preset-tick.active {
+  color: var(--accent-primary, var(--btn-primary-bg, var(--text-primary)));
+  font-weight: 600;
+}
 .media-page .chime-editor-preset-details,
 .media-page .chime-editor-notes {
   color: var(--text-secondary);

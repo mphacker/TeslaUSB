@@ -668,6 +668,20 @@ export function ChimeAudioEditor({ file, onUpload, onCancel }: ChimeAudioEditorP
                   );
                 }}
               />
+              <div class="chime-editor-preset-ticks" aria-hidden="true">
+                {LOUDNESS_PRESETS.map((option, index) => (
+                  <span
+                    key={option.name}
+                    class={
+                      index === presetIndex
+                        ? "chime-editor-preset-tick active"
+                        : "chime-editor-preset-tick"
+                    }
+                  >
+                    {option.name}
+                  </span>
+                ))}
+              </div>
               <span class="chime-editor-readout">
                 <strong>{preset.name}</strong> ({preset.lufs} LUFS)
               </span>

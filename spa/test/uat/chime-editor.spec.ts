@@ -148,6 +148,12 @@ test("single-file selection opens editor, supports trim controls, and uploads WA
   });
   await expect(page.locator(".chime-editor-preset-details")).toContainText("Maximum");
 
+  // V1-parity: four loudness tick labels under the slider, active one highlighted.
+  const ticks = page.locator(".chime-editor-preset-tick");
+  await expect(ticks).toHaveCount(4);
+  await expect(ticks).toHaveText(["Broadcast", "Streaming", "Loud", "Maximum"]);
+  await expect(page.locator(".chime-editor-preset-tick.active")).toHaveText("Maximum");
+
   await page.locator("[data-testid=chime-editor-filename]").fill("bad/name");
   await page
     .locator("[data-testid=chime-editor-upload]")

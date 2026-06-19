@@ -774,8 +774,11 @@ LUNs) is the single make-or-break that still needs the car.**
   (just-activated name, else unique library size-match, else honest `LockChime.wav`
   fallback). Verified on hardware cold-load + in-session activation, console clean —
   `files/hw-sourcename-1280.png`.**
-- [ ] Groups (create/edit/delete; persist `chime_groups.json`). **(partial: A3 UI +
-  schedulerd render proven; verify CRUD round-trip)**
+- [x] Groups (create/edit/delete; persist scheduler state). **(CRUD round-trip VERIFIED
+  2026-06-18 — schedulerd `update_group_persists_across_reload` (write→reload-from-disk
+  assert) + UAT "edit group"/"delete group" drive the real webd through PUT/DELETE on
+  desktop+mobile, console clean. NOTE: B-1 consolidates v1's separate `chime_groups.json`
+  into one schedulerd state file, persisted atomically on every mutation.)**
 - [x] Schedules (weekly/date/holiday/recurring; CRUD+enable; `chime_schedules.json`). **(CRUD+UI
   proven; **now ENFORCED** via the webd enforcer — A3d DONE 2026-06-17, live-proven on hardware)**
 - [x] Random mode from a group (`chime_random_config.json`); rotates active chime. **(model+UI

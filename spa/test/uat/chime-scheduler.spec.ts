@@ -119,6 +119,7 @@ interface Captured {
   schedulePut: { id: string; body: unknown }[];
   scheduleDelete: string[];
   groupPost: unknown[];
+  groupPut: { id: string; body: unknown }[];
   groupDelete: string[];
   randomMode: { enabled: boolean; groupId?: string | null }[];
   libraryPost: string[];
@@ -145,6 +146,7 @@ async function installScheduler(
     schedulePut: [],
     scheduleDelete: [],
     groupPost: [],
+    groupPut: [],
     groupDelete: [],
     randomMode: [],
     libraryPost: [],
@@ -228,6 +230,7 @@ async function installScheduler(
     const id = tail(route.request().url());
     if (m === "PUT") {
       const body = route.request().postDataJSON() as Group;
+      cap.groupPut.push({ id, body });
       const i = snap.groups.findIndex((g) => g.id === id);
       if (i >= 0) snap.groups[i] = { ...body, id };
       return json200(route, { ...body, id });
@@ -614,6 +617,66 @@ test.describe("chime scheduler UAT (A3b)", () => {
     expect(body.name).toBe("Holiday Set");
     expect(body.description).toBe("Festive chimes");
     expect(body.chimes).toContain("Sparkle.wav");
+    assertCleanConsole(probe);
+  });
+
+  // ── Gate 7b: edit an existing group via the modal ────────────────────────
+  test("edit group — modal pre-populates, PUTs the update, and the card reflects it", async ({
+    page,
+    probe,
+  }) => {
+    const { cap } = await installScheduler(page, populatedSnapshot());
+    await gotoScheduler(page);
+
+    // Open the seeded group ("Night Set", chimes [Sparkle.wav]) for editing.
+    await page.locator("[data-testid=group-edit]").first().click();
+    const modal = page.locator("[data-testid=group-modal]");
+    await expect(modal).toBeVisible();
+    await expect(page.locator("#group-modal-title")).toHaveText("Edit Group");
+
+    // The form pre-populates from the existing group.
+    await expect(page.locator("[data-testid=group-name]")).toHaveValue("Night Set");
+    await expect(page.locator("[data-testid=group-description]")).toHaveValue("Quiet chimes");
+    await expect(page.locator("#gc-Sparkle\\.wav")).toBeChecked();
+    await expect(page.locator("#gc-Chime2\\.wav")).not.toBeChecked();
+
+    // Rename it and add the second library chime.
+    await page.locator("[data-testid=group-name]").fill("Evening Set");
+    await page.locator("#gc-Chime2\\.wav").check();
+    await page.locator("[data-testid=group-save]").click();
+
+    // Modal closes; the single card reflects the new name + chime count.
+    await expect(modal).toHaveCount(0);
+    await expect(page.locator("[data-testid=group-card]")).toHaveCount(1);
+    await expect(page.locator("[data-testid=groups-container]")).toContainText("Evening Set");
+    await expect(page.locator("[data-testid=group-card] .group-meta-item")).toHaveText("2 chimes");
+
+    // The PUT hit the right id with the merged body.
+    expect(cap.groupPut).toHaveLength(1);
+    expect(cap.groupPut[0].id).toBe("grp-seed");
+    const body = cap.groupPut[0].body as Group;
+    expect(body.name).toBe("Evening Set");
+    expect(body.chimes).toContain("Sparkle.wav");
+    expect(body.chimes).toContain("Chime2.wav");
+    assertCleanConsole(probe);
+  });
+
+  // ── Gate 7c: delete a group via the card's Delete button ─────────────────
+  test("delete group — the card's Delete button DELETEs the id and removes the card", async ({
+    page,
+    probe,
+  }) => {
+    const { cap } = await installScheduler(page, populatedSnapshot());
+    await gotoScheduler(page);
+
+    await expect(page.locator("[data-testid=group-card]")).toHaveCount(1);
+    await page.locator("[data-testid=group-delete]").first().click();
+
+    // The card disappears and the honest empty state returns.
+    await expect(page.locator("[data-testid=group-card]")).toHaveCount(0);
+    await expect(page.locator("[data-testid=groups-empty]")).toBeVisible();
+
+    expect(cap.groupDelete).toEqual(["grp-seed"]);
     assertCleanConsole(probe);
   });
 

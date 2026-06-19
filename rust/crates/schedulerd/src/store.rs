@@ -584,6 +584,57 @@ mod tests {
     }
 
     #[test]
+    fn update_group_persists_across_reload() {
+        let path = tmp_path("grp-update");
+        let mut store = Store::load(path.clone());
+        let g = store
+            .add_group(GroupInput {
+                name: "Night Set".to_owned(),
+                description: "Quiet chimes".to_owned(),
+                chimes: vec!["Sparkle.wav".to_owned()],
+            })
+            .unwrap();
+
+        // Editing an unknown id is rejected.
+        assert!(matches!(
+            store.update_group(
+                "missing",
+                GroupInput {
+                    name: "Nope".to_owned(),
+                    description: String::new(),
+                    chimes: vec![],
+                },
+            ),
+            Err(StoreError::NotFound)
+        ));
+
+        // A valid edit returns the new state in place (same id).
+        let updated = store
+            .update_group(
+                &g.id,
+                GroupInput {
+                    name: "Evening Set".to_owned(),
+                    description: "Quiet chimes".to_owned(),
+                    chimes: vec!["Sparkle.wav".to_owned(), "Chime2.wav".to_owned()],
+                },
+            )
+            .unwrap();
+        assert_eq!(updated.id, g.id);
+        assert_eq!(updated.name, "Evening Set");
+        assert_eq!(updated.chimes.len(), 2);
+
+        // The edit is durable: a fresh load from disk reflects it.
+        let reloaded = Store::load(path.clone());
+        let on_disk = reloaded.groups().iter().find(|x| x.id == g.id).unwrap();
+        assert_eq!(on_disk.name, "Evening Set");
+        assert_eq!(
+            on_disk.chimes,
+            vec!["Sparkle.wav".to_owned(), "Chime2.wav".to_owned()]
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn rename_updates_schedule_and_group() {
         let path = tmp_path("rename-sched-group");
         let mut store = Store::load(path.clone());

@@ -605,6 +605,7 @@ impl Statfs for LiveStatfs {
     clippy::indexing_slicing
 )]
 mod tests {
+    use std::cell::RefCell;
     use std::fs;
     use std::os::unix::fs::symlink;
     use std::path::{Path, PathBuf};
@@ -614,10 +615,14 @@ mod tests {
 
     use super::{LiveArchiveStore, LiveClock, LiveRand, LiveRecentDirReader, LiveStatfs};
     use retentiond::archive::ArchiveStore;
+    use retentiond::archive_driver::{DriverState, archive_recent_once};
     use retentiond::delete::RandGen;
     use retentiond::governor::Statfs;
     use retentiond::io::ContentHash;
-    use retentiond::recent_facts::RecentDirReader;
+    use retentiond::recent_facts::{RecentDirReader, RecentFactsGatherer};
+    use retentiond::register_client::{
+        ArchiveRegistration, RegisterClient, RegisterError, RegistrationOk,
+    };
     use retentiond::time::Clock;
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -646,6 +651,76 @@ mod tests {
         let mut out = [0_u8; 32];
         out.copy_from_slice(&digest);
         ContentHash::new(out)
+    }
+
+    const ARCHIVE_PATH: &str = "RecentClips/2026-06-19/2026-06-19_10-00-00";
+    const FRONT_REF: &str =
+        "RecentClips/2026-06-19/2026-06-19_10-00-00/2026-06-19_10-00-00-front.mp4";
+    const BACK_REF: &str =
+        "RecentClips/2026-06-19/2026-06-19_10-00-00/2026-06-19_10-00-00-back.mp4";
+
+    #[derive(Default)]
+    struct CapturingRegister {
+        calls: RefCell<Vec<ArchiveRegistration>>,
+    }
+
+    impl RegisterClient for CapturingRegister {
+        fn register(&self, reg: &ArchiveRegistration) -> Result<RegistrationOk, RegisterError> {
+            self.calls.borrow_mut().push(reg.clone());
+            Ok(RegistrationOk {
+                clip_id: 1,
+                archive_item_id: 1,
+            })
+        }
+    }
+
+    fn i64_len(bytes: &[u8]) -> i64 {
+        i64::try_from(bytes.len()).expect("test byte length should fit in i64")
+    }
+
+    fn assert_archived_bytes(archive_root: &Path, file_ref: &str, expected: &[u8]) {
+        let path = archive_root.join(file_ref);
+        assert!(
+            path.is_file(),
+            "archive file must exist at {}",
+            path.display()
+        );
+        assert_eq!(fs::read(&path).expect("read archived file"), expected);
+    }
+
+    fn assert_registered_angles(
+        reg: &ArchiveRegistration,
+        archive_root: &Path,
+        front_bytes: &[u8],
+        back_bytes: &[u8],
+    ) {
+        assert_eq!(reg.angles.len(), 2);
+        let mut saw_front = false;
+        let mut saw_back = false;
+        for angle in &reg.angles {
+            assert_eq!(angle.offset_ms, 0);
+            assert!(angle.duration_s.is_none());
+            assert!(
+                angle.file_ref == FRONT_REF || angle.file_ref == BACK_REF,
+                "unexpected file_ref {}",
+                angle.file_ref
+            );
+            let resolved = archive_root.join(&angle.file_ref);
+            assert!(
+                resolved.is_file(),
+                "file_ref should resolve under archive root: {}",
+                resolved.display()
+            );
+            if angle.file_ref == FRONT_REF {
+                saw_front = true;
+                assert_eq!(angle.size_bytes, i64_len(front_bytes));
+            } else {
+                saw_back = true;
+                assert_eq!(angle.size_bytes, i64_len(back_bytes));
+            }
+        }
+        assert!(saw_front, "front angle should be present");
+        assert!(saw_back, "back angle should be present");
     }
 
     #[test]
@@ -828,6 +903,85 @@ mod tests {
         let files = reader.list(0).expect("list should skip broken symlink");
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].name, "a.mp4");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn archive_recent_once_lands_bytes_and_registers_archive_relative_file_refs() {
+        let root = new_temp_dir();
+        let source_root = root.join("source");
+        let archive_root = root.join("archive");
+        fs::create_dir_all(&source_root).expect("create source root");
+        fs::create_dir_all(&archive_root).expect("create archive root");
+
+        let front_bytes = b"front-bytes";
+        let back_bytes = b"back-bytes-longer";
+        let recent_dir = source_root.join("TeslaCam/RecentClips");
+        write_file(
+            &recent_dir.join("2026-06-19_10-00-00-front.mp4"),
+            front_bytes,
+        );
+        write_file(
+            &recent_dir.join("2026-06-19_10-00-00-back.mp4"),
+            back_bytes,
+        );
+
+        let reader = LiveRecentDirReader::new(&source_root, "TeslaCam/RecentClips", 0);
+        let store = LiveArchiveStore::new(&source_root, &archive_root);
+        let register = CapturingRegister::default();
+        let mut gatherer = RecentFactsGatherer::new(2);
+        let mut state = DriverState::new();
+        let now_epoch_s = 1_750_000_000;
+
+        let first = archive_recent_once(
+            &mut gatherer,
+            0,
+            "TeslaCam/RecentClips",
+            &reader,
+            &store,
+            &register,
+            &mut state,
+            now_epoch_s,
+        )
+        .expect("first archive pass should succeed");
+        assert_eq!(first.observed, 0);
+        assert_eq!(first.registered, 0);
+
+        let second = archive_recent_once(
+            &mut gatherer,
+            0,
+            "TeslaCam/RecentClips",
+            &reader,
+            &store,
+            &register,
+            &mut state,
+            now_epoch_s,
+        )
+        .expect("second archive pass should emit and register");
+        assert_eq!(second.observed, 1);
+        assert_eq!(second.registered, 1);
+
+        assert_archived_bytes(&archive_root, FRONT_REF, front_bytes);
+        assert_archived_bytes(&archive_root, BACK_REF, back_bytes);
+
+        let calls = register.calls.borrow();
+        assert_eq!(calls.len(), 1);
+        let reg = &calls[0];
+        assert_eq!(reg.canonical_key, "0:TeslaCam/RecentClips/2026-06-19_10-00-00");
+        assert_eq!(reg.partition, "slot0");
+        assert_eq!(reg.folder_class, "RecentClips");
+        assert_eq!(reg.started_at, reg.ended_at);
+        assert!(reg.started_at > 0);
+        assert!(reg.duration_s.is_none());
+        assert_eq!(reg.archive.archived_at, now_epoch_s);
+        assert_eq!(reg.archive.path, ARCHIVE_PATH);
+        assert_eq!(reg.archive.file_count, 2);
+        assert_eq!(
+            reg.archive.size_bytes,
+            i64_len(front_bytes) + i64_len(back_bytes)
+        );
+        assert_registered_angles(reg, &archive_root, front_bytes, back_bytes);
 
         let _ = fs::remove_dir_all(root);
     }

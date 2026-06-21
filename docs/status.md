@@ -1,6 +1,6 @@
 # TeslaUSB B-1 — Build Status (vs. `Requirements.md`)
 
-> ## ⏯️ RESUME HERE (2026-06-20) — Phase-1b mount-free rework DONE + committed; hardware deploy is next
+> ## ⏯️ RESUME HERE (2026-06-21) — Phase-1 archive daemons DEPLOYED + verified on hardware; Playwright is next
 >
 > **Phase-1 (archive-only, non-destructive) is CODE-COMPLETE + host-green; on-device
 > verification is what remains.** The operator-approved two-phase plan split the
@@ -30,17 +30,22 @@
 >   across both crates.
 > - (Earlier mount-era lanes `20884b2`/`257675a`/`6fe9d33`/`6808c76` superseded by the above.)
 >
-> **NEXT (Phase-1 verification, in order):**
-> 1. `p1-hw-deploy` — cross-build aarch64 (indexd + scannerd + retentiond) via podman,
->    then deploy under the dead-man rails (hardware-test skill). Adds-only, no deleter.
->    Requires: gadget DOWN before staging synthetic footage onto `teslacam.img`; swap
->    `indexd` (binds register socket) + `scannerd` (binds `scannerd-read.sock`) +
->    `retentiond` (+ systemd unit). BINDING DEPLOY INVARIANT: retentiond `--archive-root`
->    MUST equal webd `WEBD_ARCHIVE_ROOT` (default `/data/teslausb/archive`). MANDATORY:
->    GPT-5.5-review the recording-critical deploy plan + snapshot `teslacam.img` + arm
->    dead-man BEFORE touching the device.
-> 2. `p1-playwright` — verify §4.2 trip-map clip playback end-to-end against
->    `cybertruckusb.local`; only then tick §4.2 #2 (line ~719) with linked evidence.
+> **`p1-hw-deploy` — DONE (2026-06-21, PASS).** Cross-built aarch64 (indexd + scannerd +
+> retentiond) via podman; deployed under the dead-man rails (hardware-test skill) after a
+> GPT-5.5 deploy-plan review (BLOCK → all 8 fixes applied). No synthetic footage / no
+> `teslacam.img` RW-mount was needed — the live catalog already held one RecentClips
+> candidate (clip id 5), and the archive path is strictly read-only on `teslacam.img`.
+> retentiond archived clip 5's 4 angles (`ro_usb`→`archive`, 49192 B each) into
+> `/data/teslausb/archive` and registered them with indexd; webd `/api/clips/5/stream`
+> returns **206** for all 4 cameras (was 404). teslacam.img size+mtime unchanged, no new
+> failed units, retentiond now `enabled`. Evidence: session `files/hw-results.md`
+> (+ `hw-p1deploy-*.log`). Deploy invariant held: retentiond `--archive-root` ==
+> `WEBD_ARCHIVE_ROOT` = `/data/teslausb/archive`.
+>
+> **NEXT (Phase-1 verification):**
+> 1. `p1-playwright` — verify §4.2 trip-map clip playback end-to-end against
+>    `cybertruckusb.local` (drive the real page, assert perf/console/visual per the
+>    Playwright UAT rules); only then tick §4.2 #2 (line ~719) with linked evidence.
 >
 > **Phase-2 (the deleter) stays deferred + GATED** — leases/recovery, indexd delete-RPC,
 > gadgetd delete-handoff client, C2 governor calibration, safety gates + explicit operator

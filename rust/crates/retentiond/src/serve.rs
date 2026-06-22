@@ -856,6 +856,12 @@ mod tests {
         fn remove_dest(&self, _dest_rel: &str) -> io::Result<()> {
             Ok(())
         }
+        fn probe_dest_playability(
+            &self,
+            _dest_rel: &str,
+        ) -> io::Result<crate::probe::ArchivePlayability> {
+            Ok(crate::probe::ArchivePlayability::Playable)
+        }
     }
 
     struct FakeHandoff {

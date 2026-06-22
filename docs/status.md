@@ -55,8 +55,10 @@
 >    `DataLength==ValidDataLength==49192`, so scannerd reads faithfully and there is
 >    **no truncation bug** (an earlier in-flight hypothesis + a prior GPT-5.5 opinion,
 >    both refuted by direct measurement). The decode proof is gated on real footage
->    (Tier-C **C3**). Two robustness follow-ups filed under §4.2 (retentiond `moov`
->    gate; scannerd VDL-clamp check).
+>    (Tier-C **C3**). Two robustness follow-ups were filed under §4.2: the retentiond
+>    `moov`/decodability gate — **DONE 2026-06-22** (quarantines undecodable archive
+>    copies instead of publishing them; spec `contracts/indexd-archive-register.md` §9;
+>    FU-1..FU-6 filed) — and the scannerd VDL-clamp check (still open, gated:C3).
 >
 > **Phase-2 (the deleter) stays deferred + GATED** — leases/recovery, indexd delete-RPC,
 > gadgetd delete-handoff client, C2 governor calibration, safety gates + explicit operator
@@ -751,11 +753,42 @@ LUNs) is the single make-or-break that still needs the car.**
   on the device. Measured read-only: every angle is exactly 49192 B with exFAT
   `DataLength==ValidDataLength==49192` (scannerd reads faithfully — no truncation/clamp
   gap). Decode proof gated on real footage (Tier-C C3).**
-- [ ] **retentiond: decodability gate before publishing an `archive` angle.** Cheaply
-  validate the archived MP4 has a top-level `moov` (bounds-checked top-level atom scan);
-  if absent, mark the clip `unplayable`/quarantine rather than registering it as a normal
-  playable angle. Prevents false-green (clip 5 archived + 206 but never decodes). Caveat:
-  would quarantine the current synthetic fixtures. **(follow-up from `p1-playwright`)**
+- [x] **retentiond: decodability gate before publishing an `archive` angle.** DONE
+  2026-06-22. After a copy lands (before registration), `retentiond::probe` runs a
+  memory-bounded container-completeness check (top-level `ftyp`+`mdat`+`moov` with a
+  parseable `moov/trak/mdia/mdhd`, `timescale>0`; any top-level box whose extent
+  overruns EOF or whose header is malformed ⇒ unplayable; `mdat` never read into
+  memory). If any angle fails, the whole clip is **quarantined** via a distinct
+  `RegisterQuarantinedArchive` verb → `indexd` writes `archive_items.delete_state=
+  'QUARANTINED'`, `durable=0`, and does **not** promote angles (stay `ro_usb` →
+  `webd` 404), so a non-decodable copy is never served as a playable `archive` angle.
+  Bytes are kept (zero clip loss); `remove_dest` stays reserved for copy failures.
+  Fail-closed (old `indexd` rejects the verb → defer pending, never poison-dropped;
+  deploy `indexd` before `retentiond`). Re-archive loop prevented (candidate SELECT
+  excludes non-`DELETED` `archive_items`; pending `canonical_key` dedupe holds during
+  retry). Spec: `contracts/indexd-archive-register.md` §9. Verified (podman):
+  retentiond 126+14, indexd 68, teslausb-core 343 tests pass + clippy `-D warnings`
+  clean; key test `archive_driver::tests::probe_error_routes_to_quarantine_without_copy_failure_or_remove`.
+  Reviews: GPT-5.5 `moov-design-review` (design) + `moov-review`/`moov-review2` (diff).
+  Will quarantine the live synthetic clip-5 stubs when deployed (expected; not a
+  regression). Follow-ups filed below. **(follow-up from `p1-playwright`)**
+  - [ ] **FU-1** — remediate clips force-promoted to `archive` *before* this gate
+    (live clip-5 stubs stay playable-but-broken until a narrow Guard-A exception +
+    re-validation driver downgrades them; low urgency, superseded at C3).
+  - [ ] **FU-2** — finalization-aware archiving + explicit `QUARANTINED→LIVE`
+    un-quarantine (gate selection on `mp4probe.complete`; allow re-archival when
+    source bytes change so a not-yet-finalized segment isn't permanently quarantined).
+  - [ ] **FU-3** — per-angle partial archive (archive good angles, quarantine only bad).
+  - [ ] **FU-4** — quarantined-byte accounting metric (never auto-delete).
+  - [ ] **FU-5** — strict nested-box extent validation in the MP4 probe, applied
+    consistently across `scannerd::mp4probe` + `retentiond::probe` (today both reuse
+    `teslausb_core::sei::mp4::find_box*`, which clamps child extents; theoretical gap
+    not reachable by the truncation failure mode the gate targets).
+  - [ ] **FU-6** — slot-aware archive path (pre-existing). `archive_item_path_for_candidate`
+    drops the `slot:` prefix, so two clips on different slots sharing a timestamp would
+    collide on one archive path. Unreachable in the single-slot RecentClips topology and
+    never loses source footage (car volume read-only), but the path scheme should include
+    the slot. Predates this gate (affected the LIVE path equally).
 - [ ] **scannerd: confirm the `min(ValidDataLength, DataLength)` read clamp cannot
   truncate real Tesla footage.** No clamp gap on the synthetic test image
   (`VDL==DataLength`), but if a real car ever leaves `ValidDataLength` stale-small with

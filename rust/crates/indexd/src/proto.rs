@@ -16,6 +16,10 @@ pub const MAX_REQUEST_FRAME: u32 = 64 * 1024;
 pub enum Request {
     /// Register one completed archive clip copy.
     RegisterArchivedClip(RegisterArchivedClip),
+    /// Register one copied-but-undecodable archive clip as quarantined.
+    // Deploy `indexd` before `retentiond`: older indexd must reject this
+    // unknown verb so retentiond fails closed to pending, never force-publishing.
+    RegisterQuarantinedArchive(RegisterArchivedClip),
 }
 
 /// Archive registration payload.
@@ -149,6 +153,38 @@ mod tests {
     #[test]
     fn request_roundtrip_frame_codec() {
         let req = Request::RegisterArchivedClip(RegisterArchivedClip {
+            canonical_key: "slot0:TeslaCam/RecentClips/2026-06-19/2026-06-19_10-00-00".to_owned(),
+            folder_class: "RecentClips".to_owned(),
+            partition: "slot0".to_owned(),
+            started_at: 1_718_805_600,
+            ended_at: 1_718_805_660,
+            duration_s: Some(60),
+            archive: ArchiveUnit {
+                path: "archive/2026-06-19/clip-001".to_owned(),
+                size_bytes: 12_345,
+                file_count: 4,
+                archived_at: 1_718_805_700,
+            },
+            angles: vec![ArchiveAngle {
+                camera: "front".to_owned(),
+                file_ref: "archive/2026-06-19/clip-001/front.mp4".to_owned(),
+                offset_ms: 0,
+                duration_s: Some(60),
+                size_bytes: 3_086,
+            }],
+        });
+
+        let mut buf = Vec::new();
+        let json = serde_json::to_vec(&req).unwrap();
+        write_frame(&mut buf, &json).unwrap();
+        let mut cur = Cursor::new(buf);
+        let decoded = read_request(&mut cur).unwrap();
+        assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn quarantined_request_roundtrip_frame_codec() {
+        let req = Request::RegisterQuarantinedArchive(RegisterArchivedClip {
             canonical_key: "slot0:TeslaCam/RecentClips/2026-06-19/2026-06-19_10-00-00".to_owned(),
             folder_class: "RecentClips".to_owned(),
             partition: "slot0".to_owned(),

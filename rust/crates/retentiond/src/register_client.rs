@@ -105,12 +105,30 @@ pub trait RegisterClient {
     /// Returns [`RegisterError`] on transport, framing, decode, or
     /// server-reported failures.
     fn register(&self, reg: &ArchiveRegistration) -> Result<RegistrationOk, RegisterError>;
+
+    /// Send one quarantined archive registration to `indexd`.
+    ///
+    /// Deploy ordering is binding: deploy `indexd` before `retentiond`.
+    /// Older `indexd` rejects this distinct verb, and `retentiond` fails
+    /// closed by deferring the registration pending retry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegisterError`] on transport, framing, decode, or
+    /// server-reported failures.
+    fn register_quarantined(
+        &self,
+        reg: &ArchiveRegistration,
+    ) -> Result<RegistrationOk, RegisterError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 enum WireRequest {
     RegisterArchivedClip(ArchiveRegistration),
+    // Deploy `indexd` before `retentiond`: this distinct verb must fail closed
+    // on older `indexd` (unknown cmd), never silently default to LIVE publish.
+    RegisterQuarantinedArchive(ArchiveRegistration),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -181,8 +199,12 @@ fn decode_response_payload(payload: &[u8]) -> Result<RegistrationOk, RegisterErr
 /// Returns [`RegisterError`] if serialization fails or if the encoded frame
 /// exceeds [`MAX_REQUEST_FRAME`].
 pub fn encode_request_frame(reg: &ArchiveRegistration) -> Result<Vec<u8>, RegisterError> {
-    let payload = serde_json::to_vec(&WireRequest::RegisterArchivedClip(reg.clone()))
-        .map_err(|err| RegisterError::Decode(err.to_string()))?;
+    encode_wire_request_frame(&WireRequest::RegisterArchivedClip(reg.clone()))
+}
+
+fn encode_wire_request_frame(request: &WireRequest) -> Result<Vec<u8>, RegisterError> {
+    let payload =
+        serde_json::to_vec(&request).map_err(|err| RegisterError::Decode(err.to_string()))?;
     let mut framed = Vec::with_capacity(payload.len() + 4);
     write_frame(&mut framed, &payload, MAX_REQUEST_FRAME)?;
     Ok(framed)
@@ -230,6 +252,20 @@ impl UnixRegisterClient {
 #[cfg(unix)]
 impl RegisterClient for UnixRegisterClient {
     fn register(&self, reg: &ArchiveRegistration) -> Result<RegistrationOk, RegisterError> {
+        self.send_request(&WireRequest::RegisterArchivedClip(reg.clone()))
+    }
+
+    fn register_quarantined(
+        &self,
+        reg: &ArchiveRegistration,
+    ) -> Result<RegistrationOk, RegisterError> {
+        self.send_request(&WireRequest::RegisterQuarantinedArchive(reg.clone()))
+    }
+}
+
+#[cfg(unix)]
+impl UnixRegisterClient {
+    fn send_request(&self, request: &WireRequest) -> Result<RegistrationOk, RegisterError> {
         use std::os::unix::net::UnixStream;
         use std::time::Duration;
 
@@ -238,7 +274,7 @@ impl RegisterClient for UnixRegisterClient {
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(timeout))?;
 
-        let frame = encode_request_frame(reg)?;
+        let frame = encode_wire_request_frame(request)?;
         stream.write_all(&frame)?;
         stream.flush()?;
 
@@ -258,8 +294,8 @@ mod tests {
 
     use super::{
         ArchiveAngleRef, ArchiveItemRef, ArchiveRegistration, MAX_REQUEST_FRAME, RegisterError,
-        RegistrationOk, WireResponse, decode_response_frame, encode_request_frame, read_frame,
-        write_frame,
+        RegistrationOk, WireRequest, WireResponse, decode_response_frame, encode_request_frame,
+        read_frame, write_frame,
     };
     use std::io::Cursor;
 
@@ -318,7 +354,10 @@ mod tests {
             "file_ref",
             "offset_ms",
         ] {
-            assert!(json.contains(&format!("\"{field}\"")), "missing field: {field}");
+            assert!(
+                json.contains(&format!("\"{field}\"")),
+                "missing field: {field}"
+            );
         }
 
         let value: serde_json::Value = serde_json::from_slice(&payload).expect("valid json");
@@ -328,14 +367,32 @@ mod tests {
         assert_eq!(value["partition"], registration.partition);
         assert_eq!(value["started_at"], registration.started_at);
         assert_eq!(value["ended_at"], registration.ended_at);
-        assert_eq!(value["duration_s"], registration.duration_s.expect("duration exists"));
+        assert_eq!(
+            value["duration_s"],
+            registration.duration_s.expect("duration exists")
+        );
         assert_eq!(value["archive"]["path"], registration.archive.path);
-        assert_eq!(value["archive"]["size_bytes"], registration.archive.size_bytes);
-        assert_eq!(value["archive"]["file_count"], registration.archive.file_count);
-        assert_eq!(value["archive"]["archived_at"], registration.archive.archived_at);
+        assert_eq!(
+            value["archive"]["size_bytes"],
+            registration.archive.size_bytes
+        );
+        assert_eq!(
+            value["archive"]["file_count"],
+            registration.archive.file_count
+        );
+        assert_eq!(
+            value["archive"]["archived_at"],
+            registration.archive.archived_at
+        );
         assert_eq!(value["angles"][0]["camera"], registration.angles[0].camera);
-        assert_eq!(value["angles"][0]["file_ref"], registration.angles[0].file_ref);
-        assert_eq!(value["angles"][0]["offset_ms"], registration.angles[0].offset_ms);
+        assert_eq!(
+            value["angles"][0]["file_ref"],
+            registration.angles[0].file_ref
+        );
+        assert_eq!(
+            value["angles"][0]["offset_ms"],
+            registration.angles[0].offset_ms
+        );
         assert_eq!(
             value["angles"][0]["duration_s"],
             registration.angles[0].duration_s.expect("duration exists")
@@ -389,6 +446,16 @@ mod tests {
 
         let err = decode_response_frame(&frame).expect_err("oversize frame should fail");
         assert!(matches!(err, RegisterError::FrameTooLarge { .. }));
+    }
+
+    #[test]
+    fn wire_request_encodes_quarantine_cmd() {
+        let payload = serde_json::to_vec(&WireRequest::RegisterQuarantinedArchive(
+            sample_registration(),
+        ))
+        .expect("serialize request");
+        let value: serde_json::Value = serde_json::from_slice(&payload).expect("valid json");
+        assert_eq!(value["cmd"], "register_quarantined_archive");
     }
 }
 
@@ -514,6 +581,47 @@ mod unix_tests {
             RegisterError::Server { message } => assert_eq!(message, "clip not found"),
             other => panic!("unexpected error: {other:?}"),
         }
+        server.join().expect("server join");
+
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn unix_register_client_quarantine_roundtrip_ok() {
+        let temp_dir = new_temp_dir();
+        let socket_path = temp_dir.join("indexd.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind listener");
+        let expected_registration = sample_registration();
+        let thread_registration = expected_registration.clone();
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            let payload = read_frame(&mut stream, MAX_REQUEST_FRAME).expect("read request frame");
+            let request: WireRequest = serde_json::from_slice(&payload).expect("decode request");
+            assert_eq!(
+                request,
+                WireRequest::RegisterQuarantinedArchive(thread_registration)
+            );
+
+            let payload = serde_json::to_vec(&WireResponse::Ok {
+                clip_id: 41,
+                archive_item_id: 43,
+            })
+            .expect("encode response");
+            write_frame(&mut stream, &payload, MAX_REQUEST_FRAME).expect("write response");
+        });
+
+        let client = UnixRegisterClient::new(socket_path);
+        let got = client
+            .register_quarantined(&expected_registration)
+            .expect("quarantine register request");
+        assert_eq!(
+            got,
+            RegistrationOk {
+                clip_id: 41,
+                archive_item_id: 43
+            }
+        );
         server.join().expect("server join");
 
         let _ = fs::remove_dir_all(temp_dir);

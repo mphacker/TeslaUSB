@@ -277,6 +277,38 @@ pub fn register_archived_clip(
     conn: &mut Connection,
     registration: &ArchiveRegistration,
 ) -> Result<(i64, i64), DbError> {
+    register_clip_with_disposition(conn, registration, RegistrationDisposition::Live)
+}
+
+/// Register one quarantined archived clip in a single transaction:
+/// ensure clip, upsert archive item (`QUARANTINED`, `durable=0`), and link
+/// `archive_item_clips` without promoting angles to archive.
+///
+/// # Errors
+///
+/// Returns [`DbError`] if any statement fails (the transaction rolls back).
+pub fn register_quarantined_clip(
+    conn: &mut Connection,
+    registration: &ArchiveRegistration,
+) -> Result<(i64, i64), DbError> {
+    register_clip_with_disposition(
+        conn,
+        registration,
+        RegistrationDisposition::QuarantineUndecodable,
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegistrationDisposition {
+    Live,
+    QuarantineUndecodable,
+}
+
+fn register_clip_with_disposition(
+    conn: &mut Connection,
+    registration: &ArchiveRegistration,
+    disposition: RegistrationDisposition,
+) -> Result<(i64, i64), DbError> {
     let now = now_epoch_s();
     let tx = conn.transaction()?;
     let clip_id = ensure_clip(
@@ -295,24 +327,30 @@ pub fn register_archived_clip(
         "INSERT INTO archive_items
              (folder_class, path, clip_id, size_bytes, file_count, archived_at,
               delete_state, durable, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'LIVE', 0, ?7, ?7)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?8)
          ON CONFLICT(path) DO UPDATE SET
              size_bytes  = excluded.size_bytes,
              file_count  = excluded.file_count,
              archived_at = excluded.archived_at,
              clip_id     = excluded.clip_id,
-             delete_state = 'LIVE',
+             delete_state = CASE
+                 WHEN archive_items.delete_state = 'LIVE' AND ?9 = 'QUARANTINED'
+                 THEN archive_items.delete_state
+                 ELSE excluded.delete_state
+             END,
              durable     = 0,
              updated_at  = excluded.updated_at
          RETURNING id",
         params![
-            registration.folder_class.as_db_str(),
+           registration.folder_class.as_db_str(),
             registration.archive.path,
             clip_id,
             registration.archive.size_bytes,
             registration.archive.file_count,
             registration.archive.archived_at,
+            disposition.delete_state(),
             now,
+            disposition.delete_state(),
         ],
         |r| r.get(0),
     )?;
@@ -323,23 +361,37 @@ pub fn register_archived_clip(
         params![archive_item_id, clip_id],
     )?;
 
-    for angle in &registration.angles {
-        upsert_angle_force_archive(
-            &tx,
-            clip_id,
-            &AngleFacts {
-                camera: angle.camera.clone(),
-                file_ref: angle.file_ref.clone(),
-                view_kind: "archive".to_owned(),
-                offset_ms: angle.offset_ms,
-                duration_s: angle.duration_s,
-                size_bytes: Some(angle.size_bytes),
-            },
-        )?;
+    if disposition == RegistrationDisposition::Live {
+        // FU-2 owns explicit finalization-aware un-quarantine. A LIVE register
+        // over an existing QUARANTINED row currently resurrects it; this is
+        // only reachable if candidate-selection exclusion is bypassed.
+        for angle in &registration.angles {
+            upsert_angle_force_archive(
+                &tx,
+                clip_id,
+                &AngleFacts {
+                    camera: angle.camera.clone(),
+                    file_ref: angle.file_ref.clone(),
+                    view_kind: "archive".to_owned(),
+                    offset_ms: angle.offset_ms,
+                    duration_s: angle.duration_s,
+                    size_bytes: Some(angle.size_bytes),
+                },
+            )?;
+        }
     }
 
     tx.commit()?;
     Ok((clip_id, archive_item_id))
+}
+
+impl RegistrationDisposition {
+    const fn delete_state(self) -> &'static str {
+        match self {
+            Self::Live => "LIVE",
+            Self::QuarantineUndecodable => "QUARANTINED",
+        }
+    }
 }
 
 /// Replace the cached SEI telemetry for a clip (full delete + reinsert).
@@ -746,8 +798,8 @@ mod tests {
     use super::{
         AngleFacts, ArchiveAngleRegistration, ArchiveRegistration, ArchiveUnitRegistration,
         ClipFacts, load_derive_clips, prune_missing_clips, rebuild_all_from_db,
-        register_archived_clip, replace_clip_waypoints, upsert_angle_force_archive,
-        upsert_angle_scan_preserving, upsert_clip,
+        register_archived_clip, register_quarantined_clip, replace_clip_waypoints,
+        upsert_angle_force_archive, upsert_angle_scan_preserving, upsert_clip,
     };
     use crate::db::open_in_memory;
     use crate::derive::DeriveConfig;
@@ -1056,6 +1108,180 @@ mod tests {
                 .unwrap();
             assert_eq!(count, 1, "expected one row in {table}");
         }
+    }
+
+    #[test]
+    fn register_quarantined_clip_writes_quarantine_without_angle_promotion() {
+        let mut conn = open_in_memory().unwrap();
+        let registration = archive_registration(
+            "slot0:TeslaCam/RecentClips/2026-06-19/clip-quarantine",
+            "archive/2026-06-19/clip-quarantine",
+            "archive/2026-06-19/clip-quarantine/front.mp4",
+        );
+        let clip_id = upsert_clip(
+            &conn,
+            &clip_facts(
+                "slot0:TeslaCam/RecentClips/2026-06-19/clip-quarantine",
+                1_718_805_600,
+                FolderClass::RecentClips,
+            ),
+        )
+        .unwrap();
+        upsert_angle_scan_preserving(
+            &conn,
+            clip_id,
+            &AngleFacts {
+                camera: "front".to_owned(),
+                file_ref: "TeslaCam/RecentClips/clip-quarantine/front.mp4".to_owned(),
+                view_kind: "ro_usb".to_owned(),
+                offset_ms: 0,
+                duration_s: Some(60.0),
+                size_bytes: Some(1024),
+            },
+        )
+        .unwrap();
+
+        let (got_clip_id, archive_item_id) =
+            register_quarantined_clip(&mut conn, &registration).unwrap();
+        assert_eq!(got_clip_id, clip_id);
+
+        let (delete_state, durable): (String, i64) = conn
+            .query_row(
+                "SELECT delete_state, durable FROM archive_items WHERE id = ?1",
+                [archive_item_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(delete_state, "QUARANTINED");
+        assert_eq!(durable, 0);
+
+        let links: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM archive_item_clips WHERE archive_item_id = ?1 AND clip_id = ?2",
+                [archive_item_id, clip_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(links, 1);
+
+        let (view_kind, file_ref): (String, String) = conn
+            .query_row(
+                "SELECT view_kind, file_ref FROM angles WHERE clip_id = ?1 AND camera = 'front'",
+                [clip_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(view_kind, "ro_usb");
+        assert_eq!(file_ref, "TeslaCam/RecentClips/clip-quarantine/front.mp4");
+    }
+
+    #[test]
+    fn register_quarantined_clip_is_idempotent() {
+        let mut conn = open_in_memory().unwrap();
+        let registration = archive_registration(
+            "slot0:TeslaCam/RecentClips/2026-06-19/clip-quarantine-idempotent",
+            "archive/2026-06-19/clip-quarantine-idempotent",
+            "archive/2026-06-19/clip-quarantine-idempotent/front.mp4",
+        );
+        let clip_id = upsert_clip(
+            &conn,
+            &clip_facts(
+                "slot0:TeslaCam/RecentClips/2026-06-19/clip-quarantine-idempotent",
+                1_718_805_600,
+                FolderClass::RecentClips,
+            ),
+        )
+        .unwrap();
+        upsert_angle_scan_preserving(
+            &conn,
+            clip_id,
+            &AngleFacts {
+                camera: "front".to_owned(),
+                file_ref: "TeslaCam/RecentClips/clip-quarantine-idempotent/front.mp4".to_owned(),
+                view_kind: "ro_usb".to_owned(),
+                offset_ms: 0,
+                duration_s: Some(60.0),
+                size_bytes: Some(1024),
+            },
+        )
+        .unwrap();
+
+        let first = register_quarantined_clip(&mut conn, &registration).unwrap();
+        let second = register_quarantined_clip(&mut conn, &registration).unwrap();
+        assert_eq!(first, second);
+
+        let (delete_state, durable): (String, i64) = conn
+            .query_row(
+                "SELECT delete_state, durable FROM archive_items WHERE id = ?1",
+                [first.1],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(delete_state, "QUARANTINED");
+        assert_eq!(durable, 0);
+
+        let (view_kind, file_ref): (String, String) = conn
+            .query_row(
+                "SELECT view_kind, file_ref FROM angles WHERE clip_id = ?1 AND camera = 'front'",
+                [clip_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(view_kind, "ro_usb");
+        assert_eq!(
+            file_ref,
+            "TeslaCam/RecentClips/clip-quarantine-idempotent/front.mp4"
+        );
+
+        let clips: i64 = conn
+            .query_row("SELECT COUNT(*) FROM clips", [], |r| r.get(0))
+            .unwrap();
+        let angles: i64 = conn
+            .query_row("SELECT COUNT(*) FROM angles", [], |r| r.get(0))
+            .unwrap();
+        let archive_items: i64 = conn
+            .query_row("SELECT COUNT(*) FROM archive_items", [], |r| r.get(0))
+            .unwrap();
+        let links: i64 = conn
+            .query_row("SELECT COUNT(*) FROM archive_item_clips", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(clips, 1);
+        assert_eq!(angles, 1);
+        assert_eq!(archive_items, 1);
+        assert_eq!(links, 1);
+    }
+
+    #[test]
+    fn register_quarantined_clip_does_not_relabel_existing_live_row() {
+        let mut conn = open_in_memory().unwrap();
+        let registration = archive_registration(
+            "slot0:TeslaCam/RecentClips/2026-06-19/clip-live-kept",
+            "archive/2026-06-19/clip-live-kept",
+            "archive/2026-06-19/clip-live-kept/front.mp4",
+        );
+
+        let (clip_id, archive_item_id) = register_archived_clip(&mut conn, &registration).unwrap();
+        let (_, same_archive_item_id) = register_quarantined_clip(&mut conn, &registration).unwrap();
+        assert_eq!(same_archive_item_id, archive_item_id);
+
+        let delete_state: String = conn
+            .query_row(
+                "SELECT delete_state FROM archive_items WHERE id = ?1",
+                [archive_item_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(delete_state, "LIVE");
+
+        let (view_kind, file_ref): (String, String) = conn
+            .query_row(
+                "SELECT view_kind, file_ref FROM angles WHERE clip_id = ?1 AND camera = 'front'",
+                [clip_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(view_kind, "archive");
+        assert_eq!(file_ref, "archive/2026-06-19/clip-live-kept/front.mp4");
     }
 
     #[test]

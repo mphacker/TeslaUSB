@@ -2,10 +2,13 @@
 
 > Parent: [`indexd.md`](../indexd.md) · [`retentiond.md`](../retentiond.md) §3.3 ·
 > [`storage.md`](../storage.md) · [`ADR-0001`](../../adr/0001-scannerd-indexd-ipc-seam.md)
-> Status: **DESIGN (2026-06-19)**. Opus design, reconciled with an independent
-> GPT-5.5 design review (`rt-register-design`). Phase-1 of the two-phase
-> `retentiond serve` plan (archive-only; **no deletes**). Unblocks map clip
-> playback (`webd` §4.2) with zero deploy risk.
+> Status: **DESIGN (2026-06-19)**, amended **2026-06-22** with §9 (decodability
+> gate / quarantine of undecodable archive copies), reconciled with an independent
+> GPT-5.5 adversarial design review (`moov-design-review`) and two GPT-5.5 diff
+> reviews (`moov-review`, `moov-review2`). Opus design, originally reconciled with
+> an independent GPT-5.5 design review (`rt-register-design`). Phase-1 of the
+> two-phase `retentiond serve` plan (archive-only; **no deletes**). Unblocks map
+> clip playback (`webd` §4.2) with zero deploy risk.
 
 ## 1. Why
 
@@ -222,3 +225,105 @@ from canonical identity, not wall-clock or attempt counter).
       rejected within `MAX_REQUEST_FRAME` without writing partial state.
 - [ ] `webd` `open_archive_angle` serves bytes for the registered angle end-to-end
       against a fixture (the playback unblock this contract exists for).
+- [x] **Decodability gate (§9):** after a copy lands, an angle that is not a
+      container-complete MP4 (missing `ftyp`/`moov`/`mdat`, unparseable `mdhd`, or
+      any top-level box whose declared extent overruns EOF / is malformed) routes
+      the whole clip to quarantine via `RegisterQuarantinedArchive`, never to a
+      playable `archive` angle (probe unit tests in `retentiond/src/probe.rs`).
+- [x] **Zero clip loss on scan failure:** a probe failure or probe I/O error on an
+      already-landed file routes to quarantine (bytes **kept**); only a *copy*
+      failure runs `remove_dest` (driver tests in `retentiond/src/archive_driver.rs`).
+- [x] **Fail-closed across deploy ordering:** `RegisterQuarantinedArchive` is a
+      distinct `cmd`; an `indexd` lacking the verb returns `Error`, so `retentiond`
+      defers to its pending queue rather than publishing a bad `archive` angle.
+      Quarantine pendings are **not** poison-dropped (held until `indexd` accepts).
+- [x] **Quarantine ingest:** `archive_items.delete_state='QUARANTINED'`,
+      `durable=0`, `archive_item_clips` linked, angles **not** promoted (stay
+      `ro_usb` → `webd` 404). Idempotent; an incoming `QUARANTINED` never relabels
+      an existing `LIVE` row (`ingest.rs` `ON CONFLICT` CASE guard + tests).
+
+## 9. Decodability gate — quarantine of undecodable archive copies (amendment 2026-06-22)
+
+A force-published `archive` angle whose bytes are not a decodable MP4 makes `webd`
+serve `206` on every camera while the browser never decodes (`readyState=0`). The
+gate stops a not-container-complete copy from ever becoming a playable angle, while
+**keeping the bytes** (zero clip loss) and **never re-archiving it in a loop**.
+
+**Where it runs.** In `retentiond::archive_driver::archive_recent_once`, **after**
+`store.copy_and_hash_dest(...)` returns `Ok` (bytes landed + fsync'd) and **before**
+registration. It is *not* inside `copy_and_hash_dest` (whose `Err` path deletes the
+temp file). A probe I/O/parse/limit error is **not** a copy failure → it routes to
+quarantine (keep bytes), never `remove_dest`. `remove_dest` remains reserved for a
+*copy* failure only.
+
+**Container-complete probe** (`retentiond::probe::probe_file_playability`, mirrors
+`scannerd::mp4probe::probe_mp4.complete`, reusing `teslausb_core::sei::mp4`): top-level
+`ftyp` **and** `mdat` present, **and** a top-level `moov` whose `moov/trak/mdia/mdhd`
+parses with `timescale > 0`. **Memory-bounded** for the Pi Zero 2 W: it seek-walks
+top-level box headers (handling 32-bit size, `size==0` to-EOF, `size==1` 64-bit
+largesize, `size<header` malformed); any top-level box whose declared extent overruns
+EOF **or** whose header is malformed (truncated 64-bit, `size<header`, overflow) ⇒
+`Unplayable`; it reads only the bounded `moov` body (cap `MAX_MOOV_BODY`) and **never**
+reads `mdat` into memory.
+
+**Granularity = whole-clip.** If *any* angle is not playable, the whole clip is
+quarantined. The demonstrated failure mode is all-angles-bad synthetic stubs, where
+whole-clip quarantine loses nothing. Per-angle partial archive is **FU-3**.
+
+**Distinct RPC verb `RegisterQuarantinedArchive`** (a separate `cmd`, *not* a
+defaulted bool — a defaulted bool would be silently ignored by an old `indexd` and
+fail **open**). It carries the same payload as `RegisterArchivedClip`. An `indexd`
+without the variant rejects the unknown `cmd` → `retentiond` fails **closed**
+(enqueues pending; never publishes a bad angle). **Binding deploy order: `indexd`
+before `retentiond`.**
+
+**Quarantine ingest** (`indexd::db::ingest::register_quarantined_clip`, one
+transaction): `ensure_clip` (unchanged); upsert `archive_items` by `path` with
+`delete_state='QUARANTINED'`, `durable=0`; `INSERT OR IGNORE archive_item_clips`;
+**skip** angle promotion (angles stay `ro_usb` → `webd open_archive_angle` 404 by its
+`view_kind != 'archive'` gate). The `ON CONFLICT(path)` `delete_state` update is
+guarded so an incoming `QUARANTINED` **never** relabels an existing `LIVE` row.
+Idempotent (re-send = no-op).
+
+**Re-archive suppression.** Once committed, the candidate SELECT
+(`retentiond/src/candidates.rs`) excludes any clip with a non-`DELETED`
+`archive_items` row, so a `QUARANTINED` clip is never re-selected. While a quarantine
+registration is pending-retry, the driver's in-memory `canonical_key` dedupe skips
+re-copying it. Quarantine pendings are **not** poison-dropped (LIVE pendings still
+are), so under a deploy-order violation the clip fails closed **and holds** (no
+re-copy churn) until `indexd` accepts; `MAX_PENDING` eviction remains the memory bound.
+
+**Preserved invariants.** Guard A / Guard B (§5) unchanged: the gate only quarantines
+*fresh* candidates that have no existing `archive` angle, so it never downgrades one;
+Guard B prune-protects the quarantined clip (it persists as an unplayable `ro_usb`
+entry, never deleted — `retentiond`'s deleter/governor leaves `QUARANTINED` untouched).
+
+### 9.1 Follow-ups (filed, out of scope for this amendment)
+
+- **FU-1 — remediate already-published bad angles.** Clips force-promoted to
+  `archive` *before* this gate stay playable-but-broken until a narrow Guard-A
+  exception + re-validation driver downgrades them. (Live clip-5 synthetic stubs;
+  superseded at C3, low urgency.)
+- **FU-2 — finalization-aware archiving / explicit un-quarantine.** Gate candidate
+  selection on `mp4probe.complete` and allow re-archival when source bytes change, so
+  a merely-not-yet-finalized segment isn't permanently quarantined. The legitimate
+  `QUARANTINED → LIVE` transition is owned here (the ingest does **not** guard that
+  reverse direction today; it is unreachable in the single-slot pipeline — see FU-6).
+- **FU-3 — per-angle partial archive** (archive the good angles, quarantine only the
+  bad ones) instead of whole-clip quarantine.
+- **FU-4 — quarantined-byte accounting metric** (surface bytes held in quarantine;
+  never auto-delete).
+- **FU-5 — strict nested-box extent validation** in the MP4 probe (reject a child
+  box whose declared extent exceeds its parent), applied **consistently** across
+  `scannerd::mp4probe` and `retentiond::probe` so they don't diverge. Today both
+  reuse `teslausb_core::sei::mp4::find_box*`, which clamps child extents to the parent
+  range; a deliberately-malformed-but-fully-present `moov` is a theoretical gap not
+  reachable by the truncation failure mode this gate targets.
+- **FU-6 — slot-aware archive path** (pre-existing). `archive_item_path_for_candidate`
+  derives `RecentClips/{date}/{timestamp}` from the `canonical_key` timestamp only,
+  dropping the `slot:` prefix. Two clips on different slots sharing a timestamp would
+  collide on one archive path (overwriting the Pi-side copy and, via the `clip_id`-keyed
+  — not path-keyed — candidate SELECT, making the FU-2 reverse transition reachable).
+  Unreachable in the shipped single-slot RecentClips topology and **never** loses
+  source footage (the car volume is read-only), but the path scheme should include the
+  slot. Predates this gate (affected the LIVE path equally).

@@ -4,10 +4,11 @@
 //! are copied by the injected `ArchiveStore` (live store uses `ReadFile`).
 
 use std::collections::VecDeque;
-use std::io;
+use std::io::{self, Write};
 
 use crate::archive::ArchiveStore;
 use crate::candidates::{Candidate, CandidateSource};
+use crate::probe::{ArchivePlayability, UnplayableReason};
 use crate::register_client::{
     ArchiveAngleRef, ArchiveItemRef, ArchiveRegistration, RegisterClient,
 };
@@ -22,6 +23,13 @@ pub const MAX_PENDING: usize = 256;
 pub struct PendingRegistration {
     reg: ArchiveRegistration,
     attempts: u32,
+    disposition: RegistrationDisposition,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegistrationDisposition {
+    Live,
+    Quarantine,
 }
 
 /// Stateful cross-cycle data for the archive driver.
@@ -53,6 +61,8 @@ pub struct CycleReport {
     pub copy_failed: usize,
     /// Count of registrations deferred to pending due to register failure.
     pub register_deferred: usize,
+    /// Count of copied candidates quarantined as undecodable.
+    pub quarantined_undecodable: usize,
     /// Count of observed candidates skipped because their key is already pending.
     pub skipped_already_pending: usize,
     /// Count of pending items dropped (poison or queue-bound eviction).
@@ -107,7 +117,10 @@ pub fn archive_recent_once(
         for angle in &candidate.angles {
             let file_name = basename(&angle.file_ref);
             let dest_rel = format!("{archive_item_path}/{file_name}");
-            if store.copy_and_hash_dest(&angle.file_ref, &dest_rel).is_err() {
+            if store
+                .copy_and_hash_dest(&angle.file_ref, &dest_rel)
+                .is_err()
+            {
                 report.copy_failed = report.copy_failed.saturating_add(1);
                 copy_failed = true;
                 break;
@@ -147,11 +160,27 @@ pub fn archive_recent_once(
             angles: copied_angles,
         };
 
-        if register.register(&reg).is_ok() {
-            report.registered = report.registered.saturating_add(1);
+        let probe_failures = collect_probe_failures(store, &reg.angles);
+        if probe_failures.is_empty() {
+            if register.register(&reg).is_ok() {
+                report.registered = report.registered.saturating_add(1);
+            } else {
+                report.register_deferred = report.register_deferred.saturating_add(1);
+                enqueue_pending(reg, RegistrationDisposition::Live, state, &mut report);
+            }
         } else {
-            report.register_deferred = report.register_deferred.saturating_add(1);
-            enqueue_pending(reg, state, &mut report);
+            let failure_detail = probe_failures
+                .iter()
+                .map(ProbeFailure::to_log_fragment)
+                .collect::<Vec<_>>()
+                .join(",");
+            log_quarantine_warning(&reg.canonical_key, &failure_detail);
+            if register.register_quarantined(&reg).is_ok() {
+                report.quarantined_undecodable = report.quarantined_undecodable.saturating_add(1);
+            } else {
+                report.register_deferred = report.register_deferred.saturating_add(1);
+                enqueue_pending(reg, RegistrationDisposition::Quarantine, state, &mut report);
+            }
         }
     }
 
@@ -171,13 +200,17 @@ fn archive_item_path_for_candidate(candidate: &Candidate) -> Option<String> {
 fn drain_pending(register: &dyn RegisterClient, state: &mut DriverState, report: &mut CycleReport) {
     let mut retained = VecDeque::with_capacity(state.pending.len());
     for mut pending in std::mem::take(&mut state.pending) {
-        if register.register(&pending.reg).is_ok() {
+        if send_registration(register, pending.disposition, &pending.reg).is_ok() {
             report.registered_from_pending = report.registered_from_pending.saturating_add(1);
             continue;
         }
 
         pending.attempts = pending.attempts.saturating_add(1);
-        if pending.attempts >= MAX_REGISTER_ATTEMPTS {
+        // Quarantine pendings fail closed: retain until indexd accepts the
+        // quarantined-register verb. The queue bound remains MAX_PENDING.
+        if pending.attempts >= MAX_REGISTER_ATTEMPTS
+            && pending.disposition == RegistrationDisposition::Live
+        {
             report.dropped_poison = report.dropped_poison.saturating_add(1);
             continue;
         }
@@ -186,7 +219,12 @@ fn drain_pending(register: &dyn RegisterClient, state: &mut DriverState, report:
     state.pending = retained;
 }
 
-fn enqueue_pending(reg: ArchiveRegistration, state: &mut DriverState, report: &mut CycleReport) {
+fn enqueue_pending(
+    reg: ArchiveRegistration,
+    disposition: RegistrationDisposition,
+    state: &mut DriverState,
+    report: &mut CycleReport,
+) {
     if state
         .pending
         .iter()
@@ -200,9 +238,74 @@ fn enqueue_pending(reg: ArchiveRegistration, state: &mut DriverState, report: &m
         report.dropped_poison = report.dropped_poison.saturating_add(1);
     }
 
-    state
-        .pending
-        .push_back(PendingRegistration { reg, attempts: 1 });
+    state.pending.push_back(PendingRegistration {
+        reg,
+        attempts: 1,
+        disposition,
+    });
+}
+
+fn send_registration(
+    register: &dyn RegisterClient,
+    disposition: RegistrationDisposition,
+    reg: &ArchiveRegistration,
+) -> Result<crate::register_client::RegistrationOk, crate::register_client::RegisterError> {
+    match disposition {
+        RegistrationDisposition::Live => register.register(reg),
+        RegistrationDisposition::Quarantine => register.register_quarantined(reg),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProbeFailure {
+    camera: String,
+    reason: ProbeFailureReason,
+}
+
+impl ProbeFailure {
+    fn to_log_fragment(&self) -> String {
+        match self.reason {
+            ProbeFailureReason::Unplayable(reason) => {
+                format!("camera={} reason={reason:?}", self.camera)
+            }
+            ProbeFailureReason::ProbeIo => format!("camera={} reason=ProbeIo", self.camera),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeFailureReason {
+    Unplayable(UnplayableReason),
+    ProbeIo,
+}
+
+fn collect_probe_failures(
+    store: &dyn ArchiveStore,
+    angles: &[ArchiveAngleRef],
+) -> Vec<ProbeFailure> {
+    let mut failures = Vec::new();
+    for angle in angles {
+        match store.probe_dest_playability(&angle.file_ref) {
+            Ok(ArchivePlayability::Playable) => {}
+            Ok(ArchivePlayability::Unplayable(reason)) => failures.push(ProbeFailure {
+                camera: angle.camera.clone(),
+                reason: ProbeFailureReason::Unplayable(reason),
+            }),
+            Err(_) => failures.push(ProbeFailure {
+                camera: angle.camera.clone(),
+                reason: ProbeFailureReason::ProbeIo,
+            }),
+        }
+    }
+    failures
+}
+
+fn log_quarantine_warning(canonical_key: &str, failure_detail: &str) {
+    let mut stderr = io::stderr();
+    let _ = writeln!(
+        &mut stderr,
+        "retentiond archive_recent_only: quarantining_undecodable canonical_key={canonical_key} failures={failure_detail}"
+    );
 }
 
 fn u64_to_i64_saturating(value: u64) -> i64 {
@@ -232,7 +335,7 @@ pub fn basename(src_rel: &str) -> &str {
 mod tests {
     use std::{
         cell::{Cell, RefCell},
-        collections::{HashSet, VecDeque},
+        collections::{HashMap, HashSet, VecDeque},
         io,
     };
 
@@ -240,10 +343,13 @@ mod tests {
         archive::ArchiveStore,
         candidates::{Candidate, CandidateAngle, CandidateSource},
         io::{ContentHash, FileIdentity},
+        probe::{ArchivePlayability, UnplayableReason},
         register_client::{ArchiveRegistration, RegisterClient, RegisterError, RegistrationOk},
     };
 
-    use super::{DriverState, MAX_REGISTER_ATTEMPTS, archive_recent_once, basename};
+    use super::{
+        DriverState, MAX_REGISTER_ATTEMPTS, RegistrationDisposition, archive_recent_once, basename,
+    };
 
     const KEY: &str = "0:TeslaCam/RecentClips/2026-06-19_10-00-00";
     const PATH: &str = "RecentClips/2026-06-19/2026-06-19_10-00-00";
@@ -298,11 +404,23 @@ mod tests {
         fail_once_src: RefCell<Option<String>>,
         removed: RefCell<Vec<String>>,
         landed: RefCell<HashSet<String>>,
+        probe_unplayable: RefCell<HashMap<String, UnplayableReason>>,
+        probe_error: RefCell<HashSet<String>>,
     }
 
     impl FakeStore {
         fn fail_once_for(&self, src_rel: &str) {
             *self.fail_once_src.borrow_mut() = Some(src_rel.to_owned());
+        }
+
+        fn set_unplayable(&self, dest_rel: &str, reason: UnplayableReason) {
+            self.probe_unplayable
+                .borrow_mut()
+                .insert(dest_rel.to_owned(), reason);
+        }
+
+        fn set_probe_error(&self, dest_rel: &str) {
+            self.probe_error.borrow_mut().insert(dest_rel.to_owned());
         }
     }
 
@@ -332,42 +450,98 @@ mod tests {
             self.landed.borrow_mut().remove(dest_rel);
             Ok(())
         }
+
+        fn probe_dest_playability(&self, dest_rel: &str) -> io::Result<ArchivePlayability> {
+            if self.probe_error.borrow().contains(dest_rel) {
+                return Err(io::Error::other("probe failed"));
+            }
+            if let Some(reason) = self.probe_unplayable.borrow().get(dest_rel) {
+                return Ok(ArchivePlayability::Unplayable(*reason));
+            }
+            Ok(ArchivePlayability::Playable)
+        }
     }
 
     #[derive(Default)]
     struct FakeRegister {
-        calls: RefCell<Vec<ArchiveRegistration>>,
-        failures: RefCell<VecDeque<bool>>,
-        always_fail: Cell<bool>,
+        live_calls: RefCell<Vec<ArchiveRegistration>>,
+        quarantine_calls: RefCell<Vec<ArchiveRegistration>>,
+        live_failures: RefCell<VecDeque<bool>>,
+        quarantine_failures: RefCell<VecDeque<bool>>,
+        always_fail_live: Cell<bool>,
+        always_fail_quarantine: Cell<bool>,
     }
 
     impl FakeRegister {
-        fn with_failures(failures: Vec<bool>) -> Self {
+        fn with_live_failures(failures: Vec<bool>) -> Self {
             Self {
-                calls: RefCell::new(Vec::new()),
-                failures: RefCell::new(failures.into()),
-                always_fail: Cell::new(false),
+                live_calls: RefCell::new(Vec::new()),
+                quarantine_calls: RefCell::new(Vec::new()),
+                live_failures: RefCell::new(failures.into()),
+                quarantine_failures: RefCell::new(VecDeque::new()),
+                always_fail_live: Cell::new(false),
+                always_fail_quarantine: Cell::new(false),
             }
         }
 
-        fn set_always_fail(&self, always_fail: bool) {
-            self.always_fail.set(always_fail);
+        fn with_quarantine_failures(failures: Vec<bool>) -> Self {
+            Self {
+                live_calls: RefCell::new(Vec::new()),
+                quarantine_calls: RefCell::new(Vec::new()),
+                live_failures: RefCell::new(VecDeque::new()),
+                quarantine_failures: RefCell::new(failures.into()),
+                always_fail_live: Cell::new(false),
+                always_fail_quarantine: Cell::new(false),
+            }
+        }
+
+        fn set_always_fail_live(&self, always_fail: bool) {
+            self.always_fail_live.set(always_fail);
+        }
+
+        fn set_always_fail_quarantine(&self, always_fail: bool) {
+            self.always_fail_quarantine.set(always_fail);
         }
     }
 
     impl RegisterClient for FakeRegister {
         fn register(&self, reg: &ArchiveRegistration) -> Result<RegistrationOk, RegisterError> {
-            self.calls.borrow_mut().push(reg.clone());
+            self.live_calls.borrow_mut().push(reg.clone());
             let should_fail = {
-                let mut failures = self.failures.borrow_mut();
+                let mut failures = self.live_failures.borrow_mut();
                 if let Some(next) = failures.pop_front() {
                     next
                 } else {
-                    self.always_fail.get()
+                    self.always_fail_live.get()
                 }
             };
             if should_fail {
                 Err(RegisterError::Io(io::Error::other("register failed")))
+            } else {
+                Ok(RegistrationOk {
+                    clip_id: 1,
+                    archive_item_id: 1,
+                })
+            }
+        }
+
+        fn register_quarantined(
+            &self,
+            reg: &ArchiveRegistration,
+        ) -> Result<RegistrationOk, RegisterError> {
+            self.quarantine_calls.borrow_mut().push(reg.clone());
+            let should_fail = {
+                let mut failures = self.quarantine_failures.borrow_mut();
+                if let Some(next) = failures.pop_front() {
+                    next
+                } else {
+                    self.always_fail_quarantine.get()
+                }
+            };
+            if should_fail {
+                Err(RegisterError::Io(io::Error::other(
+                    "quarantine register failed",
+                )))
             } else {
                 Ok(RegistrationOk {
                     clip_id: 1,
@@ -389,6 +563,7 @@ mod tests {
             archive_recent_once(&candidates, &store, &register, &mut state, 2_000_000_000).unwrap();
         assert_eq!(report.observed, 1);
         assert_eq!(report.registered, 1);
+        assert_eq!(report.quarantined_undecodable, 0);
         assert_eq!(report.pending_len, 0);
 
         let copies = store.copies.borrow();
@@ -402,8 +577,9 @@ mod tests {
             "RecentClips/2026-06-19/2026-06-19_10-00-00/2026-06-19_10-00-00-back.mp4"
         );
 
-        let calls = register.calls.borrow();
+        let calls = register.live_calls.borrow();
         assert_eq!(calls.len(), 1);
+        assert_eq!(register.quarantine_calls.borrow().len(), 0);
         let reg = &calls[0];
         assert_eq!(reg.canonical_key, KEY);
         assert_eq!(reg.archive.path, PATH);
@@ -428,11 +604,11 @@ mod tests {
 
         let first = archive_recent_once(&candidates, &store, &register, &mut state, 1).unwrap();
         assert_eq!(first.copy_failed, 1);
-        assert_eq!(register.calls.borrow().len(), 0);
+        assert_eq!(register.live_calls.borrow().len(), 0);
 
         let second = archive_recent_once(&candidates, &store, &register, &mut state, 2).unwrap();
         assert_eq!(second.registered, 1);
-        assert_eq!(register.calls.borrow().len(), 1);
+        assert_eq!(register.live_calls.borrow().len(), 1);
     }
 
     #[test]
@@ -446,17 +622,22 @@ mod tests {
 
         let first = archive_recent_once(&candidates, &store, &register, &mut state, 1).unwrap();
         assert_eq!(first.copy_failed, 1);
-        assert_eq!(register.calls.borrow().len(), 0);
+        assert_eq!(register.live_calls.borrow().len(), 0);
         assert_eq!(
             store.removed.borrow().as_slice(),
-            &["RecentClips/2026-06-19/2026-06-19_10-00-00/2026-06-19_10-00-00-front.mp4"
-                .to_owned()]
+            &[
+                "RecentClips/2026-06-19/2026-06-19_10-00-00/2026-06-19_10-00-00-front.mp4"
+                    .to_owned()
+            ]
         );
-        assert!(store.landed.borrow().is_empty(), "no orphan angle files left");
+        assert!(
+            store.landed.borrow().is_empty(),
+            "no orphan angle files left"
+        );
 
         let second = archive_recent_once(&candidates, &store, &register, &mut state, 2).unwrap();
         assert_eq!(second.registered, 1);
-        assert_eq!(register.calls.borrow().len(), 1);
+        assert_eq!(register.live_calls.borrow().len(), 1);
     }
 
     #[test]
@@ -464,7 +645,7 @@ mod tests {
         let candidates = FakeCandidates::default();
         candidates.set(vec![sample_candidate()]);
         let store = FakeStore::default();
-        let register = FakeRegister::with_failures(vec![true, false]);
+        let register = FakeRegister::with_live_failures(vec![true, false]);
         let mut state = DriverState::new();
 
         let deferred = archive_recent_once(&candidates, &store, &register, &mut state, 1).unwrap();
@@ -481,12 +662,83 @@ mod tests {
     }
 
     #[test]
+    fn unplayable_angle_registers_quarantine_without_remove_dest() {
+        let candidates = FakeCandidates::default();
+        candidates.set(vec![sample_candidate()]);
+        let store = FakeStore::default();
+        store.set_unplayable(
+            "RecentClips/2026-06-19/2026-06-19_10-00-00/2026-06-19_10-00-00-back.mp4",
+            UnplayableReason::NoMoov,
+        );
+        let register = FakeRegister::default();
+        let mut state = DriverState::new();
+
+        let report = archive_recent_once(&candidates, &store, &register, &mut state, 1).unwrap();
+        assert_eq!(report.quarantined_undecodable, 1);
+        assert_eq!(report.copy_failed, 0);
+        assert_eq!(register.live_calls.borrow().len(), 0);
+        assert_eq!(register.quarantine_calls.borrow().len(), 1);
+        assert!(store.removed.borrow().is_empty());
+    }
+
+    #[test]
+    fn probe_error_routes_to_quarantine_without_copy_failure_or_remove() {
+        let candidates = FakeCandidates::default();
+        candidates.set(vec![sample_candidate()]);
+        let store = FakeStore::default();
+        store.set_probe_error(
+            "RecentClips/2026-06-19/2026-06-19_10-00-00/2026-06-19_10-00-00-front.mp4",
+        );
+        let register = FakeRegister::default();
+        let mut state = DriverState::new();
+
+        let report = archive_recent_once(&candidates, &store, &register, &mut state, 1).unwrap();
+        assert_eq!(report.copy_failed, 0);
+        assert_eq!(report.quarantined_undecodable, 1);
+        assert!(store.removed.borrow().is_empty());
+        assert_eq!(register.live_calls.borrow().len(), 0);
+        assert_eq!(register.quarantine_calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn quarantine_register_failure_defers_pending_and_retry_skips_recopy() {
+        let candidates = FakeCandidates::default();
+        candidates.set(vec![sample_candidate()]);
+        let store = FakeStore::default();
+        store.set_unplayable(
+            "RecentClips/2026-06-19/2026-06-19_10-00-00/2026-06-19_10-00-00-front.mp4",
+            UnplayableReason::NoMoov,
+        );
+        let register = FakeRegister::with_quarantine_failures(vec![true, true, false]);
+        let mut state = DriverState::new();
+
+        let first = archive_recent_once(&candidates, &store, &register, &mut state, 1).unwrap();
+        assert_eq!(first.register_deferred, 1);
+        assert_eq!(first.pending_len, 1);
+        let copies_after_first = store.copies.borrow().len();
+        assert_eq!(register.quarantine_calls.borrow().len(), 1);
+
+        let second = archive_recent_once(&candidates, &store, &register, &mut state, 2).unwrap();
+        assert_eq!(second.registered_from_pending, 0);
+        assert_eq!(second.skipped_already_pending, 1);
+        assert_eq!(second.pending_len, 1);
+        assert_eq!(store.copies.borrow().len(), copies_after_first);
+        assert_eq!(register.quarantine_calls.borrow().len(), 2);
+
+        candidates.set(Vec::new());
+        let third = archive_recent_once(&candidates, &store, &register, &mut state, 3).unwrap();
+        assert_eq!(third.registered_from_pending, 1);
+        assert_eq!(third.pending_len, 0);
+        assert_eq!(register.quarantine_calls.borrow().len(), 3);
+    }
+
+    #[test]
     fn pending_key_reemit_is_skipped_not_recopied() {
         let candidates = FakeCandidates::default();
         candidates.set(vec![sample_candidate()]);
         let store = FakeStore::default();
         let register = FakeRegister::default();
-        register.set_always_fail(true);
+        register.set_always_fail_live(true);
         let mut state = DriverState::new();
 
         let first = archive_recent_once(&candidates, &store, &register, &mut state, 1).unwrap();
@@ -507,7 +759,7 @@ mod tests {
         candidates.set(vec![sample_candidate()]);
         let store = FakeStore::default();
         let register = FakeRegister::default();
-        register.set_always_fail(true);
+        register.set_always_fail_live(true);
         let mut state = DriverState::new();
 
         archive_recent_once(&candidates, &store, &register, &mut state, 1).unwrap();
@@ -516,15 +768,77 @@ mod tests {
         candidates.set(Vec::new());
         let mut saw_drop = false;
         for tick in 0..=MAX_REGISTER_ATTEMPTS {
-            let report = archive_recent_once(&candidates, &store, &register, &mut state, 2 + i64::from(tick))
-                .unwrap();
+            let report = archive_recent_once(
+                &candidates,
+                &store,
+                &register,
+                &mut state,
+                2 + i64::from(tick),
+            )
+            .unwrap();
             if report.dropped_poison > 0 {
                 saw_drop = true;
                 assert_eq!(report.pending_len, 0);
                 break;
             }
         }
-        assert!(saw_drop, "pending registration should eventually poison-drop");
+        assert!(
+            saw_drop,
+            "pending registration should eventually poison-drop"
+        );
+    }
+
+    #[test]
+    fn quarantine_pending_is_retained_past_max_attempts_until_register_accepts() {
+        let candidates = FakeCandidates::default();
+        candidates.set(vec![sample_candidate()]);
+        let store = FakeStore::default();
+        store.set_unplayable(
+            "RecentClips/2026-06-19/2026-06-19_10-00-00/2026-06-19_10-00-00-front.mp4",
+            UnplayableReason::NoMoov,
+        );
+        let register = FakeRegister::default();
+        register.set_always_fail_quarantine(true);
+        let mut state = DriverState::new();
+
+        let first = archive_recent_once(&candidates, &store, &register, &mut state, 1).unwrap();
+        assert_eq!(first.register_deferred, 1);
+        assert_eq!(first.pending_len, 1);
+        assert_eq!(store.copies.borrow().len(), 2);
+
+        for tick in 0..=(MAX_REGISTER_ATTEMPTS + 1) {
+            let report = archive_recent_once(
+                &candidates,
+                &store,
+                &register,
+                &mut state,
+                2 + i64::from(tick),
+            )
+            .unwrap();
+            assert_eq!(report.skipped_already_pending, 1);
+            assert_eq!(report.pending_len, 1);
+        }
+
+        assert_eq!(store.copies.borrow().len(), 2);
+        assert_eq!(state.pending.len(), 1);
+        let pending = state.pending.front().expect("pending retained");
+        assert_eq!(pending.disposition, RegistrationDisposition::Quarantine);
+        assert!(pending.attempts > MAX_REGISTER_ATTEMPTS);
+
+        candidates.set(Vec::new());
+        register.set_always_fail_quarantine(false);
+        let drained = archive_recent_once(
+            &candidates,
+            &store,
+            &register,
+            &mut state,
+            2 + i64::from(MAX_REGISTER_ATTEMPTS) + 2,
+        )
+        .unwrap();
+        assert_eq!(drained.registered_from_pending, 1);
+        assert_eq!(drained.pending_len, 0);
+        assert_eq!(register.live_calls.borrow().len(), 0);
+        assert!(register.quarantine_calls.borrow().len() > 2);
     }
 
     #[test]

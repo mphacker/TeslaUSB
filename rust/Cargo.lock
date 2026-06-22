@@ -609,6 +609,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "teslausb-core",
  "thiserror 2.0.18",
 ]
 

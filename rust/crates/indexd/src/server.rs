@@ -13,6 +13,7 @@ use rusqlite::Connection;
 
 use crate::db::ingest::{
     ArchiveAngleRegistration, ArchiveRegistration, ArchiveUnitRegistration, register_archived_clip,
+    register_quarantined_clip,
 };
 use crate::model::FolderClass;
 use crate::proto::{RegisterArchivedClip, Request, Response, read_request, write_response};
@@ -79,6 +80,15 @@ fn handle_connection(
                     Err(message) => Response::Error { message },
                 }
             }
+            Request::RegisterQuarantinedArchive(payload) => {
+                match handle_register_quarantined_clip(conn, &payload) {
+                    Ok((clip_id, archive_item_id)) => Response::Ok {
+                        clip_id,
+                        archive_item_id,
+                    },
+                    Err(message) => Response::Error { message },
+                }
+            }
         },
         Err(e) => Response::Error {
             message: format!("invalid request: {e}"),
@@ -92,9 +102,28 @@ fn handle_register_archived_clip(
     conn: &Arc<Mutex<Connection>>,
     payload: &RegisterArchivedClip,
 ) -> Result<(i64, i64), String> {
+    let registration = build_registration(payload)?;
+    let mut locked = conn
+        .lock()
+        .map_err(|_| "index database mutex is poisoned".to_owned())?;
+    register_archived_clip(&mut locked, &registration).map_err(|e| e.to_string())
+}
+
+fn handle_register_quarantined_clip(
+    conn: &Arc<Mutex<Connection>>,
+    payload: &RegisterArchivedClip,
+) -> Result<(i64, i64), String> {
+    let registration = build_registration(payload)?;
+    let mut locked = conn
+        .lock()
+        .map_err(|_| "index database mutex is poisoned".to_owned())?;
+    register_quarantined_clip(&mut locked, &registration).map_err(|e| e.to_string())
+}
+
+fn build_registration(payload: &RegisterArchivedClip) -> Result<ArchiveRegistration, String> {
     validate_payload(payload)?;
     let folder_class = parse_folder_class(&payload.folder_class)?;
-    let registration = ArchiveRegistration {
+    Ok(ArchiveRegistration {
         canonical_key: payload.canonical_key.clone(),
         folder_class,
         partition: payload.partition.clone(),
@@ -120,12 +149,7 @@ fn handle_register_archived_clip(
                 })
             })
             .collect::<Result<Vec<_>, String>>()?,
-    };
-
-    let mut locked = conn
-        .lock()
-        .map_err(|_| "index database mutex is poisoned".to_owned())?;
-    register_archived_clip(&mut locked, &registration).map_err(|e| e.to_string())
+    })
 }
 
 fn parse_folder_class(raw: &str) -> Result<FolderClass, String> {

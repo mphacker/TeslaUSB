@@ -61,6 +61,17 @@ pub trait ArchiveStore {
     /// # Errors
     /// Any underlying I/O failure removing the destination file.
     fn remove_dest(&self, dest_rel: &str) -> std::io::Result<()>;
+
+    /// Probe an already-landed destination file for container completeness.
+    ///
+    /// The path is resolved under the archive root by the implementation.
+    ///
+    /// # Errors
+    /// Any underlying I/O failure while opening/reading the landed file.
+    fn probe_dest_playability(
+        &self,
+        dest_rel: &str,
+    ) -> std::io::Result<crate::probe::ArchivePlayability>;
 }
 
 /// Terminal result of a car-side delete handoff request (`gadgetd` is the final
@@ -393,6 +404,12 @@ mod tests {
         }
         fn remove_dest(&self, _dest_rel: &str) -> std::io::Result<()> {
             Ok(())
+        }
+        fn probe_dest_playability(
+            &self,
+            _dest_rel: &str,
+        ) -> std::io::Result<crate::probe::ArchivePlayability> {
+            Ok(crate::probe::ArchivePlayability::Playable)
         }
     }
 

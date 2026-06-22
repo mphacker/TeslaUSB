@@ -121,15 +121,10 @@ using degraded best-effort random token fallback"
     let pid = u64::from(std::process::id());
     let probe = 0_u8;
     let addr = std::ptr::addr_of!(probe) as usize as u64;
-    let lo = splitmix64(
-        counter
-            ^ pid.rotate_left(13)
-            ^ addr.rotate_left(29)
-            ^ 0xa076_1d64_78bd_642f,
-    );
+    let lo =
+        splitmix64(counter ^ pid.rotate_left(13) ^ addr.rotate_left(29) ^ 0xa076_1d64_78bd_642f);
     let hi = splitmix64(
-        counter
-            .wrapping_add(0x9e37_79b9_7f4a_7c15)
+        counter.wrapping_add(0x9e37_79b9_7f4a_7c15)
             ^ pid.rotate_left(41)
             ^ addr.rotate_left(7)
             ^ 0xe703_7ed1_a0b4_28db,
@@ -240,6 +235,15 @@ impl ArchiveStore for LiveArchiveStore {
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(err) => Err(err),
         }
+    }
+
+    fn probe_dest_playability(
+        &self,
+        dest_rel: &str,
+    ) -> io::Result<retentiond::probe::ArchivePlayability> {
+        let dest_path = jailed_join(&self.archive_root, dest_rel)?;
+        let landed = canonicalize_under_root(&self.archive_root, &dest_path)?;
+        retentiond::probe::probe_file_playability(&landed)
     }
 
     fn source_identity(&self, _src_rel: &str) -> io::Result<FileIdentity> {
@@ -387,7 +391,10 @@ fn sync_dir_chain(root: &Path, leaf: &Path) -> io::Result<()> {
         let Some(parent) = current.parent() else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("directory {} has no parent while syncing", current.display()),
+                format!(
+                    "directory {} has no parent while syncing",
+                    current.display()
+                ),
             ));
         };
         current = parent.to_path_buf();
@@ -440,7 +447,10 @@ pub(crate) struct LiveStatfs;
 impl Statfs for LiveStatfs {
     fn statfs(&self, path: &str) -> io::Result<FsStat> {
         let c_path = CString::new(path).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidInput, "path contains interior NUL byte")
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "path contains interior NUL byte",
+            )
         })?;
         let mut st: libc::stat = unsafe { std::mem::zeroed() };
         if unsafe { libc::stat(c_path.as_ptr(), &mut st) } != 0 {
@@ -450,7 +460,11 @@ impl Statfs for LiveStatfs {
         if unsafe { libc::statvfs(c_path.as_ptr(), &mut s) } != 0 {
             return Err(io::Error::last_os_error());
         }
-        let frsize = if s.f_frsize == 0 { s.f_bsize } else { s.f_frsize };
+        let frsize = if s.f_frsize == 0 {
+            s.f_bsize
+        } else {
+            s.f_frsize
+        };
         let frsize = to_u64_saturating(frsize);
 
         Ok(FsStat {
@@ -469,9 +483,9 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::fs;
+    use std::io;
     use std::os::unix::fs::symlink;
     use std::path::PathBuf;
-    use std::io;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use sha2::{Digest, Sha256};
@@ -483,7 +497,9 @@ mod tests {
     use retentiond::delete::RandGen;
     use retentiond::governor::Statfs;
     use retentiond::io::ContentHash;
-    use retentiond::read_client::{ClipIdentity, ReadFileClient, ReadFileError, ReadFileOk, ReadFileRequest};
+    use retentiond::read_client::{
+        ClipIdentity, ReadFileClient, ReadFileError, ReadFileOk, ReadFileRequest,
+    };
     use retentiond::register_client::{
         ArchiveRegistration, RegisterClient, RegisterError, RegistrationOk,
     };
@@ -506,6 +522,31 @@ mod tests {
         ContentHash::new(out)
     }
 
+    fn box32(name: [u8; 4], body: &[u8]) -> Vec<u8> {
+        let size = u32::try_from(8 + body.len()).expect("box size");
+        let mut out = Vec::with_capacity(8 + body.len());
+        out.extend_from_slice(&size.to_be_bytes());
+        out.extend_from_slice(&name);
+        out.extend_from_slice(body);
+        out
+    }
+
+    fn playable_mp4_bytes() -> Vec<u8> {
+        let mut mdhd = vec![0_u8; 4];
+        mdhd.extend_from_slice(&0_u32.to_be_bytes());
+        mdhd.extend_from_slice(&0_u32.to_be_bytes());
+        mdhd.extend_from_slice(&30_000_u32.to_be_bytes());
+        mdhd.extend_from_slice(&90_000_u32.to_be_bytes());
+        mdhd.extend_from_slice(&[0_u8; 4]);
+        let mdhd = box32(*b"mdhd", &mdhd);
+        let mdia = box32(*b"mdia", &mdhd);
+        let trak = box32(*b"trak", &mdia);
+        let moov = box32(*b"moov", &trak);
+        let ftyp = box32(*b"ftyp", b"isom");
+        let mdat = box32(*b"mdat", &[0_u8; 32]);
+        [ftyp, moov, mdat].concat()
+    }
+
     struct FakeReadClient {
         scripted: RefCell<VecDeque<Result<ReadFileOk, ReadFileError>>>,
         requests: RefCell<Vec<ReadFileRequest>>,
@@ -523,10 +564,11 @@ mod tests {
     impl ReadFileClient for FakeReadClient {
         fn read_file(&self, req: &ReadFileRequest) -> Result<ReadFileOk, ReadFileError> {
             self.requests.borrow_mut().push(req.clone());
-            self.scripted
-                .borrow_mut()
-                .pop_front()
-                .unwrap_or_else(|| Err(ReadFileError::Decode("missing scripted response".to_owned())))
+            self.scripted.borrow_mut().pop_front().unwrap_or_else(|| {
+                Err(ReadFileError::Decode(
+                    "missing scripted response".to_owned(),
+                ))
+            })
         }
     }
 
@@ -553,6 +595,13 @@ mod tests {
                 clip_id: 1,
                 archive_item_id: 1,
             })
+        }
+
+        fn register_quarantined(
+            &self,
+            reg: &ArchiveRegistration,
+        ) -> Result<RegistrationOk, RegisterError> {
+            self.register(reg)
         }
     }
 
@@ -656,8 +705,7 @@ mod tests {
             )
             .expect("copy succeeds");
         assert_eq!(hash, hash_bytes(bytes));
-        let landed =
-            archive_root.join("RecentClips/2026-06-19/2026-06-19_10-00-00/front.mp4");
+        let landed = archive_root.join("RecentClips/2026-06-19/2026-06-19_10-00-00/front.mp4");
         assert_eq!(fs::read(landed).expect("read landed file"), bytes);
         let _ = fs::remove_dir_all(root);
     }
@@ -697,8 +745,7 @@ mod tests {
             .expect("streaming copy succeeds");
         let expected = b"abcdefghi";
         assert_eq!(hash, hash_bytes(expected));
-        let landed =
-            archive_root.join("RecentClips/2026-06-19/2026-06-19_10-00-00/front.mp4");
+        let landed = archive_root.join("RecentClips/2026-06-19/2026-06-19_10-00-00/front.mp4");
         assert_eq!(fs::read(landed).expect("read landed file"), expected);
         let _ = fs::remove_dir_all(root);
     }
@@ -752,21 +799,21 @@ mod tests {
         let root = new_temp_dir();
         let archive_root = root.join("archive");
         fs::create_dir_all(&archive_root).expect("create archive root");
-        let front_bytes = b"front-bytes";
-        let back_bytes = b"back-bytes";
+        let front_bytes = playable_mp4_bytes();
+        let back_bytes = playable_mp4_bytes();
         let id = identity();
         let scripted = vec![
             Ok(ReadFileOk {
                 identity: id,
                 readable_size: front_bytes.len() as u64,
                 eof: true,
-                bytes: front_bytes.to_vec(),
+                bytes: front_bytes.clone(),
             }),
             Ok(ReadFileOk {
                 identity: id,
                 readable_size: back_bytes.len() as u64,
                 eof: true,
-                bytes: back_bytes.to_vec(),
+                bytes: back_bytes.clone(),
             }),
         ];
         let store = LiveArchiveStore::new(Box::new(FakeReadClient::new(scripted)), &archive_root);
@@ -790,10 +837,17 @@ mod tests {
         let calls = register.calls.borrow();
         assert_eq!(calls.len(), 1);
         let reg = &calls[0];
-        assert_eq!(reg.archive.path, "RecentClips/2026-06-19/2026-06-19_10-00-00");
+        assert_eq!(
+            reg.archive.path,
+            "RecentClips/2026-06-19/2026-06-19_10-00-00"
+        );
         assert_eq!(reg.angles.len(), 2);
         for angle in &reg.angles {
-            assert!(angle.file_ref.starts_with("RecentClips/2026-06-19/2026-06-19_10-00-00/"));
+            assert!(
+                angle
+                    .file_ref
+                    .starts_with("RecentClips/2026-06-19/2026-06-19_10-00-00/")
+            );
         }
         let _ = fs::remove_dir_all(root);
     }

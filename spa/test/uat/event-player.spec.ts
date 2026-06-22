@@ -488,6 +488,49 @@ test.describe("event-player UAT", () => {
     );
   });
 
+  test("direct clip deep-link — /events?clip=1 resolves event-less archived clip 1", async ({
+    page,
+  }) => {
+    const streams = trackStreams(page);
+    await page.goto("/events?clip=1", { waitUntil: "load" });
+    await expect(page.locator("[data-screen=event-player]")).toBeVisible();
+    await expect(page.locator("#mainVideo")).toHaveAttribute("src", /\/api\/clips\/1\/stream/);
+
+    const mediaResp = streams.responses.filter((r) =>
+      r.resourceType === "media" && /\/api\/clips\/1\/stream/.test(r.url)
+    );
+    expect(mediaResp.length, "direct clip 1 must issue a media request").toBeGreaterThan(0);
+    expect(mediaResp.some((r) => r.status === 206), "direct clip 1 media request must be 206").toBe(true);
+    const partial = mediaResp.find((r) => r.status === 206)!;
+    expect(partial.acceptRanges).toBe("bytes");
+    expect(partial.contentRange, `content-range=${partial.contentRange}`).toMatch(
+      /^bytes \d+-\d+\/\d+$/,
+    );
+
+    const decode = await decodeVideo(page);
+    expect(decode.readyState).toBeGreaterThanOrEqual(2);
+    expect(decode.duration).toBeGreaterThan(0);
+    expect(decode.videoWidth).toBeGreaterThan(0);
+
+    await expect(page.locator("[data-testid=video-unarchived]")).toHaveCount(0);
+    await expect(page.locator("[data-testid=event-nav]")).toHaveCount(0);
+    await expect(page.locator(".event-location")).toHaveText("RecentClips");
+    await expect(page.locator(".event-datetime")).not.toHaveText("\u2014");
+  });
+
+  test("deep-link guard — same-path ?clip change re-resolves without reload", async ({
+    page,
+  }) => {
+    await page.goto("/events?clip=1", { waitUntil: "load" });
+    await expect(page.locator("#mainVideo")).toHaveAttribute("src", /\/api\/clips\/1\/stream/);
+
+    await page.evaluate(() => window.history.pushState({}, "", "/events?clip=5"));
+    await expect(page.locator("#mainVideo")).toHaveAttribute("src", /\/api\/clips\/5\/stream/);
+
+    await page.goBack();
+    await expect(page.locator("#mainVideo")).toHaveAttribute("src", /\/api\/clips\/1\/stream/);
+  });
+
   // ── Gate 3 (read-only): only whitelisted GET; switched camera streams; the
   //    archive control stays inert; opening + cancelling the Delete confirm
   //    fires NO mutation ──────────────────────────────────────────────────

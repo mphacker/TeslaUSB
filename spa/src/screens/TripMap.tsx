@@ -521,7 +521,13 @@ function ClipsTab({ clips }: { clips: Clip[] | null }) {
   return (
     <div data-testid="vp-clips">
       {clips.map((c) => (
-        <div class="vp-clip" key={c.id}>
+        <a
+          class="vp-clip vp-clip-link"
+          key={c.id}
+          href={`/events?clip=${c.id}`}
+          data-testid={`vp-clip-link-${c.id}`}
+          aria-label={`Open clip ${fmtClock(c.started_at)}`}
+        >
           <div class="vp-clip-info">
             <div class="vp-clip-date">{fmtClock(c.started_at)}</div>
             <div class="vp-clip-meta">
@@ -529,7 +535,7 @@ function ClipsTab({ clips }: { clips: Clip[] | null }) {
             </div>
             {c.is_sentry && <div class="vp-clip-reason">sentry</div>}
           </div>
-        </div>
+        </a>
       ))}
     </div>
   );

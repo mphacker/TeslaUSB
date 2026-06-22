@@ -222,29 +222,45 @@ function eventSeekSeconds(
   return Math.max(0, (canonicalMs - target.offset_ms) / 1000);
 }
 
-/** Pick the starting playlist index from the URL deep-link. Supports
- *  `?event=<id>` (exact event match) and `?clip=<id>` (first event on that
- *  clip) so the trip-map and other screens can hand off to a specific moment.
- *  Falls back to 0 (top of the playlist) when absent or unmatched. */
-function initialIndex(playable: EventItem[]): number {
-  if (typeof window === "undefined") return 0;
+interface DeepLink {
+  eventId: number | null;
+  clipId: number | null;
+}
+
+/** Parse deep-link params from `window.location.search`. */
+function deepLink(): DeepLink {
+  if (typeof window === "undefined") return { eventId: null, clipId: null };
   let params: URLSearchParams;
   try {
     params = new URLSearchParams(window.location.search);
   } catch {
-    return 0;
+    return { eventId: null, clipId: null };
   }
-  const eventId = Number(params.get("event"));
-  if (Number.isFinite(eventId) && params.get("event")) {
+  const rawEvent = params.get("event");
+  const rawClip = params.get("clip");
+  const eventId = rawEvent ? Number(rawEvent) : NaN;
+  const clipId = rawClip ? Number(rawClip) : NaN;
+  return {
+    eventId: Number.isFinite(eventId) ? eventId : null,
+    clipId: Number.isFinite(clipId) ? clipId : null,
+  };
+}
+
+/** Resolve URL deep-link to either an event index or a direct clip id. */
+function initialSelection(
+  playable: EventItem[],
+  { eventId, clipId }: DeepLink,
+): { index: number; directClipId: number | null } {
+  if (eventId != null) {
     const i = playable.findIndex((e) => e.id === eventId);
-    if (i >= 0) return i;
+    if (i >= 0) return { index: i, directClipId: null };
   }
-  const clipId = Number(params.get("clip"));
-  if (Number.isFinite(clipId) && params.get("clip")) {
+  if (clipId != null) {
     const i = playable.findIndex((e) => e.clip_id === clipId);
-    if (i >= 0) return i;
+    if (i >= 0) return { index: i, directClipId: null };
+    return { index: 0, directClipId: clipId };
   }
-  return 0;
+  return { index: 0, directClipId: null };
 }
 
 export function EventPlayer() {
@@ -254,6 +270,10 @@ export function EventPlayer() {
 
   const [events, setEvents] = useState<EventItem[] | null>(null);
   const [index, setIndex] = useState(0);
+  const [directClipId, setDirectClipId] = useState<number | null>(null);
+  const [search, setSearch] = useState(
+    () => (typeof window !== "undefined" ? window.location.search : ""),
+  );
   const [clip, setClip] = useState<Clip | null>(null);
   const [camera, setCamera] = useState("front");
   const [hudOn, setHudOn] = useState(false);
@@ -268,7 +288,9 @@ export function EventPlayer() {
   const [notice, setNotice] = useState<string | null>(null);
   const deleteAbortRef = useRef<AbortController | null>(null);
 
-  const currentEvent = events && events.length ? events[index] : undefined;
+  const inDirectMode = directClipId != null;
+  const currentEvent =
+    !inDirectMode && events && events.length ? events[index] : undefined;
   const currentAngle = clip?.angles.find((a) => a.camera === camera);
   // Only build a stream URL for an angle webd will actually serve; pointing the
   // <video> at a non-archive (ro_usb) angle 404s and logs a console error.
@@ -277,6 +299,38 @@ export function EventPlayer() {
   // A clip is playable when any angle is archive-backed. ro_usb-only clips are
   // still live on the car's USB and have nothing webd can stream or export yet.
   const clipPlayable = !!clip && clip.angles.some(isStreamableAngle);
+  // The clip id the current selection points at (the event's clip, or the direct
+  // clip). `clip` resolves asynchronously, so it can briefly lag the selection
+  // right after a query change. `clipReady` means they're in sync; it gates the
+  // destructive Delete action so a fast click can't delete the *old* clip while
+  // the newly-selected one is still loading.
+  const selectedClipId = currentEvent?.clip_id ?? directClipId;
+  const clipReady = !!clip && clip.id === selectedClipId;
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const syncSearch = () => setSearch(window.location.search);
+    const onPopState = () => syncSearch();
+    const origPush = window.history.pushState;
+    const patchedPushState: typeof window.history.pushState = function (
+      this: History,
+      ...args: Parameters<History["pushState"]>
+    ): ReturnType<History["pushState"]> {
+      const result = origPush.apply(this, args);
+      syncSearch();
+      return result;
+    };
+    window.addEventListener("popstate", onPopState);
+    window.history.pushState = patchedPushState;
+    return () => {
+      window.removeEventListener("popstate", onPopState);
+      // Only restore if our patch is still installed — guards against clobbering
+      // a newer patch should two instances ever overlap.
+      if (window.history.pushState === patchedPushState) {
+        window.history.pushState = origPush;
+      }
+    };
+  }, []);
 
   // ── Mount: seed HUD toggle from localStorage + load the event playlist. ──
   useEffect(() => {
@@ -291,8 +345,13 @@ export function EventPlayer() {
         const page = await api.events({ limit: 100 }, ac.signal);
         // The player only lists events that have a playable clip.
         const playable = page.items.filter((e) => e.clip_id != null);
+        // Resolve the deep-link selection atomically with the playlist so no
+        // intermediate render can fall back to events[0] (which would flash the
+        // wrong event's metadata and kick off a wasted clip fetch).
+        const selection = initialSelection(playable, deepLink());
         setEvents(playable);
-        setIndex(initialIndex(playable));
+        setIndex(selection.index);
+        setDirectClipId(selection.directClipId);
       } catch (err) {
         if (ac.signal.aborted) return;
         setError(errMessage(err));
@@ -300,6 +359,22 @@ export function EventPlayer() {
     })();
     return () => ac.abort();
   }, []);
+
+  // Re-derive the selection when the URL QUERY changes while mounted (a
+  // same-path ?clip/?event nav or back/forward — the shared router only tracks
+  // pathname, so EventPlayer won't remount). Intentionally keyed on `search`
+  // ONLY, never `events`: a playlist mutation (e.g. deleting the current clip)
+  // must NOT re-run this, or an unchanged ?clip=<deleted-id> would resurrect the
+  // just-removed clip as a direct clip. On mount it runs once with events=null
+  // and returns — the fetch effect owns the atomic initial selection. When
+  // `search` changes, React re-runs this with the latest render's `events`
+  // closure, so the read below is current.
+  useEffect(() => {
+    if (!events) return;
+    const sel = initialSelection(events, deepLink());
+    setIndex(sel.index);
+    setDirectClipId(sel.directClipId);
+  }, [search]);
 
   // ── Create the imperative HUD controller once the DOM is mounted. ──
   useEffect(() => {
@@ -327,20 +402,28 @@ export function EventPlayer() {
 
   // ── Resolve the current event's clip (angles) whenever it changes. ──
   useEffect(() => {
-    if (!currentEvent || currentEvent.clip_id == null) return;
+    const clipId = currentEvent?.clip_id ?? directClipId;
+    if (clipId == null) {
+      setClip(null);
+      return;
+    }
     const ac = new AbortController();
     (async () => {
       try {
-        const c = await api.clip(currentEvent.clip_id as number, ac.signal);
+        const c = await api.clip(clipId, ac.signal);
         setClip(c);
         setCamera("front");
+        setError(null);
       } catch (err) {
         if (ac.signal.aborted) return;
+        // Drop any previously-loaded clip so a failed re-resolve can't leave
+        // stale video on screen under the new error/selection.
+        setClip(null);
         setError(errMessage(err));
       }
     })();
     return () => ac.abort();
-  }, [currentEvent?.id]);
+  }, [currentEvent?.id, directClipId]);
 
   // ── (Re)load HUD telemetry when the streamed clip/camera changes, but only
   //    while the overlay is on (matches the legacy "load SEI on toggle" path
@@ -398,7 +481,7 @@ export function EventPlayer() {
   // ── Playlist navigation: step through the loaded events. The clip/stream/HUD
   //    effects all key off `currentEvent`, so flipping the index re-resolves the
   //    clip and reloads the video — no extra plumbing needed. ──
-  const eventCount = events ? events.length : 0;
+  const eventCount = !inDirectMode && events ? events.length : 0;
   const canPrev = index > 0;
   const canNext = index < eventCount - 1;
   const goPrev = () => setIndex((i) => Math.max(0, i - 1));
@@ -423,9 +506,20 @@ export function EventPlayer() {
   // ── Abort any in-flight delete if the screen unmounts. ──
   useEffect(() => () => deleteAbortRef.current?.abort(), []);
 
+  // ── Dismiss an open delete confirm when the selection moves (query nav or
+  //    prev/next) so a later Confirm can't act on a clip the user has navigated
+  //    away from. Skipped mid-deletion so an in-flight delete isn't disturbed. ──
+  useEffect(() => {
+    if (deleting) return;
+    setPending(null);
+    setDeleteFail(null);
+  }, [selectedClipId]);
+
   const openDeleteDialog = () => {
-    if (!clip || !currentEvent) return;
-    const label = `${humanize(currentEvent.type)} \u2014 ${fmtDateTime(currentEvent.t)}`;
+    if (!clipReady || !clip) return;
+    const label = currentEvent
+      ? `${humanize(currentEvent.type)} \u2014 ${fmtDateTime(currentEvent.t)}`
+      : `${clip.folder_class} \u2014 ${fmtDateTime(clip.started_at)}`;
     setPending({ clipId: clip.id, label });
     setDeleteFail(null);
     setNotice(null);
@@ -438,7 +532,9 @@ export function EventPlayer() {
   };
 
   /** Remove the deleted clip by stable id (never by the current `index`, which
-   *  can move) and clear the streamed clip if it was the one removed. */
+   *  can move) and clear the streamed clip if it was the one removed. In direct
+   *  mode we KEEP `directClipId` so deleting an event-less clip shows the empty
+   *  "deleted" state rather than snapping the playlist to events[0]. */
   const finishDeletion = (clipId: number, msg: string) => {
     setPending(null);
     setDeleteFail(null);
@@ -503,9 +599,15 @@ export function EventPlayer() {
       {/* Top overlay with location and info */}
       <div class="event-header" id="topOverlay">
         <div class="event-info">
-          <h2 class="event-location">{locationLabel(currentEvent)}</h2>
+          <h2 class="event-location">
+            {currentEvent ? locationLabel(currentEvent) : clip?.folder_class ?? "\u2014"}
+          </h2>
           <div class="event-datetime">
-            {currentEvent ? fmtDateTime(currentEvent.t) : "\u2014"}
+            {currentEvent
+              ? fmtDateTime(currentEvent.t)
+              : clip
+                ? fmtDateTime(clip.started_at)
+                : "\u2014"}
           </div>
           {eventCount > 1 && (
             <div class="event-nav" data-testid="event-nav">
@@ -594,7 +696,7 @@ export function EventPlayer() {
         </div>
 
         <div class="event-meta-right">
-          <div>{currentEvent ? humanize(currentEvent.type) : "\u2014"}</div>
+          <div>{currentEvent ? humanize(currentEvent.type) : clip?.folder_class ?? "\u2014"}</div>
           <div>{clipSize(clip)}</div>
         </div>
       </div>
@@ -644,13 +746,15 @@ export function EventPlayer() {
           </div>
         ))}
 
-        {/* Download all angles (ZIP export) — only when archive-backed. */}
+        {/* Download all angles (ZIP export) — only when archive-backed AND the
+            resolved clip matches the current selection (so a query change in
+            flight can't hand back a ZIP of the previously-shown clip). */}
         <a
-          class={`camera-option download-option${clipPlayable ? "" : " disabled"}`}
+          class={`camera-option download-option${clipPlayable && clipReady ? "" : " disabled"}`}
           id="downloadButton"
-          href={clipPlayable && clip ? api.exportUrl(clip.id) : undefined}
+          href={clipPlayable && clipReady && clip ? api.exportUrl(clip.id) : undefined}
           download
-          aria-disabled={clipPlayable ? "false" : "true"}
+          aria-disabled={clipPlayable && clipReady ? "false" : "true"}
         >
           <Icon name="download" class="camera-icon" />
           <div class="camera-label">Download All</div>
@@ -670,13 +774,13 @@ export function EventPlayer() {
         {/* Delete clip — operator-gated destructive action (webd car-handoff). */}
         <button
           type="button"
-          class={`camera-option delete-option${clip ? "" : " disabled"}`}
+          class={`camera-option delete-option${clipReady ? "" : " disabled"}`}
           id="deleteButton"
           onClick={openDeleteDialog}
-          disabled={!clip || deleting}
-          aria-disabled={clip ? "false" : "true"}
+          disabled={!clipReady || deleting}
+          aria-disabled={clipReady ? "false" : "true"}
           aria-haspopup="dialog"
-          title={clip ? "Delete this clip from the car" : "No clip to delete"}
+          title={clipReady ? "Delete this clip from the car" : "No clip to delete"}
         >
           <Icon name="trash-2" class="camera-icon" />
           <div class="camera-label">Delete</div>

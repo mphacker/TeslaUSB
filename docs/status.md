@@ -1,6 +1,6 @@
 # TeslaUSB B-1 — Build Status (vs. `Requirements.md`)
 
-> ## ⏯️ RESUME HERE (2026-06-21) — Phase-1 archive daemons DEPLOYED + verified on hardware; Playwright is next
+> ## ⏯️ RESUME HERE (2026-06-22) — Phase-1 archive daemons live; `p1-playwright` SPA wiring DONE+proven; live DECODE gated on real footage (C3)
 >
 > **Phase-1 (archive-only, non-destructive) is CODE-COMPLETE + host-green; on-device
 > verification is what remains.** The operator-approved two-phase plan split the
@@ -40,12 +40,23 @@
 > returns **206** for all 4 cameras (was 404). teslacam.img size+mtime unchanged, no new
 > failed units, retentiond now `enabled`. Evidence: session `files/hw-results.md`
 > (+ `hw-p1deploy-*.log`). Deploy invariant held: retentiond `--archive-root` ==
-> `WEBD_ARCHIVE_ROOT` = `/data/teslausb/archive`.
+> `WEBD_ARCHIVE_ROOT` = `/data/teslausb/archive`. **NB (found 2026-06-22): 206 proves
+> the streaming wiring, NOT decodability — clip 5 and every clip on the device are
+> synthetic ~48 KiB stubs (`ftyp`+`mdat`, no `moov`); see `p1-playwright` below.**
 >
 > **NEXT (Phase-1 verification):**
-> 1. `p1-playwright` — verify §4.2 trip-map clip playback end-to-end against
->    `cybertruckusb.local` (drive the real page, assert perf/console/visual per the
->    Playwright UAT rules); only then tick §4.2 #2 (line ~719) with linked evidence.
+> 1. `p1-playwright` — **SPA portion DONE + proven live 2026-06-22.** All Clips list →
+>    clickable clip row (`/events?clip=<id>`) → EventPlayer clip-by-id resolve →
+>    `#mainVideo` src `/api/clips/<id>/stream` → **HTTP 206 with full bytes on all 4
+>    cameras**, TTFB ~14 ms, FCP ~280 ms, console clean (`files/hw-results.md`).
+>    **§4.2 #2 stays UNCHECKED: actual DECODE/playback is blocked** — the live
+>    `teslacam.img` holds only synthetic ~48 KiB stub clips (no `moov`). Measured
+>    read-only: every angle is exactly 49192 B with exFAT
+>    `DataLength==ValidDataLength==49192`, so scannerd reads faithfully and there is
+>    **no truncation bug** (an earlier in-flight hypothesis + a prior GPT-5.5 opinion,
+>    both refuted by direct measurement). The decode proof is gated on real footage
+>    (Tier-C **C3**). Two robustness follow-ups filed under §4.2 (retentiond `moov`
+>    gate; scannerd VDL-clamp check).
 >
 > **Phase-2 (the deleter) stays deferred + GATED** — leases/recovery, indexd delete-RPC,
 > gadgetd delete-handoff client, C2 governor calibration, safety gates + explicit operator
@@ -727,12 +738,33 @@ LUNs) is the single make-or-break that still needs the car.**
 
 - [x] Stream **archived** clip with HTTP range (seek). **(proven for archived clips;
   live clips are the separate item below)**
-- [ ] **Play live (not-yet-archived) recorded clips** on the map. **(gated:B1 archive
-  loop, then the lun.0 `ReadFile` fallback — ADR-0003 / `contracts/scannerd-readfile.md`.
-  **Gate confirmed live 2026-06-16:** the device's clips are all `view_kind=ro_usb`;
-  `GET /api/clips/1/stream` correctly `404`s and EventPlayer shows the "Not yet
-  archived" overlay [`data-testid=video-unarchived`] by design — playback genuinely
-  needs the B1 archive pipeline to produce a `VIEW_ARCHIVE` angle.)**
+- [ ] **Play a recorded clip on the map by archiving it first (B1 archive loop).**
+  A clip that is only on the car USB (`ro_usb`) is copied Pi-side by `retentiond`
+  and registered as a `VIEW_ARCHIVE` angle, then plays through the normal archive
+  stream path; reachable from the map's **All Clips** list (`/events?clip=<id>`).
+  **(SPA play entry point PROVEN LIVE 2026-06-22 — `p1-playwright`: All Clips →
+  clickable row → EventPlayer clip-by-id resolve → `#mainVideo` src
+  `/api/clips/<id>/stream` → HTTP 206 with full bytes on all 4 cameras; TTFB ~14 ms,
+  FCP ~280 ms, console clean. See `files/hw-results.md`.) Actual playback/DECODE is
+  NOT yet proven on hardware: the live `teslacam.img` holds only synthetic ~48 KiB
+  stub clips (`ftyp`+`mdat`, no `moov`, no coded video), so no decodable source exists
+  on the device. Measured read-only: every angle is exactly 49192 B with exFAT
+  `DataLength==ValidDataLength==49192` (scannerd reads faithfully — no truncation/clamp
+  gap). Decode proof gated on real footage (Tier-C C3).**
+- [ ] **retentiond: decodability gate before publishing an `archive` angle.** Cheaply
+  validate the archived MP4 has a top-level `moov` (bounds-checked top-level atom scan);
+  if absent, mark the clip `unplayable`/quarantine rather than registering it as a normal
+  playable angle. Prevents false-green (clip 5 archived + 206 but never decodes). Caveat:
+  would quarantine the current synthetic fixtures. **(follow-up from `p1-playwright`)**
+- [ ] **scannerd: confirm the `min(ValidDataLength, DataLength)` read clamp cannot
+  truncate real Tesla footage.** No clamp gap on the synthetic test image
+  (`VDL==DataLength`), but if a real car ever leaves `ValidDataLength` stale-small with
+  recoverable data the clamp would silently truncate — a latent zero-clip-loss risk.
+  Verify against real footage. **(follow-up from `p1-playwright`; gated:C3)**
+- [ ] **Stream a not-yet-archived clip directly from USB** (the lun.0 `ReadFile`
+  fallback — ADR-0003 / `contracts/scannerd-readfile.md`). **(DEFERRED — distinct
+  from the archive-then-play path above; raw exFAT byte-range streaming without
+  copying is a separate seam.)**
 - [x] Switch camera angle (position preserved where possible). **(proven)**
 - [x] Navigate clips within an event (prev/next). **(A6b proven)**
 - [ ] Telemetry HUD overlay (SEI: speed/gear/brake/throttle/steering/AP-FSD), synced. **(partial: client-side SEI parse exists — A7; verify full HUD)**
@@ -1142,7 +1174,9 @@ LUNs) is the single make-or-break that still needs the car.**
 - [ ] **C1 · 2.1 LUN-acceptance vehicle spike** — does the car accept a SECOND
   read-only media LUN? Make-or-break; unblocks all calibration + F1. **(C)**
 - [ ] **C2 · WiFi TX-cap (2.6) + governor defaults (2.7)** at-vehicle. **(C)**
-- [ ] **C3 · Real Tesla footage validation** (replace synthetic SMPTE). **(C)**
+- [ ] **C3 · Real Tesla footage validation** (replace synthetic SMPTE). Also gates the
+  live **archive-then-decodes** proof for §4.2 #2 and the scannerd VDL-clamp check — the
+  dev Pi currently holds only undecodable ~48 KiB stub clips. **(C)**
 - [ ] **C4 · Push held commits + port-80 + live deploy.** **(C)**
 - [ ] **C5 · Security ruling on rclone-key write exposure** (blocks B3 config-write). **(C)**
 - [ ] **C6 · Car change-propagation verification** (§1.1 soft vs full re-enum). **(C)**

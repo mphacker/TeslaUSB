@@ -491,6 +491,16 @@ body.mapping-active .main-content {
     transition: border-color 150ms ease;
 }
 .vp-clip:hover { border-color: var(--accent-primary, var(--mapping-accent-primary)); }
+.vp-clip-link {
+    display: flex;
+    color: inherit;
+    text-decoration: none;
+    cursor: pointer;
+}
+.vp-clip-link:focus-visible {
+    outline: 2px solid var(--mapping-accent-primary, var(--accent-primary));
+    outline-offset: 2px;
+}
 [data-theme="dark"] .vp-clip { background: rgba(15, 23, 42, 0.6); }
 .vp-clip-info {
     flex: 1;

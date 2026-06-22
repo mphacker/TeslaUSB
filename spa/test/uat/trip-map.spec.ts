@@ -260,6 +260,14 @@ test.describe("trip map UAT", () => {
     // All Clips tab → the 6 seeded clips.
     await page.locator("#vpTabClips").click();
     await expect(page.locator("[data-testid=vp-clips] .vp-clip")).toHaveCount(6);
+    const clipLinks = page.locator("[data-testid=vp-clips] a[data-testid^=vp-clip-link-]");
+    await expect(clipLinks).toHaveCount(6);
+    for (const id of [1, 2, 3, 4, 5, 6]) {
+      await expect(page.locator(`[data-testid=vp-clip-link-${id}]`)).toHaveAttribute(
+        "href",
+        `/events?clip=${id}`,
+      );
+    }
 
     // (g) Marker clustering active (done LAST — it zooms the map out): the 2
     //     event bubbles collapse into a SINGLE `.marker-cluster` whose badge
@@ -532,5 +540,22 @@ test.describe("trip map UAT", () => {
       "src",
       /\/api\/clips\/2\/stream/,
     );
+  });
+
+  test("map→video — all clips rows deep-link into the player", async ({
+    page,
+  }) => {
+    await gotoMap(page);
+    await page.locator("#btnVideos").click();
+    await expect(page.locator("#videoPanel")).toHaveClass(/open/);
+    await page.locator("#vpTabClips").click();
+
+    const clipOne = page.locator("[data-testid=vp-clip-link-1]");
+    await expect(clipOne).toHaveAttribute("href", "/events?clip=1");
+    await clipOne.click();
+
+    await expect(page).toHaveURL(/\/events\?clip=1$/);
+    await expect(page.locator("[data-screen=event-player]")).toBeVisible();
+    await expect(page.locator("#mainVideo")).toHaveAttribute("src", /\/api\/clips\/1\/stream/);
   });
 });

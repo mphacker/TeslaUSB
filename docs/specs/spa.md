@@ -60,6 +60,15 @@ Every capability above must exist post-rebuild; appearance must match.
   player shows angles together; delete acts on the clip (→ `webd` → handoff).
 - **Jump-to-moment:** clicking an event or a point on the trip path opens the
   front-cam video at that timestamp with the HUD active.
+- **Open any clip from the panel:** selecting a row in the side panel's **All
+  Clips** tab opens the event player for that clip (`/events?clip=<id>`), per
+  Requirements §4.1 ("selecting one opens the event player"). The player resolves
+  a clip directly from `/api/clips/{id}` when the `?clip=<id>` deep-link matches
+  no event in the events playlist (event-less clips — e.g. a RecentClips clip
+  with no Sentry/honk event): it plays from `t=0` with no event nav and no HUD
+  telemetry. Archive-backed clips stream; `ro_usb` (not-yet-archived) clips show
+  the "Not yet archived" overlay (`data-testid=video-unarchived`) and fire no
+  doomed `/stream` request.
 - **Scaling:** player scales to full-page and full-screen with the HUD intact.
 - **Mutations show progress:** delete/install operations reflect handoff progress
   and a friendly "try again" if `gadgetd` refuses (car busy).

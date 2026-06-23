@@ -129,21 +129,29 @@ fn run_serve(args: &[String]) -> ExitCode {
                     || report.registered_from_pending > 0
                     || report.copy_failed > 0
                     || report.register_deferred > 0
+                    || report.register_rejected > 0
+                    || report.quarantined_undecodable > 0
                     || report.skipped_already_pending > 0
+                    || report.skipped_rejected > 0
                     || report.dropped_poison > 0
                     || report.pending_len > 0;
                 if has_activity {
                     println!(
                         "retentiond archive_recent_only slot={} observed={} registered={} \
                          registered_from_pending={} copy_failed={} register_deferred={} \
-                         skipped_already_pending={} dropped_poison={} pending={}",
+                         register_rejected={} quarantined_undecodable={} \
+                         skipped_already_pending={} skipped_rejected={} dropped_poison={} \
+                         pending={}",
                         parsed.slot,
                         report.observed,
                         report.registered,
                         report.registered_from_pending,
                         report.copy_failed,
                         report.register_deferred,
+                        report.register_rejected,
+                        report.quarantined_undecodable,
                         report.skipped_already_pending,
+                        report.skipped_rejected,
                         report.dropped_poison,
                         report.pending_len
                     );

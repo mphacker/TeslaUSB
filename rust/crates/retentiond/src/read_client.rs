@@ -264,7 +264,11 @@ fn read_raw_tail(
 }
 
 #[cfg(unix)]
-const IO_TIMEOUT_SECS: u64 = 5;
+// Reads can carry up to an 8 MiB window from contended microSD media; keep this
+// client less aggressive than scannerd's 120s read / 30s write server limits.
+const READ_TIMEOUT_SECS: u64 = 60;
+#[cfg(unix)]
+const WRITE_TIMEOUT_SECS: u64 = 10;
 
 /// Live Unix-domain-socket `ReadFile` client.
 #[cfg(unix)]
@@ -291,9 +295,8 @@ impl ReadFileClient for UnixReadFileClient {
         use std::time::Duration;
 
         let mut stream = UnixStream::connect(&self.socket_path)?;
-        let timeout = Duration::from_secs(IO_TIMEOUT_SECS);
-        stream.set_read_timeout(Some(timeout))?;
-        stream.set_write_timeout(Some(timeout))?;
+        stream.set_read_timeout(Some(Duration::from_secs(READ_TIMEOUT_SECS)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(WRITE_TIMEOUT_SECS)))?;
 
         let payload =
             serde_json::to_vec(req).map_err(|err| ReadFileError::Decode(err.to_string()))?;

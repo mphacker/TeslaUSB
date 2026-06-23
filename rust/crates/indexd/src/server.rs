@@ -77,7 +77,8 @@ fn handle_connection(
                         clip_id,
                         archive_item_id,
                     },
-                    Err(message) => Response::Error { message },
+                    Err(HandlerError::Rejected(message)) => Response::Rejected { message },
+                    Err(HandlerError::Internal(message)) => Response::Error { message },
                 }
             }
             Request::RegisterQuarantinedArchive(payload) => {
@@ -86,7 +87,8 @@ fn handle_connection(
                         clip_id,
                         archive_item_id,
                     },
-                    Err(message) => Response::Error { message },
+                    Err(HandlerError::Rejected(message)) => Response::Rejected { message },
+                    Err(HandlerError::Internal(message)) => Response::Error { message },
                 }
             }
             Request::SetPref { key, value } => match handle_set_pref(conn, &key, &value) {
@@ -102,26 +104,36 @@ fn handle_connection(
     Ok(())
 }
 
+/// Classifies a register-handler failure for wire-response mapping.
+enum HandlerError {
+    /// Deterministic: payload invalid, retry is futile -> `Response::Rejected`.
+    Rejected(String),
+    /// Operational/transient: DB or lock failure -> `Response::Error`.
+    Internal(String),
+}
+
 fn handle_register_archived_clip(
     conn: &Arc<Mutex<Connection>>,
     payload: &RegisterArchivedClip,
-) -> Result<(i64, i64), String> {
-    let registration = build_registration(payload)?;
+) -> Result<(i64, i64), HandlerError> {
+    let registration = build_registration(payload).map_err(HandlerError::Rejected)?;
     let mut locked = conn
         .lock()
-        .map_err(|_| "index database mutex is poisoned".to_owned())?;
-    register_archived_clip(&mut locked, &registration).map_err(|e| e.to_string())
+        .map_err(|_| HandlerError::Internal("index database mutex is poisoned".to_owned()))?;
+    register_archived_clip(&mut locked, &registration)
+        .map_err(|e| HandlerError::Internal(e.to_string()))
 }
 
 fn handle_register_quarantined_clip(
     conn: &Arc<Mutex<Connection>>,
     payload: &RegisterArchivedClip,
-) -> Result<(i64, i64), String> {
-    let registration = build_registration(payload)?;
+) -> Result<(i64, i64), HandlerError> {
+    let registration = build_registration(payload).map_err(HandlerError::Rejected)?;
     let mut locked = conn
         .lock()
-        .map_err(|_| "index database mutex is poisoned".to_owned())?;
-    register_quarantined_clip(&mut locked, &registration).map_err(|e| e.to_string())
+        .map_err(|_| HandlerError::Internal("index database mutex is poisoned".to_owned()))?;
+    register_quarantined_clip(&mut locked, &registration)
+        .map_err(|e| HandlerError::Internal(e.to_string()))
 }
 
 fn handle_set_pref(conn: &Arc<Mutex<Connection>>, key: &str, value: &str) -> Result<(), String> {
@@ -223,7 +235,7 @@ fn validate_payload(payload: &RegisterArchivedClip) -> Result<(), String> {
 fn is_allowed_camera(camera: &str) -> bool {
     matches!(
         camera,
-        "front" | "back" | "left_repeater" | "right_repeater" | "left" | "right"
+        "front" | "back" | "left_repeater" | "right_repeater" | "left_pillar" | "right_pillar"
     )
 }
 
@@ -307,5 +319,66 @@ mod tests {
     #[test]
     fn validation_accepts_valid_payload() {
         assert!(validate_payload(&payload()).is_ok());
+    }
+
+    #[test]
+    fn validation_accepts_real_six_camera_recent_clip_payload() {
+        let mut request = payload();
+        request.archive.file_count = 6;
+        request.angles.push(ArchiveAngle {
+            camera: "back".to_owned(),
+            file_ref: "archive/2026-06-19/clip-a/back.mp4".to_owned(),
+            offset_ms: 0,
+            duration_s: Some(60),
+            size_bytes: 1024,
+        });
+        request.angles.push(ArchiveAngle {
+            camera: "left_repeater".to_owned(),
+            file_ref: "archive/2026-06-19/clip-a/left_repeater.mp4".to_owned(),
+            offset_ms: 0,
+            duration_s: Some(60),
+            size_bytes: 1024,
+        });
+        request.angles.push(ArchiveAngle {
+            camera: "right_repeater".to_owned(),
+            file_ref: "archive/2026-06-19/clip-a/right_repeater.mp4".to_owned(),
+            offset_ms: 0,
+            duration_s: Some(60),
+            size_bytes: 1024,
+        });
+        request.angles.push(ArchiveAngle {
+            camera: "left_pillar".to_owned(),
+            file_ref: "archive/2026-06-19/clip-a/left_pillar.mp4".to_owned(),
+            offset_ms: 0,
+            duration_s: Some(60),
+            size_bytes: 1024,
+        });
+        request.angles.push(ArchiveAngle {
+            camera: "right_pillar".to_owned(),
+            file_ref: "archive/2026-06-19/clip-a/right_pillar.mp4".to_owned(),
+            offset_ms: 0,
+            duration_s: Some(60),
+            size_bytes: 1024,
+        });
+
+        assert!(validate_payload(&request).is_ok());
+    }
+
+    #[test]
+    fn validation_accepts_left_pillar_single_angle_payload() {
+        let mut request = payload();
+        let angle = request.angles.first_mut().expect("payload has one angle");
+        angle.camera = "left_pillar".to_owned();
+        angle.file_ref = "archive/2026-06-19/clip-a/left_pillar.mp4".to_owned();
+        assert!(validate_payload(&request).is_ok());
+    }
+
+    #[test]
+    fn validation_rejects_bogus_left_camera_label() {
+        let mut request = payload();
+        let angle = request.angles.first_mut().expect("payload has one angle");
+        angle.camera = "left".to_owned();
+        angle.file_ref = "archive/2026-06-19/clip-a/left.mp4".to_owned();
+        assert!(validate_payload(&request).is_err());
     }
 }

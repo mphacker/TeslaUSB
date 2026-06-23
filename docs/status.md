@@ -765,19 +765,20 @@ LUNs) is the single make-or-break that still needs the car.**
 
 - [x] Stream **archived** clip with HTTP range (seek). **(proven for archived clips;
   live clips are the separate item below)**
-- [ ] **Play a recorded clip on the map by archiving it first (B1 archive loop).**
+- [x] **Play a recorded clip on the map by archiving it first (B1 archive loop).**
   A clip that is only on the car USB (`ro_usb`) is copied Pi-side by `retentiond`
   and registered as a `VIEW_ARCHIVE` angle, then plays through the normal archive
   stream path; reachable from the map's **All Clips** list (`/events?clip=<id>`).
-  **(SPA play entry point PROVEN LIVE 2026-06-22 — `p1-playwright`: All Clips →
-  clickable row → EventPlayer clip-by-id resolve → `#mainVideo` src
-  `/api/clips/<id>/stream` → HTTP 206 with full bytes on all 4 cameras; TTFB ~14 ms,
-  FCP ~280 ms, console clean. See `files/hw-results.md`.) Actual playback/DECODE is
-  NOT yet proven on hardware: the live `teslacam.img` holds only synthetic ~48 KiB
-  stub clips (`ftyp`+`mdat`, no `moov`, no coded video), so no decodable source exists
-  on the device. Measured read-only: every angle is exactly 49192 B with exFAT
-  `DataLength==ValidDataLength==49192` (scannerd reads faithfully — no truncation/clamp
-  gap). Decode proof gated on real footage (Tier-C C3).**
+  **PROVEN LIVE END-TO-END ON REAL FOOTAGE 2026-06-23 (`c3` gate, device in-car,
+  Sentry ON):** real RecentClips archived (9 LIVE `archive_items`, ~1.49 GB; e.g.
+  clip 8 = 6 angles incl. `left_pillar`/`right_pillar`, front 52 MB), `delete_state=
+  LIVE` (decodability/`moov` gate passed on real muxing) → `webd` `/api/clips/8/stream`
+  HTTP **206** with correct `Content-Range` on front + both pillars → **Chromium
+  decode**: front 2896×1876 / left_pillar 1448×938, `currentTime` 0→3.001 s,
+  62/73 frames decoded, **0 dropped**, console clean. Required the C3 fix (indexd
+  pillar-camera allowlist + retentiond timeout/taxonomy/tombstone). See
+  `files/hw-results.md`. (Earlier SPA play entry point proven 2026-06-22
+  `p1-playwright`; full DECODE was gated on real footage — now satisfied.)**
 - [x] **retentiond: decodability gate before publishing an `archive` angle.** DONE
   2026-06-22. After a copy lands (before registration), `retentiond::probe` runs a
   memory-bounded container-completeness check (top-level `ftyp`+`mdat`+`moov` with a
@@ -1232,9 +1233,18 @@ LUNs) is the single make-or-break that still needs the car.**
 - [ ] **C1 · 2.1 LUN-acceptance vehicle spike** — does the car accept a SECOND
   read-only media LUN? Make-or-break; unblocks all calibration + F1. **(C)**
 - [ ] **C2 · WiFi TX-cap (2.6) + governor defaults (2.7)** at-vehicle. **(C)**
-- [ ] **C3 · Real Tesla footage validation** (replace synthetic SMPTE). Also gates the
-  live **archive-then-decodes** proof for §4.2 #2 and the scannerd VDL-clamp check — the
-  dev Pi currently holds only undecodable ~48 KiB stub clips. **(C)**
+- [x] **C3 · Real Tesla footage validation** (replace synthetic SMPTE). **PASSED
+  2026-06-23 (device in-car, Sentry ON, real footage).** C3 caught that the Phase-1
+  archive pipeline — green only on 48 KiB synthetic stubs — failed on every real
+  multi-MB clip (`registered=0`): root cause indexd rejected real `left_pillar`/
+  `right_pillar` cameras (allowlist only had bogus `left`/`right`), secondary the 5 s
+  read timeout under microSD write-contention. Fixed (camera allowlist + 60 s read
+  timeout + Rejected/Error taxonomy + rejected-key tombstone), cross-built aarch64
+  via podman, deployed indexd+retentiond under hardware-test rails. Result: real
+  RecentClips now archive (9 LIVE items, ~1.49 GB) and the **archive-then-decodes**
+  proof for §4.2 #2 passes (206 + Chromium decode, 0 dropped frames). Full-duration
+  (59.8 s) decode also demonstrates scannerd reads real footage faithfully (no
+  truncation/clamp gap → VDL-clamp concern satisfied). See `files/hw-results.md`. **(C)**
 - [ ] **C4 · Push held commits + port-80 + live deploy.** **(C)**
 - [ ] **C5 · Security ruling on rclone-key write exposure** (blocks B3 config-write). **(C)**
 - [ ] **C6 · Car change-propagation verification** (§1.1 soft vs full re-enum). **(C)**

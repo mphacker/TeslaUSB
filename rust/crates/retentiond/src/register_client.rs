@@ -83,6 +83,13 @@ pub enum RegisterError {
         /// Human-readable server message.
         message: String,
     },
+    /// Deterministic server rejection: indexd validated the payload and refused
+    /// it. Retrying is futile; callers must not defer/poison on this.
+    #[error("indexd rejected payload: {message}")]
+    Rejected {
+        /// Human-readable rejection reason.
+        message: String,
+    },
     /// Received or attempted frame exceeded max size.
     #[error("frame too large: {len} > {cap} bytes")]
     FrameTooLarge {
@@ -136,6 +143,7 @@ enum WireRequest {
 enum WireResponse {
     Ok { clip_id: i64, archive_item_id: i64 },
     Error { message: String },
+    Rejected { message: String },
 }
 
 fn frame_cap_usize(cap: u32) -> Result<usize, RegisterError> {
@@ -189,6 +197,7 @@ fn decode_response_payload(payload: &[u8]) -> Result<RegistrationOk, RegisterErr
             archive_item_id,
         }),
         WireResponse::Error { message } => Err(RegisterError::Server { message }),
+        WireResponse::Rejected { message } => Err(RegisterError::Rejected { message }),
     }
 }
 
@@ -294,8 +303,8 @@ mod tests {
 
     use super::{
         ArchiveAngleRef, ArchiveItemRef, ArchiveRegistration, MAX_REQUEST_FRAME, RegisterError,
-        RegistrationOk, WireRequest, WireResponse, decode_response_frame, encode_request_frame,
-        read_frame, write_frame,
+        RegistrationOk, WireRequest, WireResponse, decode_response_frame, decode_response_payload,
+        encode_request_frame, read_frame, write_frame,
     };
     use std::io::Cursor;
 
@@ -440,6 +449,30 @@ mod tests {
     }
 
     #[test]
+    fn decode_response_payload_maps_error_and_rejected_distinctly() {
+        let error_payload = serde_json::to_vec(&WireResponse::Error {
+            message: "db busy".to_owned(),
+        })
+        .expect("serialize response");
+        let error = decode_response_payload(&error_payload).expect_err("error should propagate");
+        match error {
+            RegisterError::Server { message } => assert_eq!(message, "db busy"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let rejected_payload = serde_json::to_vec(&WireResponse::Rejected {
+            message: "invalid camera: left".to_owned(),
+        })
+        .expect("serialize response");
+        let rejected =
+            decode_response_payload(&rejected_payload).expect_err("rejected should propagate");
+        match rejected {
+            RegisterError::Rejected { message } => assert_eq!(message, "invalid camera: left"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
     fn decode_response_frame_rejects_oversize() {
         let mut frame = Vec::new();
         frame.extend_from_slice(&(MAX_REQUEST_FRAME + 1).to_le_bytes());
@@ -579,6 +612,38 @@ mod unix_tests {
             .expect_err("server error should map to RegisterError::Server");
         match err {
             RegisterError::Server { message } => assert_eq!(message, "clip not found"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+        server.join().expect("server join");
+
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn unix_register_client_rejected_error() {
+        let temp_dir = new_temp_dir();
+        let socket_path = temp_dir.join("indexd.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind listener");
+        let expected_registration = sample_registration();
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            let payload = read_frame(&mut stream, MAX_REQUEST_FRAME).expect("read request frame");
+            let _request: WireRequest = serde_json::from_slice(&payload).expect("decode request");
+
+            let payload = serde_json::to_vec(&WireResponse::Rejected {
+                message: "invalid camera: left".to_owned(),
+            })
+            .expect("encode response");
+            write_frame(&mut stream, &payload, MAX_REQUEST_FRAME).expect("write response");
+        });
+
+        let client = UnixRegisterClient::new(socket_path);
+        let err = client
+            .register(&expected_registration)
+            .expect_err("rejected should map to RegisterError::Rejected");
+        match err {
+            RegisterError::Rejected { message } => assert_eq!(message, "invalid camera: left"),
             other => panic!("unexpected error: {other:?}"),
         }
         server.join().expect("server join");

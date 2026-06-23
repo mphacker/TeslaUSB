@@ -94,6 +94,13 @@ pub enum Response {
         /// Human-readable error message.
         message: String,
     },
+    /// Deterministic request rejection: the payload is invalid and will never
+    /// succeed on retry. Distinct from `Error` (operational/transient) so
+    /// clients can avoid futile retries and poison-drops.
+    Rejected {
+        /// Human-readable rejection reason.
+        message: String,
+    },
     /// Preference write acknowledged.
     PrefSet {
         /// The updated preference key.
@@ -269,6 +276,20 @@ mod tests {
         assert_eq!(
             encoded.get("status").and_then(serde_json::Value::as_str),
             Some("pref_set")
+        );
+        let decoded: Response = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn response_rejected_serializes_with_rejected_status() {
+        let response = Response::Rejected {
+            message: "invalid camera: left_pillar".to_owned(),
+        };
+        let encoded = serde_json::to_value(&response).unwrap();
+        assert_eq!(
+            encoded.get("status").and_then(serde_json::Value::as_str),
+            Some("rejected")
         );
         let decoded: Response = serde_json::from_value(encoded).unwrap();
         assert_eq!(decoded, response);

@@ -69,6 +69,16 @@ Every capability above must exist post-rebuild; appearance must match.
   telemetry. Archive-backed clips stream; `ro_usb` (not-yet-archived) clips show
   the "Not yet archived" overlay (`data-testid=video-unarchived`) and fire no
   doomed `/stream` request.
+- **Downloads (§4.2):** the event player's camera selector exposes two download
+  affordances, both gated on the clip being archive-backed and resolved. (1)
+  **Download All** (`#downloadButton`) — the whole clip as a ZIP of its archive
+  angles via `GET /api/clips/{id}/export` (`api.exportUrl`). (2) **Download
+  Angle** (`#downloadAngleButton`) — just the **currently-selected** camera's
+  archive MP4 via `GET /api/clips/{id}/angles/{camera}/download`
+  (`api.downloadUrl`); its target follows the active camera and it disables when
+  the current angle is not `archive`-backed (`ro_usb` angles aren't downloadable,
+  matching `/stream`). Both are native `<a download>` anchors — the browser does
+  the byte transfer; webd serves `Content-Disposition: attachment`.
 - **Trip-map filters (§4.1):** the trip map carries four client-side "visible
   set" filters applied over the already-loaded day (no `webd` round-trip): event
   **type** (toggle pill per type present that day), minimum **severity**

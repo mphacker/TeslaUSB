@@ -810,7 +810,7 @@ LUNs) is the single make-or-break that still needs the car.**
 - [x] Switch camera angle (position preserved where possible). **(proven)**
 - [x] Navigate clips within an event (prev/next). **(A6b proven)**
 - [ ] Telemetry HUD overlay (SEI: speed/gear/brake/throttle/steering/AP-FSD), synced. **(partial: client-side SEI parse exists — A7; verify full HUD)**
-- [ ] Download single angle + download whole event as ZIP. **(verify ZIP path)**
+- [x] Download single angle + download whole event as ZIP. **(A8 proven — single-angle "Download Angle" + whole-clip "Download All" ZIP UI in EventPlayer; webd `GET|HEAD /api/clips/:id/export` + `/api/clips/:id/angles/:camera/download`; event-player.spec.ts "downloads —" happy-path + ro_usb disabled/inert tests, 28 passed)**
 - [ ] Archive event to cloud. **(gated:B3)**
 - [ ] Delete event/clip (confirm) via privileged path-validated helper; car re-reads. **(partial: TeslaCam delete via handoff — verify end-to-end)**
 

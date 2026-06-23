@@ -17,6 +17,7 @@ import "../styles/player.css";
  *  - angles   → `/api/clips/:id` (the clip's available camera angles)
  *  - video    → `<video src=/api/clips/:id/stream?camera=>` (browser range reqs)
  *  - download → `/api/clips/:id/export` (ZIP of the clip's archive angles)
+ *  - angle dl → `/api/clips/:id/angles/:camera/download` (single archive MP4)
  *
  * The Tesla HUD is a non-Preact, per-frame concern, so it is driven imperatively
  * by {@link HudController} via a ref/effect — the same "imperative lib behind a
@@ -306,6 +307,7 @@ export function EventPlayer() {
   // the newly-selected one is still loading.
   const selectedClipId = currentEvent?.clip_id ?? directClipId;
   const clipReady = !!clip && clip.id === selectedClipId;
+  const angleDownloadReady = clipReady && !!clip && isStreamableAngle(currentAngle);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -758,6 +760,17 @@ export function EventPlayer() {
         >
           <Icon name="download" class="camera-icon" />
           <div class="camera-label">Download All</div>
+        </a>
+
+        <a
+          class={`camera-option download-option${angleDownloadReady ? "" : " disabled"}`}
+          id="downloadAngleButton"
+          href={angleDownloadReady && clip ? api.downloadUrl(clip.id, camera) : undefined}
+          download={angleDownloadReady ? true : undefined}
+          aria-disabled={angleDownloadReady ? "false" : "true"}
+        >
+          <Icon name="download" class="camera-icon" />
+          <div class="camera-label">Download Angle</div>
         </a>
 
         {/* Archive to cloud — DEFERRED (webd 5.1c): inert. */}

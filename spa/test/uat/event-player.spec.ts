@@ -6,7 +6,7 @@ import {
   type Probe,
 } from "./helpers";
 import type { Page } from "@playwright/test";
-import { writeFileSync } from "node:fs";
+import { writeFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 
 // ── Task 5.3 UAT gate (spa.md §5/§40-42, .github/copilot-instructions.md) ──
@@ -604,6 +604,210 @@ test.describe("event-player UAT", () => {
       ["POST", "PUT", "PATCH", "DELETE"].includes(r.method.toUpperCase()),
     );
     expect(mutating, `mutating request(s): ${JSON.stringify(mutating)}`).toEqual([]);
+  });
+
+  test("downloads — single-angle + whole-clip ZIP endpoints and href wiring", async ({
+    page,
+    probe,
+  }, testInfo) => {
+    const asLower = (v: string | undefined) => (v ?? "").toLowerCase();
+    // Parse the bare media type (drop any `; charset=…` parameter) so the check
+    // is an EXACT match — `application/zip-bad` or `application/mp4` must NOT pass.
+    const mediaType = (v: string | undefined) => asLower(v).split(";")[0].trim();
+    const expectAttachmentHeaders = (
+      headers: Record<string, string>,
+      expectedContentType: string,
+      expectedFilename: string,
+      label: string,
+    ) => {
+      const disposition = asLower(headers["content-disposition"]);
+      expect(disposition, `${label} content-disposition`).toContain("attachment");
+      // Bind the response to the EXACT clip/camera — a wrong filename (e.g. a
+      // different clip's zip) must fail rather than pass on a loose pattern.
+      expect(disposition, `${label} content-disposition filename`).toContain(
+        `filename="${expectedFilename.toLowerCase()}"`,
+      );
+      expect(mediaType(headers["content-type"]), `${label} content-type`).toBe(expectedContentType);
+    };
+
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await gotoPlayerHudOff(page);
+
+    const src = await page.locator("#mainVideo").getAttribute("src");
+    const clipMatch = src?.match(/\/api\/clips\/(\d+)\/stream/);
+    expect(clipMatch, `mainVideo src did not include clip id: ${src}`).toBeTruthy();
+    const clipId = clipMatch![1];
+
+    const activeCamera = await page.locator(".camera-option.active[data-camera]").first().getAttribute("data-camera");
+    expect(activeCamera, "active camera data-camera").toBeTruthy();
+    expect(activeCamera, "seeded default active camera").toBe("front");
+
+    await expect(page.locator("#downloadButton")).toHaveAttribute("href", `/api/clips/${clipId}/export`);
+    await expect(page.locator("#downloadButton")).toHaveAttribute("download", /^(|true)$/);
+
+    const angleHref = `/api/clips/${clipId}/angles/${encodeURIComponent(activeCamera!)}/download`;
+    const angleButton = page.locator("#downloadAngleButton");
+    await expect(angleButton).toHaveAttribute("href", angleHref);
+    await expect(angleButton).toHaveAttribute("download", /^(|true)$/);
+    await expect(angleButton).toHaveAttribute("aria-disabled", "false");
+    await expect(angleButton).not.toHaveClass(/disabled/);
+
+    const headExp = await page.request.head(`/api/clips/${clipId}/export`);
+    expect(headExp.ok(), "whole-clip export HEAD endpoint").toBe(true);
+    expectAttachmentHeaders(
+      headExp.headers(),
+      "application/zip",
+      `clip-${clipId}.zip`,
+      "whole-clip export HEAD",
+    );
+
+    const getExp = await page.request.get(`/api/clips/${clipId}/export`);
+    expect(getExp.ok(), "whole-clip export GET endpoint").toBe(true);
+    expectAttachmentHeaders(
+      getExp.headers(),
+      "application/zip",
+      `clip-${clipId}.zip`,
+      "whole-clip export GET",
+    );
+    expect((await getExp.body()).length, "whole-clip export GET body bytes").toBeGreaterThan(0);
+
+    const headAng = await page.request.head(angleHref);
+    expect(headAng.ok(), "single-angle download HEAD endpoint").toBe(true);
+    expectAttachmentHeaders(
+      headAng.headers(),
+      "video/mp4",
+      `clip-${clipId}-${activeCamera}.mp4`,
+      "single-angle download HEAD",
+    );
+
+    const getAng = await page.request.get(angleHref);
+    expect(getAng.ok(), "single-angle download GET endpoint").toBe(true);
+    expectAttachmentHeaders(
+      getAng.headers(),
+      "video/mp4",
+      `clip-${clipId}-${activeCamera}.mp4`,
+      "single-angle download GET",
+    );
+    expect((await getAng.body()).length, "single-angle download GET body bytes").toBeGreaterThan(0);
+
+    const [zipDl] = await Promise.all([
+      page.waitForEvent("download"),
+      page.locator("#downloadButton").click(),
+    ]);
+    expect(zipDl.suggestedFilename()).toBe(`clip-${clipId}.zip`);
+    const zipDlPath = await zipDl.path();
+    expect(zipDlPath).toBeTruthy();
+    expect(statSync(zipDlPath!).size).toBeGreaterThan(0);
+
+    const [angleDl] = await Promise.all([
+      page.waitForEvent("download"),
+      angleButton.click(),
+    ]);
+    expect(angleDl.suggestedFilename()).toMatch(new RegExp(`^clip-${clipId}-${activeCamera}\\.mp4$`));
+    const angleDlPath = await angleDl.path();
+    expect(angleDlPath).toBeTruthy();
+    expect(statSync(angleDlPath!).size).toBeGreaterThan(0);
+
+    const availableCameras = await page
+      .locator(".camera-option:not(.unavailable):not(.download-option)[data-camera]")
+      .evaluateAll((els) =>
+        els
+          .map((el) => (el as HTMLElement).dataset.camera ?? "")
+          .filter((cam): cam is string => cam.length > 0),
+      );
+    expect(availableCameras.length, "seeded clip should expose >=2 archive cameras").toBeGreaterThanOrEqual(2);
+    const differentCamera = availableCameras.find((cam) => cam !== activeCamera);
+    expect(differentCamera, "must find a non-active available camera").toBeTruthy();
+    const switchedCamera = differentCamera!;
+    await page.locator(`.camera-option[data-camera="${switchedCamera}"]`).click();
+    await expect(page.locator(`.camera-option[data-camera="${switchedCamera}"]`)).toHaveClass(/active/);
+    await expect(angleButton).toHaveAttribute(
+      "href",
+      `/api/clips/${clipId}/angles/${encodeURIComponent(switchedCamera)}/download`,
+    );
+
+    const [switchedAngleDl] = await Promise.all([
+      page.waitForEvent("download"),
+      angleButton.click(),
+    ]);
+    expect(switchedAngleDl.suggestedFilename()).toBe(`clip-${clipId}-${switchedCamera}.mp4`);
+    const switchedAngleDlPath = await switchedAngleDl.path();
+    expect(switchedAngleDlPath).toBeTruthy();
+    expect(statSync(switchedAngleDlPath!).size).toBeGreaterThan(0);
+
+    const desktopShot = resolve(ARTIFACTS, "event-player-downloads-desktop.png");
+    await page.screenshot({ path: desktopShot, fullPage: true });
+    await testInfo.attach("event-player-downloads-desktop.png", {
+      path: desktopShot,
+      contentType: "image/png",
+    });
+
+    await page.setViewportSize({ width: 375, height: 812 });
+    await expect(page.locator(".event-player-container")).toBeVisible();
+    const mobileShot = resolve(ARTIFACTS, "event-player-downloads-mobile.png");
+    await page.screenshot({ path: mobileShot, fullPage: true });
+    await testInfo.attach("event-player-downloads-mobile.png", {
+      path: mobileShot,
+      contentType: "image/png",
+    });
+
+    assertCleanConsole(probe);
+  });
+
+  test("downloads — disabled + inert on an unarchived (ro_usb) clip", async ({
+    page,
+    probe,
+  }) => {
+    await page.route("**/api/clips/*", async (route) => {
+      const path = new URL(route.request().url()).pathname;
+      if (!/^\/api\/clips\/\d+$/.test(path)) {
+        await route.fallback();
+        return;
+      }
+
+      const resp = await route.fetch();
+      const body = await resp.json() as {
+        angles?: Array<{ camera?: string; view_kind?: string; [key: string]: unknown }>;
+        [key: string]: unknown;
+      };
+      const angles = Array.isArray(body.angles) ? body.angles : [];
+      expect(angles.length, `${path} should include seeded angles`).toBeGreaterThan(0);
+      for (const angle of angles) {
+        expect(typeof angle.camera, `${path} angle camera should be a string`).toBe("string");
+        expect(angle, `${path} angle should include view_kind`).toHaveProperty("view_kind");
+      }
+      body.angles = angles.map((angle) => ({ ...angle, view_kind: "ro_usb" }));
+      await route.fulfill({ response: resp, json: body });
+    });
+
+    await page.goto("/events?clip=2", { waitUntil: "load" });
+    await expect(page.locator("[data-screen=event-player]")).toBeVisible();
+    await expect(page.locator('[data-testid="video-unarchived"]')).toBeVisible();
+
+    const angleButton = page.locator("#downloadAngleButton");
+    const zipButton = page.locator("#downloadButton");
+
+    await expect(angleButton).toHaveClass(/disabled/);
+    await expect(angleButton).toHaveAttribute("aria-disabled", "true");
+    expect(await angleButton.getAttribute("href")).toBeNull();
+
+    await expect(zipButton).toHaveClass(/disabled/);
+    await expect(zipButton).toHaveAttribute("aria-disabled", "true");
+    expect(await zipButton.getAttribute("href")).toBeNull();
+
+    let downloaded = false;
+    page.on("download", () => {
+      downloaded = true;
+    });
+    const urlBefore = page.url();
+    await angleButton.click({ force: true });
+    await zipButton.click({ force: true });
+    await page.waitForTimeout(300);
+    expect(downloaded, "disabled download controls must be inert").toBe(false);
+    expect(page.url(), "disabled controls must not navigate").toBe(urlBefore);
+    await expect(page.locator("[data-screen=event-player]")).toBeVisible();
+
+    assertCleanConsole(probe);
   });
 
   // ── Gate 4 (console + network): zero warnings/errors, no failed/non-2xx ──

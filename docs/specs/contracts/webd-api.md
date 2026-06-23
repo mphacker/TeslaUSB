@@ -77,7 +77,8 @@ SQLite ([D1](./indexd-schema.md)).
 | Method · Route | Behavior |
 |---|---|
 | `GET /api/clips/:id/stream?camera=front` | HTTP **range requests** to the `<video>` element (`webd.md §2.3`, ref `video_service/_range.py`); **no transcoding** — stream as stored (H.264 plays natively); codec fallback = "download to view" edge-case guard. **Holds a playback lease (TTL + heartbeat)** on the item while streaming ([D3 §2.2](./single-writer-lease.md)). |
-| `GET /api/clips/:id/export.zip` | Zip/download export (ref `_zip.py`); holds the lease while exporting. |
+| `GET\|HEAD /api/clips/:id/export` | Whole-clip ZIP export (`application/zip`, `Content-Disposition: attachment`) of the clip's **archive** angles (ref `_zip.py`); `HEAD` describes the response without building the zip. (The D3 playback lease is a **deferred seam** — not yet held; `retentiond`/the lease RPC don't exist yet, see `media.rs`.) |
+| `GET\|HEAD /api/clips/:id/angles/:camera/download` | Single-angle file download — the one camera's archive MP4 served `attachment` (`Content-Disposition`), for "download just this view". `HEAD` reports availability without streaming bytes. Only `archive`-backed angles are downloadable (live `ro_usb` angles `404`, same as `stream`). |
 
 ### 2.3 Mutations
 

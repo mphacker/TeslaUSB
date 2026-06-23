@@ -176,7 +176,7 @@ test.describe("settings dashboard UAT", () => {
     await expect(card).toContainText("All systems nominal.");
 
     // System Health — open. overall + the three probed subsystem rows come from
-    // the fixture; Video Indexer comes from the real catalog (seed = 6 clips);
+    // the fixture; Video Indexer comes from the real catalog (seed = 30 clips);
     // the remaining six subsystems have no probe data and degrade to "—".
     const sh = page.locator("#system-health-section");
     await expect(sh).toHaveAttribute("open", "");
@@ -192,7 +192,7 @@ test.describe("settings dashboard UAT", () => {
     expect(shText).toContain("archive root writable");
     expect(shText).toContain("Video Indexer");
     // Video Indexer carries REAL catalog data in the baseline's exact phrasing.
-    expect(shText).toMatch(/6 clips indexed; newest is \d+ d old/);
+    expect(shText).toMatch(/30 clips indexed; newest is \d+ d old/);
     // The six unprobed subsystems degrade to "—" — none is fabricated.
     expect((shText.match(/—/g) ?? []).length).toBe(6);
 

@@ -16,8 +16,10 @@ import type {
   ChimeGroup,
   Chimes,
   Clip,
+  ClipsParams,
   DaySummary,
   EventItem,
+  EventsParams,
   GadgetStatus,
   GroupInput,
   MediaHandoffResult,
@@ -35,6 +37,7 @@ import type {
   TimezoneInfo,
   Trip,
   TripDetail,
+  TripsPageParams,
 } from "./types";
 
 /** An error from a webd API call (non-2xx, network, or malformed body). */
@@ -194,23 +197,14 @@ export interface ChimeHandoffResult {
 /** Logical lock-chime size cap mirrored from webd's `CHIME_MAX_BYTES` (1 MiB). */
 export const CHIME_MAX_BYTES = 1024 * 1024;
 
-export interface EventsParams {
-  after?: number;
-  limit?: number;
-  trip?: number;
-}
-
-export interface ClipsParams {
-  after?: number;
-  limit?: number;
-  folder_class?: string;
-}
-
 export const api = {
   days: (signal?: AbortSignal) => getJson<DaySummary[]>("/api/days", signal),
 
   trips: (day?: string, signal?: AbortSignal) =>
     getJson<Trip[]>(`/api/trips${qs({ day })}`, signal),
+
+  tripsPage: (params: TripsPageParams = {}, signal?: AbortSignal) =>
+    getJson<Page<Trip>>(`/api/trips/page${qs({ ...params })}`, signal),
 
   trip: (id: number, signal?: AbortSignal) =>
     getJson<TripDetail>(`/api/trips/${id}`, signal),

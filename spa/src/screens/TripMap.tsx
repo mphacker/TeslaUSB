@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "preact/hooks";
+import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { Icon } from "../components/Icon";
 import { api, ApiError } from "../api/client";
 import type { Clip, DaySummary, EventItem, Trip, TripDetail } from "../api/types";
@@ -15,6 +15,42 @@ const METERS_PER_MILE = 1609.344;
 const KM_PER_MILE = 1.609344;
 
 type PanelTab = "events" | "trips" | "clips";
+const PANEL_PAGE_SIZE = 25;
+
+interface PanelTabState<T> {
+  items: T[] | null;
+  nextCursor: string | null;
+  endReached: boolean;
+  loading: boolean;
+  error: boolean;
+}
+
+interface PanelState {
+  events: PanelTabState<EventItem>;
+  trips: PanelTabState<Trip>;
+  clips: PanelTabState<Clip>;
+}
+
+function newPanelTabState<T>(): PanelTabState<T> {
+  return {
+    items: null,
+    nextCursor: null,
+    endReached: false,
+    loading: false,
+    error: false,
+  };
+}
+
+function appendUniqueById<T extends { id: number }>(existing: T[], incoming: T[]): T[] {
+  const seen = new Set(existing.map((item) => item.id));
+  const merged = [...existing];
+  for (const item of incoming) {
+    if (seen.has(item.id)) continue;
+    seen.add(item.id);
+    merged.push(item);
+  }
+  return merged;
+}
 
 /** Map a webd event type onto the legacy sentry-timeline dot class. */
 function eventDotClass(type: string): string {
@@ -112,7 +148,7 @@ function toMapTrip(trip: Trip, detail: TripDetail | null): MapTrip {
  *  - routes   → `/api/trips?day=` + per-trip `/api/trips/:id` (points + speed),
  *               falling back to the trip's pre-decoded `polyline` segments.
  *  - bubbles  → bounded per-trip `/api/events?trip=<id>` (on-route events).
- *  - panel    → `/api/events` (all, incl. trip-less), `/api/trips`, `/api/clips`.
+ *  - panel    → `/api/events`, `/api/trips/page`, `/api/clips` (global cursor pages).
  *
  * The display-preference toggles (mph/kmh + local/UTC clock) are small SPA
  * functional additions (the legacy app was server-driven with no UI control) to
@@ -138,9 +174,30 @@ export function TripMap() {
   const [displayVisible, setDisplayVisible] = useState(false);
   const [panelOpen, setPanelOpen] = useState(false);
   const [panelTab, setPanelTab] = useState<PanelTab>("events");
-  const [panelEvents, setPanelEvents] = useState<EventItem[] | null>(null);
-  const [panelTrips, setPanelTrips] = useState<Trip[] | null>(null);
-  const [panelClips, setPanelClips] = useState<Clip[] | null>(null);
+  const [panelState, setPanelState] = useState<PanelState>({
+    events: newPanelTabState<EventItem>(),
+    trips: newPanelTabState<Trip>(),
+    clips: newPanelTabState<Clip>(),
+  });
+  const panelStateRef = useRef(panelState);
+  const panelListRef = useRef<HTMLDivElement>(null);
+  const panelSentinelRef = useRef<HTMLDivElement | null>(null);
+  const activePanelTabRef = useRef<PanelTab>("events");
+  const panelRequestSeqRef = useRef<Record<PanelTab, number>>({
+    events: 0,
+    trips: 0,
+    clips: 0,
+  });
+  const panelAbortRef = useRef<Record<PanelTab, AbortController | null>>({
+    events: null,
+    trips: null,
+    clips: null,
+  });
+  const panelInFlightRef = useRef<Record<PanelTab, boolean>>({
+    events: false,
+    trips: false,
+    clips: false,
+  });
 
   const currentDay = days && days.length ? days[dayIndex] : null;
   const presentEventTypes = useMemo(
@@ -296,32 +353,203 @@ export function TripMap() {
     ctrl.render({ trips: mapTrips, events: mapEvents, unit, clock, filters });
   }, [mapTrips, mapEvents, unit, clock, filters]);
 
-  // ── Lazy-load the video-panel data for the active tab when opened. ──
+  useEffect(() => {
+    panelStateRef.current = panelState;
+  }, [panelState]);
+
+  const setActiveSentinel = useCallback((node: HTMLDivElement | null) => {
+    panelSentinelRef.current = node;
+  }, []);
+
+  const abortTabRequest = useCallback((tab: PanelTab) => {
+    const controller = panelAbortRef.current[tab];
+    panelInFlightRef.current[tab] = false;
+    if (!controller) return;
+    controller.abort();
+    panelAbortRef.current[tab] = null;
+    panelRequestSeqRef.current[tab] += 1;
+    setPanelState((prev) => ({
+      ...prev,
+      [tab]: { ...prev[tab], loading: false },
+    }));
+  }, []);
+
+  const loadPanelPage = useCallback(
+    async (tab: PanelTab, initial: boolean) => {
+      if (panelInFlightRef.current[tab]) return;
+      const state = panelStateRef.current[tab];
+      if (state.loading) return;
+      if (!initial && (state.items === null || state.nextCursor === null)) {
+        return;
+      }
+
+      const seq = panelRequestSeqRef.current[tab] + 1;
+      panelRequestSeqRef.current[tab] = seq;
+      const controller = new AbortController();
+      panelAbortRef.current[tab] = controller;
+      panelInFlightRef.current[tab] = true;
+      const cursor = initial ? undefined : state.nextCursor ?? undefined;
+      setPanelState((prev) => ({
+        ...prev,
+        [tab]: { ...prev[tab], loading: true, error: false },
+      }));
+
+      try {
+        if (tab === "events") {
+          const page = await api.events(
+            { cursor, limit: PANEL_PAGE_SIZE },
+            controller.signal,
+          );
+          if (controller.signal.aborted || panelRequestSeqRef.current[tab] !== seq) {
+            return;
+          }
+          setPanelState((prev) => {
+            const prevTab = prev.events;
+            const merged =
+              initial || prevTab.items === null
+                ? page.items
+                : appendUniqueById(prevTab.items, page.items);
+            return {
+              ...prev,
+              events: {
+                items: merged,
+                nextCursor: page.next_cursor,
+                endReached: page.next_cursor === null,
+                loading: false,
+                error: false,
+              },
+            };
+          });
+          return;
+        }
+        if (tab === "trips") {
+          const page = await api.tripsPage(
+            { cursor, limit: PANEL_PAGE_SIZE },
+            controller.signal,
+          );
+          if (controller.signal.aborted || panelRequestSeqRef.current[tab] !== seq) {
+            return;
+          }
+          setPanelState((prev) => {
+            const prevTab = prev.trips;
+            const merged =
+              initial || prevTab.items === null
+                ? page.items
+                : appendUniqueById(prevTab.items, page.items);
+            return {
+              ...prev,
+              trips: {
+                items: merged,
+                nextCursor: page.next_cursor,
+                endReached: page.next_cursor === null,
+                loading: false,
+                error: false,
+              },
+            };
+          });
+          return;
+        }
+        const page = await api.clips(
+          { cursor, limit: PANEL_PAGE_SIZE },
+          controller.signal,
+        );
+        if (controller.signal.aborted || panelRequestSeqRef.current[tab] !== seq) {
+          return;
+        }
+        setPanelState((prev) => {
+          const prevTab = prev.clips;
+          const merged =
+            initial || prevTab.items === null
+              ? page.items
+              : appendUniqueById(prevTab.items, page.items);
+          return {
+            ...prev,
+            clips: {
+              items: merged,
+              nextCursor: page.next_cursor,
+              endReached: page.next_cursor === null,
+              loading: false,
+              error: false,
+            },
+          };
+        });
+      } catch {
+        if (controller.signal.aborted || panelRequestSeqRef.current[tab] !== seq) {
+          return;
+        }
+        setPanelState((prev) => ({
+          ...prev,
+          [tab]: { ...prev[tab], loading: false, error: true },
+        }));
+      } finally {
+        if (panelAbortRef.current[tab] === controller) {
+          panelInFlightRef.current[tab] = false;
+          panelAbortRef.current[tab] = null;
+        }
+      }
+    },
+    [],
+  );
+
+  const retryPanelTab = useCallback((tab: PanelTab) => {
+    setPanelState((prev) => ({
+      ...prev,
+      [tab]: { ...prev[tab], error: false },
+    }));
+    const initial = panelStateRef.current[tab].items === null;
+    void loadPanelPage(tab, initial);
+  }, [loadPanelPage]);
+
+  useEffect(() => {
+    const previousTab = activePanelTabRef.current;
+    if (previousTab !== panelTab) {
+      abortTabRequest(previousTab);
+      activePanelTabRef.current = panelTab;
+    }
+  }, [panelTab, abortTabRequest]);
+
+  useEffect(() => {
+    if (!panelOpen) {
+      abortTabRequest("events");
+      abortTabRequest("trips");
+      abortTabRequest("clips");
+      return;
+    }
+    if (panelStateRef.current[panelTab].items === null) {
+      void loadPanelPage(panelTab, true);
+    }
+  }, [panelOpen, panelTab, abortTabRequest, loadPanelPage]);
+
   useEffect(() => {
     if (!panelOpen) return;
-    const ac = new AbortController();
-    (async () => {
-      try {
-        if (panelTab === "events" && panelEvents === null) {
-          const page = await api.events({ limit: 100 }, ac.signal);
-          setPanelEvents(page.items);
-        } else if (panelTab === "trips") {
-          if (currentDay) {
-            const t = await api.trips(currentDay.day, ac.signal);
-            setPanelTrips(t);
-          } else {
-            setPanelTrips([]);
-          }
-        } else if (panelTab === "clips" && panelClips === null) {
-          const page = await api.clips({ limit: 100 }, ac.signal);
-          setPanelClips(page.items);
-        }
-      } catch {
-        /* panel data is best-effort; leave the loading state for the user */
-      }
-    })();
-    return () => ac.abort();
-  }, [panelOpen, panelTab, currentDay?.day]);
+    const root = panelListRef.current;
+    const sentinel = panelSentinelRef.current;
+    const active = panelState[panelTab];
+    if (!root || !sentinel || active.loading || active.error || active.nextCursor === null) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((entry) => entry.isIntersecting)) return;
+        void loadPanelPage(panelTab, false);
+      },
+      { root, rootMargin: "0px 0px 120px 0px" },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [
+    panelOpen,
+    panelTab,
+    panelState,
+    loadPanelPage,
+  ]);
+
+  useEffect(
+    () => () => {
+      abortTabRequest("events");
+      abortTabRequest("trips");
+      abortTabRequest("clips");
+    },
+    [abortTabRequest],
+  );
 
   const buckets = useMemo(() => activeSpeedBuckets(unit), [unit]);
 
@@ -745,12 +973,40 @@ export function TripMap() {
             <Icon name="x" />
           </button>
         </div>
-        <div class="video-panel-list" id="vpList">
+        <div class="video-panel-list" id="vpList" ref={panelListRef}>
           {panelTab === "events" && (
-            <EventsTab events={panelEvents} clock={clock} />
+            <EventsTab
+              events={panelState.events.items}
+              clock={clock}
+              loading={panelState.events.loading}
+              endReached={panelState.events.endReached}
+              error={panelState.events.error}
+              sentinelRef={setActiveSentinel}
+              onRetry={() => retryPanelTab("events")}
+            />
           )}
-          {panelTab === "trips" && <TripsTab trips={panelTrips} clock={clock} />}
-          {panelTab === "clips" && <ClipsTab clips={panelClips} clock={clock} />}
+          {panelTab === "trips" && (
+            <TripsTab
+              trips={panelState.trips.items}
+              clock={clock}
+              loading={panelState.trips.loading}
+              endReached={panelState.trips.endReached}
+              error={panelState.trips.error}
+              sentinelRef={setActiveSentinel}
+              onRetry={() => retryPanelTab("trips")}
+            />
+          )}
+          {panelTab === "clips" && (
+            <ClipsTab
+              clips={panelState.clips.items}
+              clock={clock}
+              loading={panelState.clips.loading}
+              endReached={panelState.clips.endReached}
+              error={panelState.clips.error}
+              sentinelRef={setActiveSentinel}
+              onRetry={() => retryPanelTab("clips")}
+            />
+          )}
         </div>
       </div>
     </div>
@@ -760,12 +1016,41 @@ export function TripMap() {
 function EventsTab({
   events,
   clock,
+  loading,
+  endReached,
+  error,
+  sentinelRef,
+  onRetry,
 }: {
   events: EventItem[] | null;
   clock: ClockPref;
+  loading: boolean;
+  endReached: boolean;
+  error: boolean;
+  sentinelRef: (node: HTMLDivElement | null) => void;
+  onRetry: () => void;
 }) {
-  if (events === null) return <div class="vp-loading">Loading events…</div>;
-  if (events.length === 0) return <div class="vp-empty">No events</div>;
+  if (events === null) {
+    if (error && !loading)
+      return (
+        <div class="vp-error" data-testid="vp-error-events">
+          <span>Couldn't load events.</span>
+          <button
+            type="button"
+            class="vp-retry"
+            data-testid="vp-retry-events"
+            onClick={onRetry}
+          >
+            Retry
+          </button>
+        </div>
+      );
+    return <div class="vp-loading">Loading events…</div>;
+  }
+  if (events.length === 0) {
+    if (loading) return <div class="vp-loading">Loading events…</div>;
+    return <div class="vp-empty">No events</div>;
+  }
   return (
     <div class="sentry-timeline" data-testid="vp-events">
       <div class="st-summary">
@@ -808,13 +1093,70 @@ function EventsTab({
           </div>
         );
       })}
+      {loading && <div class="vp-loading">Loading…</div>}
+      {error && !loading && (
+        <div class="vp-error" data-testid="vp-error-events">
+          <span>Couldn't load more.</span>
+          <button
+            type="button"
+            class="vp-retry"
+            data-testid="vp-retry-events"
+            onClick={onRetry}
+          >
+            Retry
+          </button>
+        </div>
+      )}
+      {!loading && !endReached && !error && (
+        <div
+          class="vp-sentinel"
+          data-testid="vp-sentinel-events"
+          ref={sentinelRef}
+        />
+      )}
+      {endReached && <div class="vp-end" data-testid="vp-end-events">No more</div>}
     </div>
   );
 }
 
-function TripsTab({ trips, clock }: { trips: Trip[] | null; clock: ClockPref }) {
-  if (trips === null) return <div class="vp-loading">Loading trips…</div>;
-  if (trips.length === 0) return <div class="vp-empty">No trips this day</div>;
+function TripsTab({
+  trips,
+  clock,
+  loading,
+  endReached,
+  error,
+  sentinelRef,
+  onRetry,
+}: {
+  trips: Trip[] | null;
+  clock: ClockPref;
+  loading: boolean;
+  endReached: boolean;
+  error: boolean;
+  sentinelRef: (node: HTMLDivElement | null) => void;
+  onRetry: () => void;
+}) {
+  if (trips === null) {
+    if (error && !loading)
+      return (
+        <div class="vp-error" data-testid="vp-error-trips">
+          <span>Couldn't load trips.</span>
+          <button
+            type="button"
+            class="vp-retry"
+            data-testid="vp-retry-trips"
+            onClick={onRetry}
+          >
+            Retry
+          </button>
+        </div>
+      );
+    return <div class="vp-loading">Loading trips…</div>;
+  }
+  if (trips.length === 0) {
+    if (loading) return <div class="vp-loading">Loading trips…</div>;
+    return <div class="vp-empty">No trips this day</div>;
+  }
   return (
     <div data-testid="vp-trips">
       {trips.map((t) => (
@@ -830,13 +1172,70 @@ function TripsTab({ trips, clock }: { trips: Trip[] | null; clock: ClockPref }) 
           </div>
         </div>
       ))}
+      {loading && <div class="vp-loading">Loading…</div>}
+      {error && !loading && (
+        <div class="vp-error" data-testid="vp-error-trips">
+          <span>Couldn't load more.</span>
+          <button
+            type="button"
+            class="vp-retry"
+            data-testid="vp-retry-trips"
+            onClick={onRetry}
+          >
+            Retry
+          </button>
+        </div>
+      )}
+      {!loading && !endReached && !error && (
+        <div
+          class="vp-sentinel"
+          data-testid="vp-sentinel-trips"
+          ref={sentinelRef}
+        />
+      )}
+      {endReached && <div class="vp-end" data-testid="vp-end-trips">No more</div>}
     </div>
   );
 }
 
-function ClipsTab({ clips, clock }: { clips: Clip[] | null; clock: ClockPref }) {
-  if (clips === null) return <div class="vp-loading">Loading clips…</div>;
-  if (clips.length === 0) return <div class="vp-empty">No clips</div>;
+function ClipsTab({
+  clips,
+  clock,
+  loading,
+  endReached,
+  error,
+  sentinelRef,
+  onRetry,
+}: {
+  clips: Clip[] | null;
+  clock: ClockPref;
+  loading: boolean;
+  endReached: boolean;
+  error: boolean;
+  sentinelRef: (node: HTMLDivElement | null) => void;
+  onRetry: () => void;
+}) {
+  if (clips === null) {
+    if (error && !loading)
+      return (
+        <div class="vp-error" data-testid="vp-error-clips">
+          <span>Couldn't load clips.</span>
+          <button
+            type="button"
+            class="vp-retry"
+            data-testid="vp-retry-clips"
+            onClick={onRetry}
+          >
+            Retry
+          </button>
+        </div>
+      );
+    return <div class="vp-loading">Loading clips…</div>;
+  }
+  if (clips.length === 0) {
+    if (loading) return <div class="vp-loading">Loading clips…</div>;
+    return <div class="vp-empty">No clips</div>;
+  }
   return (
     <div data-testid="vp-clips">
       {clips.map((c) => (
@@ -856,6 +1255,28 @@ function ClipsTab({ clips, clock }: { clips: Clip[] | null; clock: ClockPref }) 
           </div>
         </a>
       ))}
+      {loading && <div class="vp-loading">Loading…</div>}
+      {error && !loading && (
+        <div class="vp-error" data-testid="vp-error-clips">
+          <span>Couldn't load more.</span>
+          <button
+            type="button"
+            class="vp-retry"
+            data-testid="vp-retry-clips"
+            onClick={onRetry}
+          >
+            Retry
+          </button>
+        </div>
+      )}
+      {!loading && !endReached && !error && (
+        <div
+          class="vp-sentinel"
+          data-testid="vp-sentinel-clips"
+          ref={sentinelRef}
+        />
+      )}
+      {endReached && <div class="vp-end" data-testid="vp-end-clips">No more</div>}
     </div>
   );
 }

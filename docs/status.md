@@ -735,8 +735,24 @@ LUNs) is the single make-or-break that still needs the car.**
   in `docs/specs/spa.md` §4 "Trip-map filters". GPT-5.5 reviewed → SHIP.)**
 - [ ] Filters follow-up: multi-day **date range** picker (needs multi-day load +
   seed/UAT changes; deferred from the within-day filter lane). **(not started)**
-- [ ] Filters follow-up: apply the active filters to the **side-panel** lists too
-  (v1 filtered the map markers only; v1 panel parity is a follow-up). **(not started)**
+- [x] Side-panel = independent **global catalog browser**, decoupled from the map
+  filters. Per operator directive the **map** reacts to filters (day-scoped) while all
+  three panel tabs (Events / Trips / All Clips) show the **whole catalog newest-first**
+  with **progressive (infinite-scroll) loading** so the Pi never serves one giant list.
+  **(webd keyset cursor pagination `(date DESC, id DESC)`, opaque base64url cursor with
+  `MAX(id)` snapshot pin → no mid-scroll shift/dup, `400 invalid_cursor`; new
+  `GET /api/trips/page`. SPA per-tab IntersectionObserver state machine with synchronous
+  in-flight lock (no double-fire) + error→retry affordance that does NOT auto-retry-storm
+  a failing device, incl. on the initial load. EventPlayer keeps its v1 chronological
+  playlist via a client-side asc sort. Spec: `docs/specs/contracts/webd-api.md` §2.1.1 +
+  `docs/specs/spa.md`. Verified: `cargo test -p webd` 280; `tsc` clean; full UAT 427
+  passed (progressive-scroll cross-day-desc, paging-error no-storm, initial-load-error
+  retry — desktop 1280 + mobile 375, console clean). GPT-5.5 reviewed → SHIP.)**
+- [ ] Filters follow-up: optionally also let the panel be **filtered** to match the map
+  (v1 filtered map markers only; superseded above by the global-catalog-browser directive —
+  revisit only if per-tab filtering is later requested). **(not started)**
+- [ ] EventPlayer follow-up: `?event=` deep-links resolve beyond the newest 100 events
+  (pre-existing 100-event fetch cap; needs paginate-until-found or by-id lookup). **(not started)**
 - [x] Side panel tabs (Events / Trips / All Clips) + source folder switch. **(proven;
   **All Clips tab LIVE-verified on hardware 2026-06-16** — the panel rendered all 4
   real device clips from the live catalog with correct `folder_class` labels

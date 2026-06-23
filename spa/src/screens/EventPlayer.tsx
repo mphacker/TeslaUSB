@@ -345,8 +345,14 @@ export function EventPlayer() {
     (async () => {
       try {
         const page = await api.events({ limit: 100 }, ac.signal);
-        // The player only lists events that have a playable clip.
-        const playable = page.items.filter((e) => e.clip_id != null);
+        // The player only lists events that have a playable clip. The global
+        // `/api/events` feed is newest-first (it backs the map side-panel's
+        // descending catalog browser); the event player instead walks its
+        // playlist chronologically (oldest -> newest), so sort here — decoupled
+        // from the API's default order — to keep prev/next stable.
+        const playable = page.items
+          .filter((e) => e.clip_id != null)
+          .sort((a, b) => a.t - b.t || a.id - b.id);
         // Resolve the deep-link selection atomically with the playlist so no
         // intermediate render can fall back to events[0] (which would flash the
         // wrong event's metadata and kick off a wasted clip fetch).

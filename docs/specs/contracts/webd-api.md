@@ -57,10 +57,11 @@ SQLite ([D1](./indexd-schema.md)).
 |---|---|---|---|
 | `GET /api/overview` | Home / media hub | counts, recent events, feature availability, health summary | D1 + service status |
 | `GET /api/days` | Trip map day-nav | `[{day, trip_count, event_count, distance_m}]` | `trips`, `events` |
-| `GET /api/trips?day=YYYY-MM-DD` | Trip map | `[{id, day, started_at, ended_at, bbox, distance_m, polyline|point_ref}]` | `trips`(+`trip_points`) |
+| `GET /api/trips?day=YYYY-MM-DD` | Trip map (day view) | `[{id, day, started_at, ended_at, bbox, distance_m, polyline|point_ref}]` — **day-scoped, non-paginated** (drives the map). | `trips`(+`trip_points`) |
+| `GET /api/trips/page?cursor=&limit=` | Side-panel Trips browser | `Page<Trip>` — **global, newest-first, cursor-paginated** (§2.1.1). | `trips` |
 | `GET /api/trips/:id/route` | Trip map route | ordered points / simplified polyline | `trip_points` |
-| `GET /api/events?day=…&trip=…` | Event bubbles | `[{id, type, severity, t, lat, lon, clip_id, front_frame_offset_ms}]` | `events` |
-| `GET /api/clips?…` | All-clips list | `[{id, started_at, folder_class, is_sentry, duration_s, availability, angles:[camera]}]` | `clips`,`angles` |
+| `GET /api/events?cursor=&limit=&trip=` | Event bubbles + side-panel Events browser | `Page<{id, type, severity, t, lat, lon, clip_id, front_frame_offset_ms, …}>` — **newest-first, cursor-paginated** (§2.1.1); optional `trip` filter (map's per-trip fetch). | `events` |
+| `GET /api/clips?cursor=&limit=&folder_class=` | All-clips browser | `Page<{id, started_at, folder_class, is_sentry, duration_s, availability, angles:[camera]}>` — **newest-first, cursor-paginated** (§2.1.1); optional `folder_class` filter. | `clips`,`angles` |
 | `GET /api/clips/:id` | Event player | clip + its angle set + linked event/jump-offset (`front_frame_offset_ms`) | `clips`,`angles`,`events` |
 | `GET /api/clips/:id/telemetry` | Video overlay HUD | SEI/telemetry samples synced to playback (speed/heading/etc. over time) for the **client-side** HUD ([`spa.md §2,§3`](../spa.md), [`webd.md §4`](../webd.md)) | `indexd` (or sidecar) |
 | `GET /api/chimes`, `/api/lightshows`, `/api/boombox`, `/api/music`, `/api/plates`, `/api/wraps` | Media managers (list/detail) | installed items + assignable state (parity `GET` halves of the blueprints, [`webd.md §3`](../webd.md)) | media staging + D1 |
@@ -71,6 +72,40 @@ SQLite ([D1](./indexd-schema.md)).
 | `GET /api/system/health` | System health | uptime, mem, service states, gadget bound/UDC, write-heartbeat | services |
 | `GET /api/gadget/status` | Settings → USB Drive | live USB-gadget state `{present, bound, bound_udc, udc_state, lun_file, media_lun_file, handoff_active, last_result, last_handoff_id}`. `present` is load-bearing (a missing/unparseable reply ⇒ `502`); other fields degrade to `false`/`null`. `gadgetd` unreachable ⇒ `503`. Read-only — does **not** mutate or trigger a handoff. | `gadgetd` control socket (`gadget_status`) |
 | `GET /api/settings` | Settings | all editable prefs/thresholds | `prefs` |
+
+### 2.1.1 Cursor pagination (newest-first) — realizes OQ-2
+
+`GET /api/events`, `GET /api/clips`, and `GET /api/trips/page` are cursor-paginated
+and ordered **newest-first** by `(date DESC, id DESC)`, where `date` is `events.t`
+/ `clips.started_at` / `trips.started_at` (all `i64` UTC epoch seconds, each
+indexed). `id` is the unique tiebreaker for equal timestamps. The side panel uses
+these to browse the **whole catalog** progressively (infinite scroll), so the Pi
+never serves one giant list.
+
+- **Params:** `?limit=<n>` (default `100`, clamped to `[1, 500]`) and `?cursor=<opaque>`
+  (omit for the first page). Endpoint filters still compose: `events?trip=<id>`,
+  `clips?folder_class=<class>`.
+- **Response:** `Page<T> = { items: T[], next_cursor: string | null, limit: number }`.
+  `items` are in `(date DESC, id DESC)` order. `next_cursor` is `null` exactly when
+  the end has been reached.
+- **Opaque cursor:** `base64url(JSON)` of `{ v:1, r:"events"|"clips"|"trips",
+  ts:<i64>, id:<i64>, snap:<i64> }`. Clients MUST treat it as opaque and echo it
+  back verbatim. webd rejects a cursor whose `r` does not match the endpoint or
+  whose `v` is unknown with `400 invalid_cursor`.
+- **Snapshot stability:** the first page captures `snap = MAX(id)` for the resource
+  and carries it in every `next_cursor`; **all pages filter `WHERE id <= snap`** so
+  rows inserted by `indexd`/`retentiond` while the user scrolls cannot shift or
+  duplicate already-loaded pages (stable "as of when the list was opened"). New rows
+  appear on the next fresh open of the list.
+- **Keyset (no skip/dup under ties):** first page
+  `… WHERE id <= :snap [AND <filter>] ORDER BY date DESC, id DESC LIMIT :limit+1`;
+  next page adds `AND (date < :ts OR (date = :ts AND id < :id))`. Fetch `limit+1`,
+  return at most `limit`; `next_cursor` is built from the **last returned** row, and
+  is `null` when fewer than `limit+1` rows were fetched — avoiding the classic
+  phantom empty final page.
+- **Supersedes** the prior ascending `?after=<id>` scheme (no SPA consumer depended
+  on it). `GET /api/trips?day=` is unchanged — it stays day-scoped and non-paginated
+  to drive the map.
 
 ### 2.2 Streaming / export (with playback lease — D3)
 
@@ -303,9 +338,11 @@ storage/cloud screens surface them.
 1. **(OQ-6) SSE vs. long-poll.** [`webd.md §6`](../webd.md) allows either. Proposed:
    **SSE primary** for `/api/jobs` (one stream, all progress events), with a poll
    fallback (`GET /api/handoff/:id`) for environments where SSE is awkward. Confirm.
-2. **Pagination / windowing.** `/api/clips` and `/api/events` over a large archive
-   can be big. Propose cursor pagination (`?after=<id>&limit=`) — confirm whether the
-   parity UI ever needs full-list semantics.
+2. **Pagination / windowing.** ✅ **Resolved (§2.1.1).** `/api/clips`, `/api/events`,
+   and the new `/api/trips/page` use newest-first `(date DESC, id DESC)` keyset
+   cursor pagination with an opaque, snapshot-pinned cursor; the side panel browses
+   the whole catalog progressively. `/api/trips?day=` stays day-scoped + non-paginated
+   for the map.
 3. **Media-manager payloads.** The `POST /api/{chimes,boombox,…}` bodies carry file
    uploads (audio for chimes/boombox); confirm multipart vs. base64-JSON and the
    trimmer hand-off (`spa.md §2` `lamejs` is client-side, so the server likely

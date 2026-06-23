@@ -97,7 +97,7 @@ test.describe("webd catalog client", () => {
 
   test("clips() returns a cursor page; each clip carries its angles", async () => {
     const page = await api.clips({ limit: 500 });
-    expect(page.items.length).toBe(6);
+    expect(page.items.length).toBe(30);
     const clip = page.items[0];
     expect(Array.isArray(clip.angles)).toBe(true);
     expect(clip.angles.length).toBe(4);
@@ -109,7 +109,7 @@ test.describe("webd catalog client", () => {
 
   test("clips(folder_class=) filters by folder", async () => {
     const sentry = await api.clips({ folder_class: "SentryClips", limit: 500 });
-    expect(sentry.items.length).toBe(2);
+    expect(sentry.items.length).toBe(10);
     expect(sentry.items.every((c) => c.folder_class === "SentryClips")).toBe(true);
   });
 

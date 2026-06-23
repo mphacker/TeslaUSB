@@ -179,19 +179,22 @@ test.describe("analytics UAT", () => {
     // FSD usage is not aggregated by webd → still the legacy em-dash.
     await expect(page.locator("#dsFsdPct")).toHaveText(EM_DASH);
 
-    // (c2) Video Statistics — LIVE footage aggregates. Seed: 6 clips × 4 angles
-    //      = 24 files; per-angle bytes 1.0–1.3 MB → 27.6 MB total; three folder
-    //      classes (Recent/Saved/Sentry), each 2 clips / 8 files / 9.2 MB.
+    // (c2) Video Statistics — LIVE footage aggregates. Seed: 6 archive-backed
+    //      clips × 4 angles (1.0–1.3 MB each = 27.6 MB / 24 files) + 24 list-only
+    //      clips × 2 angles (0.7/0.8 MB each = 36.0 MB / 48 files) = 30 clips /
+    //      72 files / 63.6 MB total. The 24 extra clips split evenly across the
+    //      three folder classes (Recent/Saved/Sentry), so each class now totals
+    //      10 clips / 24 files / 21.2 MB (2/8/9.2 original + 8/16/12.0 extra).
     const totals = page.locator("[data-testid=video-totals]");
     await expect(totals).toBeVisible();
-    await expect(page.locator("#vsTotalClips")).toHaveText("6");
-    await expect(page.locator("#vsTotalFiles")).toHaveText("24");
-    await expect(page.locator("#vsTotalBytes")).toHaveText("27.6 MB");
+    await expect(page.locator("#vsTotalClips")).toHaveText("30");
+    await expect(page.locator("#vsTotalFiles")).toHaveText("72");
+    await expect(page.locator("#vsTotalBytes")).toHaveText("63.6 MB");
     const savedRow = page.locator("[data-testid=folder-table] tr[data-folder=SavedClips]");
     await expect(savedRow).toContainText("Saved Clips");
-    await expect(savedRow.locator(".number-cell").nth(0)).toHaveText("2");
-    await expect(savedRow.locator(".number-cell").nth(1)).toHaveText("8");
-    await expect(savedRow.locator(".number-cell").nth(2)).toHaveText("9.2 MB");
+    await expect(savedRow.locator(".number-cell").nth(0)).toHaveText("10");
+    await expect(savedRow.locator(".number-cell").nth(1)).toHaveText("24");
+    await expect(savedRow.locator(".number-cell").nth(2)).toHaveText("21.2 MB");
 
     // (d) Charts: both <canvas> elements present and the loading placeholder gone.
     await expect(page.locator("[data-testid=charts-loading]")).toHaveCount(0);

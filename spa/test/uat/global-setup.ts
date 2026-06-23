@@ -34,7 +34,8 @@ const MEDIA_RO_ROOT = resolve(ART, "media-ro");
 const ZONEINFO_DIR = resolve(ART, "zoneinfo");
 const FIXTURE_MP4 = resolve(SPA, "test", "fixtures", "clip.mp4");
 const FIXTURE_PNG = resolve(SPA, "test", "fixtures", "thumb.png");
-// Mirrors build-db.mjs CLIPS canonical_key list + ANGLES camera list (6×4=24).
+// Mirrors only the original six archive-backed clip keys from build-db.mjs.
+// Older list-only clips are intentionally excluded to keep UAT artifact setup fast.
 const ARCHIVE_KEYS = [
   "2024-06-01_07-15-00",
   "2024-06-01_08-02-00",
@@ -175,7 +176,7 @@ export default async function globalSetup() {
   mkdirSync(ART, { recursive: true });
 
   if (!FAST) {
-    // 1. Seed a fresh read-only catalog (3 trips / 6 clips / 3 events).
+    // 1. Seed a fresh read-only catalog (3 trips / 30 clips / 3 events).
     run(process.execPath, [resolve(SPA, "test", "seed", "build-db.mjs"), SEED_DB], SPA);
     // 2. Build the hashed static bundle (tsc typecheck + vite build).
     run(NPM, ["run", "build"], SPA);

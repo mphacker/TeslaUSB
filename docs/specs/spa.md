@@ -95,9 +95,24 @@ Every capability above must exist post-rebuild; appearance must match.
   render exactly. The map never `fitBounds` on an empty visible set; under
   limit-to-view a debounced `moveend` refilters without a fitBounds reset; click
   route-disambiguation reads the *filtered* visible trips. Filter pills reseed to
-  "all on" on day change. v1 parity note: filters scope the **map markers** only
-  (side-panel lists and a multi-day **date range** are tracked follow-ups). Multi-
-  day date range is out of scope for v1 of this lane.
+  "all on"   on day change. v1 parity note: filters scope the **map markers** only — the
+  side-panel lists are an independent global catalog browser (see "Side-panel
+  catalog browser" below), NOT a filtered view of the day. Multi-day **date range**
+  is out of scope for v1 of this lane.
+- **Side-panel catalog browser (§4.1):** the slide-up side panel's three tabs —
+  **Events**, **Trips**, **All Clips** — are each a **global, newest-first,
+  progressively-loaded** list over the whole catalog (NOT day-scoped and NOT
+  affected by the map filters; the map stays the filtered day view). Each tab pulls
+  from its cursor-paginated endpoint (`GET /api/events`, `GET /api/trips/page`,
+  `GET /api/clips`, all `(date DESC, id DESC)` — see [`webd-api.md §2.1.1`](./contracts/webd-api.md)),
+  rendering the first page on open and fetching the next page via an
+  `IntersectionObserver` sentinel as the user scrolls — so the Pi never serves one
+  giant list. Pagination state is **per tab**: one in-flight request at a time,
+  aborted and reset on tab switch / unmount; responses arriving after a switch are
+  ignored; items dedupe by `id`. A tab shows a "Loading…" affordance while a page is
+  in flight and stops fetching when `next_cursor` is `null` (end of catalog). The
+  snapshot-pinned cursor means rows recorded while the user scrolls don't shift the
+  list; they appear the next time the tab is opened.
 - **Display preferences (§4.1/§4.15, server-persisted):** the trip map exposes
   two display knobs persisted **server-side** (via `PUT /api/settings` → indexd
   `SetPref`, see `webd.md §3.2`) so they survive reload and are shared across

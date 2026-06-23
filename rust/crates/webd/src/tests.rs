@@ -20,6 +20,7 @@ use axum::http::{Method, Request, StatusCode};
 use http_body_util::BodyExt;
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 use tower::ServiceExt;
@@ -36,6 +37,7 @@ use crate::{
 /// alive for the duration of the test (handlers open the DB per request).
 struct Fixture {
     _dir: TempDir,
+    db_path: PathBuf,
     app: Router,
 }
 
@@ -87,7 +89,11 @@ fn fixture() -> Fixture {
     // gadgetd socket at a path that does not exist.
     let gadget_sock = dir.path().join("gadgetd.sock");
     let app = build_router(catalog, static_dir, media, gadget_sock);
-    Fixture { _dir: dir, app }
+    Fixture {
+        _dir: dir,
+        db_path,
+        app,
+    }
 }
 
 fn settings_fixture(indexd_response: Value, fail_unavailable: bool) -> SettingsFixture {
@@ -291,20 +297,21 @@ async fn events_cursor_paginate() {
     let items = body["items"].as_array().unwrap();
     assert_eq!(items.len(), 2);
     assert_eq!(body["limit"], 2);
-    assert_eq!(body["next_cursor"], 2); // full page -> cursor = last id
+    let cursor = body["next_cursor"].as_str().unwrap();
+    assert!(!cursor.is_empty());
+    assert!(items[0]["t"].as_i64().unwrap() > items[1]["t"].as_i64().unwrap());
     // Event field mapping.
-    assert_eq!(items[0]["type"], "harsh_braking");
-    assert_eq!(items[0]["front_frame_offset_ms"], 1500);
-    assert_eq!(items[0]["front_frame_index"], 45);
+    assert_eq!(items[1]["type"], "sharp_turn");
+    assert_eq!(items[1]["front_frame_offset_ms"], 1800);
+    assert_eq!(items[1]["front_frame_index"], 54);
 
     // Next page: one remaining event, cursor exhausted.
-    let (status, body) = get_json(&fx.app, "/api/events?after=2&limit=2").await;
+    let (status, body) = get_json(&fx.app, &format!("/api/events?cursor={cursor}&limit=2")).await;
     assert_eq!(status, StatusCode::OK);
     let items = body["items"].as_array().unwrap();
     assert_eq!(items.len(), 1);
-    assert_eq!(items[0]["id"], 3);
-    assert_eq!(items[0]["type"], "sentry");
-    assert!(items[0]["trip_id"].is_null());
+    assert_eq!(items[0]["id"], 1);
+    assert_eq!(items[0]["type"], "harsh_braking");
     assert!(body["next_cursor"].is_null());
 }
 
@@ -319,9 +326,15 @@ async fn events_filter_by_trip_and_reject_bad_params() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"]["code"], "invalid_limit");
 
-    let (status, body) = get_json(&fx.app, "/api/events?after=-1").await;
+    let (status, body) = get_json(&fx.app, "/api/events?cursor=not-valid-base64!!").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["error"]["code"], "invalid_after");
+    assert_eq!(body["error"]["code"], "invalid_cursor");
+
+    let (_, clips_page) = get_json(&fx.app, "/api/clips?limit=1").await;
+    let clips_cursor = clips_page["next_cursor"].as_str().unwrap();
+    let (status, body) = get_json(&fx.app, &format!("/api/events?cursor={clips_cursor}")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_cursor");
 }
 
 #[tokio::test]
@@ -332,7 +345,11 @@ async fn clips_list_with_angles_and_pagination() {
     let items = body["items"].as_array().unwrap();
     assert_eq!(items.len(), 2);
 
-    let clip1 = &items[0];
+    let clip2 = &items[0];
+    assert_eq!(clip2["id"], 2);
+    assert_eq!(clip2["is_sentry"], true);
+
+    let clip1 = &items[1];
     assert_eq!(clip1["id"], 1);
     assert_eq!(clip1["is_sentry"], false);
     let angles = clip1["angles"].as_array().unwrap();
@@ -344,19 +361,68 @@ async fn clips_list_with_angles_and_pagination() {
     // car-volume clips (D1; indexd commit 6bd5ced) and 'archive' for Pi-side.
     assert_eq!(angles[0]["view_kind"], "ro_usb");
 
-    let clip2 = &items[1];
-    assert_eq!(clip2["is_sentry"], true);
-
-    // Pagination: one per page -> cursor = first id.
+    // Pagination: one per page using an opaque cursor.
     let (_, body) = get_json(&fx.app, "/api/clips?limit=1").await;
-    assert_eq!(body["items"].as_array().unwrap().len(), 1);
-    assert_eq!(body["next_cursor"], 1);
+    let first_page = body["items"].as_array().unwrap();
+    assert_eq!(first_page.len(), 1);
+    assert_eq!(first_page[0]["id"], 2);
+    let cursor = body["next_cursor"].as_str().unwrap();
+    assert!(!cursor.is_empty());
+    let (_, body) = get_json(&fx.app, &format!("/api/clips?cursor={cursor}&limit=1")).await;
+    let second_page = body["items"].as_array().unwrap();
+    assert_eq!(second_page.len(), 1);
+    assert_eq!(second_page[0]["id"], 1);
+    assert!(body["next_cursor"].is_null());
 
     // folder_class filter.
     let (_, body) = get_json(&fx.app, "/api/clips?folder_class=SentryClips").await;
     let items = body["items"].as_array().unwrap();
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["id"], 2);
+}
+
+#[tokio::test]
+async fn trips_page_cursor_paginate() {
+    let fx = fixture();
+    let (status, body) = get_json(&fx.app, "/api/trips/page?limit=1").await;
+    assert_eq!(status, StatusCode::OK);
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["id"], 2);
+    assert_eq!(items[0]["point_count"], 0);
+    assert!(items[0]["bbox"].is_null());
+    let cursor = body["next_cursor"].as_str().unwrap();
+    assert!(!cursor.is_empty());
+
+    let (status, body) = get_json(&fx.app, &format!("/api/trips/page?cursor={cursor}&limit=1")).await;
+    assert_eq!(status, StatusCode::OK);
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["id"], 1);
+    assert_eq!(items[0]["point_count"], 2);
+    assert_eq!(items[0]["bbox"]["min_lat"], 40.0);
+    assert!(body["next_cursor"].is_null());
+}
+
+#[tokio::test]
+async fn cursor_snapshot_stability_ignores_late_inserts() {
+    let fx = fixture();
+    let (_, body) = get_json(&fx.app, "/api/events?limit=2").await;
+    let cursor = body["next_cursor"].as_str().unwrap().to_owned();
+
+    let conn = Connection::open(&fx.db_path).unwrap();
+    conn.execute(
+        "INSERT INTO events (id, trip_id, clip_id, type, severity, t, lat, lon, front_frame_offset, front_frame_index, description, created_at) \
+         VALUES (?1, NULL, NULL, 'late_insert', 1, 9999, NULL, NULL, NULL, NULL, 'Late insert', 0)",
+        params![99],
+    )
+    .unwrap();
+
+    let (_, body) = get_json(&fx.app, &format!("/api/events?cursor={cursor}&limit=2")).await;
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["id"], 1);
+    assert!(items.iter().all(|item| item["id"] != 99));
 }
 
 #[tokio::test]

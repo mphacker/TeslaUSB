@@ -15,18 +15,16 @@ use serde::Serialize;
 
 use crate::polyline::Polyline;
 
-/// A cursor-paginated page of items (D2 §6 OQ-2: `?after=<id>&limit=`).
+/// A cursor-paginated page of items (`?cursor=<opaque>&limit=`).
 ///
-/// `next_cursor` is the id to pass as `after` for the next page, present when a
-/// full page was returned (there may be more). When the total is an exact
-/// multiple of `limit`, the final follow-up page is empty — a benign, standard
-/// artefact of opaque-cursor pagination.
+/// `next_cursor` is an opaque string the client must echo back verbatim to fetch
+/// the next page; `null` means the end has been reached.
 #[derive(Debug, Serialize)]
 pub(crate) struct Page<T> {
-    /// The items in this page, ordered by ascending id.
+    /// The items in this page, ordered newest-first by `(date DESC, id DESC)`.
     pub items: Vec<T>,
-    /// The id to pass as `after` to fetch the next page, or `null` at the end.
-    pub next_cursor: Option<i64>,
+    /// Opaque next-page cursor, or `null` at the end.
+    pub next_cursor: Option<String>,
     /// The effective page size that was applied.
     pub limit: i64,
 }

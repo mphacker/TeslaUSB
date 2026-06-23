@@ -18,8 +18,8 @@ export interface ApiErrorBody {
 /** A cursor-paginated page (`{items, next_cursor, limit}`). */
 export interface Page<T> {
   items: T[];
-  /** id to pass as `after` for the next page, or null at the end. */
-  next_cursor: number | null;
+  /** Opaque cursor to echo as `cursor` for the next page, or null at the end. */
+  next_cursor: string | null;
   limit: number;
 }
 
@@ -81,6 +81,12 @@ export interface EventItem {
   description: string | null;
 }
 
+export interface EventsParams {
+  cursor?: string;
+  limit?: number;
+  trip?: number;
+}
+
 export interface Angle {
   camera: string;
   /** Opaque passthrough (code writes "live"); do not assume an enum. */
@@ -102,6 +108,17 @@ export interface Clip {
   duration_s: number | null;
   availability: string;
   angles: Angle[];
+}
+
+export interface ClipsParams {
+  cursor?: string;
+  limit?: number;
+  folder_class?: string;
+}
+
+export interface TripsPageParams {
+  cursor?: string;
+  limit?: number;
 }
 
 export interface EventTypeCount {

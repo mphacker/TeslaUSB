@@ -601,6 +601,33 @@ body.mapping-active .main-content {
     color: var(--text-muted, var(--text-secondary));
     font-size: 0.8125rem;
 }
+.vp-end {
+    text-align: center;
+    padding: 12px 8px 10px;
+    color: var(--text-muted, var(--text-secondary));
+    font-size: 0.75rem;
+    opacity: 0.85;
+}
+.vp-error {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 12px 8px 10px;
+    color: var(--text-muted, var(--text-secondary));
+    font-size: 0.75rem;
+}
+.vp-retry {
+    border: 1px solid var(--border-color, var(--border));
+    border-radius: var(--radius-sm, 4px);
+    background: transparent;
+    color: var(--text-primary);
+    font: inherit;
+    line-height: 1.2;
+    padding: 4px 10px;
+    cursor: pointer;
+}
+.vp-retry:hover { border-color: var(--accent-primary, var(--mapping-accent-primary)); }
 .vp-clip {
     display: flex;
     align-items: center;

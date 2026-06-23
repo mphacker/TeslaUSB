@@ -2,7 +2,8 @@
 // Playwright UAT. The schema DDL is transcribed verbatim from
 // rust/crates/indexd/src/db/migrations.rs (V1_SQL) plus the schema_version v1
 // row that webd's catalog guard requires. Sample data mirrors the 0.4 parity
-// baseline: one civil day with 3 trips / 6 clips / 3 events.
+// baseline for trips/events while extending clip coverage: one driving day with
+// 3 trips / 30 clips / 3 events.
 //
 // No crate edits and no native deps: uses Node's built-in `node:sqlite`.
 //
@@ -185,13 +186,17 @@ CREATE TABLE prefs (
 );
 `;
 
-// --- Sample data: one civil day, 3 trips / 6 clips / 3 events --------------
-// 2024-06-01 (UTC). Epoch seconds anchored at local-ish daytime values.
+// --- Sample data: one driving day, 3 trips / 30 clips / 3 events -------------
+// 2024-06-01 (UTC) is the driving day; clips span 2024-06-01, 2024-05-31, 2024-05-30.
 const DAY = "2024-06-01";
+const DAY_EPOCH = 1717200000; // 2024-06-01T00:00:00Z
+const DAY_SECONDS = 86400;
 // Epoch seconds for 2024-06-01T00:00:00Z + h hours + m minutes. Math.round
 // guarantees an INTEGER (float hour math like 8.1%1*60 is not exact, and the
 // time columns have INTEGER affinity — a REAL would make webd's i64 reads fail).
-const T = (h, m = 0) => Math.round(1717200000 + h * 3600 + m * 60);
+const T = (h, m = 0) => Math.round(DAY_EPOCH + h * 3600 + m * 60);
+const TDay = (dayOffset, h, m = 0) =>
+  Math.round(DAY_EPOCH + dayOffset * DAY_SECONDS + h * 3600 + m * 60);
 
 const CLIPS = [
   // id, key, start(h), end(h), folder_class, is_sentry, dur_s
@@ -203,7 +208,24 @@ const CLIPS = [
   [6, "2024-06-01_21-05-00", 21, 21.1, "SentryClips", 1, 25.0],
 ];
 
+const EXTRA_CLIPS = Array.from({ length: 24 }, (_, index) => {
+  const id = 7 + index;
+  const dayOffset = index < 12 ? -1 : -2;
+  const day = dayOffset === -1 ? "2024-05-31" : "2024-05-30";
+  const slot = index % 12;
+  const hour = 6 + Math.floor(slot / 2);
+  const minute = slot % 2 === 0 ? 10 : 40;
+  const folderClass = ["RecentClips", "SavedClips", "SentryClips"][index % 3];
+  const isSentry = folderClass === "SentryClips" ? 1 : 0;
+  const duration = 22 + (index % 6) * 4;
+  const startedAt = TDay(dayOffset, hour, minute);
+  const endedAt = startedAt + Math.round(duration);
+  const key = `${day}_${String(hour).padStart(2, "0")}-${String(minute).padStart(2, "0")}-00-x${id}`;
+  return { id, key, startedAt, endedAt, folderClass, isSentry, duration };
+});
+
 const ANGLES = ["front", "back", "left_repeater", "right_repeater"];
+const EXTRA_ANGLES = ["front", "back"];
 
 // Each trip route is a list of [lat, lon, speed_mps] points. Speeds deliberately
 // span all six viridis speed buckets (≈11→81 mph) so the speed-coloured
@@ -308,6 +330,26 @@ for (const [id, key, sh, eh, fc, sentry, dur] of CLIPS) {
     insAngle.run(id, cam, `p1/${key}/${cam}.mp4`, dur, 1_000_000 + i * 100_000);
   });
 }
+for (const clip of EXTRA_CLIPS) {
+  insClip.run(
+    clip.id,
+    clip.key,
+    clip.startedAt,
+    clip.endedAt,
+    clip.folderClass,
+    clip.isSentry,
+    clip.duration,
+  );
+  EXTRA_ANGLES.forEach((cam, i) => {
+    insAngle.run(
+      clip.id,
+      cam,
+      `p1/${clip.key}/${cam}.mp4`,
+      clip.duration,
+      700_000 + i * 100_000,
+    );
+  });
+}
 
 const insTrip = db.prepare(
   "INSERT INTO trips (id, day, started_at, ended_at, bbox_min_lat, bbox_min_lon, bbox_max_lat, bbox_max_lon, distance_m, point_count, polyline, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)",
@@ -396,8 +438,9 @@ const counts = {
   events: one("SELECT COUNT(*) FROM events"),
   angles: one("SELECT COUNT(*) FROM angles"),
 };
-if (counts.trips !== 3 || counts.clips !== 6 || counts.events !== 3)
+if (counts.trips !== 3 || counts.clips !== 30 || counts.events !== 3)
   checks.push(`unexpected counts ${JSON.stringify(counts)}`);
+if (counts.angles !== 72) checks.push(`angles=${counts.angles} (expected 72)`);
 
 // Map-render preconditions: routes must form a visible path, the overlapping
 // segment must exist on two trips (disambiguation), and the BLOB fallback path

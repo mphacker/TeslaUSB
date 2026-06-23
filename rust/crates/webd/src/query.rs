@@ -26,6 +26,33 @@ const CLIP_COLS: &str = "SELECT id, canonical_key, started_at, ended_at, partiti
 const EVENT_COLS: &str = "SELECT id, type, severity, t, lat, lon, clip_id, trip_id, \
      front_frame_index, front_frame_offset, description FROM events";
 
+/// Descending keyset cursor state (`(date DESC, id DESC)`).
+#[derive(Clone, Copy)]
+pub(crate) struct Keyset {
+    /// Snapshot pin: every page filters `id <= snap`.
+    pub snap: i64,
+    /// Last row of the previous page (`date`, `id`), or `None` on the first page.
+    pub after: Option<(i64, i64)>,
+}
+
+/// The table to snapshot for cursor pagination.
+#[derive(Clone, Copy)]
+pub(crate) enum SnapshotResource {
+    Events,
+    Clips,
+    Trips,
+}
+
+impl SnapshotResource {
+    fn table_name(self) -> &'static str {
+        match self {
+            Self::Events => "events",
+            Self::Clips => "clips",
+            Self::Trips => "trips",
+        }
+    }
+}
+
 /// `GET /api/days`: civil days with driving trips plus rolled-up counts.
 ///
 /// `event_count` is events linked to trips on that day (trip-less sentry events
@@ -72,6 +99,40 @@ pub(crate) fn list_trips(
     }
 }
 
+/// `GET /api/trips/page`: newest-first keyset page over the whole trip catalog.
+pub(crate) fn list_trips_page(
+    conn: &Connection,
+    keyset: Keyset,
+    limit: i64,
+) -> Result<Vec<TripDto>, rusqlite::Error> {
+    let limit_plus_one = limit.saturating_add(1);
+    let trips = if let Some((ts, id)) = keyset.after {
+        let sql = format!(
+            "{TRIP_COLS} WHERE id <= ?1 \
+             AND (started_at < ?2 OR (started_at = ?2 AND id < ?3)) \
+             ORDER BY started_at DESC, id DESC LIMIT ?4"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        stmt.query_map(params![keyset.snap, ts, id, limit_plus_one], map_trip)?
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        let sql = format!("{TRIP_COLS} WHERE id <= ?1 ORDER BY started_at DESC, id DESC LIMIT ?2");
+        let mut stmt = conn.prepare(&sql)?;
+        stmt.query_map(params![keyset.snap, limit_plus_one], map_trip)?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    Ok(trips)
+}
+
+/// `SELECT MAX(id)` snapshot anchor for cursor pagination.
+pub(crate) fn snapshot_max_id(
+    conn: &Connection,
+    resource: SnapshotResource,
+) -> Result<Option<i64>, rusqlite::Error> {
+    let sql = format!("SELECT MAX(id) FROM {}", resource.table_name());
+    conn.query_row(&sql, [], |row| row.get(0))
+}
+
 /// `GET /api/trips/:id`: a trip plus its `trip_points` (in `seq` order).
 /// `None` when no trip has that id.
 pub(crate) fn get_trip(
@@ -101,50 +162,99 @@ pub(crate) fn get_trip(
     Ok(Some(TripDetailDto { trip, points }))
 }
 
-/// `GET /api/events`: cursor page of event bubbles (`id > after`, ascending),
-/// optionally filtered to a single `trip`.
+/// `GET /api/events`: newest-first keyset page of event bubbles, optionally
+/// filtered to a single `trip`.
 pub(crate) fn list_events(
     conn: &Connection,
-    after: i64,
+    keyset: Keyset,
     limit: i64,
     trip: Option<i64>,
 ) -> Result<Vec<EventDto>, rusqlite::Error> {
-    if let Some(trip) = trip {
-        let sql = format!("{EVENT_COLS} WHERE id > ?1 AND trip_id = ?2 ORDER BY id ASC LIMIT ?3");
-        let mut stmt = conn.prepare(&sql)?;
-        let out = stmt
-            .query_map(params![after, trip, limit], map_event)?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(out)
-    } else {
-        let sql = format!("{EVENT_COLS} WHERE id > ?1 ORDER BY id ASC LIMIT ?2");
-        let mut stmt = conn.prepare(&sql)?;
-        let out = stmt
-            .query_map(params![after, limit], map_event)?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(out)
-    }
+    let limit_plus_one = limit.saturating_add(1);
+    let out = match (trip, keyset.after) {
+        (Some(trip_id), Some((ts, id))) => {
+            let sql = format!(
+                "{EVENT_COLS} WHERE id <= ?1 AND trip_id = ?2 \
+                 AND (t < ?3 OR (t = ?3 AND id < ?4)) \
+                 ORDER BY t DESC, id DESC LIMIT ?5"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            stmt.query_map(params![keyset.snap, trip_id, ts, id, limit_plus_one], map_event)?
+                .collect::<Result<Vec<_>, _>>()?
+        }
+        (Some(trip_id), None) => {
+            let sql =
+                format!("{EVENT_COLS} WHERE id <= ?1 AND trip_id = ?2 ORDER BY t DESC, id DESC LIMIT ?3");
+            let mut stmt = conn.prepare(&sql)?;
+            stmt.query_map(params![keyset.snap, trip_id, limit_plus_one], map_event)?
+                .collect::<Result<Vec<_>, _>>()?
+        }
+        (None, Some((ts, id))) => {
+            let sql = format!(
+                "{EVENT_COLS} WHERE id <= ?1 AND (t < ?2 OR (t = ?2 AND id < ?3)) \
+                 ORDER BY t DESC, id DESC LIMIT ?4"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            stmt.query_map(params![keyset.snap, ts, id, limit_plus_one], map_event)?
+                .collect::<Result<Vec<_>, _>>()?
+        }
+        (None, None) => {
+            let sql = format!("{EVENT_COLS} WHERE id <= ?1 ORDER BY t DESC, id DESC LIMIT ?2");
+            let mut stmt = conn.prepare(&sql)?;
+            stmt.query_map(params![keyset.snap, limit_plus_one], map_event)?
+                .collect::<Result<Vec<_>, _>>()?
+        }
+    };
+    Ok(out)
 }
 
-/// `GET /api/clips`: cursor page of clips (`id > after`, ascending), optionally
+/// `GET /api/clips`: newest-first keyset page of clips, optionally
 /// filtered by `folder_class`, each with its camera angles.
 pub(crate) fn list_clips(
     conn: &Connection,
-    after: i64,
+    keyset: Keyset,
     limit: i64,
     folder_class: Option<&str>,
 ) -> Result<Vec<ClipDto>, rusqlite::Error> {
-    let mut clips: Vec<ClipDto> = if let Some(fc) = folder_class {
-        let sql =
-            format!("{CLIP_COLS} WHERE id > ?1 AND folder_class = ?2 ORDER BY id ASC LIMIT ?3");
-        let mut stmt = conn.prepare(&sql)?;
-        stmt.query_map(params![after, fc, limit], map_clip)?
+    let limit_plus_one = limit.saturating_add(1);
+    let mut clips: Vec<ClipDto> = match (folder_class, keyset.after) {
+        (Some(folder_class), Some((ts, id))) => {
+            let sql = format!(
+                "{CLIP_COLS} WHERE id <= ?1 AND folder_class = ?2 \
+                 AND (started_at < ?3 OR (started_at = ?3 AND id < ?4)) \
+                 ORDER BY started_at DESC, id DESC LIMIT ?5"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            stmt.query_map(
+                params![keyset.snap, folder_class, ts, id, limit_plus_one],
+                map_clip,
+            )?
             .collect::<Result<Vec<_>, _>>()?
-    } else {
-        let sql = format!("{CLIP_COLS} WHERE id > ?1 ORDER BY id ASC LIMIT ?2");
-        let mut stmt = conn.prepare(&sql)?;
-        stmt.query_map(params![after, limit], map_clip)?
-            .collect::<Result<Vec<_>, _>>()?
+        }
+        (Some(folder_class), None) => {
+            let sql = format!(
+                "{CLIP_COLS} WHERE id <= ?1 AND folder_class = ?2 ORDER BY started_at DESC, id DESC LIMIT ?3"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            stmt.query_map(params![keyset.snap, folder_class, limit_plus_one], map_clip)?
+                .collect::<Result<Vec<_>, _>>()?
+        }
+        (None, Some((ts, id))) => {
+            let sql = format!(
+                "{CLIP_COLS} WHERE id <= ?1 \
+                 AND (started_at < ?2 OR (started_at = ?2 AND id < ?3)) \
+                 ORDER BY started_at DESC, id DESC LIMIT ?4"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            stmt.query_map(params![keyset.snap, ts, id, limit_plus_one], map_clip)?
+                .collect::<Result<Vec<_>, _>>()?
+        }
+        (None, None) => {
+            let sql = format!("{CLIP_COLS} WHERE id <= ?1 ORDER BY started_at DESC, id DESC LIMIT ?2");
+            let mut stmt = conn.prepare(&sql)?;
+            stmt.query_map(params![keyset.snap, limit_plus_one], map_clip)?
+                .collect::<Result<Vec<_>, _>>()?
+        }
     };
 
     let ids: Vec<i64> = clips.iter().map(|clip| clip.id).collect();

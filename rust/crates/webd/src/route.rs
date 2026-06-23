@@ -17,7 +17,7 @@ use axum::response::Sse;
 use axum::response::sse::{Event, KeepAlive};
 use axum::routing::{delete, get, post};
 use rusqlite::Connection;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
@@ -53,6 +53,7 @@ pub(crate) fn router(state: AppState, static_dir: PathBuf) -> Router {
     let api = Router::new()
         .route("/days", get(days))
         .route("/trips", get(trips))
+        .route("/trips/page", get(trips_page))
         .route("/trips/{id}", get(trip_detail))
         .route("/events", get(events))
         .route("/media-events", get(media_events_stream))
@@ -175,8 +176,8 @@ struct TripsQuery {
 /// Query parameters for cursor-paginated `GET /api/events`.
 #[derive(Deserialize)]
 struct EventsQuery {
-    /// Return events with `id` strictly greater than this cursor.
-    after: Option<i64>,
+    /// Opaque cursor echoed from `next_cursor`.
+    cursor: Option<String>,
     /// Page size (clamped to [`MAX_LIMIT`]).
     limit: Option<i64>,
     /// Optional filter to a single trip.
@@ -186,12 +187,21 @@ struct EventsQuery {
 /// Query parameters for cursor-paginated `GET /api/clips`.
 #[derive(Deserialize)]
 struct ClipsQuery {
-    /// Return clips with `id` strictly greater than this cursor.
-    after: Option<i64>,
+    /// Opaque cursor echoed from `next_cursor`.
+    cursor: Option<String>,
     /// Page size (clamped to [`MAX_LIMIT`]).
     limit: Option<i64>,
     /// Optional `folder_class` filter.
     folder_class: Option<String>,
+}
+
+/// Query parameters for cursor-paginated `GET /api/trips/page`.
+#[derive(Deserialize)]
+struct TripsPageQuery {
+    /// Opaque cursor echoed from `next_cursor`.
+    cursor: Option<String>,
+    /// Page size (clamped to [`MAX_LIMIT`]).
+    limit: Option<i64>,
 }
 
 async fn days(State(state): State<AppState>) -> Result<Json<Vec<DaySummary>>, ApiError> {
@@ -210,6 +220,43 @@ async fn trips(
     Ok(Json(out))
 }
 
+async fn trips_page(
+    State(state): State<AppState>,
+    Query(q): Query<TripsPageQuery>,
+) -> Result<Json<Page<TripDto>>, ApiError> {
+    let limit = validate_limit(q.limit)?;
+    let keyset = if let Some(cursor) = q.cursor {
+        let (ts, id, snap) = decode_cursor(&cursor, "trips")?;
+        query::Keyset {
+            snap,
+            after: Some((ts, id)),
+        }
+    } else {
+        let Some(snap) = read(state.catalog.clone(), move |conn| {
+            query::snapshot_max_id(conn, query::SnapshotResource::Trips)
+        })
+        .await?
+        else {
+            return Ok(Json(Page {
+                items: vec![],
+                next_cursor: None,
+                limit,
+            }));
+        };
+        query::Keyset { snap, after: None }
+    };
+    let snap = keyset.snap;
+    let items = read(state.catalog, move |conn| query::list_trips_page(conn, keyset, limit)).await?;
+    Ok(Json(into_page(
+        items,
+        limit,
+        snap,
+        "trips",
+        |trip| trip.started_at,
+        |trip| trip.id,
+    )))
+}
+
 async fn trip_detail(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -222,26 +269,79 @@ async fn events(
     State(state): State<AppState>,
     Query(q): Query<EventsQuery>,
 ) -> Result<Json<Page<EventDto>>, ApiError> {
-    let (after, limit) = resolve_page(q.after, q.limit)?;
+    let limit = validate_limit(q.limit)?;
     let trip = q.trip;
-    let items = read(state.catalog, move |conn| {
-        query::list_events(conn, after, limit, trip)
-    })
-    .await?;
-    Ok(Json(into_page(items, limit, |event| event.id)))
+    let keyset = if let Some(cursor) = q.cursor {
+        let (ts, id, snap) = decode_cursor(&cursor, "events")?;
+        query::Keyset {
+            snap,
+            after: Some((ts, id)),
+        }
+    } else {
+        let Some(snap) = read(state.catalog.clone(), move |conn| {
+            query::snapshot_max_id(conn, query::SnapshotResource::Events)
+        })
+        .await?
+        else {
+            return Ok(Json(Page {
+                items: vec![],
+                next_cursor: None,
+                limit,
+            }));
+        };
+        query::Keyset { snap, after: None }
+    };
+    let snap = keyset.snap;
+    let items = read(state.catalog, move |conn| query::list_events(conn, keyset, limit, trip)).await?;
+    Ok(Json(into_page(
+        items,
+        limit,
+        snap,
+        "events",
+        |event| event.t,
+        |event| event.id,
+    )))
 }
 
 async fn clips(
     State(state): State<AppState>,
     Query(q): Query<ClipsQuery>,
 ) -> Result<Json<Page<ClipDto>>, ApiError> {
-    let (after, limit) = resolve_page(q.after, q.limit)?;
+    let limit = validate_limit(q.limit)?;
     let folder_class = q.folder_class;
+    let keyset = if let Some(cursor) = q.cursor {
+        let (ts, id, snap) = decode_cursor(&cursor, "clips")?;
+        query::Keyset {
+            snap,
+            after: Some((ts, id)),
+        }
+    } else {
+        let Some(snap) = read(state.catalog.clone(), move |conn| {
+            query::snapshot_max_id(conn, query::SnapshotResource::Clips)
+        })
+        .await?
+        else {
+            return Ok(Json(Page {
+                items: vec![],
+                next_cursor: None,
+                limit,
+            }));
+        };
+        query::Keyset { snap, after: None }
+    };
+    let snap = keyset.snap;
     let items = read(state.catalog, move |conn| {
-        query::list_clips(conn, after, limit, folder_class.as_deref())
+        query::list_clips(conn, keyset, limit, folder_class.as_deref())
     })
     .await?;
-    Ok(Json(into_page(items, limit, |clip| clip.id)))
+    Ok(Json(into_page(
+        items,
+        limit,
+        snap,
+        "clips",
+        |clip| clip.started_at,
+        |clip| clip.id,
+    )))
 }
 
 async fn clip_detail(
@@ -1123,27 +1223,154 @@ async fn api_not_found() -> ApiError {
     ApiError::NotFound
 }
 
-/// Validate and normalize cursor-pagination params.
-fn resolve_page(after: Option<i64>, limit: Option<i64>) -> Result<(i64, i64), ApiError> {
-    let after = after.unwrap_or(0);
-    if after < 0 {
-        return Err(ApiError::bad_request("invalid_after", "after must be >= 0"));
-    }
-    let limit = match limit {
-        None => DEFAULT_LIMIT,
+/// Validate and normalize page-size params.
+fn validate_limit(limit: Option<i64>) -> Result<i64, ApiError> {
+    match limit {
+        None => Ok(DEFAULT_LIMIT),
         Some(value) if value < 1 => {
-            return Err(ApiError::bad_request("invalid_limit", "limit must be >= 1"));
+            Err(ApiError::bad_request("invalid_limit", "limit must be >= 1"))
         }
-        Some(value) => value.min(MAX_LIMIT),
-    };
-    Ok((after, limit))
+        Some(value) => Ok(value.min(MAX_LIMIT)),
+    }
 }
 
-/// Wrap a result set in a [`Page`], computing the next cursor from the last
-/// item's id when a full page was returned.
-fn into_page<T, F: Fn(&T) -> i64>(items: Vec<T>, limit: i64, id_of: F) -> Page<T> {
-    let full = usize::try_from(limit).is_ok_and(|cap| items.len() == cap);
-    let next_cursor = if full { items.last().map(id_of) } else { None };
+#[derive(Serialize, Deserialize)]
+struct CursorPayload {
+    v: i64,
+    r: String,
+    ts: i64,
+    id: i64,
+    snap: i64,
+}
+
+const BASE64URL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+fn encode_cursor(resource: &str, ts: i64, id: i64, snap: i64) -> String {
+    let payload = format!(r#"{{"v":1,"r":"{resource}","ts":{ts},"id":{id},"snap":{snap}}}"#);
+    base64url_encode(payload.as_bytes())
+}
+
+fn decode_cursor(cursor: &str, expected_resource: &str) -> Result<(i64, i64, i64), ApiError> {
+    let decoded = base64url_decode(cursor)?;
+    let payload: CursorPayload = serde_json::from_slice(&decoded)
+        .map_err(|_| ApiError::bad_request("invalid_cursor", "cursor must be valid JSON"))?;
+    if payload.v != 1 {
+        return Err(ApiError::bad_request(
+            "invalid_cursor",
+            "unsupported cursor version",
+        ));
+    }
+    if payload.r != expected_resource {
+        return Err(ApiError::bad_request(
+            "invalid_cursor",
+            "cursor resource does not match endpoint",
+        ));
+    }
+    Ok((payload.ts, payload.id, payload.snap))
+}
+
+fn base64url_encode(data: &[u8]) -> String {
+    let mut out = String::with_capacity((data.len() * 4).div_ceil(3));
+    let mut i = 0usize;
+    while i + 3 <= data.len() {
+        let chunk = (u32::from(data[i]) << 16) | (u32::from(data[i + 1]) << 8) | u32::from(data[i + 2]);
+        out.push(char::from(BASE64URL[((chunk >> 18) & 0x3f) as usize]));
+        out.push(char::from(BASE64URL[((chunk >> 12) & 0x3f) as usize]));
+        out.push(char::from(BASE64URL[((chunk >> 6) & 0x3f) as usize]));
+        out.push(char::from(BASE64URL[(chunk & 0x3f) as usize]));
+        i += 3;
+    }
+    match data.len() - i {
+        1 => {
+            let chunk = u32::from(data[i]) << 16;
+            out.push(char::from(BASE64URL[((chunk >> 18) & 0x3f) as usize]));
+            out.push(char::from(BASE64URL[((chunk >> 12) & 0x3f) as usize]));
+        }
+        2 => {
+            let chunk = (u32::from(data[i]) << 16) | (u32::from(data[i + 1]) << 8);
+            out.push(char::from(BASE64URL[((chunk >> 18) & 0x3f) as usize]));
+            out.push(char::from(BASE64URL[((chunk >> 12) & 0x3f) as usize]));
+            out.push(char::from(BASE64URL[((chunk >> 6) & 0x3f) as usize]));
+        }
+        _ => {}
+    }
+    out
+}
+
+fn base64url_decode(input: &str) -> Result<Vec<u8>, ApiError> {
+    if input.len() % 4 == 1 {
+        return Err(ApiError::bad_request(
+            "invalid_cursor",
+            "cursor is not valid base64url",
+        ));
+    }
+    let mut out = Vec::with_capacity(input.len() * 3 / 4);
+    let mut bits = 0u8;
+    let mut acc = 0u32;
+    for &byte in input.as_bytes() {
+        let Some(value) = base64url_value(byte) else {
+            return Err(ApiError::bad_request(
+                "invalid_cursor",
+                "cursor is not valid base64url",
+            ));
+        };
+        acc = (acc << 6) | u32::from(value);
+        bits += 6;
+        while bits >= 8 {
+            bits -= 8;
+            out.push(((acc >> bits) & 0xff) as u8);
+        }
+    }
+    if bits > 0 {
+        let mask = (1u32 << bits) - 1;
+        if (acc & mask) != 0 {
+            return Err(ApiError::bad_request(
+                "invalid_cursor",
+                "cursor is not valid base64url",
+            ));
+        }
+    }
+    Ok(out)
+}
+
+fn base64url_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'A'..=b'Z' => Some(byte - b'A'),
+        b'a'..=b'z' => Some(byte - b'a' + 26),
+        b'0'..=b'9' => Some(byte - b'0' + 52),
+        b'-' => Some(62),
+        b'_' => Some(63),
+        _ => None,
+    }
+}
+
+/// Wrap a result set in a [`Page`], computing an opaque `next_cursor` from the
+/// last returned row when `limit+1` rows were fetched.
+fn into_page<T, FDate: Fn(&T) -> i64, FId: Fn(&T) -> i64>(
+    mut items: Vec<T>,
+    limit: i64,
+    snap: i64,
+    resource: &str,
+    date_of: FDate,
+    id_of: FId,
+) -> Page<T> {
+    let cap = match usize::try_from(limit) {
+        Ok(value) => value,
+        Err(_) => 0,
+    };
+    let has_more = items.len() > cap;
+    if has_more {
+        items.truncate(cap);
+    }
+    let next_cursor = if has_more {
+        items.last().map(|item| {
+            let ts = date_of(item);
+            let id = id_of(item);
+            encode_cursor(resource, ts, id, snap)
+        })
+    } else {
+        None
+    };
     Page {
         items,
         next_cursor,

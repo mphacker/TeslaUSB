@@ -33,6 +33,7 @@ const TRIPMAP_API = new Set([
   "/api/days",
   "/api/settings",
   "/api/trips",
+  "/api/trips/page",
   "/api/events",
   "/api/clips",
 ]);
@@ -298,17 +299,18 @@ test.describe("trip map UAT", () => {
     await expect(vpEvents).toContainText("warning");
     await expect(vpEvents).toContainText("info");
     await expect(vpEvents).not.toContainText(/\b\d+\s*(mph|kph)\b/);
-    // Trips tab → the 3 seeded trips for the day, labelled by id.
+    // Trips tab → the 3 seeded trips from the global paged catalog.
     await page.locator("#vpTabTrips").click();
     const vpTrips = page.locator("[data-testid=vp-trips]");
     await expect(vpTrips.locator(".vp-clip")).toHaveCount(3);
     await expect(vpTrips).toContainText("Trip #1");
+    await expect(vpTrips).toContainText("Trip #2");
     await expect(vpTrips).toContainText("Trip #3");
-    // All Clips tab → the 6 seeded clips.
+    // All Clips tab → first page is capped at PANEL_PAGE_SIZE (25).
     await page.locator("#vpTabClips").click();
-    await expect(page.locator("[data-testid=vp-clips] .vp-clip")).toHaveCount(6);
+    await expect(page.locator("[data-testid=vp-clips] .vp-clip")).toHaveCount(25);
     const clipLinks = page.locator("[data-testid=vp-clips] a[data-testid^=vp-clip-link-]");
-    await expect(clipLinks).toHaveCount(6);
+    await expect(clipLinks).toHaveCount(25);
     for (const id of [1, 2, 3, 4, 5, 6]) {
       await expect(page.locator(`[data-testid=vp-clip-link-${id}]`)).toHaveAttribute(
         "href",
@@ -331,6 +333,170 @@ test.describe("trip map UAT", () => {
     await expect(page.locator(".event-svg-icon")).toHaveCount(0);
   });
 
+  test("panel — progressive infinite scroll loads the whole clip catalog newest-first", async ({
+    page,
+    probe,
+  }, testInfo) => {
+    await gotoMap(page);
+    await page.locator("#btnVideos").click();
+    await expect(page.locator("#videoPanel")).toHaveClass(/open/);
+    await page.locator("#vpTabClips").click();
+
+    const clipRows = page.locator("[data-testid=vp-clips] .vp-clip");
+    await expect(clipRows).toHaveCount(25);
+    await page.locator("[data-testid=vp-sentinel-clips]").scrollIntoViewIfNeeded();
+    await expect(clipRows).toHaveCount(30);
+
+    const clipIds = await page
+      .locator("[data-testid=vp-clips] a[data-testid^=vp-clip-link-]")
+      .evaluateAll((links) =>
+        links.map((link) =>
+          Number((link.getAttribute("data-testid") ?? "").replace("vp-clip-link-", "")),
+        ),
+      );
+    expect(clipIds).toHaveLength(30);
+    expect(new Set(clipIds).size).toBe(30);
+
+    const clipTimes = await page.evaluate(async () => {
+      const resp = await fetch("/api/clips?limit=500", { credentials: "same-origin" });
+      const body = (await resp.json()) as {
+        items?: { id: number; started_at: number }[];
+      };
+      return body.items ?? [];
+    });
+    const byId = new Map(clipTimes.map((clip) => [clip.id, clip.started_at]));
+    const started = clipIds.map((id) => byId.get(id) ?? 0);
+    for (let i = 1; i < started.length; i += 1) {
+      expect(started[i - 1]).toBeGreaterThanOrEqual(started[i]);
+    }
+    const daySpan = new Set(
+      started.map((ts) => new Date(ts * 1000).toISOString().slice(0, 10)),
+    );
+    expect(daySpan.size).toBeGreaterThan(1);
+
+    await expect(page.locator("[data-testid=vp-end-clips]")).toBeVisible();
+    const clipReqBefore = probe.requests.filter(
+      (req) => new URL(req.url).pathname === "/api/clips",
+    ).length;
+    await page.locator("#vpList").evaluate((el) => {
+      el.scrollTop = el.scrollHeight;
+    });
+    await page.waitForTimeout(300);
+    const clipReqAfter = probe.requests.filter(
+      (req) => new URL(req.url).pathname === "/api/clips",
+    ).length;
+    expect(clipReqAfter).toBe(clipReqBefore);
+
+    await page.setViewportSize({ width: 1280, height: 800 });
+    const desktopShot = resolve(
+      ARTIFACTS,
+      `tripmap-scroll-desktop-${testInfo.project.name}.png`,
+    );
+    await page.screenshot({ path: desktopShot, fullPage: false });
+    await testInfo.attach(`tripmap-scroll-desktop-${testInfo.project.name}.png`, {
+      path: desktopShot,
+      contentType: "image/png",
+    });
+
+    await page.setViewportSize({ width: 375, height: 812 });
+    const mobileShot = resolve(
+      ARTIFACTS,
+      `tripmap-scroll-mobile-${testInfo.project.name}.png`,
+    );
+    await page.screenshot({ path: mobileShot, fullPage: false });
+    await testInfo.attach(`tripmap-scroll-mobile-${testInfo.project.name}.png`, {
+      path: mobileShot,
+      contentType: "image/png",
+    });
+
+    assertCleanConsole(probe);
+  });
+
+  test("panel — clips paging error does not auto-retry storm and manual retry recovers", async ({
+    page,
+    probe,
+  }) => {
+    let failCursorPage = true;
+    let failedCursorHits = 0;
+    await page.route("**/api/clips**", async (route) => {
+      const reqUrl = new URL(route.request().url());
+      if (failCursorPage && reqUrl.searchParams.has("cursor")) {
+        failedCursorHits += 1;
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: "{invalid-json",
+        });
+        return;
+      }
+      await route.continue();
+    });
+
+    await gotoMap(page);
+    await page.locator("#btnVideos").click();
+    await expect(page.locator("#videoPanel")).toHaveClass(/open/);
+    await page.locator("#vpTabClips").click();
+
+    const clipRows = page.locator("[data-testid=vp-clips] .vp-clip");
+    await expect(clipRows).toHaveCount(25);
+    await page.locator("[data-testid=vp-sentinel-clips]").scrollIntoViewIfNeeded();
+    await expect.poll(() => failedCursorHits).toBeGreaterThanOrEqual(1);
+    await expect(page.locator("[data-testid=vp-retry-clips]")).toBeVisible();
+
+    await page.waitForTimeout(1500);
+    expect(failedCursorHits).toBeLessThanOrEqual(2);
+
+    failCursorPage = false;
+    await page.locator("[data-testid=vp-retry-clips]").click();
+    await expect(clipRows).toHaveCount(30);
+    await expect(page.locator("[data-testid=vp-end-clips]")).toBeVisible();
+    assertCleanConsole(probe);
+  });
+
+  test("panel — clips initial-load error shows retry, not a permanent spinner, and recovers", async ({
+    page,
+    probe,
+  }) => {
+    let failFirst = true;
+    let firstHits = 0;
+    await page.route("**/api/clips**", async (route) => {
+      const reqUrl = new URL(route.request().url());
+      if (failFirst && !reqUrl.searchParams.has("cursor")) {
+        firstHits += 1;
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: "{invalid-json",
+        });
+        return;
+      }
+      await route.continue();
+    });
+
+    await gotoMap(page);
+    await page.locator("#btnVideos").click();
+    await expect(page.locator("#videoPanel")).toHaveClass(/open/);
+    await page.locator("#vpTabClips").click();
+
+    // Initial load fails -> the tab must surface a retry affordance (not a
+    // permanent "Loading clips…" spinner) and must NOT storm the device.
+    await expect(page.locator("[data-testid=vp-error-clips]")).toBeVisible();
+    await expect(page.locator("[data-testid=vp-retry-clips]")).toBeVisible();
+    await expect(page.locator("[data-testid=vp-clips]")).toHaveCount(0);
+    await page.waitForTimeout(1000);
+    expect(firstHits).toBeLessThanOrEqual(2);
+
+    // Recover: allow success, click retry -> the catalog loads and pages.
+    failFirst = false;
+    await page.locator("[data-testid=vp-retry-clips]").click();
+    const clipRows = page.locator("[data-testid=vp-clips] .vp-clip");
+    await expect(clipRows).toHaveCount(25);
+    await page.locator("[data-testid=vp-sentinel-clips]").scrollIntoViewIfNeeded();
+    await expect(clipRows).toHaveCount(30);
+    await expect(page.locator("[data-testid=vp-end-clips]")).toBeVisible();
+    assertCleanConsole(probe);
+  });
+
   test("filters — event type, severity, min distance, limit-to-view, restore defaults", async ({
     page,
   }) => {
@@ -339,6 +505,15 @@ test.describe("trip map UAT", () => {
     const base = await hooks(page);
     expect(base.tripCount).toBe(3);
     expect(base.eventMarkerCount).toBe(2);
+
+    // Panel list is global/unfiltered: first page stays 25 even as map filters change.
+    await page.locator("#btnVideos").click();
+    await expect(page.locator("#videoPanel")).toHaveClass(/open/);
+    await page.locator("#vpTabClips").click();
+    const panelClips = page.locator("[data-testid=vp-clips] .vp-clip");
+    await expect(panelClips).toHaveCount(25);
+    await page.locator("#videoPanel .close-btn").click();
+    await expect(page.locator("#videoPanel")).not.toHaveClass(/open/);
 
     // Event type pills.
     const harshPill = page.locator("[data-testid=filter-type-harsh_braking]");
@@ -350,6 +525,12 @@ test.describe("trip map UAT", () => {
         .__TESLAUSB_MAP_HOOKS__;
       return !!h && h.eventMarkerCount === 1;
     });
+    await page.locator("#btnVideos").click();
+    await expect(page.locator("#videoPanel")).toHaveClass(/open/);
+    await page.locator("#vpTabClips").click();
+    await expect(panelClips).toHaveCount(25);
+    await page.locator("#videoPanel .close-btn").click();
+    await expect(page.locator("#videoPanel")).not.toHaveClass(/open/);
     let coords = await eventLatLngs(page);
     expect(coords.some(([la, lo]) => near(la, 37.79) && near(lo, -122.42))).toBe(false);
     await harshPill.click();
@@ -735,7 +916,7 @@ test.describe("trip map UAT", () => {
     }
 
     // Each required endpoint was actually hit (defends against partial wiring).
-    for (const p of ["/api/days", "/api/settings", "/api/trips", "/api/events", "/api/clips"]) {
+    for (const p of ["/api/days", "/api/settings", "/api/trips", "/api/trips/page", "/api/events", "/api/clips"]) {
       expect(apiSeen.has(p), `required endpoint ${p} was never requested`).toBe(true);
     }
     // Per-trip detail (points + speed) was fetched for EVERY rendered trip —

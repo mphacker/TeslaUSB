@@ -105,6 +105,41 @@ function assertCleanConsole(probe: Probe) {
 }
 
 test.describe("trip map UAT", () => {
+  test.beforeEach(async ({ page }) => {
+    const overrides = new Map<string, string>();
+    await page.route("**/api/settings", async (route) => {
+      const req = route.request();
+      if (req.method() === "PUT") {
+        const body = JSON.parse(req.postData() || "{}") as {
+          key?: string;
+          value?: string;
+        };
+        if (body.key && body.value) overrides.set(body.key, body.value);
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ key: body.key, value: body.value }),
+        });
+        return;
+      }
+      if (req.method() === "GET") {
+        const resp = await route.fetch();
+        const prefs = (await resp.json()) as { key: string; value: string }[];
+        const merged = new Map(prefs.map((p) => [p.key, p.value]));
+        for (const [k, v] of overrides) merged.set(k, v);
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(
+            [...merged].map(([key, value]) => ({ key, value })),
+          ),
+        });
+        return;
+      }
+      await route.continue();
+    });
+  });
+
   // ── Gate 1: functional parity ──────────────────────────────────────────
   test("functional parity — day nav, polylines, bubbles, clustering, speed toggle, disambiguation, panel", async ({
     page,
@@ -511,6 +546,118 @@ test.describe("trip map UAT", () => {
     const full = await hooks(page);
     expect(full.tripCount).toBe(3);
     expect(full.eventMarkerCount).toBe(2);
+  });
+
+  test.describe("display preferences (server-persisted)", () => {
+    test.use({ timezoneId: "America/Los_Angeles" });
+
+    test("clock and speed settings persist across reload", async ({
+      page,
+      probe,
+    }, testInfo) => {
+      const settingPuts: { key?: string; value?: string }[] = [];
+      page.on("request", (req) => {
+        if (!req.url().includes("/api/settings") || req.method() !== "PUT") return;
+        try {
+          settingPuts.push(JSON.parse(req.postData() || "{}") as { key?: string; value?: string });
+        } catch {
+          settingPuts.push({});
+        }
+      });
+
+      await gotoMap(page);
+      await page.locator("#btnDisplayPrefs").click();
+      await expect(page.locator("#displayPanel")).toBeVisible();
+      await expect(page.locator("#clockLocal")).toHaveAttribute("aria-pressed", "true");
+
+      await page.locator("#btnVideos").click();
+      await expect(page.locator("[data-testid=vp-events]")).toBeVisible();
+
+      const epoch = await page.evaluate(async () => {
+        const resp = await fetch("/api/events?limit=100", { credentials: "same-origin" });
+        const body = (await resp.json()) as { items?: { id: number; t: number }[] };
+        return body.items?.find((ev) => ev.id === 1)?.t ?? null;
+      });
+      expect(epoch).not.toBeNull();
+      const ts = epoch as number;
+      const expected = await page.evaluate((eventEpoch) => {
+        const opts: Intl.DateTimeFormatOptions = {
+          month: "short",
+          day: "numeric",
+          hour: "numeric",
+          minute: "2-digit",
+          hour12: true,
+        };
+        return {
+          local: new Date(eventEpoch * 1000).toLocaleString(undefined, opts),
+          utc: new Date(eventEpoch * 1000).toLocaleString(undefined, {
+            ...opts,
+            timeZone: "UTC",
+          }),
+        };
+      }, ts);
+      expect(expected.local).not.toBe(expected.utc);
+
+      const eventOneTime = page.locator("[data-testid=vp-event-link-1] .st-date");
+      await expect(eventOneTime).toHaveText(expected.local);
+
+      await page.locator("#videoPanel .close-btn").click();
+      await expect(page.locator("#videoPanel")).not.toHaveClass(/open/);
+      await page.locator("#clockUtc").click();
+      await expect(page.locator("#clockUtc")).toHaveAttribute("aria-pressed", "true");
+      await page.locator("#btnVideos").click();
+      await expect(page.locator("#videoPanel")).toHaveClass(/open/);
+      await expect(eventOneTime).toHaveText(expected.utc);
+      await expect
+        .poll(() => settingPuts.some((p) => p.key === "clock" && p.value === "utc"))
+        .toBe(true);
+
+      await page.locator("#videoPanel .close-btn").click();
+      await expect(page.locator("#videoPanel")).not.toHaveClass(/open/);
+      await page.locator("#btnDisplayPrefs").click();
+      await expect(page.locator("#displayPanel")).not.toHaveClass(/visible/);
+      await page.locator("#btnSpeedLegend").click();
+      await expect(page.locator("#speedLegend")).toBeVisible();
+      await page.locator("#speedUnitKph").click();
+      await expect
+        .poll(() => settingPuts.some((p) => p.key === "speed_unit" && p.value === "kph"))
+        .toBe(true);
+
+      await page.reload({ waitUntil: "load" });
+      await expect(page.locator(".map-container[data-screen=trip-map]")).toBeVisible();
+      await page.waitForFunction(() => {
+        const h = (window as unknown as { __TESLAUSB_MAP_HOOKS__?: { tripCount: number } })
+          .__TESLAUSB_MAP_HOOKS__;
+        return !!h && h.tripCount > 0;
+      });
+
+      await page.locator("#btnDisplayPrefs").click();
+      await expect(page.locator("#displayPanel")).toBeVisible();
+      await expect(page.locator("#clockUtc")).toHaveAttribute("aria-pressed", "true");
+
+      // Speed unit must survive the reload too (persisted independently of clock).
+      await page.locator("#btnDisplayPrefs").click();
+      await expect(page.locator("#displayPanel")).not.toHaveClass(/visible/);
+      await page.locator("#btnSpeedLegend").click();
+      await expect(page.locator("#speedLegend")).toBeVisible();
+      await expect(page.locator("#speedUnitKph")).toHaveAttribute("aria-pressed", "true");
+      await page.locator("#btnSpeedLegend").click();
+
+      await page.locator("#btnVideos").click();
+      await expect(page.locator("[data-testid=vp-events]")).toBeVisible();
+      await expect(page.locator("[data-testid=vp-event-link-1] .st-date")).toHaveText(expected.utc);
+      await page.locator("#videoPanel .close-btn").click();
+      await expect(page.locator("#videoPanel")).not.toHaveClass(/open/);
+
+      const shot = resolve(ARTIFACTS, `display-prefs-${testInfo.project.name}.png`);
+      await page.screenshot({ path: shot, fullPage: false });
+      await testInfo.attach(`display-prefs-${testInfo.project.name}.png`, {
+        path: shot,
+        contentType: "image/png",
+      });
+
+      assertCleanConsole(probe);
+    });
   });
 
   // ── Gate 5: wiring proof — the served HTML runs the freshly-built bundle ─

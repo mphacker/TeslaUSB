@@ -743,7 +743,7 @@ LUNs) is the single make-or-break that still needs the car.**
   [RecentClips/SavedClips/SentryClips], angle counts, sentry flags + timestamps;
   no doomed `/clips/*/stream` request for the `ro_usb` clips; console clean. See
   `files/hw-results.md` "clips browse live".)**
-- [ ] Units & timezone preferences re-render speeds/times. **(partial: wire to Settings §4.15)**
+- [x] Units & timezone preferences re-render speeds/times. **(server-persisted: speed unit (mph/kph) + display clock (local/UTC) re-render trip-map speeds & times and survive reload; optimistic write with per-key serialized PUT /api/settings→indexd and rollback to the last server-confirmed value. Playwright: `spa/test/uat/trip-map.spec.ts` "display preferences (server-persisted)" — 20/20 green desktop+mobile, console clean. Follow-up: full IANA-zone picker + cross-screen time propagation.)**
 
 ### 4.2 Event / Video Player — `Requirements.md` §4.2
 
@@ -1179,7 +1179,7 @@ LUNs) is the single make-or-break that still needs the car.**
 
 - [ ] Toggle Samba + status dot. **(depends on §2)**
 - [ ] Set/change Samba password (8–63). **(depends on §2)**
-- [ ] Map/display prefs (units, timezone) + network settings. **(partial: GET-only today)**
+- [ ] Map/display prefs (units, timezone) + network settings. **(partial: map display prefs now persist via `PUT /api/settings` — speed unit + local/UTC clock, see §4.1; network settings + dedicated Settings screen still pending)**
 - [ ] System-health card (per-subsystem behind top-bar dot). **(gated:A5/B1)**
 
 ---

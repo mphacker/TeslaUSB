@@ -3,6 +3,7 @@ import { Icon } from "../components/Icon";
 import { api, ApiError } from "../api/client";
 import type { Clip, DaySummary, EventItem, Trip, TripDetail } from "../api/types";
 import {
+  type ClockPref,
   TripMapController,
   type MapEvent,
   type MapFilters,
@@ -53,15 +54,17 @@ function severityLabel(severity: number | null): string | null {
   }
 }
 
-function fmtClock(epochSec: number): string {
+function fmtClock(epochSec: number, clock: ClockPref): string {
   try {
-    return new Date(epochSec * 1000).toLocaleString(undefined, {
+    const options: Intl.DateTimeFormatOptions = {
       month: "short",
       day: "numeric",
       hour: "numeric",
       minute: "2-digit",
       hour12: true,
-    });
+    };
+    if (clock === "utc") options.timeZone = "UTC";
+    return new Date(epochSec * 1000).toLocaleString(undefined, options);
   } catch {
     return "—";
   }
@@ -111,8 +114,9 @@ function toMapTrip(trip: Trip, detail: TripDetail | null): MapTrip {
  *  - bubbles  → bounded per-trip `/api/events?trip=<id>` (on-route events).
  *  - panel    → `/api/events` (all, incl. trip-less), `/api/trips`, `/api/clips`.
  *
- * The mph/kmh toggle is a small SPA functional addition (the legacy app was
- * server-driven with no UI control) to satisfy the spa.md §3 parity gate.
+ * The display-preference toggles (mph/kmh + local/UTC clock) are small SPA
+ * functional additions (the legacy app was server-driven with no UI control) to
+ * satisfy the parity gate.
  */
 export function TripMap() {
   const mapRef = useRef<HTMLDivElement>(null);
@@ -122,13 +126,16 @@ export function TripMap() {
   const [days, setDays] = useState<DaySummary[] | null>(null);
   const [dayIndex, setDayIndex] = useState(0);
   const [unit, setUnit] = useState<SpeedUnit>("mph");
+  const [clock, setClock] = useState<ClockPref>("local");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [prefError, setPrefError] = useState<string | null>(null);
   const [mapTrips, setMapTrips] = useState<MapTrip[]>([]);
   const [mapEvents, setMapEvents] = useState<MapEvent[]>([]);
 
   const [legendVisible, setLegendVisible] = useState(false);
   const [filtersVisible, setFiltersVisible] = useState(false);
+  const [displayVisible, setDisplayVisible] = useState(false);
   const [panelOpen, setPanelOpen] = useState(false);
   const [panelTab, setPanelTab] = useState<PanelTab>("events");
   const [panelEvents, setPanelEvents] = useState<EventItem[] | null>(null);
@@ -204,7 +211,9 @@ export function TripMap() {
         ]);
         const pref = settings.find((p) => p.key === "speed_unit")?.value ?? "";
         const initialUnit: SpeedUnit = /kph|km/i.test(pref) ? "kph" : "mph";
+        const clockPref = settings.find((p) => p.key === "clock")?.value;
         setUnit(initialUnit);
+        setClock(clockPref === "utc" ? "utc" : "local");
         setDays(dayList);
         setDayIndex(0);
       } catch (err) {
@@ -284,8 +293,8 @@ export function TripMap() {
   useEffect(() => {
     const ctrl = ctrlRef.current;
     if (!ctrl) return;
-    ctrl.render({ trips: mapTrips, events: mapEvents, unit, filters });
-  }, [mapTrips, mapEvents, unit, filters]);
+    ctrl.render({ trips: mapTrips, events: mapEvents, unit, clock, filters });
+  }, [mapTrips, mapEvents, unit, clock, filters]);
 
   // ── Lazy-load the video-panel data for the active tab when opened. ──
   useEffect(() => {
@@ -326,9 +335,73 @@ export function TripMap() {
     });
   };
 
+  // Per-key persisted-preference writer. The UI updates optimistically; this then
+  // PUTs the value to /api/settings with three robustness guards (mirroring this
+  // file's seqRef pattern for stale async results):
+  //   • serialize per key so concurrent PUTs land in click order — the server
+  //     converges to the user's latest choice even when a slow Pi reorders them;
+  //   • track the last server-confirmed value per key (updated only on a
+  //     successful PUT), so a failed write reverts the UI to what the server
+  //     actually holds — never to an optimistic value that itself never persisted;
+  //   • only the most-recently-enqueued write for a key may revert / surface an
+  //     error, so a superseded failure can't clobber a newer value or show a
+  //     stale toast.
+  const prefWriteRef = useRef<
+    Record<string, { seq: number; tail: Promise<unknown>; confirmed: string }>
+  >({});
+
+  const persistPref = (
+    key: string,
+    value: string,
+    confirmedSeed: string,
+    applyValue: (v: string) => void,
+    errMsg: string,
+  ) => {
+    setPrefError(null);
+    const slot = (prefWriteRef.current[key] ??= {
+      seq: 0,
+      tail: Promise.resolve(),
+      confirmed: confirmedSeed,
+    });
+    const seq = ++slot.seq;
+    const send = async () => {
+      await api.putSetting(key, value);
+      slot.confirmed = value;
+    };
+    slot.tail = slot.tail.then(send, send).then(
+      () => undefined,
+      () => {
+        if (seq !== slot.seq) return;
+        applyValue(slot.confirmed);
+        setPrefError(errMsg);
+      },
+    );
+  };
+
   const onToggleUnit = (next: SpeedUnit) => {
     if (next === unit) return;
+    const prev = unit;
     setUnit(next);
+    persistPref(
+      "speed_unit",
+      next,
+      prev,
+      (v) => setUnit(v as SpeedUnit),
+      "Couldn't save speed unit. Keeping previous value.",
+    );
+  };
+
+  const onToggleClock = (next: ClockPref) => {
+    if (next === clock) return;
+    const prev = clock;
+    setClock(next);
+    persistPref(
+      "clock",
+      next,
+      prev,
+      (v) => setClock(v as ClockPref),
+      "Couldn't save clock preference. Keeping previous value.",
+    );
   };
 
   const onToggleType = (type: string) => {
@@ -564,6 +637,37 @@ export function TripMap() {
         </div>
       </div>
 
+      <div
+        class={`display-panel${displayVisible ? " visible" : ""}`}
+        id="displayPanel"
+        aria-hidden={displayVisible ? "false" : "true"}
+      >
+        <div class="filter-panel-title">Display</div>
+        <div class="filter-section">
+          <div class="filter-label">Clock</div>
+          <span class="speed-unit-toggle" role="group" aria-label="Clock">
+            <button
+              type="button"
+              class={`speed-unit-btn${clock === "local" ? " active" : ""}`}
+              id="clockLocal"
+              aria-pressed={clock === "local"}
+              onClick={() => onToggleClock("local")}
+            >
+              Local
+            </button>
+            <button
+              type="button"
+              class={`speed-unit-btn${clock === "utc" ? " active" : ""}`}
+              id="clockUtc"
+              aria-pressed={clock === "utc"}
+              onClick={() => onToggleClock("utc")}
+            >
+              UTC
+            </button>
+          </span>
+        </div>
+      </div>
+
       <div class="map-fab-group" id="mapFabs">
         <button
           class={`map-fab${panelOpen ? " active" : ""}`}
@@ -584,6 +688,15 @@ export function TripMap() {
           <Icon name="filter" />
         </button>
         <button
+          class={`map-fab${displayVisible ? " active" : ""}`}
+          id="btnDisplayPrefs"
+          onClick={() => setDisplayVisible((v) => !v)}
+          aria-label="Display preferences"
+          title="Display"
+        >
+          <Icon name="settings" />
+        </button>
+        <button
           class={`map-fab${legendVisible ? " active" : ""}`}
           id="btnSpeedLegend"
           onClick={() => setLegendVisible((v) => !v)}
@@ -593,6 +706,11 @@ export function TripMap() {
           <Icon name="zap" />
         </button>
       </div>
+      {prefError && (
+        <div class="map-pref-error" role="status" aria-live="polite">
+          {prefError}
+        </div>
+      )}
 
       <div class={`video-panel${panelOpen ? " open" : ""}`} id="videoPanel">
         <div class="video-panel-header">
@@ -629,10 +747,10 @@ export function TripMap() {
         </div>
         <div class="video-panel-list" id="vpList">
           {panelTab === "events" && (
-            <EventsTab events={panelEvents} />
+            <EventsTab events={panelEvents} clock={clock} />
           )}
-          {panelTab === "trips" && <TripsTab trips={panelTrips} />}
-          {panelTab === "clips" && <ClipsTab clips={panelClips} />}
+          {panelTab === "trips" && <TripsTab trips={panelTrips} clock={clock} />}
+          {panelTab === "clips" && <ClipsTab clips={panelClips} clock={clock} />}
         </div>
       </div>
     </div>
@@ -641,8 +759,10 @@ export function TripMap() {
 
 function EventsTab({
   events,
+  clock,
 }: {
   events: EventItem[] | null;
+  clock: ClockPref;
 }) {
   if (events === null) return <div class="vp-loading">Loading events…</div>;
   if (events.length === 0) return <div class="vp-empty">No events</div>;
@@ -657,7 +777,7 @@ function EventsTab({
         const inner = (
           <>
             <div class="st-type">{ev.type.replace(/_/g, " ")}</div>
-            <div class="st-date">{fmtClock(ev.t)}</div>
+            <div class="st-date">{fmtClock(ev.t, clock)}</div>
             <div class="st-meta">
               {ev.description ||
                 (ev.trip_id != null ? `Trip #${ev.trip_id}` : "Standalone")}
@@ -692,7 +812,7 @@ function EventsTab({
   );
 }
 
-function TripsTab({ trips }: { trips: Trip[] | null }) {
+function TripsTab({ trips, clock }: { trips: Trip[] | null; clock: ClockPref }) {
   if (trips === null) return <div class="vp-loading">Loading trips…</div>;
   if (trips.length === 0) return <div class="vp-empty">No trips this day</div>;
   return (
@@ -702,7 +822,7 @@ function TripsTab({ trips }: { trips: Trip[] | null }) {
           <div class="vp-clip-info">
             <div class="vp-clip-date">Trip #{t.id}</div>
             <div class="vp-clip-meta">
-              {fmtClock(t.started_at)} · {t.point_count} pts
+              {fmtClock(t.started_at, clock)} · {t.point_count} pts
             </div>
             <div class="vp-clip-reason">
               {((t.distance_m ?? 0) / METERS_PER_MILE).toFixed(1)} mi
@@ -714,7 +834,7 @@ function TripsTab({ trips }: { trips: Trip[] | null }) {
   );
 }
 
-function ClipsTab({ clips }: { clips: Clip[] | null }) {
+function ClipsTab({ clips, clock }: { clips: Clip[] | null; clock: ClockPref }) {
   if (clips === null) return <div class="vp-loading">Loading clips…</div>;
   if (clips.length === 0) return <div class="vp-empty">No clips</div>;
   return (
@@ -725,10 +845,10 @@ function ClipsTab({ clips }: { clips: Clip[] | null }) {
           key={c.id}
           href={`/events?clip=${c.id}`}
           data-testid={`vp-clip-link-${c.id}`}
-          aria-label={`Open clip ${fmtClock(c.started_at)}`}
+          aria-label={`Open clip ${fmtClock(c.started_at, clock)}`}
         >
           <div class="vp-clip-info">
-            <div class="vp-clip-date">{fmtClock(c.started_at)}</div>
+            <div class="vp-clip-date">{fmtClock(c.started_at, clock)}</div>
             <div class="vp-clip-meta">
               {c.angles.length} cam · {c.folder_class}
             </div>

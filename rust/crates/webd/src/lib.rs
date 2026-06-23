@@ -39,6 +39,7 @@ mod dto;
 mod error;
 mod gadget;
 mod health;
+mod indexd_client;
 mod jobs;
 mod lightshows;
 mod media;
@@ -84,6 +85,7 @@ struct AppState {
     sys: SysHandle,
     gadget: Arc<dyn gadget::GadgetClient>,
     scheduler: Arc<dyn scheduler::SchedulerClient>,
+    indexd: Arc<dyn indexd_client::IndexdClient>,
     jobs: jobs::JobHub,
     /// Process-wide media-change bus: a background `data_version` monitor ticks
     /// this whenever `indexd` commits, and the `/api/media-events` SSE forwards
@@ -171,6 +173,13 @@ fn default_scheduler_sock() -> PathBuf {
     )
 }
 
+/// The default `indexd` control-socket path (overridable via
+/// `WEBD_INDEXD_SOCK`).
+fn default_indexd_sock() -> PathBuf {
+    std::env::var_os("WEBD_INDEXD_SOCK")
+        .map_or_else(|| PathBuf::from("/run/teslausb/indexd.sock"), PathBuf::from)
+}
+
 /// The default `schedulerd` chime-library directory (overridable via
 /// `WEBD_CHIME_LIBRARY_DIR`). Must match `schedulerd`'s `SCHEDULERD_LIBRARY_DIR`;
 /// `webd` only ever reads it.
@@ -189,6 +198,27 @@ fn router_with_clients(
     scheduler: Arc<dyn scheduler::SchedulerClient>,
     chime_library_dir: PathBuf,
 ) -> Router {
+    let indexd = indexd_client::default_client(default_indexd_sock());
+    router_with_all_clients(
+        catalog,
+        static_dir,
+        media,
+        gadget,
+        scheduler,
+        indexd,
+        chime_library_dir,
+    )
+}
+
+fn router_with_all_clients(
+    catalog: Catalog,
+    static_dir: PathBuf,
+    media: MediaConfig,
+    gadget: Arc<dyn gadget::GadgetClient>,
+    scheduler: Arc<dyn scheduler::SchedulerClient>,
+    indexd: Arc<dyn indexd_client::IndexdClient>,
+    chime_library_dir: PathBuf,
+) -> Router {
     let sys = SysHandle {
         probe: Arc::new(sysinfo::LinuxProbe),
         paths: Arc::new(sysinfo::SysPaths {
@@ -203,6 +233,7 @@ fn router_with_clients(
         sys,
         gadget,
         scheduler,
+        indexd,
         jobs: jobs::JobHub::new(),
         media_events,
         chime_library_dir,

@@ -645,6 +645,39 @@ pub fn set_durable(conn: &Connection, archive_item_id: i64, durable: bool) -> Re
     Ok(())
 }
 
+/// Upsert one settings preference in `prefs`.
+///
+/// # Errors
+///
+/// Returns [`DbError`] if validation fails or the statement fails.
+pub fn set_pref(conn: &Connection, key: &str, value: &str) -> Result<(), DbError> {
+    if key.is_empty() || key.len() > 64 {
+        return Err(DbError::Sqlite(rusqlite::Error::InvalidParameterName(
+            "prefs.key must be 1..=64 bytes".to_owned(),
+        )));
+    }
+    if !key
+        .bytes()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        return Err(DbError::Sqlite(rusqlite::Error::InvalidParameterName(
+            "prefs.key must match [a-z0-9_]+".to_owned(),
+        )));
+    }
+    if value.is_empty() || value.len() > 8192 {
+        return Err(DbError::Sqlite(rusqlite::Error::InvalidParameterName(
+            "prefs.value must be 1..=8192 bytes".to_owned(),
+        )));
+    }
+
+    conn.execute(
+        "INSERT INTO prefs (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )?;
+    Ok(())
+}
+
 /// Run `PRAGMA wal_checkpoint(TRUNCATE)` and return the `SQLite` triple
 /// `(busy, log_frames, checkpointed_frames)`. The entry point
 /// `retentiond` calls to bound WAL growth (storage.md §5.2). `busy == 1`
@@ -670,7 +703,8 @@ mod tests {
     use super::{
         ClipLeaseGrant, LeaseGrant, LeaseKind, ReleaseResult, RenewResult, claim_for_delete,
         has_unexpired_lease, lease_acquire, lease_acquire_for_clip, lease_release, lease_renew,
-        mark_deleted, mark_deleting, reap_stale_leases, set_durable, wal_checkpoint_truncate,
+        mark_deleted, mark_deleting, reap_stale_leases, set_durable, set_pref,
+        wal_checkpoint_truncate,
     };
     use crate::db::open_in_memory;
 
@@ -885,6 +919,44 @@ mod tests {
             )
             .unwrap();
         assert_eq!(durable, 1);
+    }
+
+    #[test]
+    fn set_pref_upserts_existing_key() {
+        let conn = open_in_memory().unwrap();
+        set_pref(&conn, "speed_unit", "mph").unwrap();
+        set_pref(&conn, "speed_unit", "kph").unwrap();
+        let value: String = conn
+            .query_row(
+                "SELECT value FROM prefs WHERE key = 'speed_unit'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(value, "kph");
+    }
+
+    #[test]
+    fn set_pref_rejects_invalid_key_and_writes_nothing() {
+        let conn = open_in_memory().unwrap();
+        assert!(set_pref(&conn, "Bad Key", "mph").is_err());
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM prefs WHERE key = 'Bad Key'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn set_pref_rejects_overlong_value_and_writes_nothing() {
+        let conn = open_in_memory().unwrap();
+        let value = "x".repeat(8193);
+        assert!(set_pref(&conn, "speed_unit", &value).is_err());
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM prefs WHERE key = 'speed_unit'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[test]

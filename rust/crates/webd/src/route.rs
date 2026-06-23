@@ -135,7 +135,7 @@ pub(crate) fn router(state: AppState, static_dir: PathBuf) -> Router {
         .route("/jobs", get(jobs_stream))
         .route("/jobs/failed", get(jobs_failed))
         .route("/analytics", get(analytics))
-        .route("/settings", get(settings))
+        .route("/settings", get(settings).put(put_setting))
         .merge(crate::chime_scheduler::routes())
         .merge(crate::chime_library::routes())
         .merge(crate::health::routes())
@@ -260,6 +260,78 @@ async fn analytics(State(state): State<AppState>) -> Result<Json<AnalyticsDto>, 
 async fn settings(State(state): State<AppState>) -> Result<Json<Vec<PrefDto>>, ApiError> {
     let out = read(state.catalog, query::list_settings).await?;
     Ok(Json(out))
+}
+
+#[derive(Deserialize)]
+struct PutSettingBody {
+    key: String,
+    value: String,
+}
+
+async fn put_setting(
+    State(state): State<AppState>,
+    Json(body): Json<PutSettingBody>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    if !validate_setting(&body.key, &body.value) {
+        return Err(ApiError::bad_request(
+            "invalid_setting",
+            format!("unknown or invalid setting '{}'", body.key),
+        ));
+    }
+
+    let key = body.key.clone();
+    let value = body.value.clone();
+    let request_key = key.clone();
+    let request_value = value.clone();
+    let request = json!({
+        "cmd": "set_pref",
+        "key": request_key,
+        "value": request_value,
+    });
+    let client = state.indexd.clone();
+    let response = tokio::task::spawn_blocking(move || client.call(request))
+        .await
+        .map_err(|_| ApiError::Internal)?
+        .map_err(|err| match err {
+            TransportError::Unavailable(_) => ApiError::status(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "unavailable",
+                "settings service unavailable",
+            ),
+            TransportError::Protocol(_) => ApiError::Internal,
+        })?;
+
+    match response
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+    {
+        "pref_set"
+            if response.get("key").and_then(serde_json::Value::as_str) == Some(key.as_str()) =>
+        {
+            Ok((StatusCode::OK, Json(json!({ "key": key, "value": value }))))
+        }
+        "error" => {
+            let message = response
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("indexd rejected the write");
+            Err(ApiError::status(
+                StatusCode::BAD_GATEWAY,
+                "indexd_error",
+                message,
+            ))
+        }
+        _ => Err(ApiError::Internal),
+    }
+}
+
+fn validate_setting(key: &str, value: &str) -> bool {
+    match key {
+        "speed_unit" => matches!(value, "mph" | "kph"),
+        "clock" => matches!(value, "local" | "utc"),
+        _ => false,
+    }
 }
 
 /// Query parameters for `DELETE /api/clips/:id`.

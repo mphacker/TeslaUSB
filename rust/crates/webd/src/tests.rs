@@ -25,14 +25,40 @@ use tempfile::TempDir;
 use tower::ServiceExt;
 
 use crate::gadget::{GadgetClient, TransportError};
+use crate::indexd_client;
 use crate::scheduler::SchedulerClient;
-use crate::{Catalog, MediaConfig, build_router, router_with_clients, router_with_gadget};
+use crate::{
+    Catalog, MediaConfig, build_router, router_with_all_clients, router_with_clients,
+    router_with_gadget,
+};
 
 /// A live fixture: a seeded catalog + its router. `_dir` keeps the temp files
 /// alive for the duration of the test (handlers open the DB per request).
 struct Fixture {
     _dir: TempDir,
     app: Router,
+}
+
+struct MockIndexd {
+    last: Arc<Mutex<Option<Value>>>,
+    response: Value,
+    fail_unavailable: bool,
+}
+
+impl indexd_client::IndexdClient for MockIndexd {
+    fn call(&self, request: Value) -> Result<Value, TransportError> {
+        *self.last.lock().unwrap() = Some(request);
+        if self.fail_unavailable {
+            return Err(TransportError::Unavailable("indexd socket down".to_owned()));
+        }
+        Ok(self.response.clone())
+    }
+}
+
+struct SettingsFixture {
+    _dir: TempDir,
+    app: Router,
+    indexd_last: Arc<Mutex<Option<Value>>>,
 }
 
 /// Build a seeded catalog and an app router over it.
@@ -62,6 +88,48 @@ fn fixture() -> Fixture {
     let gadget_sock = dir.path().join("gadgetd.sock");
     let app = build_router(catalog, static_dir, media, gadget_sock);
     Fixture { _dir: dir, app }
+}
+
+fn settings_fixture(indexd_response: Value, fail_unavailable: bool) -> SettingsFixture {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("catalog.db");
+    seed(&db_path);
+
+    let static_dir = dir.path().join("static");
+    std::fs::create_dir_all(&static_dir).unwrap();
+    std::fs::write(static_dir.join("index.html"), "<!doctype html>shell").unwrap();
+
+    let catalog = Catalog::open(&db_path).unwrap();
+    let archive_dir = dir.path().join("archive");
+    let cache_dir = dir.path().join("cache");
+    std::fs::create_dir_all(&archive_dir).unwrap();
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    let media = MediaConfig::new(archive_dir, cache_dir);
+
+    let gadget = crate::default_gadget_client(dir.path().join("gadgetd.sock"));
+    let scheduler = crate::scheduler::default_client(dir.path().join("schedulerd.sock"));
+    let chime_dir = dir.path().join("chimes");
+    std::fs::create_dir_all(&chime_dir).unwrap();
+    let indexd_last = Arc::new(Mutex::new(None));
+    let indexd: Arc<dyn indexd_client::IndexdClient> = Arc::new(MockIndexd {
+        last: Arc::clone(&indexd_last),
+        response: indexd_response,
+        fail_unavailable,
+    });
+    let app = router_with_all_clients(
+        catalog,
+        static_dir,
+        media,
+        gadget,
+        scheduler,
+        indexd,
+        chime_dir,
+    );
+    SettingsFixture {
+        _dir: dir,
+        app,
+        indexd_last,
+    }
 }
 
 /// Seed the catalog with two clips, two trips, three events, and two prefs.
@@ -360,6 +428,110 @@ async fn settings_returns_raw_prefs() {
     assert_eq!(rows[0]["key"], "map_provider");
     assert_eq!(rows[0]["value"], "osm");
     assert_eq!(rows[1]["key"], "speed_unit");
+}
+
+#[tokio::test]
+async fn put_settings_speed_unit_kph_forwards_set_pref() {
+    let fx = settings_fixture(json!({ "status": "pref_set", "key": "speed_unit" }), false);
+    let (status, body) = put_json(
+        &fx.app,
+        "/api/settings",
+        json!({ "key": "speed_unit", "value": "kph" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({ "key": "speed_unit", "value": "kph" }));
+    let req = fx.indexd_last.lock().unwrap().clone().unwrap();
+    assert_eq!(
+        req,
+        json!({ "cmd": "set_pref", "key": "speed_unit", "value": "kph" })
+    );
+}
+
+#[tokio::test]
+async fn put_settings_clock_utc_forwards_set_pref() {
+    let fx = settings_fixture(json!({ "status": "pref_set", "key": "clock" }), false);
+    let (status, body) = put_json(
+        &fx.app,
+        "/api/settings",
+        json!({ "key": "clock", "value": "utc" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({ "key": "clock", "value": "utc" }));
+    let req = fx.indexd_last.lock().unwrap().clone().unwrap();
+    assert_eq!(req, json!({ "cmd": "set_pref", "key": "clock", "value": "utc" }));
+}
+
+#[tokio::test]
+async fn put_settings_rejects_invalid_speed_unit_without_forwarding() {
+    let fx = settings_fixture(json!({ "status": "pref_set", "key": "speed_unit" }), false);
+    let (status, body) = put_json(
+        &fx.app,
+        "/api/settings",
+        json!({ "key": "speed_unit", "value": "furlongs" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_setting");
+    assert!(fx.indexd_last.lock().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn put_settings_rejects_unknown_setting_without_forwarding() {
+    let fx = settings_fixture(json!({ "status": "pref_set", "key": "speed_unit" }), false);
+    let (status, body) = put_json(
+        &fx.app,
+        "/api/settings",
+        json!({ "key": "nonsense", "value": "x" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_setting");
+    assert!(fx.indexd_last.lock().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn put_settings_maps_indexd_error_to_bad_gateway() {
+    let fx = settings_fixture(
+        json!({ "status": "error", "message": "boom" }),
+        false,
+    );
+    let (status, body) = put_json(
+        &fx.app,
+        "/api/settings",
+        json!({ "key": "speed_unit", "value": "kph" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(body["error"]["code"], "indexd_error");
+}
+
+#[tokio::test]
+async fn put_settings_maps_unavailable_to_service_unavailable() {
+    let fx = settings_fixture(json!({ "status": "pref_set", "key": "speed_unit" }), true);
+    let (status, body) = put_json(
+        &fx.app,
+        "/api/settings",
+        json!({ "key": "speed_unit", "value": "kph" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"]["code"], "unavailable");
+}
+
+#[tokio::test]
+async fn put_settings_mismatched_ack_key_fails_closed() {
+    // indexd acknowledges a *different* key than requested: a protocol anomaly
+    // that must fail closed rather than report a misleading success.
+    let fx = settings_fixture(json!({ "status": "pref_set", "key": "clock" }), false);
+    let (status, _body) = put_json(
+        &fx.app,
+        "/api/settings",
+        json!({ "key": "speed_unit", "value": "kph" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
 }
 
 #[tokio::test]

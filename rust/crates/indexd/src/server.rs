@@ -89,6 +89,10 @@ fn handle_connection(
                     Err(message) => Response::Error { message },
                 }
             }
+            Request::SetPref { key, value } => match handle_set_pref(conn, &key, &value) {
+                Ok(()) => Response::PrefSet { key },
+                Err(message) => Response::Error { message },
+            },
         },
         Err(e) => Response::Error {
             message: format!("invalid request: {e}"),
@@ -118,6 +122,13 @@ fn handle_register_quarantined_clip(
         .lock()
         .map_err(|_| "index database mutex is poisoned".to_owned())?;
     register_quarantined_clip(&mut locked, &registration).map_err(|e| e.to_string())
+}
+
+fn handle_set_pref(conn: &Arc<Mutex<Connection>>, key: &str, value: &str) -> Result<(), String> {
+    let locked = conn
+        .lock()
+        .map_err(|_| "index database mutex is poisoned".to_owned())?;
+    crate::db::mutations::set_pref(&locked, key, value).map_err(|e| e.to_string())
 }
 
 fn build_registration(payload: &RegisterArchivedClip) -> Result<ArchiveRegistration, String> {

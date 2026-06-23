@@ -193,7 +193,8 @@ never strand a job in `running`.
 | Method · Route | Forwards to |
 |---|---|
 | `GET/POST /api/cloud/*` (provider/browse/queue/sync) | `uploadd` ([`webd.md §3`](../webd.md)) |
-| `PUT /api/settings` (retention reserves/quotas/value-weights) | `retentiond` |
+| `PUT /api/settings` — display prefs (`speed_unit`, `clock`) | `indexd` (`SetPref`; allow-list in `webd` — [`webd.md §3.2`](../webd.md)) |
+| `PUT /api/settings` — retention (reserves/quotas/value-weights) | `retentiond` |
 | `GET/POST /api/wifi` (STA/AP config) | `wifid` (secrets never echoed — [`webd.md §3.1`](../webd.md)) |
 | `GET /portal` | captive-portal entry for AP onboarding ([`webd.md §2.7`](../webd.md)) |
 

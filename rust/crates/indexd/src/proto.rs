@@ -20,6 +20,13 @@ pub enum Request {
     // Deploy `indexd` before `retentiond`: older indexd must reject this
     // unknown verb so retentiond fails closed to pending, never force-publishing.
     RegisterQuarantinedArchive(RegisterArchivedClip),
+    /// Set one settings preference value.
+    SetPref {
+        /// Preference key.
+        key: String,
+        /// Preference value.
+        value: String,
+    },
 }
 
 /// Archive registration payload.
@@ -86,6 +93,11 @@ pub enum Response {
     Error {
         /// Human-readable error message.
         message: String,
+    },
+    /// Preference write acknowledged.
+    PrefSet {
+        /// The updated preference key.
+        key: String,
     },
 }
 
@@ -233,6 +245,32 @@ mod tests {
         let mut cur = Cursor::new(buf);
         let payload = read_frame(&mut cur, MAX_REQUEST_FRAME).unwrap();
         let decoded: Response = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn request_set_pref_serializes_with_set_pref_cmd() {
+        let request = Request::SetPref {
+            key: "speed_unit".to_owned(),
+            value: "kph".to_owned(),
+        };
+        let encoded = serde_json::to_value(&request).unwrap();
+        assert_eq!(encoded.get("cmd").and_then(serde_json::Value::as_str), Some("set_pref"));
+        let decoded: Request = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn response_pref_set_serializes_with_pref_set_status() {
+        let response = Response::PrefSet {
+            key: "speed_unit".to_owned(),
+        };
+        let encoded = serde_json::to_value(&response).unwrap();
+        assert_eq!(
+            encoded.get("status").and_then(serde_json::Value::as_str),
+            Some("pref_set")
+        );
+        let decoded: Response = serde_json::from_value(encoded).unwrap();
         assert_eq!(decoded, response);
     }
 }

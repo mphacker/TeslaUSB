@@ -48,6 +48,13 @@ filesystem** (Linux ext4), never inside the car's `disk.img` LUN.
    later car rescan/prune can never downgrade or delete archive-backed state.
    Full surface + invariants: [`contracts/indexd-archive-register.md`](./contracts/indexd-archive-register.md).
    (Phase 2 adds delete-state / lease / checkpoint verbs on the same socket.)
+   `webd` also writes UI preferences over this socket via **`SetPref{key,value}`** —
+   a generic bounded `prefs` upsert (structural bounds only: key matches
+   `^[a-z0-9_]{1,64}$`, value is `1..=8192` bytes; on violation it writes nothing
+   and returns `error`). The *vocabulary* allow-list (which keys/values are
+   meaningful) lives in `webd`, so `indexd` stays a dumb, defensible KV store.
+   Success returns **`PrefSet{key}`** echoing the written key. This is the one
+   mutation that originates from `webd` rather than `retentiond`.
 
 ## 3. Non-responsibilities
 

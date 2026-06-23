@@ -1,10 +1,10 @@
 /**
  * Typed client for the webd catalog API (contract D2).
  *
- * webd is **read-only** except for the operator-gated `gadgetd` eject-handoff
- * mutations: the car-visible clip delete (`DELETE /api/clips/:id?target=car`,
- * §2.3) and lock-chime management (`POST /api/chimes`, `DELETE /api/chimes/:id`,
- * §2.3.1). Every other method is a GET. Errors surface as {@link ApiError}
+ * webd is mostly read-only except for the settings write (`PUT /api/settings`)
+ * and the operator-gated `gadgetd` eject-handoff mutations: the car-visible clip
+ * delete (`DELETE /api/clips/:id?target=car`, §2.3) and lock-chime management
+ * (`POST /api/chimes`, `DELETE /api/chimes/:id`, §2.3.1). Errors surface as {@link ApiError}
  * carrying the server's `{code, message}` envelope when present (and the HTTP
  * `status`, which callers use to tell a transient `409` from a terminal `422`).
  * All paths are same-origin (`/api/...`) because the bundle is served by webd
@@ -228,6 +228,14 @@ export const api = {
     getJson<Analytics>("/api/analytics", signal),
 
   settings: (signal?: AbortSignal) => getJson<Pref[]>("/api/settings", signal),
+  putSetting: (key: string, value: string, signal?: AbortSignal): Promise<Pref> =>
+    request<Pref>(
+      "PUT",
+      "/api/settings",
+      signal,
+      JSON.stringify({ key, value }),
+      "application/json",
+    ),
 
   // Device-status reads (webd 5.1d). All read-only; handlers never 5xx and
   // degrade to unknown/null when a subsystem can't be probed honestly.

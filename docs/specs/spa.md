@@ -36,7 +36,7 @@ screen; do not redesign the visual language.
 | Screen | Today's template | Must preserve |
 |--------|------------------|---------------|
 | Home / media hub | `index.html`, `media_hub_nav.html` | landing, nav, media tiles |
-| Trip map | `mapping.html` | day nav, trip routes, **event bubbles** (honk/Sentry/hard brake/accel), marker clustering, speed-unit toggle, route disambiguation |
+| Trip map | `mapping.html` | day nav, trip routes, **event bubbles** (honk/Sentry/hard brake/accel), marker clustering, speed-unit toggle, **display prefs (units + local/UTC clock, server-persisted)**, route disambiguation |
 | Event player | `event_player.html` | click event/path → front-cam at that moment; angle group as one **clip**; full-page/full-screen scaling **with HUD**; delete clip |
 | Video overlay HUD | `mapping/video_overlay*` | telemetry overlay synced to playback |
 | Analytics | `analytics.html` | the existing charts |
@@ -88,6 +88,19 @@ Every capability above must exist post-rebuild; appearance must match.
   "all on" on day change. v1 parity note: filters scope the **map markers** only
   (side-panel lists and a multi-day **date range** are tracked follow-ups). Multi-
   day date range is out of scope for v1 of this lane.
+- **Display preferences (§4.1/§4.15, server-persisted):** the trip map exposes
+  two display knobs persisted **server-side** (via `PUT /api/settings` → indexd
+  `SetPref`, see `webd.md §3.2`) so they survive reload and are shared across
+  browsers. (1) **Speed unit** (`speed_unit` ∈ `mph|kph`) — the existing
+  speed-legend toggle now persists. (2) **Display clock** (`clock` ∈ `local|utc`,
+  default `local`) via a new **Display** gear FAB + panel (`#btnDisplayPrefs` /
+  `#displayPanel`, controls `#clockLocal`/`#clockUtc`): when `utc`, every map
+  timestamp (controller popups via `fmtLocalTime`, side-panel lists via `fmtClock`)
+  renders in UTC. Both prefs seed from `/api/settings` on mount and update
+  **optimistically with rollback on failure** (a `role=status` error toast on the
+  map surface); an already-open Leaflet popup is rebuilt with the new clock on next
+  open. The map's `speed_unit` (singular) is intentionally distinct from the
+  settings-dashboard `speed_units` (plural) until a future key-unification lane.
 - **Scaling:** player scales to full-page and full-screen with the HUD intact.
 - **Mutations show progress:** delete/install operations reflect handoff progress
   and a friendly "try again" if `gadgetd` refuses (car busy).

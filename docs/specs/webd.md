@@ -83,6 +83,27 @@ this rebuild preserves it — do **not** silently add or remove authentication
   (path traversal, file-type, size) — `gadgetd` executes what it's given, so
   validation is `webd`'s responsibility.
 
+## 3.2 Settings writes (`PUT /api/settings`)
+
+`PUT /api/settings` is the single settings-write endpoint and is **key-dispatched**:
+
+- **Display preferences** (`speed_unit` ∈ {`mph`,`kph`}, `clock` ∈ {`local`,`utc`})
+  persist to `indexd`'s `prefs` table via the `SetPref` mutation socket
+  ([`indexd.md §2`](./indexd.md)). `webd` owns the vocabulary allow-list and
+  validates `{key,value}` **before** forwarding; an unknown key or out-of-range
+  value returns `400 invalid_setting` and nothing is forwarded.
+- **Retention settings** (reserves/quotas/value-weights) forward to `retentiond`
+  when built — see [`contracts/webd-api.md §2.4`](./contracts/webd-api.md).
+
+Request body is `{ "key": string, "value": string }`. A malformed body (missing
+fields, non-string `key`/`value`) is rejected by the JSON extractor with `422`
+before allow-list validation; a well-formed but unknown key/value returns
+`400 invalid_setting`. On a forwarded display-pref write, `webd` maps the `indexd`
+reply: `PrefSet{key}` with `key` matching the request → `200 {key,value}`;
+`error` → `502 indexd_error`; socket unavailable → `503 unavailable`; any other
+reply (including a `PrefSet` whose `key` does not match the request) fails closed
+→ `500`.
+
 ## 4. Non-responsibilities
 
 - Does not write the Tesla FS directly (delegates to `gadgetd` handoff).

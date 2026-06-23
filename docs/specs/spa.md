@@ -69,6 +69,25 @@ Every capability above must exist post-rebuild; appearance must match.
   telemetry. Archive-backed clips stream; `ro_usb` (not-yet-archived) clips show
   the "Not yet archived" overlay (`data-testid=video-unarchived`) and fire no
   doomed `/stream` request.
+- **Trip-map filters (§4.1):** the trip map carries four client-side "visible
+  set" filters applied over the already-loaded day (no `webd` round-trip): event
+  **type** (toggle pill per type present that day), minimum **severity**
+  (All / Info+ / Warning+ / Critical → 0/1/2/3; a threshold hides null-severity
+  events), minimum **trip distance** (stored canonical in miles; the slider max,
+  value and label convert to mi/km per the user unit), and **limit to map view**
+  (bbox). With limit-to-view ON a trip shows iff its bounding box *intersects*
+  the current viewport — bbox-intersection, **not** vertex-in-bounds, so a route
+  that crosses the viewport with all vertices outside still shows. An event shows
+  iff its own lat/lng is in bounds. A trip-**linked** event hides when its parent
+  trip is filtered out (e.g. by min-distance/bbox); a trip-**less** event is
+  unaffected by trip/distance/bbox-trip filtering. The default state (all types
+  on, severity All, min-distance 0, limit-to-view off) reproduces the unfiltered
+  render exactly. The map never `fitBounds` on an empty visible set; under
+  limit-to-view a debounced `moveend` refilters without a fitBounds reset; click
+  route-disambiguation reads the *filtered* visible trips. Filter pills reseed to
+  "all on" on day change. v1 parity note: filters scope the **map markers** only
+  (side-panel lists and a multi-day **date range** are tracked follow-ups). Multi-
+  day date range is out of scope for v1 of this lane.
 - **Scaling:** player scales to full-page and full-screen with the HUD intact.
 - **Mutations show progress:** delete/install operations reflect handoff progress
   and a friendly "try again" if `gadgetd` refuses (car busy).

@@ -53,6 +53,8 @@ export interface MapTrip {
 export interface MapEvent {
   id: number;
   type: string;
+  severity: number | null;
+  tripId: number | null;
   lat: number;
   lon: number;
   description: string;
@@ -62,10 +64,18 @@ export interface MapEvent {
   clipId?: number | null;
 }
 
+export interface MapFilters {
+  enabledTypes: Set<string>;
+  minSeverity: number;
+  minDistanceMi: number;
+  limitToView: boolean;
+}
+
 interface RenderInput {
   trips: MapTrip[];
   events: MapEvent[];
   unit: SpeedUnit;
+  filters: MapFilters;
 }
 
 interface Candidate {
@@ -154,6 +164,9 @@ export class TripMapController {
   private readonly hasTileLayer: boolean;
 
   private last: RenderInput | null = null;
+  private visibleTrips: MapTrip[] = [];
+  private moveendTimer: number | null = null;
+  private disambigPopup: L.Popup | null = null;
   private hooks: MapHooks;
 
   constructor(container: HTMLElement) {
@@ -248,6 +261,7 @@ export class TripMapController {
     this.map.on("popupclose", () => {
       this.disambigHighlightLayer.clearLayers();
     });
+    this.map.on("moveend", this.onMoveEnd);
   }
 
   /** Leaflet needs a size recalculation once its container is laid out. */
@@ -262,21 +276,57 @@ export class TripMapController {
 
   /** Draw a full day: trips, events, start/end markers; fit bounds. */
   render(input: RenderInput) {
-    this.last = input;
-    this.hooks.unit = input.unit;
+    const normalized = this.normalizeRenderInput(input);
+    this.last = normalized;
+    this.hooks.unit = normalized.unit;
+    this.renderCurrent(true);
+  }
+
+  private onMoveEnd = () => {
+    if (!this.last?.filters.limitToView) return;
+    if (this.moveendTimer != null) {
+      window.clearTimeout(this.moveendTimer);
+    }
+    this.moveendTimer = window.setTimeout(() => {
+      this.moveendTimer = null;
+      if (!this.last?.filters.limitToView) return;
+      this.renderCurrent(false);
+    }, 80);
+  };
+
+  private renderCurrent(allowFitBounds: boolean) {
+    const input = this.last;
+    if (!input) return;
+    // The visible set is being rebuilt: any open disambiguation popup holds row
+    // handlers that close over the PREVIOUS candidates, so a trip just hidden by
+    // a filter/bbox change could still be picked from the stale popup. Close it.
+    if (this.disambigPopup) {
+      this.map.closePopup(this.disambigPopup);
+      this.disambigPopup = null;
+    }
     this.tripLayer.clearLayers();
     this.eventCluster.clearLayers();
     this.disambigHighlightLayer.clearLayers();
 
     let polylineCount = 0;
     const bounds: L.LatLngTuple[] = [];
+    const mapBounds = input.filters.limitToView ? this.map.getBounds() : null;
+    const visibleTrips = this.filterTrips(input.trips, input.filters, mapBounds);
+    const visibleTripIds = new Set(visibleTrips.map((trip) => trip.id));
+    const visibleEvents = this.filterEvents(
+      input.events,
+      input.filters,
+      mapBounds,
+      visibleTripIds,
+    );
+    this.visibleTrips = visibleTrips;
 
-    for (const trip of input.trips) {
+    for (const trip of visibleTrips) {
       polylineCount += this.renderTrip(trip, input.unit, bounds);
     }
 
     let eventMarkerCount = 0;
-    for (const ev of input.events) {
+    for (const ev of visibleEvents) {
       if (!Number.isFinite(ev.lat) || !Number.isFinite(ev.lon)) continue;
       const marker = L.marker([ev.lat, ev.lon], {
         icon: makeEventIcon(ev.type),
@@ -296,11 +346,78 @@ export class TripMapController {
     }
     this.hooks.tripPolylineCount = polylineCount;
     this.hooks.eventMarkerCount = eventMarkerCount;
-    this.hooks.tripCount = input.trips.length;
+    this.hooks.tripCount = visibleTrips.length;
 
-    if (bounds.length > 0) {
+    if (allowFitBounds && !input.filters.limitToView && bounds.length > 0) {
       this.map.fitBounds(bounds, { padding: [30, 30] });
     }
+  }
+
+  private normalizeRenderInput(input: RenderInput): RenderInput {
+    return {
+      trips: input.trips,
+      events: input.events,
+      unit: input.unit,
+      filters: {
+        enabledTypes: new Set(input.filters.enabledTypes),
+        minSeverity: input.filters.minSeverity,
+        minDistanceMi: input.filters.minDistanceMi,
+        limitToView: input.filters.limitToView,
+      },
+    };
+  }
+
+  private filterTrips(
+    trips: MapTrip[],
+    filters: MapFilters,
+    mapBounds: L.LatLngBounds | null,
+  ): MapTrip[] {
+    return trips.filter((trip) => {
+      const distance = Number.isFinite(trip.distanceMi) ? trip.distanceMi : 0;
+      if (distance < filters.minDistanceMi) return false;
+      if (!filters.limitToView || !mapBounds) return true;
+      const tripBounds = this.tripBounds(trip);
+      return tripBounds ? tripBounds.intersects(mapBounds) : false;
+    });
+  }
+
+  private filterEvents(
+    events: MapEvent[],
+    filters: MapFilters,
+    mapBounds: L.LatLngBounds | null,
+    visibleTripIds: Set<number>,
+  ): MapEvent[] {
+    return events.filter((ev) => {
+      if (!filters.enabledTypes.has(ev.type)) return false;
+      if (
+        filters.minSeverity > 0 &&
+        (ev.severity == null || ev.severity < filters.minSeverity)
+      ) {
+        return false;
+      }
+      if (
+        ev.tripId != null &&
+        !visibleTripIds.has(ev.tripId)
+      ) {
+        return false;
+      }
+      if (!filters.limitToView || !mapBounds) return true;
+      if (!Number.isFinite(ev.lat) || !Number.isFinite(ev.lon)) return false;
+      return mapBounds.contains([ev.lat, ev.lon]);
+    });
+  }
+
+  private tripBounds(trip: MapTrip): L.LatLngBounds | null {
+    const points = trip.waypoints
+      .filter((wp) => Number.isFinite(wp.lat) && Number.isFinite(wp.lon))
+      .map((wp) => [wp.lat, wp.lon] as [number, number]);
+    if (points.length) return L.latLngBounds(points as L.LatLngExpression[]);
+
+    const polyPoints = trip.polyline
+      .flat()
+      .filter(([lat, lon]) => Number.isFinite(lat) && Number.isFinite(lon));
+    if (!polyPoints.length) return null;
+    return L.latLngBounds(polyPoints as L.LatLngExpression[]);
   }
 
   /** Render one trip; returns the number of visible polylines drawn. */
@@ -440,7 +557,7 @@ export class TripMapController {
   // ── Route disambiguation (pixel-space, port of route_disambiguation.js) ──
 
   private findCandidatesNearClick(clickLatLng: L.LatLng): Candidate[] {
-    const trips = this.last?.trips ?? [];
+    const trips = this.visibleTrips;
     if (!trips.length) return [];
     const clickPt = this.map.latLngToContainerPoint(clickLatLng);
     const radius = DISAMBIG_PIXEL_RADIUS;
@@ -499,6 +616,9 @@ export class TripMapController {
   }
 
   private highlightTrip(trip: MapTrip) {
+    // Never highlight a trip that filtering has removed from the visible set
+    // (defends against a stale popup row whose closure outlived a refilter).
+    if (!this.visibleTrips.some((t) => t.id === trip.id)) return;
     this.disambigHighlightLayer.clearLayers();
     const latLngs = trip.waypoints
       .filter((wp) => Number.isFinite(wp.lat) && Number.isFinite(wp.lon))
@@ -560,7 +680,7 @@ export class TripMapController {
     }
     container.appendChild(list);
 
-    L.popup({
+    const popup = L.popup({
       className: "disambig-popup",
       closeOnClick: true,
       autoClose: true,
@@ -569,12 +689,21 @@ export class TripMapController {
       offset: L.point(0, -4),
     })
       .setLatLng(latlng)
-      .setContent(container)
-      .openOn(this.map);
+      .setContent(container);
+    this.disambigPopup = popup;
+    popup.once("remove", () => {
+      if (this.disambigPopup === popup) this.disambigPopup = null;
+    });
+    popup.openOn(this.map);
   }
 
   /** Tear down the map + null the global test hooks. Idempotent. */
   destroy() {
+    this.map.off("moveend", this.onMoveEnd);
+    if (this.moveendTimer != null) {
+      window.clearTimeout(this.moveendTimer);
+      this.moveendTimer = null;
+    }
     const win = window as unknown as {
       __TESLAUSB_MAP__?: L.Map;
       __TESLAUSB_MAP_HOOKS__?: MapHooks;
@@ -583,6 +712,8 @@ export class TripMapController {
     win.__TESLAUSB_MAP_HOOKS__ = undefined;
     this.map.remove();
     this.last = null;
+    this.visibleTrips = [];
+    this.disambigPopup = null;
   }
 }
 

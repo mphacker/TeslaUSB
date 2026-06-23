@@ -66,6 +66,17 @@ function hooks(page: Page): Promise<MapHookSnapshot> {
   });
 }
 
+function eventLatLngs(page: Page): Promise<[number, number][]> {
+  return page.evaluate(
+    () =>
+      (
+        window as unknown as {
+          __TESLAUSB_MAP_HOOKS__?: { eventLatLngs: () => [number, number][] };
+        }
+      ).__TESLAUSB_MAP_HOOKS__!.eventLatLngs(),
+  );
+}
+
 /** Force offline tiles, navigate to the map home, wait for the first render. */
 async function gotoMap(page: Page) {
   await page.addInitScript(() => {
@@ -245,9 +256,10 @@ test.describe("trip map UAT", () => {
     await expect(vpEvents).toContainText("hard acceleration");
     await expect(vpEvents).toContainText("sentry");
     // Severity is an indexd ordinal (1=info, 2=warning, 3=critical) rendered as
-    // its LABEL — never as a fabricated speed. Regression guard: the two sev=2
-    // events read "warning" and the sev=1 sentry reads "info", and no event row
-    // shows a bogus "<n> mph"/"<n> kph" minted from the severity ordinal.
+    // its LABEL — never as a fabricated speed. Regression guard: harsh_braking
+    // reads "critical", hard_acceleration reads "warning", sentry reads "info",
+    // and no event row shows a bogus "<n> mph"/"<n> kph" from severity.
+    await expect(vpEvents).toContainText("critical");
     await expect(vpEvents).toContainText("warning");
     await expect(vpEvents).toContainText("info");
     await expect(vpEvents).not.toContainText(/\b\d+\s*(mph|kph)\b/);
@@ -282,6 +294,223 @@ test.describe("trip map UAT", () => {
     await expect(cluster).toContainText("2");
     // The two markers were absorbed into the cluster (no loose bubbles left).
     await expect(page.locator(".event-svg-icon")).toHaveCount(0);
+  });
+
+  test("filters — event type, severity, min distance, limit-to-view, restore defaults", async ({
+    page,
+  }) => {
+    await gotoMap(page);
+
+    const base = await hooks(page);
+    expect(base.tripCount).toBe(3);
+    expect(base.eventMarkerCount).toBe(2);
+
+    // Event type pills.
+    const harshPill = page.locator("[data-testid=filter-type-harsh_braking]");
+    await expect(harshPill).toHaveAttribute("aria-pressed", "true");
+    await harshPill.click();
+    await expect(harshPill).toHaveAttribute("aria-pressed", "false");
+    await page.waitForFunction(() => {
+      const h = (window as unknown as { __TESLAUSB_MAP_HOOKS__?: { eventMarkerCount: number } })
+        .__TESLAUSB_MAP_HOOKS__;
+      return !!h && h.eventMarkerCount === 1;
+    });
+    let coords = await eventLatLngs(page);
+    expect(coords.some(([la, lo]) => near(la, 37.79) && near(lo, -122.42))).toBe(false);
+    await harshPill.click();
+    await expect(harshPill).toHaveAttribute("aria-pressed", "true");
+    await page.waitForFunction(() => {
+      const h = (window as unknown as { __TESLAUSB_MAP_HOOKS__?: { eventMarkerCount: number } })
+        .__TESLAUSB_MAP_HOOKS__;
+      return !!h && h.eventMarkerCount === 2;
+    });
+
+    // Severity segmented control.
+    await page.locator("#btnFilters").click();
+    await expect(page.locator("#filterPanel")).toHaveClass(/visible/);
+    await page.locator("[data-testid=filter-sev-critical]").click();
+    await page.waitForFunction(() => {
+      const h = (window as unknown as { __TESLAUSB_MAP_HOOKS__?: { eventMarkerCount: number } })
+        .__TESLAUSB_MAP_HOOKS__;
+      return !!h && h.eventMarkerCount === 1;
+    });
+    coords = await eventLatLngs(page);
+    expect(coords.some(([la, lo]) => near(la, 37.79) && near(lo, -122.42))).toBe(true);
+    await page.locator("[data-testid=filter-sev-warning]").click();
+    await page.waitForFunction(() => {
+      const h = (window as unknown as { __TESLAUSB_MAP_HOOKS__?: { eventMarkerCount: number } })
+        .__TESLAUSB_MAP_HOOKS__;
+      return !!h && h.eventMarkerCount === 2;
+    });
+    await page.locator("[data-testid=filter-sev-all]").click();
+    await page.waitForFunction(() => {
+      const h = (window as unknown as { __TESLAUSB_MAP_HOOKS__?: { eventMarkerCount: number } })
+        .__TESLAUSB_MAP_HOOKS__;
+      return !!h && h.eventMarkerCount === 2;
+    });
+
+    // Minimum trip distance (canonical threshold ~6 mi; convert when in km mode).
+    const unit = (await hooks(page)).unit;
+    const sliderValue = unit === "kph" ? 9.7 : 6.0;
+    await page.locator("#filterMinDistance").evaluate((el, value) => {
+      const input = el as HTMLInputElement;
+      input.value = String(value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }, sliderValue);
+    await page.waitForFunction(() => {
+      const h = (window as unknown as {
+        __TESLAUSB_MAP_HOOKS__?: { tripCount: number; eventMarkerCount: number };
+      }).__TESLAUSB_MAP_HOOKS__;
+      return !!h && h.tripCount === 2 && h.eventMarkerCount === 1;
+    });
+    coords = await eventLatLngs(page);
+    expect(coords.some(([la, lo]) => near(la, 37.79) && near(lo, -122.42))).toBe(false);
+    expect(coords.some(([la, lo]) => near(la, 37.83) && near(lo, -122.38))).toBe(true);
+    await page.locator("#filterMinDistance").evaluate((el) => {
+      const input = el as HTMLInputElement;
+      input.value = "0";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await page.waitForFunction(() => {
+      const h = (window as unknown as {
+        __TESLAUSB_MAP_HOOKS__?: { tripCount: number; eventMarkerCount: number };
+      }).__TESLAUSB_MAP_HOOKS__;
+      return !!h && h.tripCount === 3 && h.eventMarkerCount === 2;
+    });
+
+    // Min-distance honours the km DISPLAY unit: the threshold is stored canonical
+    // (miles) and only converted for display, so the SAME trips drop out in km
+    // mode. Switch to kph and prove the km branch (slider max/label + filtering).
+    // The unit toggle lives in the speed-legend overlay (a separate corner from
+    // the filter panel); open it to flip to km, then close it again.
+    await page.locator("#btnSpeedLegend").click();
+    await expect(page.locator("#speedLegend")).toBeVisible();
+    await page.locator("#speedUnitKph").click();
+    await page.waitForFunction(() => {
+      const h = (window as unknown as { __TESLAUSB_MAP_HOOKS__?: { unit: string } })
+        .__TESLAUSB_MAP_HOOKS__;
+      return !!h && h.unit === "kph";
+    });
+    await page.locator("#btnSpeedLegend").click();
+    await expect(page.locator("#speedLegend")).not.toBeVisible();
+    // Longest trip ≈ 7.74 mi ≈ 12.5 km → the km slider max is clearly the km
+    // scaling (≥12), distinct from the ~8 it shows in miles.
+    const kmMax = Number(await page.locator("#filterMinDistance").getAttribute("max"));
+    expect(kmMax).toBeGreaterThanOrEqual(12);
+    await expect(page.locator("#filterMinDistanceValue")).toContainText("km");
+    // 9.7 km ≈ 6.03 mi → the same two trips as the 6.0 mi case above.
+    await page.locator("#filterMinDistance").evaluate((el) => {
+      const input = el as HTMLInputElement;
+      input.value = "9.7";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await page.waitForFunction(() => {
+      const h = (window as unknown as {
+        __TESLAUSB_MAP_HOOKS__?: { tripCount: number; eventMarkerCount: number };
+      }).__TESLAUSB_MAP_HOOKS__;
+      return !!h && h.tripCount === 2 && h.eventMarkerCount === 1;
+    });
+    await expect(page.locator("#filterMinDistanceValue")).toContainText("9.7 km");
+    // Reset slider + restore mph for the remainder of the test.
+    await page.locator("#filterMinDistance").evaluate((el) => {
+      const input = el as HTMLInputElement;
+      input.value = "0";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await page.locator("#btnSpeedLegend").click();
+    await expect(page.locator("#speedLegend")).toBeVisible();
+    await page.locator("#speedUnitMph").click();
+    await page.waitForFunction(() => {
+      const h = (window as unknown as {
+        __TESLAUSB_MAP_HOOKS__?: { unit: string; tripCount: number; eventMarkerCount: number };
+      }).__TESLAUSB_MAP_HOOKS__;
+      return !!h && h.unit === "mph" && h.tripCount === 3 && h.eventMarkerCount === 2;
+    });
+    await page.locator("#btnSpeedLegend").click();
+    await expect(page.locator("#speedLegend")).not.toBeVisible();
+
+    // Limit to map view — proves BBOX-INTERSECTION semantics (not vertex-in-
+    // bounds) + moveend refilter + NO fitBounds reset. The viewport is centred in
+    // the gap between trip 2's vertices, on its 37.830→37.842 segment, at a zoom
+    // small enough that NO vertex of ANY trip lies inside it: a vertex-in-bounds
+    // filter would therefore show ZERO trips, yet trip 2's bounding box still
+    // intersects the viewport and must stay visible.
+    await page.locator("#filterLimitView").click();
+    await expect(page.locator("#filterLimitView")).toHaveAttribute("aria-checked", "true");
+    await page.evaluate(() => {
+      (window as unknown as { __TESLAUSB_MAP__?: { setView: (c: [number, number], z: number) => void } })
+        .__TESLAUSB_MAP__!.setView([37.835, -122.37], 18);
+    });
+    await page.waitForFunction(() => {
+      const h = (window as unknown as { __TESLAUSB_MAP_HOOKS__?: { tripCount: number } })
+        .__TESLAUSB_MAP_HOOKS__;
+      return !!h && h.tripCount === 1;
+    });
+    const probe = await page.evaluate(() => {
+      const map = (window as unknown as {
+        __TESLAUSB_MAP__?: {
+          getBounds: () => { contains: (p: [number, number]) => boolean };
+          getCenter: () => { lat: number; lng: number };
+        };
+      }).__TESLAUSB_MAP__!;
+      const b = map.getBounds();
+      const ALL_VERTICES: [number, number][] = [
+        [37.772, -122.445], [37.778, -122.438], [37.785, -122.43], [37.79, -122.42],
+        [37.796, -122.412], [37.802, -122.404], [37.805, -122.401], [37.808, -122.392],
+        [37.801, -122.408], [37.815, -122.392], [37.825, -122.384], [37.83, -122.38],
+        [37.842, -122.362], [37.858, -122.342],
+        [37.745, -122.465], [37.76, -122.45], [37.775, -122.43], [37.788, -122.402],
+      ];
+      const hooks = (window as unknown as {
+        __TESLAUSB_MAP_HOOKS__?: {
+          tripCount: number;
+          eventMarkerCount: number;
+          visibleRouteLayers: () => { coords: [number, number][] }[];
+        };
+      }).__TESLAUSB_MAP_HOOKS__!;
+      const c = map.getCenter();
+      return {
+        anyVertexInside: ALL_VERTICES.some((p) => b.contains(p)),
+        tripCount: hooks.tripCount,
+        eventMarkerCount: hooks.eventMarkerCount,
+        routeCoords: hooks.visibleRouteLayers().flatMap((r) => r.coords),
+        center: [c.lat, c.lng] as [number, number],
+      };
+    });
+    // Precondition: a vertex-in-bounds filter would have NOTHING in view …
+    expect(probe.anyVertexInside).toBe(false);
+    // … yet bbox-intersection keeps exactly trip 2 (its unique far vertex drawn).
+    expect(probe.tripCount).toBe(1);
+    expect(
+      probe.routeCoords.some(([la, lo]) => near(la, 37.858) && near(lo, -122.342)),
+    ).toBe(true);
+    // Trip 1 / trip 3 are gone and no event sits inside this viewport.
+    expect(probe.eventMarkerCount).toBe(0);
+    // No fitBounds reset — the user's pan/zoom is preserved.
+    expect(near(probe.center[0], 37.835, 0.01)).toBe(true);
+    expect(near(probe.center[1], -122.37, 0.01)).toBe(true);
+    await page.locator("#filterLimitView").click();
+    await expect(page.locator("#filterLimitView")).toHaveAttribute("aria-checked", "false");
+    await page.waitForFunction(() => {
+      const h = (window as unknown as {
+        __TESLAUSB_MAP_HOOKS__?: { tripCount: number; eventMarkerCount: number };
+      }).__TESLAUSB_MAP_HOOKS__;
+      return !!h && h.tripCount === 3 && h.eventMarkerCount === 2;
+    });
+
+    // Restore defaults.
+    await page.locator("[data-testid=filter-sev-all]").click();
+    await page.locator("#filterMinDistance").evaluate((el) => {
+      const input = el as HTMLInputElement;
+      input.value = "0";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    if ((await harshPill.getAttribute("aria-pressed")) === "false") {
+      await harshPill.click();
+    }
+    const full = await hooks(page);
+    expect(full.tripCount).toBe(3);
+    expect(full.eventMarkerCount).toBe(2);
   });
 
   // ── Gate 5: wiring proof — the served HTML runs the freshly-built bundle ─
@@ -491,6 +720,9 @@ test.describe("trip map UAT", () => {
     // Map + day card present regardless of breakpoint.
     await expect(page.locator("#map.leaflet-container")).toBeVisible();
     await expect(page.locator(".trip-card")).toBeVisible();
+    await expect(page.locator("#eventFilterPills .event-filter-pill")).toHaveCount(2);
+    await page.locator("#btnFilters").click();
+    await expect(page.locator("#filterPanel")).toHaveClass(/visible/);
 
     // Breakpoint-specific chrome: desktop shows the rail, mobile the bottom tabs.
     const isMobile = testInfo.project.name.includes("375");

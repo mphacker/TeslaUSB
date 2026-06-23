@@ -2,10 +2,16 @@ import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { Icon } from "../components/Icon";
 import { api, ApiError } from "../api/client";
 import type { Clip, DaySummary, EventItem, Trip, TripDetail } from "../api/types";
-import { TripMapController, type MapEvent, type MapTrip } from "../map/controller";
+import {
+  TripMapController,
+  type MapEvent,
+  type MapFilters,
+  type MapTrip,
+} from "../map/controller";
 import { activeSpeedBuckets, type SpeedUnit } from "../map/speed";
 
 const METERS_PER_MILE = 1609.344;
+const KM_PER_MILE = 1.609344;
 
 type PanelTab = "events" | "trips" | "clips";
 
@@ -61,6 +67,14 @@ function fmtClock(epochSec: number): string {
   }
 }
 
+function humanizeType(type: string): string {
+  return type
+    .split("_")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
 /** Build the per-day renderable model from webd trip detail + bubble events. */
 function toMapTrip(trip: Trip, detail: TripDetail | null): MapTrip {
   const points = detail?.points ?? [];
@@ -110,8 +124,11 @@ export function TripMap() {
   const [unit, setUnit] = useState<SpeedUnit>("mph");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [mapTrips, setMapTrips] = useState<MapTrip[]>([]);
+  const [mapEvents, setMapEvents] = useState<MapEvent[]>([]);
 
   const [legendVisible, setLegendVisible] = useState(false);
+  const [filtersVisible, setFiltersVisible] = useState(false);
   const [panelOpen, setPanelOpen] = useState(false);
   const [panelTab, setPanelTab] = useState<PanelTab>("events");
   const [panelEvents, setPanelEvents] = useState<EventItem[] | null>(null);
@@ -119,6 +136,51 @@ export function TripMap() {
   const [panelClips, setPanelClips] = useState<Clip[] | null>(null);
 
   const currentDay = days && days.length ? days[dayIndex] : null;
+  const presentEventTypes = useMemo(
+    () => Array.from(new Set(mapEvents.map((ev) => ev.type))).sort(),
+    [mapEvents],
+  );
+  const maxDistanceMi = useMemo(
+    () =>
+      mapTrips.reduce((max, trip) => {
+        const distance = Number.isFinite(trip.distanceMi) ? trip.distanceMi : 0;
+        return Math.max(max, distance);
+      }, 0),
+    [mapTrips],
+  );
+  const [filters, setFilters] = useState<MapFilters>({
+    enabledTypes: new Set<string>(),
+    minSeverity: 0,
+    minDistanceMi: 0,
+    limitToView: false,
+  });
+
+  useEffect(() => {
+    setFilters((prev) => ({
+      ...prev,
+      enabledTypes: new Set(presentEventTypes),
+    }));
+  }, [presentEventTypes.join("|")]);
+
+  useEffect(() => {
+    setFilters((prev) => ({
+      ...prev,
+      minDistanceMi: Math.min(prev.minDistanceMi, maxDistanceMi),
+    }));
+  }, [maxDistanceMi]);
+
+  const maxDistanceDisplay = useMemo(() => {
+    const displayMax =
+      unit === "kph" ? maxDistanceMi * KM_PER_MILE : maxDistanceMi;
+    return Math.max(0, Math.ceil(displayMax));
+  }, [maxDistanceMi, unit]);
+  const minDistanceDisplay = useMemo(
+    () =>
+      unit === "kph"
+        ? filters.minDistanceMi * KM_PER_MILE
+        : filters.minDistanceMi,
+    [filters.minDistanceMi, unit],
+  );
 
   // ── Mount: create the Leaflet controller, add the mapping-active body class,
   //    seed the display unit from prefs, and load the day list. ──
@@ -160,10 +222,9 @@ export function TripMap() {
     };
   }, []);
 
-  // ── Load + render the selected day whenever it (or the unit) changes. ──
+  // ── Load the selected day whenever it changes. ──
   useEffect(() => {
-    const ctrl = ctrlRef.current;
-    if (!ctrl || !currentDay) return;
+    if (!currentDay) return;
     const seq = ++seqRef.current;
     const ac = new AbortController();
     setLoading(true);
@@ -195,6 +256,8 @@ export function TripMap() {
             mapEvents.push({
               id: ev.id,
               type: ev.type,
+              severity: ev.severity ?? null,
+              tripId: ev.trip_id ?? null,
               lat: ev.lat,
               lon: ev.lon,
               description: ev.description ?? "",
@@ -203,7 +266,10 @@ export function TripMap() {
             });
           }
         }
-        ctrl.render({ trips: mapTrips, events: mapEvents, unit });
+        const enabledTypes = new Set(mapEvents.map((ev) => ev.type));
+        setFilters((prev) => ({ ...prev, enabledTypes }));
+        setMapTrips(mapTrips);
+        setMapEvents(mapEvents);
       } catch (err) {
         if (ac.signal.aborted || seq !== seqRef.current) return;
         setError(errMessage(err));
@@ -213,7 +279,13 @@ export function TripMap() {
     })();
 
     return () => ac.abort();
-  }, [currentDay?.day, unit]);
+  }, [currentDay?.day]);
+
+  useEffect(() => {
+    const ctrl = ctrlRef.current;
+    if (!ctrl) return;
+    ctrl.render({ trips: mapTrips, events: mapEvents, unit, filters });
+  }, [mapTrips, mapEvents, unit, filters]);
 
   // ── Lazy-load the video-panel data for the active tab when opened. ──
   useEffect(() => {
@@ -259,6 +331,26 @@ export function TripMap() {
     setUnit(next);
   };
 
+  const onToggleType = (type: string) => {
+    setFilters((prev) => {
+      const enabledTypes = new Set(prev.enabledTypes);
+      if (enabledTypes.has(type)) enabledTypes.delete(type);
+      else enabledTypes.add(type);
+      return { ...prev, enabledTypes };
+    });
+  };
+
+  const onMinDistanceChange = (rawValue: string) => {
+    const parsed = Number(rawValue);
+    const displayValue = Number.isFinite(parsed) ? parsed : 0;
+    const thresholdMi =
+      unit === "kph" ? displayValue / KM_PER_MILE : displayValue;
+    setFilters((prev) => ({
+      ...prev,
+      minDistanceMi: Math.max(0, Math.min(thresholdMi, maxDistanceMi)),
+    }));
+  };
+
   const dayStats = currentDay
     ? `${currentDay.trip_count} ${currentDay.trip_count === 1 ? "trip" : "trips"} \u00B7 ` +
       `${currentDay.event_count} ${currentDay.event_count === 1 ? "event" : "events"} \u00B7 ` +
@@ -299,7 +391,23 @@ export function TripMap() {
         id="eventFilterPills"
         role="toolbar"
         aria-label="Filter event markers"
-      />
+      >
+        {presentEventTypes.map((type) => {
+          const enabled = filters.enabledTypes.has(type);
+          return (
+            <button
+              type="button"
+              class={`event-filter-pill${enabled ? " active" : ""}`}
+              data-testid={`filter-type-${type}`}
+              aria-pressed={enabled}
+              onClick={() => onToggleType(type)}
+            >
+              <span class={`filter-pill-dot st-dot ${eventDotClass(type)}`} />
+              <span>{humanizeType(type)}</span>
+            </button>
+          );
+        })}
+      </div>
 
       <div class="trip-card" id="tripCard">
         <div class="trip-card-nav">
@@ -374,6 +482,88 @@ export function TripMap() {
         ))}
       </div>
 
+      <div
+        class={`filter-panel${filtersVisible ? " visible" : ""}`}
+        id="filterPanel"
+        aria-hidden={filtersVisible ? "false" : "true"}
+      >
+        <div class="filter-panel-title">Filters</div>
+        <div class="filter-section">
+          <div class="filter-label">Severity</div>
+          <div class="filter-segmented" role="group" aria-label="Minimum severity">
+            <button
+              type="button"
+              data-testid="filter-sev-all"
+              class={filters.minSeverity === 0 ? "active" : ""}
+              aria-pressed={filters.minSeverity === 0}
+              onClick={() => setFilters((prev) => ({ ...prev, minSeverity: 0 }))}
+            >
+              All
+            </button>
+            <button
+              type="button"
+              data-testid="filter-sev-info"
+              class={filters.minSeverity === 1 ? "active" : ""}
+              aria-pressed={filters.minSeverity === 1}
+              onClick={() => setFilters((prev) => ({ ...prev, minSeverity: 1 }))}
+            >
+              Info+
+            </button>
+            <button
+              type="button"
+              data-testid="filter-sev-warning"
+              class={filters.minSeverity === 2 ? "active" : ""}
+              aria-pressed={filters.minSeverity === 2}
+              onClick={() => setFilters((prev) => ({ ...prev, minSeverity: 2 }))}
+            >
+              Warning+
+            </button>
+            <button
+              type="button"
+              data-testid="filter-sev-critical"
+              class={filters.minSeverity === 3 ? "active" : ""}
+              aria-pressed={filters.minSeverity === 3}
+              onClick={() => setFilters((prev) => ({ ...prev, minSeverity: 3 }))}
+            >
+              Critical
+            </button>
+          </div>
+        </div>
+        <div class="filter-section">
+          <label class="filter-label" htmlFor="filterMinDistance">
+            Minimum trip distance
+          </label>
+          <input
+            type="range"
+            id="filterMinDistance"
+            min="0"
+            max={String(maxDistanceDisplay)}
+            step="0.1"
+            value={String(Math.min(minDistanceDisplay, maxDistanceDisplay))}
+            onInput={(e) =>
+              onMinDistanceChange((e.currentTarget as HTMLInputElement).value)
+            }
+          />
+          <div id="filterMinDistanceValue" class="filter-value">
+            {`${minDistanceDisplay.toFixed(1)} ${unit === "kph" ? "km" : "mi"}`}
+          </div>
+        </div>
+        <div class="filter-section">
+          <button
+            type="button"
+            id="filterLimitView"
+            class={`filter-switch${filters.limitToView ? " active" : ""}`}
+            role="switch"
+            aria-checked={filters.limitToView ? "true" : "false"}
+            onClick={() =>
+              setFilters((prev) => ({ ...prev, limitToView: !prev.limitToView }))
+            }
+          >
+            Limit to map view
+          </button>
+        </div>
+      </div>
+
       <div class="map-fab-group" id="mapFabs">
         <button
           class={`map-fab${panelOpen ? " active" : ""}`}
@@ -383,6 +573,15 @@ export function TripMap() {
           title="Videos"
         >
           <Icon name="video" />
+        </button>
+        <button
+          class={`map-fab${filtersVisible ? " active" : ""}`}
+          id="btnFilters"
+          onClick={() => setFiltersVisible((v) => !v)}
+          aria-label="Filters"
+          title="Filters"
+        >
+          <Icon name="filter" />
         </button>
         <button
           class={`map-fab${legendVisible ? " active" : ""}`}

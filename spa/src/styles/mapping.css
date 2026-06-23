@@ -234,10 +234,10 @@ body.mapping-active .main-content {
     transform: translateX(-50%);
     z-index: 1000;
     display: flex;
-    flex-wrap: nowrap;
+    flex-wrap: wrap;
     gap: 6px;
     max-width: calc(100vw - 120px);
-    overflow-x: auto;
+    overflow-x: visible;
     scrollbar-width: thin;
     padding: 4px 8px;
     background: var(--bg-secondary);
@@ -274,9 +274,13 @@ body.mapping-active .main-content {
 }
 .event-filter-pill.active {
     color: var(--mapping-white);
-    border-color: transparent;
-    /* per-pill background-color set inline by JS to match the
-       event-marker color so the pill reads as "this is the type" */
+    border-color: var(--accent-primary, var(--mapping-accent-primary));
+    background: var(--accent-primary, var(--mapping-accent-primary));
+}
+.event-filter-pill .filter-pill-dot {
+    width: 10px;
+    height: 10px;
+    margin-top: 0;
 }
 .event-filter-pill .pill-count {
     font-weight: 600;
@@ -324,6 +328,87 @@ body.mapping-active .main-content {
     height: 4px;
     border-radius: 2px;
     flex-shrink: 0;
+}
+
+.filter-panel {
+    position: absolute;
+    right: 64px;
+    top: 12px;
+    z-index: 1000;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color, var(--border));
+    border-radius: var(--radius-lg, 12px);
+    padding: 10px;
+    width: min(320px, calc(100vw - 88px));
+    box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+    backdrop-filter: blur(8px);
+    display: none;
+}
+[data-theme="dark"] .filter-panel {
+    background: rgba(30, 41, 59, 0.92);
+    border-color: var(--border-color, var(--mapping-panel-border-strong));
+}
+.filter-panel.visible { display: block; }
+.filter-panel-title {
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 10px;
+}
+.filter-section + .filter-section {
+    margin-top: 10px;
+}
+.filter-label {
+    display: block;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 6px;
+}
+.filter-segmented {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 4px;
+}
+.filter-segmented button {
+    border: 1px solid var(--border-color, var(--border));
+    border-radius: 999px;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 0.6875rem;
+    font-weight: 600;
+    padding: 6px 4px;
+    cursor: pointer;
+    min-height: 30px;
+}
+.filter-segmented button.active {
+    background: var(--accent-primary, var(--mapping-accent-primary));
+    border-color: var(--accent-primary, var(--mapping-accent-primary));
+    color: var(--mapping-white);
+}
+#filterMinDistance {
+    width: 100%;
+}
+.filter-value {
+    margin-top: 4px;
+    font-size: 0.75rem;
+    color: var(--text-primary);
+}
+.filter-switch {
+    width: 100%;
+    min-height: 36px;
+    border: 1px solid var(--border-color, var(--border));
+    border-radius: 999px;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+    font-weight: 600;
+    cursor: pointer;
+}
+.filter-switch.active {
+    background: var(--accent-primary, var(--mapping-accent-primary));
+    border-color: var(--accent-primary, var(--mapping-accent-primary));
+    color: var(--mapping-white);
 }
 
 .event-svg-icon { background: none !important; border: none !important; }
@@ -675,6 +760,18 @@ body.mapping-active .main-content {
     .st-actions .vp-btn {
         width: var(--video-panel-touch-target);
         height: var(--video-panel-touch-target);
+    }
+    .event-filter-pills {
+        left: 12px;
+        right: 64px;
+        transform: none;
+        max-width: none;
+    }
+    .filter-panel {
+        right: 12px;
+        left: 12px;
+        top: 62px;
+        width: auto;
     }
 }
 @media (prefers-reduced-motion: reduce) {

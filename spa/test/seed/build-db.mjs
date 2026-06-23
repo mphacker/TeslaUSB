@@ -240,7 +240,7 @@ const TRIPS = [
 const EVENTS = [
   // id, trip_id, clip_id, type, severity, t(h), lat, lon, off_ms, frame, desc
   // Two trip-linked, on-route bubbles (Sentry-derived hard-brake + accel) …
-  [1, 1, 2, "harsh_braking", 2, 7.3, 37.79, -122.42, 1500, 45, "Harsh braking"],
+  [1, 1, 2, "harsh_braking", 3, 7.3, 37.79, -122.42, 1500, 45, "Harsh braking"],
   [2, 2, 3, "hard_acceleration", 2, 12.4, 37.83, -122.38, 1800, 54, "Hard acceleration"],
   // … and one trip-less Sentry event (panel-only; not a per-trip map bubble).
   [3, null, 4, "sentry", 1, 14.15, 37.76, -122.44, null, null, "Sentry event"],

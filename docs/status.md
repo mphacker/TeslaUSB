@@ -727,7 +727,16 @@ LUNs) is the single make-or-break that still needs the car.**
 - [x] Day card stats (distance, duration, trips, events, avg/max speed). **(A4 proven)**
 - [x] Prev/next day in one fetch. **(proven)**
 - [x] Event markers by severity; click → open footage. **(A6/A6b proven)**
-- [ ] Filters: date range, **map bbox (pan/zoom)**, event type, severity, min distance. **(partial: verify bbox + all filters)**
+- [x] Filters: **map bbox (pan/zoom)**, event type, severity, min distance — client-side
+  over the loaded day. **(UAT-proven at 375px + 1280px: `spa/test/uat/trip-map.spec.ts`
+  "filters — event type, severity, min distance, limit-to-view, restore defaults". bbox uses
+  trip-bbox ∩ viewport intersection (self-validated against vertex-in-bounds); trip-linked
+  events hide with their parent trip; default state reproduces the pre-filter render; design
+  in `docs/specs/spa.md` §4 "Trip-map filters". GPT-5.5 reviewed → SHIP.)**
+- [ ] Filters follow-up: multi-day **date range** picker (needs multi-day load +
+  seed/UAT changes; deferred from the within-day filter lane). **(not started)**
+- [ ] Filters follow-up: apply the active filters to the **side-panel** lists too
+  (v1 filtered the map markers only; v1 panel parity is a follow-up). **(not started)**
 - [x] Side panel tabs (Events / Trips / All Clips) + source folder switch. **(proven;
   **All Clips tab LIVE-verified on hardware 2026-06-16** — the panel rendered all 4
   real device clips from the live catalog with correct `folder_class` labels

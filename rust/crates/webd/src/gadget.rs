@@ -307,6 +307,7 @@ pub(crate) fn map_mutation_outcome(resp: &Value) -> MutationOutcome {
             handoff_id: handoff_id.unwrap_or_default().to_owned(),
             detail: detail(),
         },
+        Some("busy") => MutationOutcome::Busy(detail()),
         Some("critical_fault") => MutationOutcome::CriticalFault {
             handoff_id: handoff_id.unwrap_or_default().to_owned(),
             detail: detail(),
@@ -723,6 +724,19 @@ mod tests {
         assert!(matches!(
             map_mutation_outcome(&crit),
             MutationOutcome::CriticalFault { .. }
+        ));
+    }
+
+    #[test]
+    fn maps_direct_busy_result() {
+        let resp = json!({
+            "handoff_id": "h-1",
+            "result": "busy",
+            "detail": "eject busy, medium intact: host has open handle"
+        });
+        assert!(matches!(
+            map_mutation_outcome(&resp),
+            MutationOutcome::Busy(_)
         ));
     }
 

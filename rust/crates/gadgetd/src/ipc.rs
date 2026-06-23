@@ -11,6 +11,7 @@
 //!   request is refused, never queued.
 //! - `handoff_status` — last/current handoff record.
 
+use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -27,7 +28,7 @@ use crate::exec::{self, LiveLun, MtimeSaveGuard};
 use crate::handoff::{self, HandoffOutcome, ImageMutator, LunControl, Mutation, Partition};
 use crate::mediamount::MediaRoMount;
 use crate::mutate::LoopMutator;
-use crate::queue::{MutationQueue, MutationState};
+use crate::queue::{BatchPlan, MutationQueue, MutationState};
 
 /// Maximum accepted frame size (a handful of small JSON fields).
 const MAX_FRAME: u32 = 1 << 20;
@@ -48,6 +49,28 @@ const ACCEPT_POLL: Duration = Duration::from_millis(100);
 /// apply at the next safe window. Sub-second so an enqueue that lands during an
 /// idle period applies promptly, but cheap enough to poll continuously.
 const DRAIN_POLL: Duration = Duration::from_secs(1);
+
+/// Per-partition exponential backoff for the transient "LUN busy" retry path, so
+/// a car that holds a LUN for hours doesn't make the drain worker hammer configfs
+/// and flood journald every `DRAIN_POLL`. Reset as soon as the partition produces
+/// any non-busy outcome.
+struct BusyBackoff {
+    attempts: u32,
+    next_eligible: Instant,
+}
+
+/// Base/cap for the busy backoff. Exponential: 1s, 2s, 4s, ... capped at 60s.
+const BUSY_BACKOFF_BASE: Duration = Duration::from_secs(1);
+const BUSY_BACKOFF_CAP: Duration = Duration::from_secs(60);
+
+fn busy_backoff_delay(attempts: u32) -> Duration {
+    // attempts is 1-based (first busy = attempt 1 -> BASE).
+    let shift = attempts.saturating_sub(1).min(16);
+    let scaled = BUSY_BACKOFF_BASE
+        .checked_mul(1u32 << shift)
+        .unwrap_or(BUSY_BACKOFF_CAP);
+    scaled.min(BUSY_BACKOFF_CAP)
+}
 
 /// A wire request (`cmd`-tagged JSON).
 #[derive(Debug, Deserialize)]
@@ -118,6 +141,8 @@ struct ServeState {
     /// Persistent read-only mount of the media image for the web read path. Its
     /// gate is suspended/resumed around media (P2) handoffs.
     media_ro: Arc<MediaRoMount>,
+    /// Per-partition (keyed by partition u8: 1=TeslaCam, 2=media) busy backoff.
+    busy_backoff: Mutex<HashMap<u8, BusyBackoff>>,
 }
 
 /// Read a length-prefixed frame (4-byte LE length, then the payload).
@@ -222,6 +247,7 @@ pub(crate) fn serve(
         queue: Mutex::new(queue),
         queue_path,
         media_ro,
+        busy_backoff: Mutex::new(HashMap::new()),
     });
 
     // Background drain worker: applies queued mutations at safe windows.
@@ -457,6 +483,7 @@ fn request_mutation(state: &ServeState, partition: u8, mutation: &Mutation) -> s
         HandoffOutcome::Done => json!({ "handoff_id": id, "result": "done" }),
         HandoffOutcome::Refused(r) => json!({ "handoff_id": id, "refused": r }),
         HandoffOutcome::Failed(d) => json!({ "handoff_id": id, "result": "failed", "detail": d }),
+        HandoffOutcome::Busy(d) => json!({ "handoff_id": id, "result": "busy", "detail": d }),
         HandoffOutcome::CriticalFault(d) => {
             json!({ "handoff_id": id, "result": "critical_fault", "detail": d })
         }
@@ -556,6 +583,9 @@ fn apply_partition(state: &ServeState, partition_u8: u8) {
     let Ok(partition) = Partition::from_u8(partition_u8) else {
         return;
     };
+    if busy_backoff_active(state, partition_u8) {
+        return;
+    }
     let plan = match state.queue.lock() {
         Ok(q) => q.plan_batch(partition_u8),
         Err(_) => return,
@@ -563,7 +593,6 @@ fn apply_partition(state: &ServeState, partition_u8: u8) {
     if plan.is_empty() {
         return;
     }
-
     // Entries superseded by a later same-path mutation never apply — retire them
     // up front so their staged blobs are reclaimed even if the apply waits.
     if !plan.coalesced_seqs.is_empty() {
@@ -572,7 +601,6 @@ fn apply_partition(state: &ServeState, partition_u8: u8) {
     if plan.applies.is_empty() {
         return;
     }
-
     // Defensive: the synthesized batch must still be valid (queue chunks deletes
     // to the cap; installs were validated at enqueue). A violation is a logic
     // bug, not a transient condition — fail those entries rather than spin.
@@ -583,26 +611,44 @@ fn apply_partition(state: &ServeState, partition_u8: u8) {
             return;
         }
     }
-
     // One handoff lock for the whole window. If a legacy direct request holds it,
     // skip this tick and retry — never block the worker on a foreign handoff.
     let Ok(_guard) = state.handoff_lock.try_lock() else {
         return;
     };
-
     // Mark Applying and persist BEFORE touching the LUN: a crash mid-handoff is
     // then recovered by requeue_inflight on the next start.
     mark_and_persist(state, &plan.apply_seqs, MutationState::Applying);
+    let disposition = run_batch_handoffs(state, &plan, partition);
 
+    // Completed entries were retired Applied in-loop on each HandoffOutcome::Done;
+    // crash/transient/fatal handling below only touches the unfinished remainder.
+    dispose_batch(state, partition_u8, &plan.apply_seq_groups, disposition);
+}
+
+struct BatchDisposition {
+    done_prefix: usize,
+    busy: bool,
+    transient: bool,
+    fatal: Option<String>,
+    busy_reason: Option<String>,
+}
+
+fn run_batch_handoffs(
+    state: &ServeState,
+    plan: &BatchPlan,
+    partition: Partition,
+) -> BatchDisposition {
     let lun_index = partition.lun_index();
     let image = state.cfg.image_for_lun(lun_index).to_path_buf();
     let lun = LiveLun::for_lun(state.cfg.clone(), lun_index);
     let guard = MtimeSaveGuard::new(image.clone(), SAVE_SAMPLE);
     let mutator = LoopMutator::new(image, state.runtime_root.clone());
 
-    let mut transient = false;
-    let mut fatal: Option<String> = None;
-    for mutation in &plan.applies {
+    let (mut transient, mut busy) = (false, false);
+    let mut done_prefix = 0usize;
+    let (mut busy_reason, mut fatal): (Option<String>, Option<String>) = (None, None);
+    for (idx, mutation) in plan.applies.iter().enumerate() {
         let id = format!("h-{}", state.next_id.fetch_add(1, Ordering::SeqCst));
         set_record(
             state,
@@ -624,7 +670,19 @@ fn apply_partition(state: &ServeState, partition_u8: u8) {
         );
         finalize_record(state, &id, &outcome);
         match outcome {
-            HandoffOutcome::Done => {}
+            HandoffOutcome::Done => {
+                if let Some(group) = plan.apply_seq_groups.get(idx) {
+                    retire_seqs(state, group, MutationState::Applied);
+                }
+                done_prefix += 1;
+            }
+            HandoffOutcome::Busy(reason) => {
+                // The car holds the LUN. Keep everything queued and retry later,
+                // backing off so we don't hammer configfs/journald every tick.
+                busy = true;
+                busy_reason = Some(reason);
+                break;
+            }
             HandoffOutcome::Refused(reason) => {
                 // Not the mutation's fault (gadget unbound / host enumerated with
                 // hot handoff off / a save in progress). Leave it queued.
@@ -642,14 +700,104 @@ fn apply_partition(state: &ServeState, partition_u8: u8) {
             }
         }
     }
+    BatchDisposition {
+        done_prefix,
+        busy,
+        transient,
+        fatal,
+        busy_reason,
+    }
+}
 
-    if transient {
-        mark_and_persist(state, &plan.apply_seqs, MutationState::Queued);
-    } else if let Some(detail) = fatal {
+fn requeue_suffix(groups: &[Vec<u64>], done_prefix: usize) -> Vec<u64> {
+    use std::collections::BTreeSet;
+    groups
+        .iter()
+        .skip(done_prefix)
+        .flatten()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// On a fatal outcome, split the unfinished suffix into the single failing
+/// group (`groups[done_prefix]`) and the un-attempted remainder
+/// (`groups[done_prefix+1..]`). The failing group is poisoned (`FailedFatal`);
+/// the remainder is requeued to retry independently.
+fn fatal_split(groups: &[Vec<u64>], done_prefix: usize) -> (Vec<u64>, Vec<u64>) {
+    use std::collections::BTreeSet;
+    let fail: Vec<u64> = groups.get(done_prefix).cloned().unwrap_or_default();
+    let requeue: Vec<u64> = groups
+        .iter()
+        .skip(done_prefix.saturating_add(1))
+        .flatten()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    (fail, requeue)
+}
+
+fn dispose_batch(
+    state: &ServeState,
+    partition_u8: u8,
+    groups: &[Vec<u64>],
+    disposition: BatchDisposition,
+) {
+    let remainder = requeue_suffix(groups, disposition.done_prefix);
+    if disposition.busy {
+        mark_and_persist(state, &remainder, MutationState::Queued);
+        let attempts = note_busy_backoff(state, partition_u8);
+        if let Some(reason) = disposition.busy_reason {
+            eprintln!(
+                "gadgetd drain: partition {partition_u8} busy (attempt {attempts}), staying queued: {reason}"
+            );
+        }
+        return;
+    }
+    clear_busy_backoff(state, partition_u8);
+    if disposition.transient {
+        mark_and_persist(state, &remainder, MutationState::Queued);
+    } else if let Some(detail) = disposition.fatal {
+        let (fail, requeue) = fatal_split(groups, disposition.done_prefix);
         eprintln!("gadgetd drain: batch apply failed ({detail}); marking failed_fatal");
-        retire_seqs(state, &plan.apply_seqs, MutationState::FailedFatal);
-    } else {
-        retire_seqs(state, &plan.apply_seqs, MutationState::Applied);
+        if !fail.is_empty() {
+            retire_seqs(state, &fail, MutationState::FailedFatal);
+        }
+        if !requeue.is_empty() {
+            mark_and_persist(state, &requeue, MutationState::Queued);
+        }
+    }
+}
+
+fn busy_backoff_active(state: &ServeState, partition: u8) -> bool {
+    match state.busy_backoff.lock() {
+        Ok(map) => map
+            .get(&partition)
+            .is_some_and(|b| Instant::now() < b.next_eligible),
+        Err(_) => false,
+    }
+}
+
+/// Record a busy outcome for `partition`, advancing the backoff. Returns the new
+/// attempt count (for logging).
+fn note_busy_backoff(state: &ServeState, partition: u8) -> u32 {
+    let Ok(mut map) = state.busy_backoff.lock() else {
+        return 0;
+    };
+    let entry = map.entry(partition).or_insert(BusyBackoff {
+        attempts: 0,
+        next_eligible: Instant::now(),
+    });
+    entry.attempts = entry.attempts.saturating_add(1);
+    entry.next_eligible = Instant::now() + busy_backoff_delay(entry.attempts);
+    entry.attempts
+}
+
+fn clear_busy_backoff(state: &ServeState, partition: u8) {
+    if let Ok(mut map) = state.busy_backoff.lock() {
+        map.remove(&partition);
     }
 }
 
@@ -716,9 +864,13 @@ fn finalize_record(state: &ServeState, id: &str, outcome: &HandoffOutcome) {
 #[cfg(test)]
 #[allow(clippy::panic, clippy::expect_used, clippy::unwrap_used)]
 mod tests {
-    use super::{MAX_FRAME, Request, read_frame, write_frame};
+    use super::{
+        MAX_FRAME, Request, busy_backoff_delay, fatal_split, read_frame, requeue_suffix,
+        write_frame,
+    };
     use crate::handoff::Mutation;
     use std::io::Cursor;
+    use std::time::Duration;
 
     #[test]
     fn frame_roundtrips() {
@@ -823,6 +975,57 @@ mod tests {
             Request::QueueStatus { job_id } => assert_eq!(job_id, "m-7"),
             other => panic!("expected queue_status, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn busy_backoff_delay_is_exponential_and_capped() {
+        assert_eq!(busy_backoff_delay(1), Duration::from_secs(1));
+        assert_eq!(busy_backoff_delay(2), Duration::from_secs(2));
+        assert_eq!(busy_backoff_delay(3), Duration::from_secs(4));
+        assert_eq!(busy_backoff_delay(7), Duration::from_secs(60));
+        assert_eq!(busy_backoff_delay(100), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn requeue_suffix_prefix_done() {
+        let groups = vec![vec![1], vec![2], vec![3]];
+        assert_eq!(requeue_suffix(&groups, 1), vec![2, 3]);
+    }
+
+    #[test]
+    fn requeue_suffix_none_done() {
+        let groups = vec![vec![1], vec![2], vec![3]];
+        assert_eq!(requeue_suffix(&groups, 0), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn requeue_suffix_all_done() {
+        let groups = vec![vec![1], vec![2], vec![3]];
+        assert!(requeue_suffix(&groups, 3).is_empty());
+    }
+
+    #[test]
+    fn requeue_suffix_handles_multi_seq_group() {
+        let groups = vec![vec![1, 2], vec![3]];
+        assert_eq!(requeue_suffix(&groups, 1), vec![3]);
+    }
+
+    #[test]
+    fn fatal_split_middle_group_failed() {
+        let groups = vec![vec![1], vec![2], vec![3]];
+        assert_eq!(fatal_split(&groups, 1), (vec![2], vec![3]));
+    }
+
+    #[test]
+    fn fatal_split_first_group_failed() {
+        let groups = vec![vec![1], vec![2], vec![3]];
+        assert_eq!(fatal_split(&groups, 0), (vec![1], vec![2, 3]));
+    }
+
+    #[test]
+    fn fatal_split_last_group_failed() {
+        let groups = vec![vec![1], vec![2], vec![3]];
+        assert_eq!(fatal_split(&groups, 2), (vec![3], vec![]));
     }
 
     use super::{bind_listener, socket_path_healthy};

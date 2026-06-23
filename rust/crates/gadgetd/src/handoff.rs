@@ -234,6 +234,11 @@ pub(crate) enum HandoffOutcome {
     /// The mutation failed, but the image was released and the LUN re-presented
     /// (the car has its drive back).
     Failed(String),
+    /// The LUN was busy (the car holds the medium) so the eject could not take.
+    /// Nothing was mutated and the backing medium is confirmed still present, so
+    /// this is transient: the mutation must stay queued and be retried at a later
+    /// safe window — it must NEVER be dropped/failed-fatal.
+    Busy(String),
     /// The image could not be proven released; the LUN is **left ejected** to
     /// avoid a double-writer. Requires recovery (handled at next `serve` start).
     CriticalFault(String),
@@ -246,6 +251,7 @@ impl HandoffOutcome {
             Self::Done => "done",
             Self::Refused(_) => "refused",
             Self::Failed(_) => "failed",
+            Self::Busy(_) => "busy",
             Self::CriticalFault(_) => "critical_fault",
         }
     }
@@ -254,7 +260,7 @@ impl HandoffOutcome {
     pub(crate) fn detail(&self) -> Option<&str> {
         match self {
             Self::Done => None,
-            Self::Refused(d) | Self::Failed(d) | Self::CriticalFault(d) => Some(d),
+            Self::Refused(d) | Self::Failed(d) | Self::Busy(d) | Self::CriticalFault(d) => Some(d),
         }
     }
 }
@@ -404,17 +410,30 @@ fn run_handoff_core(
     //     unless the mutate path cannot prove it released the image) ---
     progress(HandoffPhase::Ejecting);
     if let Err(e) = lun.eject() {
-        // Nothing was handed to the local path yet; the eject either took (rare
-        // partial) or did not. Re-presenting is safe and restores the medium.
+        // Eject failed. Best-effort restore the medium, then READ BACK the LUN to
+        // decide the true outcome. The medium's presence — not represent()'s
+        // return — is the source of truth: when the car holds the LUN, BOTH eject
+        // and re-present can EBUSY while the backing image is still fully present
+        // and untouched (the failed eject write never changed lun.N/file). We must
+        // never drop a mutation in that case — it is transient.
         let represent = lun.represent();
-        return represent.map_or_else(
-            |re| {
-                HandoffOutcome::CriticalFault(format!(
-                    "eject failed ({e}) and re-present failed ({re})"
-                ))
-            },
-            |()| HandoffOutcome::Failed(format!("eject failed: {e}")),
-        );
+        return match lun.lun_is_empty() {
+            Ok(false) => {
+                // Medium present: the car still has its drive and nothing mutated.
+                if is_busy_error(&e) {
+                    HandoffOutcome::Busy(format!("eject busy, medium intact: {e}"))
+                } else {
+                    HandoffOutcome::Failed(format!("eject failed: {e}"))
+                }
+            }
+            Ok(true) => HandoffOutcome::CriticalFault(format!(
+                "eject failed ({e}) and medium not restored (represent: {represent:?}); \
+                 LUN empty — recovery required"
+            )),
+            Err(re) => HandoffOutcome::CriticalFault(format!(
+                "eject failed ({e}); medium state unreadable ({re}) — recovery required"
+            )),
+        };
     }
 
     // --- Mount + mutate (self-cleaning) ---
@@ -430,6 +449,12 @@ fn run_handoff_core(
             me.detail
         )),
     }
+}
+
+/// A configfs eject/represent that fails with `EBUSY` means the host (the car)
+/// still holds the LUN — a transient condition, distinct from a genuine fault.
+fn is_busy_error(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::ResourceBusy
 }
 
 /// Re-present the LUN, returning `success` on success or a critical fault if the
@@ -577,7 +602,9 @@ mod tests {
         bound: bool,
         configured: bool,
         eject_fails: bool,
+        eject_busy: bool,
         represent_fails: bool,
+        medium_present: bool,
         events: RefCell<Vec<&'static str>>,
     }
     impl FakeLun {
@@ -586,7 +613,9 @@ mod tests {
                 bound: true,
                 configured: false,
                 eject_fails: false,
+                eject_busy: false,
                 represent_fails: false,
+                medium_present: true,
                 events: RefCell::new(Vec::new()),
             }
         }
@@ -599,12 +628,16 @@ mod tests {
             Ok(self.configured)
         }
         fn lun_is_empty(&self) -> std::io::Result<bool> {
-            Ok(false)
+            Ok(!self.medium_present)
         }
         fn eject(&self) -> std::io::Result<()> {
             self.events.borrow_mut().push("eject");
             if self.eject_fails {
-                Err(std::io::Error::other("eject boom"))
+                if self.eject_busy {
+                    Err(std::io::Error::from(std::io::ErrorKind::ResourceBusy))
+                } else {
+                    Err(std::io::Error::other("eject boom"))
+                }
             } else {
                 Ok(())
             }
@@ -840,6 +873,65 @@ mod tests {
         );
         assert!(matches!(out, HandoffOutcome::Failed(_)));
         // Critically, the LUN was re-presented (car gets its drive back).
+        assert_eq!(*lun.events.borrow(), ["eject", "represent"]);
+    }
+
+    #[test]
+    fn eject_busy_with_medium_present_is_busy() {
+        let mut lun = FakeLun::ok();
+        lun.eject_fails = true;
+        lun.eject_busy = true;
+        lun.medium_present = true;
+        let out = run_handoff(
+            &lun,
+            &FakeGuard(false),
+            &FakeMutator::ok(),
+            &NoopGate,
+            Partition::P1,
+            &del(),
+            false,
+            |_| {},
+        );
+        assert!(matches!(out, HandoffOutcome::Busy(_)));
+        assert_eq!(*lun.events.borrow(), ["eject", "represent"]);
+    }
+
+    #[test]
+    fn eject_busy_but_medium_lost_is_critical() {
+        let mut lun = FakeLun::ok();
+        lun.eject_fails = true;
+        lun.eject_busy = true;
+        lun.medium_present = false;
+        let out = run_handoff(
+            &lun,
+            &FakeGuard(false),
+            &FakeMutator::ok(),
+            &NoopGate,
+            Partition::P1,
+            &del(),
+            false,
+            |_| {},
+        );
+        assert!(matches!(out, HandoffOutcome::CriticalFault(_)));
+    }
+
+    #[test]
+    fn eject_nonbusy_with_medium_present_is_failed() {
+        let mut lun = FakeLun::ok();
+        lun.eject_fails = true;
+        lun.eject_busy = false;
+        lun.medium_present = true;
+        let out = run_handoff(
+            &lun,
+            &FakeGuard(false),
+            &FakeMutator::ok(),
+            &NoopGate,
+            Partition::P1,
+            &del(),
+            false,
+            |_| {},
+        );
+        assert!(matches!(out, HandoffOutcome::Failed(_)));
         assert_eq!(*lun.events.borrow(), ["eject", "represent"]);
     }
 

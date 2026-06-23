@@ -38,7 +38,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::handoff::{MAX_DELETE_PATHS, Mutation};
+use crate::handoff::Mutation;
+#[cfg(test)]
+use crate::handoff::MAX_DELETE_PATHS;
 
 /// Hard cap on live (non-terminal) queue entries. An `enqueue` past this is
 /// refused with a real error so a runaway producer cannot fill the data fs with
@@ -99,6 +101,10 @@ pub(crate) struct BatchPlan {
     pub applies: Vec<Mutation>,
     /// `seq`s moving to `Applying` (the entries backing `applies`).
     pub apply_seqs: Vec<u64>,
+    /// For each entry in `applies`, the queue `seq`s that contributed to it.
+    /// `apply_seq_groups[i]` are the seqs backing `applies[i]`.
+    /// Each winning delete `seq` appears in exactly one group.
+    pub apply_seq_groups: Vec<Vec<u64>>,
     /// `seq`s superseded by a later same-path entry → `Coalesced`.
     pub coalesced_seqs: Vec<u64>,
 }
@@ -207,8 +213,9 @@ impl MutationQueue {
 
     /// Reconcile all `Queued` entries for `partition` into a single-handoff plan.
     ///
-    /// Deletes are emitted as one batched [`Mutation::DeletePaths`] (capped by the
-    /// mutation's own bound — see [`plan_apply_seqs`] note); installs keep their
+    /// Deletes are emitted as one-or-more batched [`Mutation::DeletePaths`] (each
+    /// capped by the mutation's own bound, with whole per-seq winning groups kept
+    /// intact); installs keep their
     /// own entry so each carries its staged blob. Superseded earlier entries are
     /// reported for a `Coalesced` transition.
     pub(crate) fn plan_batch(&self, partition: u8) -> BatchPlan {
@@ -238,17 +245,22 @@ impl MutationQueue {
         // entry as the latest. Otherwise it is superseded (coalesced).
         let mut apply_seqs = Vec::new();
         let mut coalesced_seqs = Vec::new();
-        let mut delete_paths: Vec<String> = Vec::new();
-        let mut installs: Vec<Mutation> = Vec::new();
+        let mut seq_paths: BTreeMap<u64, Vec<String>> = BTreeMap::new();
+        let mut installs: Vec<(Mutation, u64)> = Vec::new();
         // Directory prunes have no path effect (so the `wins_any` test below
         // would wrongly coalesce them). They are always applied; dedup by path,
         // preserving first-seen order.
         let mut remove_dirs: Vec<String> = Vec::new();
         let mut remove_dir_seen: BTreeSet<String> = BTreeSet::new();
+        let mut remove_dir_groups: BTreeMap<String, BTreeSet<u64>> = BTreeMap::new();
 
         for entry in &queued {
             if let Mutation::RemoveEmptyDir { rel_path } = &entry.mutation {
                 apply_seqs.push(entry.seq);
+                remove_dir_groups
+                    .entry(rel_path.clone())
+                    .or_default()
+                    .insert(entry.seq);
                 if remove_dir_seen.insert(rel_path.clone()) {
                     remove_dirs.push(rel_path.clone());
                 }
@@ -268,43 +280,54 @@ impl MutationQueue {
         }
 
         // Build the minimal apply set from the winning per-path effects.
-        for (path, (_seq, effect)) in &latest {
+        for (path, (seq, effect)) in &latest {
             match effect {
-                Effect::Delete => delete_paths.push(path.clone()),
+                Effect::Delete => {
+                    seq_paths.entry(*seq).or_default().push(path.clone());
+                }
                 Effect::Install => {
                     if let Some(src) = winning_install_source(&queued, path) {
-                        installs.push(Mutation::InstallFile {
-                            rel_path: path.clone(),
-                            source_path: src,
-                        });
+                        installs.push((
+                            Mutation::InstallFile {
+                                rel_path: path.clone(),
+                                source_path: src,
+                            },
+                            *seq,
+                        ));
                     }
                 }
             }
         }
 
         let mut applies = Vec::new();
-        if !delete_paths.is_empty() {
-            delete_paths.sort();
-            // The drain worker applies each entry directly (bypassing
-            // `Mutation::validate`), so the synthesized batches must already
-            // honor the per-op cap: chunk into `DeletePaths` of <= MAX_DELETE_PATHS.
-            for chunk in delete_paths.chunks(MAX_DELETE_PATHS) {
-                applies.push(Mutation::DeletePaths {
-                    rel_paths: chunk.to_vec(),
-                });
-            }
+        let mut apply_seq_groups = Vec::new();
+        for (seq, mut rel_paths) in seq_paths {
+            rel_paths.sort();
+            applies.push(Mutation::DeletePaths { rel_paths });
+            apply_seq_groups.push(vec![seq]);
         }
         // Directory prunes run AFTER the file deletes (each apply is its own
         // handoff/eject, applied in order) so the folder's files are already gone
         // when the empty-only `remove_dir` runs, and BEFORE installs.
         for rel_path in remove_dirs {
+            let group = remove_dir_groups
+                .get(&rel_path)
+                .map(|seqs| seqs.iter().copied().collect())
+                .unwrap_or_default();
             applies.push(Mutation::RemoveEmptyDir { rel_path });
+            apply_seq_groups.push(group);
         }
-        applies.extend(installs);
+        for (mutation, seq) in installs {
+            applies.push(mutation);
+            apply_seq_groups.push(vec![seq]);
+        }
+
+        debug_assert_group_coverage(&apply_seq_groups, &apply_seqs);
 
         BatchPlan {
             applies,
             apply_seqs,
+            apply_seq_groups,
             coalesced_seqs,
         }
     }
@@ -396,6 +419,12 @@ impl MutationQueue {
         }
         Ok(())
     }
+}
+
+fn debug_assert_group_coverage(groups: &[Vec<u64>], apply_seqs: &[u64]) {
+    let grouped: BTreeSet<u64> = groups.iter().flatten().copied().collect();
+    let apply_set: BTreeSet<u64> = apply_seqs.iter().copied().collect();
+    debug_assert_eq!(grouped, apply_set);
 }
 
 /// The per-path effects a mutation contributes (path → install/delete).
@@ -558,22 +587,42 @@ mod tests {
     }
 
     #[test]
-    fn independent_paths_batch_deletes_into_one_handoff() {
+    fn independent_paths_emit_one_delete_apply_per_seq() {
         let mut q = MutationQueue::default();
         q.enqueue(2, delete("Music/a.mp3"), None, None).unwrap();
         q.enqueue(2, delete("Music/b.mp3"), None, None).unwrap();
         q.enqueue(2, install("Boombox/c.wav", "/s/c"), None, None)
             .unwrap();
         let plan = q.plan_batch(2);
-        // Deletes coalesce into one batched DeletePaths; install kept separate.
-        assert_eq!(plan.applies.len(), 2);
+        assert_eq!(plan.applies.len(), 3);
         assert!(matches!(
             &plan.applies[0],
-            Mutation::DeletePaths { rel_paths } if rel_paths == &vec!["Music/a.mp3".to_owned(), "Music/b.mp3".to_owned()]
+            Mutation::DeletePaths { rel_paths } if rel_paths == &vec!["Music/a.mp3".to_owned()]
         ));
-        assert_eq!(plan.applies[1], install("Boombox/c.wav", "/s/c"));
+        assert!(matches!(
+            &plan.applies[1],
+            Mutation::DeletePaths { rel_paths } if rel_paths == &vec!["Music/b.mp3".to_owned()]
+        ));
+        assert_eq!(plan.applies[2], install("Boombox/c.wav", "/s/c"));
         assert_eq!(plan.apply_seqs.len(), 3);
         assert!(plan.coalesced_seqs.is_empty());
+    }
+
+    #[test]
+    fn apply_seq_groups_stay_parallel_and_cover_apply_seqs() {
+        let mut q = MutationQueue::default();
+        q.enqueue(2, delete("Music/a.mp3"), None, None).unwrap();
+        q.enqueue(2, remove_dir("Music"), None, None).unwrap();
+        q.enqueue(2, install("Boombox/c.wav", "/s/c"), None, None)
+            .unwrap();
+
+        let plan = q.plan_batch(2);
+        assert_eq!(plan.apply_seq_groups.len(), plan.applies.len());
+
+        let grouped: std::collections::BTreeSet<u64> =
+            plan.apply_seq_groups.iter().flatten().copied().collect();
+        let apply_set: std::collections::BTreeSet<u64> = plan.apply_seqs.iter().copied().collect();
+        assert_eq!(grouped, apply_set);
     }
 
     #[test]
@@ -588,15 +637,18 @@ mod tests {
             .unwrap();
         let plan = q.plan_batch(2);
 
-        // Files coalesce into one DeletePaths; the prune follows as its own entry.
-        assert_eq!(plan.applies.len(), 2);
+        assert_eq!(plan.applies.len(), 3);
         assert!(matches!(
             &plan.applies[0],
             Mutation::DeletePaths { rel_paths }
-                if rel_paths == &vec!["Music/Artist/Album/a.mp3".to_owned(),
-                                      "Music/Artist/Album/b.mp3".to_owned()]
+                if rel_paths == &vec!["Music/Artist/Album/a.mp3".to_owned()]
         ));
-        assert_eq!(plan.applies[1], remove_dir("Music/Artist/Album"));
+        assert!(matches!(
+            &plan.applies[1],
+            Mutation::DeletePaths { rel_paths }
+                if rel_paths == &vec!["Music/Artist/Album/b.mp3".to_owned()]
+        ));
+        assert_eq!(plan.applies[2], remove_dir("Music/Artist/Album"));
         // The prune (seq 3) has no path effect but MUST be applied, not coalesced.
         assert!(plan.apply_seqs.contains(&3));
         assert!(plan.coalesced_seqs.is_empty());
@@ -696,9 +748,7 @@ mod tests {
     }
 
     #[test]
-    fn deletes_chunk_to_the_handoff_cap() {
-        // More distinct deletes than a single DeletePaths may carry must split
-        // into multiple batched ops, each within MAX_DELETE_PATHS.
+    fn each_delete_seq_becomes_its_own_apply() {
         let mut q = MutationQueue::default();
         let total = MAX_DELETE_PATHS + 5;
         for i in 0..total {
@@ -706,19 +756,117 @@ mod tests {
                 .unwrap();
         }
         let plan = q.plan_batch(2);
-        assert_eq!(plan.applies.len(), 2, "splits into two DeletePaths chunks");
-        let mut seen = 0;
+        assert_eq!(plan.applies.len(), total);
+        let mut seen = Vec::new();
         for m in &plan.applies {
             match m {
                 Mutation::DeletePaths { rel_paths } => {
-                    assert!(rel_paths.len() <= MAX_DELETE_PATHS);
-                    seen += rel_paths.len();
+                    assert_eq!(rel_paths.len(), 1);
+                    seen.extend(rel_paths.iter().cloned());
                 }
                 other => panic!("expected DeletePaths, got {other:?}"),
             }
         }
-        assert_eq!(seen, total, "every path is covered exactly once");
+        assert_eq!(seen.len(), total);
         assert_eq!(plan.apply_seqs.len(), total);
+        assert_eq!(plan.apply_seq_groups.len(), total);
+        assert!(plan.apply_seq_groups.iter().all(|group| group.len() == 1));
+    }
+
+    #[test]
+    fn delete_seq_groups_do_not_span_delete_chunks() {
+        let mut q = MutationQueue::default();
+        let seq1_paths: Vec<String> = (0..10).map(|i| format!("Music/s1-{i:02}.mp3")).collect();
+        let seq2_paths: Vec<String> = (0..10).map(|i| format!("Music/s2-{i:02}.mp3")).collect();
+        q.enqueue(
+            2,
+            Mutation::DeletePaths {
+                rel_paths: seq1_paths.clone(),
+            },
+            None,
+            None,
+        )
+        .unwrap();
+        q.enqueue(
+            2,
+            Mutation::DeletePaths {
+                rel_paths: seq2_paths.clone(),
+            },
+            None,
+            None,
+        )
+        .unwrap();
+
+        let plan = q.plan_batch(2);
+        assert_eq!(plan.applies.len(), 2);
+
+        let mut chunk_seq_sets: Vec<std::collections::BTreeSet<u64>> = Vec::new();
+        for (mutation, group) in plan.applies.iter().zip(plan.apply_seq_groups.iter()) {
+            assert_eq!(group.len(), 1, "one delete apply per winning seq");
+            let rel_paths = match mutation {
+                Mutation::DeletePaths { rel_paths } => rel_paths,
+                other => panic!("expected DeletePaths, got {other:?}"),
+            };
+            let seqs = rel_paths
+                .iter()
+                .map(|path| {
+                    if seq1_paths.contains(path) {
+                        1u64
+                    } else if seq2_paths.contains(path) {
+                        2u64
+                    } else {
+                        panic!("unexpected delete path in chunk: {path}");
+                    }
+                })
+                .collect();
+            assert_eq!(seqs, group.iter().copied().collect());
+            chunk_seq_sets.push(seqs);
+        }
+
+        for (idx, seqs) in chunk_seq_sets.iter().enumerate() {
+            for other in chunk_seq_sets.iter().skip(idx + 1) {
+                assert!(
+                    seqs.is_disjoint(other),
+                    "each delete chunk must contain a disjoint set of contributing seqs"
+                );
+            }
+        }
+
+        let expected_per_seq: std::collections::BTreeMap<u64, std::collections::BTreeSet<String>> =
+            [
+                (1u64, seq1_paths.iter().cloned().collect()),
+                (2u64, seq2_paths.iter().cloned().collect()),
+            ]
+            .into_iter()
+            .collect();
+        for (seq, expected_paths) in &expected_per_seq {
+            let containing_chunks: Vec<std::collections::BTreeSet<String>> = plan
+                .applies
+                .iter()
+                .filter_map(|mutation| match mutation {
+                    Mutation::DeletePaths { rel_paths } => {
+                        let chunk_paths: std::collections::BTreeSet<String> =
+                            rel_paths.iter().cloned().collect();
+                        if chunk_paths.iter().any(|p| expected_paths.contains(p)) {
+                            Some(chunk_paths)
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                containing_chunks.len(),
+                1,
+                "winning paths for seq {seq} must appear in exactly one chunk"
+            );
+            let only_chunk = containing_chunks.first().expect("one containing chunk");
+            assert!(
+                expected_paths.is_subset(only_chunk),
+                "all winning paths for seq {seq} must stay together in one chunk"
+            );
+        }
     }
 
     #[test]

@@ -374,9 +374,17 @@ pub(crate) fn run_handoff(
 
     let outcome = run_handoff_core(lun, mutator, partition, mutation, &mut progress);
 
-    if partition == Partition::P2
-        && matches!(outcome, HandoffOutcome::Done | HandoffOutcome::Failed(_))
-    {
+    // We suspended the read-only media mount above, so we MUST attempt to resume
+    // it on every terminal outcome — including `CriticalFault`. Skipping resume on
+    // a fault leaves the web read path (chime/music/lightshow preview, download,
+    // and activate) permanently 404ing until gadgetd restarts: a fault as common
+    // as an eject EBUSY (the car holding the media LUN) would otherwise strand the
+    // mount with no self-heal. Resuming is fail-safe even when the mutate path may
+    // have left a stale RW loop on the image: `MediaRoMount::ensure_mounted`
+    // refuses to mount while any loop is attached, so it can never stack a second
+    // mount on the volume — it records the error and leaves the read path down
+    // until the next startup recovery clears the loop.
+    if partition == Partition::P2 {
         if let Err(e) = gate.resume() {
             eprintln!("gadgetd handoff: media RO resume failed: {e}");
         }
@@ -994,7 +1002,11 @@ mod tests {
     }
 
     #[test]
-    fn p2_critical_fault_skips_resume() {
+    fn p2_critical_fault_still_resumes() {
+        // A P2 handoff that suspended the read mount MUST resume it even when the
+        // core handoff ends in CriticalFault — otherwise the web read path is
+        // stranded 404ing until gadgetd restarts. The resume itself is fail-safe
+        // (MediaRoMount refuses to re-mount over a stale loop).
         let lun = FakeLun::ok();
         let gate = RecordingGate {
             suspends: Cell::new(0),
@@ -1014,6 +1026,32 @@ mod tests {
         );
         assert!(matches!(outcome, HandoffOutcome::CriticalFault(_)));
         assert_eq!(gate.suspends.get(), 1);
-        assert_eq!(gate.resumes.get(), 0);
+        assert_eq!(gate.resumes.get(), 1);
+    }
+
+    #[test]
+    fn p2_critical_fault_resume_error_preserves_outcome() {
+        // A resume failure on the CriticalFault path is logged but never masks the
+        // original CriticalFault outcome the caller must act on.
+        let lun = FakeLun::ok();
+        let gate = RecordingGate {
+            suspends: Cell::new(0),
+            resumes: Cell::new(0),
+            suspend_err: false,
+            resume_err: true,
+        };
+        let outcome = run_handoff(
+            &lun,
+            &FakeGuard(false),
+            &FakeMutator::err(false),
+            &gate,
+            Partition::P2,
+            &del(),
+            false,
+            |_| {},
+        );
+        assert!(matches!(outcome, HandoffOutcome::CriticalFault(_)));
+        assert_eq!(gate.suspends.get(), 1);
+        assert_eq!(gate.resumes.get(), 1);
     }
 }

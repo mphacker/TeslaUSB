@@ -277,6 +277,12 @@ pub(crate) trait LunControl {
     fn eject(&self) -> std::io::Result<()>;
     /// Re-present: point `lun.0/file` back at the backing image.
     fn represent(&self) -> std::io::Result<()>;
+    /// Force-detach this LUN's medium even when the host holds SCSI
+    /// `PREVENT_MEDIUM_REMOVAL` (kernel `forced_eject`). The live implementation
+    /// MUST refuse any LUN other than the media LUN — the `TeslaCam` LUN backs
+    /// live dashcam recording and must never have its medium force-detached.
+    /// Used only as the media-LUN fallback when a plain `eject()` returns EBUSY.
+    fn force_eject(&self) -> std::io::Result<()>;
 }
 
 /// Coordinates the persistent read-only media mount around a media (P2) handoff.
@@ -409,31 +415,41 @@ fn run_handoff_core(
     // --- Eject (from here the image is ours; the LUN must end re-presented
     //     unless the mutate path cannot prove it released the image) ---
     progress(HandoffPhase::Ejecting);
-    if let Err(e) = lun.eject() {
-        // Eject failed. Best-effort restore the medium, then READ BACK the LUN to
-        // decide the true outcome. The medium's presence — not represent()'s
-        // return — is the source of truth: when the car holds the LUN, BOTH eject
-        // and re-present can EBUSY while the backing image is still fully present
-        // and untouched (the failed eject write never changed lun.N/file). We must
-        // never drop a mutation in that case — it is transient.
-        let represent = lun.represent();
-        return match lun.lun_is_empty() {
-            Ok(false) => {
-                // Medium present: the car still has its drive and nothing mutated.
-                if is_busy_error(&e) {
-                    HandoffOutcome::Busy(format!("eject busy, medium intact: {e}"))
-                } else {
-                    HandoffOutcome::Failed(format!("eject failed: {e}"))
-                }
+    match lun.eject() {
+        Ok(()) => {
+            // Plain eject reported success. Re-confirm detach at the orchestration
+            // layer (impl-independent double-writer guard) before mounting RW.
+            if let Err(out) = confirm_detached(lun, "eject") {
+                return out;
             }
-            Ok(true) => HandoffOutcome::CriticalFault(format!(
-                "eject failed ({e}) and medium not restored (represent: {represent:?}); \
-                 LUN empty — recovery required"
-            )),
-            Err(re) => HandoffOutcome::CriticalFault(format!(
-                "eject failed ({e}); medium state unreadable ({re}) — recovery required"
-            )),
-        };
+        }
+        Err(e) => {
+            // Plain eject failed. For the MEDIA partition (P2) the car routinely
+            // holds lun.1 with SCSI PREVENT_MEDIUM_REMOVAL, so a normal eject is
+            // EBUSY for as long as the car is parked — the queued media mutation
+            // would never apply. Fall back to the kernel `forced_eject`, which
+            // overrides prevent-removal and detaches the medium. This is done ONLY
+            // for media (P2) and ONLY on a transient EBUSY; the TeslaCam LUN (P1)
+            // is never force-ejected (its medium backs live recording).
+            if partition == Partition::P2 && is_busy_error(&e) {
+                match lun.force_eject() {
+                    Ok(()) => {
+                        // forced_eject claimed success — re-confirm detach exactly
+                        // like the plain path (never trust the override blindly).
+                        if let Err(out) = confirm_detached(lun, "forced_eject") {
+                            return out;
+                        }
+                        eprintln!(
+                            "gadgetd handoff: media plain-eject was busy; forced_eject \
+                             detached the medium, proceeding with mutate"
+                        );
+                    }
+                    Err(fe) => return classify_failed_eject(lun, &e, Some(&fe)),
+                }
+            } else {
+                return classify_failed_eject(lun, &e, None);
+            }
+        }
     }
 
     // --- Mount + mutate (self-cleaning) ---
@@ -447,6 +463,91 @@ fn run_handoff_core(
             "mutate failed and image NOT released ({}); LUN left ejected to \
              prevent a double-writer — recovery required",
             me.detail
+        )),
+    }
+}
+
+/// After an `eject`/`forced_eject` reports success, re-confirm at the
+/// orchestration layer that the medium is truly detached before mounting the
+/// backing image RW. This is the double-writer guard, independent of any
+/// `LunControl` implementation (the live impls also self-verify). `how` names
+/// the operation for diagnostics.
+///
+/// Returns `Err(outcome)` when we must NOT proceed to mutate:
+/// - medium still present: nothing was ejected or mutated and the car still has
+///   its drive, so this is a benign terminal `Failed` (retrying cannot help, and
+///   a recovery would needlessly risk the `TeslaCam` LUN).
+/// - medium state unreadable: unknown state, so `CriticalFault` (recover).
+fn confirm_detached(lun: &dyn LunControl, how: &str) -> Result<(), HandoffOutcome> {
+    match lun.lun_is_empty() {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(HandoffOutcome::Failed(format!(
+            "{how} reported success but the medium is still present; refusing to \
+             mutate (double-writer guard)"
+        ))),
+        Err(re) => {
+            // The eject reported success, so the medium is almost certainly already
+            // detached and the car has lost its drive on this LUN. We never mounted
+            // or mutated the image, so a best-effort re-present is safe and restores
+            // the car's drive — mirroring `classify_failed_eject`'s error handling —
+            // rather than leaving the LUN absent until next-startup recovery.
+            let represent = lun.represent();
+            Err(HandoffOutcome::CriticalFault(format!(
+                "{how} reported success but medium state is unreadable ({re}; \
+                 represent: {represent:?}); refusing to mutate — recovery required"
+            )))
+        }
+    }
+}
+
+/// Classify a failed eject by reading back the medium's true state — the
+/// medium's presence, not `represent()`'s return, is the source of truth. When
+/// the car holds the LUN, BOTH eject and re-present can EBUSY while the backing
+/// image is still fully present and untouched (the failed eject write never
+/// changed `lun.N/file`); we must never drop the mutation in that case — it is
+/// transient. `force_err` is `Some` when a media-LUN `forced_eject` fallback was
+/// also attempted and itself failed.
+fn classify_failed_eject(
+    lun: &dyn LunControl,
+    eject_err: &std::io::Error,
+    force_err: Option<&std::io::Error>,
+) -> HandoffOutcome {
+    // Best-effort restore the medium, then read back the LUN to decide the truth.
+    let represent = lun.represent();
+    match lun.lun_is_empty() {
+        Ok(false) => {
+            // Medium present: the car still has its drive and nothing mutated.
+            if is_busy_error(eject_err) {
+                match force_err {
+                    // Forced eject ALSO hit EBUSY — the car is clamping the LUN so
+                    // hard that even the override is contended. Still transient:
+                    // keep the mutation queued and retry with backoff.
+                    Some(fe) if is_busy_error(fe) => HandoffOutcome::Busy(format!(
+                        "eject busy, medium intact; forced-eject also busy ({fe}): {eject_err}"
+                    )),
+                    // Forced eject failed for a NON-transient reason (e.g. the
+                    // forced_eject attribute is missing, a permission error, or it
+                    // ran but did not detach the medium). Retrying cannot help, so
+                    // surface a terminal failure rather than looping Busy forever.
+                    // The medium is intact — the car keeps its drive, nothing was
+                    // mutated, so this is safe to fail (no recovery required).
+                    Some(fe) => HandoffOutcome::Failed(format!(
+                        "forced-eject failed ({fe}); plain eject busy: {eject_err}"
+                    )),
+                    // No forced-eject was attempted (P1, or a non-busy plain eject):
+                    // a transient plain-eject busy stays queued.
+                    None => HandoffOutcome::Busy(format!("eject busy, medium intact: {eject_err}")),
+                }
+            } else {
+                HandoffOutcome::Failed(format!("eject failed: {eject_err}"))
+            }
+        }
+        Ok(true) => HandoffOutcome::CriticalFault(format!(
+            "eject failed ({eject_err}) and medium not restored (represent: {represent:?}); \
+             LUN empty — recovery required"
+        )),
+        Err(re) => HandoffOutcome::CriticalFault(format!(
+            "eject failed ({eject_err}); medium state unreadable ({re}) — recovery required"
         )),
     }
 }
@@ -603,8 +704,13 @@ mod tests {
         configured: bool,
         eject_fails: bool,
         eject_busy: bool,
+        eject_no_detach: bool,
         represent_fails: bool,
-        medium_present: bool,
+        force_eject_fails: bool,
+        force_eject_busy: bool,
+        force_eject_no_detach: bool,
+        lun_is_empty_err: bool,
+        medium_present: std::cell::Cell<bool>,
         events: RefCell<Vec<&'static str>>,
     }
     impl FakeLun {
@@ -614,8 +720,13 @@ mod tests {
                 configured: false,
                 eject_fails: false,
                 eject_busy: false,
+                eject_no_detach: false,
                 represent_fails: false,
-                medium_present: true,
+                force_eject_fails: false,
+                force_eject_busy: false,
+                force_eject_no_detach: false,
+                lun_is_empty_err: false,
+                medium_present: std::cell::Cell::new(true),
                 events: RefCell::new(Vec::new()),
             }
         }
@@ -628,7 +739,10 @@ mod tests {
             Ok(self.configured)
         }
         fn lun_is_empty(&self) -> std::io::Result<bool> {
-            Ok(!self.medium_present)
+            if self.lun_is_empty_err {
+                return Err(std::io::Error::other("lun_is_empty boom"));
+            }
+            Ok(!self.medium_present.get())
         }
         fn eject(&self) -> std::io::Result<()> {
             self.events.borrow_mut().push("eject");
@@ -639,6 +753,9 @@ mod tests {
                     Err(std::io::Error::other("eject boom"))
                 }
             } else {
+                if !self.eject_no_detach {
+                    self.medium_present.set(false);
+                }
                 Ok(())
             }
         }
@@ -647,6 +764,21 @@ mod tests {
             if self.represent_fails {
                 Err(std::io::Error::other("represent boom"))
             } else {
+                Ok(())
+            }
+        }
+        fn force_eject(&self) -> std::io::Result<()> {
+            self.events.borrow_mut().push("force_eject");
+            if self.force_eject_fails {
+                if self.force_eject_busy {
+                    Err(std::io::Error::from(std::io::ErrorKind::ResourceBusy))
+                } else {
+                    Err(std::io::Error::other("force_eject boom"))
+                }
+            } else {
+                if !self.force_eject_no_detach {
+                    self.medium_present.set(false);
+                }
                 Ok(())
             }
         }
@@ -881,7 +1013,7 @@ mod tests {
         let mut lun = FakeLun::ok();
         lun.eject_fails = true;
         lun.eject_busy = true;
-        lun.medium_present = true;
+        lun.medium_present.set(true);
         let out = run_handoff(
             &lun,
             &FakeGuard(false),
@@ -901,7 +1033,7 @@ mod tests {
         let mut lun = FakeLun::ok();
         lun.eject_fails = true;
         lun.eject_busy = true;
-        lun.medium_present = false;
+        lun.medium_present.set(false);
         let out = run_handoff(
             &lun,
             &FakeGuard(false),
@@ -920,7 +1052,7 @@ mod tests {
         let mut lun = FakeLun::ok();
         lun.eject_fails = true;
         lun.eject_busy = false;
-        lun.medium_present = true;
+        lun.medium_present.set(true);
         let out = run_handoff(
             &lun,
             &FakeGuard(false),
@@ -933,6 +1065,178 @@ mod tests {
         );
         assert!(matches!(out, HandoffOutcome::Failed(_)));
         assert_eq!(*lun.events.borrow(), ["eject", "represent"]);
+    }
+
+    #[test]
+    fn media_busy_force_ejects_then_completes() {
+        // P2 + eject EBUSY: the media LUN is force-ejected and the handoff then
+        // mounts + mutates + re-presents to completion. force_eject IS used.
+        let mut lun = FakeLun::ok();
+        lun.configured = true; // car enumerated and holding the media LUN
+        lun.eject_fails = true;
+        lun.eject_busy = true;
+        let out = run_handoff(
+            &lun,
+            &FakeGuard(false),
+            &FakeMutator::ok(),
+            &NoopGate,
+            Partition::P2,
+            &del(),
+            false,
+            |_| {},
+        );
+        assert_eq!(out, HandoffOutcome::Done);
+        assert_eq!(*lun.events.borrow(), ["eject", "force_eject", "represent"]);
+    }
+
+    #[test]
+    fn media_busy_force_eject_busy_stays_queued() {
+        // P2 + eject EBUSY + forced_eject ALSO EBUSY (car still clamping the LUN):
+        // the medium is intact, so the mutation stays queued (Busy), not dropped.
+        let mut lun = FakeLun::ok();
+        lun.configured = true;
+        lun.eject_fails = true;
+        lun.eject_busy = true;
+        lun.force_eject_fails = true;
+        lun.force_eject_busy = true;
+        lun.medium_present.set(true);
+        let out = run_handoff(
+            &lun,
+            &FakeGuard(false),
+            &FakeMutator::ok(),
+            &NoopGate,
+            Partition::P2,
+            &del(),
+            false,
+            |_| {},
+        );
+        assert!(matches!(out, HandoffOutcome::Busy(_)));
+        assert_eq!(*lun.events.borrow(), ["eject", "force_eject", "represent"]);
+    }
+
+    #[test]
+    fn media_force_eject_nonbusy_failure_is_terminal() {
+        // P2 + eject EBUSY + forced_eject fails NON-busy (e.g. attribute missing /
+        // permission / verification). Retrying cannot help, so the outcome is a
+        // terminal Failed, NOT an infinite Busy. Medium stays intact.
+        let mut lun = FakeLun::ok();
+        lun.configured = true;
+        lun.eject_fails = true;
+        lun.eject_busy = true;
+        lun.force_eject_fails = true;
+        lun.force_eject_busy = false; // non-busy failure
+        lun.medium_present.set(true);
+        let out = run_handoff(
+            &lun,
+            &FakeGuard(false),
+            &FakeMutator::ok(),
+            &NoopGate,
+            Partition::P2,
+            &del(),
+            false,
+            |_| {},
+        );
+        assert!(matches!(out, HandoffOutcome::Failed(_)));
+        assert_eq!(*lun.events.borrow(), ["eject", "force_eject", "represent"]);
+    }
+
+    #[test]
+    fn media_force_eject_ok_but_medium_present_is_failed() {
+        // Double-writer guard: forced_eject returns Ok but the medium is still
+        // present. The core fails terminally (benign — car keeps its drive,
+        // nothing mutated), refusing to mutate.
+        let mut lun = FakeLun::ok();
+        lun.configured = true;
+        lun.eject_fails = true;
+        lun.eject_busy = true;
+        lun.force_eject_no_detach = true; // Ok but medium stays present
+        lun.medium_present.set(true);
+        let out = run_handoff(
+            &lun,
+            &FakeGuard(false),
+            &FakeMutator::ok(),
+            &NoopGate,
+            Partition::P2,
+            &del(),
+            false,
+            |_| {},
+        );
+        assert!(matches!(out, HandoffOutcome::Failed(_)));
+        assert_eq!(*lun.events.borrow(), ["eject", "force_eject"]);
+    }
+
+    #[test]
+    fn plain_eject_ok_but_medium_present_is_failed() {
+        // Symmetric double-writer guard: a plain eject reports success but the
+        // medium did NOT detach. The core must refuse to mutate (terminal Failed),
+        // never loop-mount RW over an image the car still holds. Applies even to
+        // the TeslaCam LUN (P1).
+        let mut lun = FakeLun::ok();
+        lun.configured = true;
+        lun.eject_no_detach = true; // eject Ok but medium stays present
+        lun.medium_present.set(true);
+        let out = run_handoff(
+            &lun,
+            &FakeGuard(false),
+            &FakeMutator::ok(),
+            &NoopGate,
+            Partition::P1,
+            &del(),
+            true,
+            |_| {},
+        );
+        assert!(matches!(out, HandoffOutcome::Failed(_)));
+        assert_eq!(*lun.events.borrow(), ["eject"]);
+    }
+
+    #[test]
+    fn eject_ok_but_readback_unreadable_represents_then_critical() {
+        // Plain eject reports success but the post-eject medium readback FAILS.
+        // The medium is almost certainly already detached (the car has lost its
+        // drive), so the guard must best-effort re-present before surfacing a
+        // CriticalFault — never leave the LUN absent until next-startup recovery.
+        let mut lun = FakeLun::ok();
+        lun.configured = true;
+        lun.lun_is_empty_err = true; // post-eject readback unreadable
+        let out = run_handoff(
+            &lun,
+            &FakeGuard(false),
+            &FakeMutator::ok(),
+            &NoopGate,
+            Partition::P2,
+            &del(),
+            false,
+            |_| {},
+        );
+        assert!(matches!(out, HandoffOutcome::CriticalFault(_)));
+        // The LUN was re-presented on the way out (car gets its drive back).
+        assert_eq!(*lun.events.borrow(), ["eject", "represent"]);
+    }
+
+    #[test]
+    fn teslacam_p1_busy_never_force_ejects() {
+        // P1 (TeslaCam) eject EBUSY must NEVER force-eject — recording medium is
+        // sacred. It stays queued (Busy) via the normal path, no force_eject call.
+        let mut lun = FakeLun::ok();
+        lun.eject_fails = true;
+        lun.eject_busy = true;
+        lun.medium_present.set(true);
+        let out = run_handoff(
+            &lun,
+            &FakeGuard(false),
+            &FakeMutator::ok(),
+            &NoopGate,
+            Partition::P1,
+            &del(),
+            true, // allow_hot so P1 passes the hot gate and reaches the eject
+            |_| {},
+        );
+        assert!(matches!(out, HandoffOutcome::Busy(_)));
+        assert_eq!(*lun.events.borrow(), ["eject", "represent"]);
+        assert!(
+            !lun.events.borrow().iter().any(|e| *e == "force_eject"),
+            "TeslaCam (P1) must never be force-ejected"
+        );
     }
 
     #[test]

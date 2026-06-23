@@ -263,6 +263,33 @@ impl crate::handoff::LunControl for LiveLun {
             Ok(())
         }
     }
+
+    fn force_eject(&self) -> io::Result<()> {
+        // Defense-in-depth: `forced_eject` is ONLY ever valid on the media LUN.
+        // The TeslaCam LUN (lun.0) backs live dashcam recording and must never
+        // have its medium force-detached. `run_handoff_core` already gates this
+        // to P2/media; refuse here too so no future caller can aim it at lun.0.
+        if self.lun != config::MEDIA_LUN {
+            return Err(io::Error::other(format!(
+                "force_eject refused: only the media LUN (lun.{}) may be force-ejected, not lun.{}",
+                config::MEDIA_LUN,
+                self.lun
+            )));
+        }
+        let path = self.cfg.lun_dir(self.lun).join("forced_eject");
+        // Writing "1" makes the kernel clear prevent_medium_removal for THIS LUN
+        // and detach its backing file, overriding the host's PREVENT_MEDIUM_REMOVAL.
+        std::fs::write(&path, "1\n")
+            .map_err(|e| annotate(&e, "force_eject (forced_eject)", &path))?;
+        // Verify the medium actually detached before the caller proceeds to mutate.
+        if self.lun_is_empty()? {
+            Ok(())
+        } else {
+            Err(io::Error::other(
+                "force_eject verification failed: lun file not empty",
+            ))
+        }
+    }
 }
 
 /// Heuristic [`SaveGuard`] that samples the backing image's mtime across a short

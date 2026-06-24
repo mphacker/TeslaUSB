@@ -28,6 +28,12 @@ const MAX_INSTALL_BYTES: u64 = 256 * 1024 * 1024;
 pub(crate) const LOSETUP_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) const MOUNT_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const UMOUNT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long to wait for a just-detached loop to actually clear (`losetup -d`
+/// is a deferred/lazy detach; the device lingers briefly, esp. after a `-P`
+/// rescan).
+pub(crate) const LOOP_CLEAR_TIMEOUT: Duration = Duration::from_secs(5);
+/// Poll cadence while waiting for loops to clear.
+const LOOP_CLEAR_POLL: Duration = Duration::from_millis(100);
 const SYNC_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Mutates a backing image by loop-mounting it.
@@ -63,18 +69,21 @@ impl ImageMutator for LoopMutator {
             }
             losetup_detach(loopdev)?;
         }
-        // Verify nothing remains tied to the image.
-        if losetup_for_image(&self.image)?.is_empty() {
-            Ok(())
-        } else {
-            Err(io::Error::other(format!(
-                "stale loop devices still attached to {}",
+        // `losetup -d` detaches lazily (the loop lingers briefly after the `-P`
+        // partition scan), so an immediate re-check can wrongly report a leftover
+        // loop and make recovery REFUSE to re-present an ejected LUN — including
+        // lun.0, the live recording drive (see `recover_lun`). Bounded-wait for the
+        // just-detached loops to clear; fail only on a genuinely stuck loop.
+        match wait_for_image_loops_clear(&self.image, LOOP_CLEAR_TIMEOUT)? {
+            None => Ok(()),
+            Some(loops) => Err(io::Error::other(format!(
+                "stale loop device(s) {loops:?} still attached to {}",
                 self.image.display()
-            )))
+            ))),
         }
     }
 
-    fn apply(&self, _partition: Partition, mutation: &Mutation) -> Result<(), MutateError> {
+    fn apply(&self, partition: Partition, mutation: &Mutation) -> Result<(), MutateError> {
         // Attach the loop; before any mount, a failure means the image is still
         // released (the eject already closed the kernel's fd).
         let loopdev = match losetup_attach(&self.image) {
@@ -109,6 +118,15 @@ impl ImageMutator for LoopMutator {
 
         let umount_ok = umount(&mnt).is_ok();
         let detach_ok = losetup_detach(&loopdev).is_ok();
+        if partition == Partition::P2 && detach_ok {
+            if let Ok(Some(loops)) = wait_for_image_loops_clear(&self.image, LOOP_CLEAR_TIMEOUT) {
+                eprintln!(
+                    "gadgetd mutate: media loop detach still settling; image {} still has \
+                     loop device(s) {loops:?} after {LOOP_CLEAR_TIMEOUT:?}",
+                    self.image.display()
+                );
+            }
+        }
         let _ = std::fs::remove_dir(&mnt);
         let image_released = umount_ok && detach_ok;
 
@@ -424,6 +442,57 @@ pub(crate) fn losetup_for_image(image: &Path) -> io::Result<Vec<String>> {
         .collect())
 }
 
+/// Testable core: poll `probe` until it yields an empty list or the deadline
+/// passes. Returns `Ok(None)` when cleared, `Ok(Some(remaining))` if still
+/// non-empty at timeout. `sleep` and `elapsed` are injected so tests need no
+/// real time or real `losetup`. A probe error propagates.
+///
+/// The deadline is a soft bound: total wall time can exceed `timeout` by up to
+/// one `interval` plus one `probe` duration (the deadline is re-checked only at
+/// the top of each iteration). That overrun is immaterial for this best-effort
+/// settle and keeps the never-double-mount guarantee (it never returns `None`
+/// while a loop is still attached).
+fn poll_loops_clear<P, S, E>(
+    mut probe: P,
+    timeout: Duration,
+    interval: Duration,
+    mut elapsed: E,
+    mut sleep: S,
+) -> io::Result<Option<Vec<String>>>
+where
+    P: FnMut() -> io::Result<Vec<String>>,
+    S: FnMut(Duration),
+    E: FnMut() -> Duration,
+{
+    loop {
+        let loops = probe()?;
+        if loops.is_empty() {
+            return Ok(None);
+        }
+        if elapsed() >= timeout {
+            return Ok(Some(loops));
+        }
+        sleep(interval);
+    }
+}
+
+/// Real-world wrapper: wait up to `timeout` for `image` to have no loop
+/// devices. `Ok(None)` = cleared; `Ok(Some(loops))` = still attached at
+/// timeout.
+pub(crate) fn wait_for_image_loops_clear(
+    image: &Path,
+    timeout: Duration,
+) -> io::Result<Option<Vec<String>>> {
+    let start = Instant::now();
+    poll_loops_clear(
+        || losetup_for_image(image),
+        timeout,
+        LOOP_CLEAR_POLL,
+        || start.elapsed(),
+        std::thread::sleep,
+    )
+}
+
 /// Mount points whose source device is a partition of `loopdev`, parsed from
 /// `/proc/self/mountinfo`.
 fn mounts_for_loop(loopdev: &str) -> io::Result<Vec<String>> {
@@ -561,7 +630,12 @@ pub(crate) fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> io::Resu
 #[cfg(test)]
 #[allow(clippy::panic, clippy::expect_used, clippy::unwrap_used)]
 mod tests {
-    use super::{delete_files, install_file, remove_empty_dir, run_with_timeout, unescape_mountinfo};
+    use super::{
+        delete_files, install_file, poll_loops_clear, remove_empty_dir, run_with_timeout,
+        unescape_mountinfo,
+    };
+    use std::cell::Cell;
+    use std::io;
     use std::path::PathBuf;
     use std::process::Command;
     use std::time::Duration;
@@ -790,5 +864,68 @@ mod tests {
         )
         .expect_err("should time out");
         assert!(err.to_string().contains("timed out"));
+    }
+
+    #[test]
+    fn poll_loops_clear_returns_none_when_loops_clear_before_timeout() {
+        let probe_calls = Cell::new(0_u8);
+        let elapsed_calls = Cell::new(0_u8);
+        let result = poll_loops_clear(
+            || {
+                let n = probe_calls.get();
+                probe_calls.set(n + 1);
+                if n < 2 {
+                    Ok(vec!["/dev/loop0".to_owned()])
+                } else {
+                    Ok(Vec::new())
+                }
+            },
+            Duration::from_secs(5),
+            Duration::from_millis(100),
+            || {
+                let n = elapsed_calls.get();
+                elapsed_calls.set(n + 1);
+                Duration::from_millis(u64::from(n) * 10)
+            },
+            |_| {},
+        )
+        .expect("probe succeeds");
+        assert!(result.is_none());
+        assert_eq!(probe_calls.get(), 3);
+    }
+
+    #[test]
+    fn poll_loops_clear_times_out_when_loops_persist() {
+        let elapsed_calls = Cell::new(0_u8);
+        let result = poll_loops_clear(
+            || Ok(vec!["/dev/loop7".to_owned()]),
+            Duration::from_millis(250),
+            Duration::from_millis(100),
+            || {
+                let n = elapsed_calls.get();
+                elapsed_calls.set(n + 1);
+                match n {
+                    0 => Duration::from_millis(0),
+                    1 => Duration::from_millis(100),
+                    _ => Duration::from_millis(300),
+                }
+            },
+            |_| {},
+        )
+        .expect("probe succeeds");
+        assert_eq!(result, Some(vec!["/dev/loop7".to_owned()]));
+    }
+
+    #[test]
+    fn poll_loops_clear_propagates_probe_error() {
+        let err = poll_loops_clear(
+            || Err(io::Error::other("probe failed")),
+            Duration::from_secs(1),
+            Duration::from_millis(100),
+            || Duration::from_millis(0),
+            |_| {},
+        )
+        .expect_err("probe error should propagate");
+        assert!(err.to_string().contains("probe failed"));
     }
 }

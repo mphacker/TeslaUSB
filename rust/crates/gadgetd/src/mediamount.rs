@@ -19,8 +19,8 @@ use std::time::Duration;
 
 use crate::handoff::ReadMountGate;
 use crate::mutate::{
-    LOSETUP_TIMEOUT, MOUNT_TIMEOUT, losetup_detach, losetup_for_image, run_with_timeout, umount,
-    wait_for_block,
+    LOOP_CLEAR_TIMEOUT, LOSETUP_TIMEOUT, MOUNT_TIMEOUT, losetup_detach, losetup_for_image,
+    run_with_timeout, umount, wait_for_block, wait_for_image_loops_clear,
 };
 
 /// Fixed mountpoint for the persistent read-only media mount. The web read path
@@ -96,10 +96,10 @@ impl MediaRoMount {
         // cleanup failed) would otherwise be mounted a SECOND time here — the
         // exact double-mount that corrupts exFAT. Fail closed; the next
         // recovery/handoff clears the stale loop and a later resume re-mounts.
-        if !losetup_for_image(&self.image)?.is_empty() {
+        if let Some(loops) = wait_for_image_loops_clear(&self.image, LOOP_CLEAR_TIMEOUT)? {
             return Err(io::Error::other(format!(
-                "{} already has a loop device attached; refusing read-only mount \
-                 to avoid a double-mount",
+                "{} still has loop device(s) {loops:?} attached after {LOOP_CLEAR_TIMEOUT:?}; \
+                 refusing read-only mount to avoid a double-mount",
                 self.image.display()
             )));
         }
@@ -169,9 +169,17 @@ impl MediaRoMount {
         for loopdev in losetup_for_image(&self.image)? {
             losetup_detach(&loopdev)?;
         }
-        if !losetup_for_image(&self.image)?.is_empty() {
+        // `losetup -d` is a DEFERRED detach: it returns success while the loop
+        // lingers briefly (especially after the `-P` partition scan used to attach
+        // the RO loop). An immediate re-check would intermittently see the
+        // just-detached loop and fail the suspend — which aborts the handoff in
+        // `run_handoff` BEFORE `resume()` runs, stranding the web read mount down
+        // with no self-heal (the same lazy-detach race that broke `mount_once`).
+        // Bounded-wait for the loops to clear; fail only if one is genuinely stuck,
+        // so a real leak still REFUSES the write and can never double-mount exFAT.
+        if let Some(loops) = wait_for_image_loops_clear(&self.image, LOOP_CLEAR_TIMEOUT)? {
             return Err(io::Error::other(format!(
-                "loop devices still attached to {} after suspend",
+                "loop device(s) {loops:?} still attached to {} after suspend ({LOOP_CLEAR_TIMEOUT:?})",
                 self.image.display()
             )));
         }

@@ -686,9 +686,12 @@ LUNs) is the single make-or-break that still needs the car.**
 - [ ] **Soft SCSI medium-change** on `lun.1` after directory changes (new/deleted
   media) — car re-reads listings without re-plug; `lun.0` unaffected. **(port
   `tesla_cache_invalidate.sh` behavior into gadgetd)**
-- [ ] **Full USB re-enumeration** ONLY for an active-`LockChime.wav` change, with a
+- [x] **Full USB re-enumeration** ONLY for an active-`LockChime.wav` change, with a
   bounded health check that recording resumes. **(port `tesla_gadget_rebind.sh`)**
-  **(SOFTWARE DONE — gated:C car-pickup proof.** Three slices: **i1** = the gated
+  **(HW-PROVEN & operator-confirmed 2026-06-24 — set chime in SPA → gadgetd auto
+  re-enumerates (`reason=chime_apply`) → car re-reads + plays the new chime on
+  next lock; `lun.0`/recording untouched. See `files/hw-results.md` + spec
+  [`gadgetd.md` §9](specs/gadgetd.md). Three slices: **i1** = the gated
   `reenum::reenumerate` primitive with the recording-idle health gate (HW-PROVEN,
   shipped `2ea8ddb`); **i2** = gadgetd auto-fires that primitive after a successful
   `InstallFile(LockChime.wav)` on P2 so the SPA "set chime" reaches the parked car
@@ -706,12 +709,13 @@ LUNs) is the single make-or-break that still needs the car.**
   review GO (3 cycles); full `media.spec.ts` = 54 pass at desktop-1280 + mobile-375,
   incl. 2 new race regression tests (each verified RED on the pre-fix code).
   **Recording (`lun.0`) never gated.** End-to-end
-  car-pickup is the (C) hardware test below.)**
+  car-pickup **HW-PROVEN 2026-06-24** (i2 auto-reenum; operator heard the new chime).)**
 - [ ] **Hardware test:** confirm the car actually picks up directory changes via
   soft medium-change, and a chime change via re-enumeration (Requirements §1.1
-  is a v1-observed behavior to re-verify on B-1). **(C)** **(i2 ready to verify:
-  set chime in SPA → car re-reads + plays it after the auto-reenum, recording
-  intact. Needs operator GO; device currently runs the i1 fix.)**
+  is a v1-observed behavior to re-verify on B-1). **(C)** **(chime-via-reenum half
+  DONE — HW-PROVEN 2026-06-24: set chime in SPA → car re-reads + plays it after the
+  i2 auto-reenum, recording intact (`files/hw-results.md`). Remaining: the **soft
+  medium-change** half for directory listings (new/deleted media).)**
 
 ---
 
@@ -1011,10 +1015,12 @@ LUNs) is the single make-or-break that still needs the car.**
 - [x] **A3d.4 · Boot-time hook.** webd `enforce_boot()` at startup evaluates `EvaluateBoot`
   (schedule-at-boot **beats** random; random pick when no eligible schedule + `random_mode` on).
   core `resolve_boot` + `trigger_today_boot` handle `OnBoot`. LIVE: EngineRev installed on reboot.
-- [ ] **A3d.5 · Car pickup of an active-chime change.** A `LockChime.wav` swap needs the
+- [x] **A3d.5 · Car pickup of an active-chime change.** A `LockChime.wav` swap needs the
   **full USB re-enumeration** path (§1.1 #2 / `tesla_gadget_rebind.sh` behavior), not the
-  soft medium-change. Wire the enforcement activation to request it; **hardware-verify the
-  car re-reads the new chime.** **(gated:C6 + §1.1 — Tier-C/at-vehicle, not started autonomously)**
+  soft medium-change. **DONE — gadgetd i2 auto-fires the re-enum after any `LockChime.wav`
+  install (incl. the enforcement/Set-Active path); HW-PROVEN & operator-confirmed
+  2026-06-24: car re-reads + plays the new chime, recording intact (`files/hw-results.md`,
+  spec [`gadgetd.md` §9](specs/gadgetd.md)).**
 - [x] **A3d.6 · Tests + proof.** Host unit/integration green (core/schedulerd/webd); **Playwright**
   46/46 chime-scheduler UAT green on desktop-1280 + mobile-375 (perf, clean-console, wiring,
   screenshots); **hardware-test** proved schedule + random-on-boot swap `LockChime.wav` with no
@@ -1286,6 +1292,8 @@ LUNs) is the single make-or-break that still needs the car.**
 - [ ] **C4 · Push held commits + port-80 + live deploy.** **(C)**
 - [ ] **C5 · Security ruling on rclone-key write exposure** (blocks B3 config-write). **(C)**
 - [ ] **C6 · Car change-propagation verification** (§1.1 soft vs full re-enum). **(C)**
+  **(full re-enum / chime half DONE — HW-PROVEN 2026-06-24, `files/hw-results.md`. Remaining:
+  the soft medium-change half for directory listings.)**
 
 ---
 

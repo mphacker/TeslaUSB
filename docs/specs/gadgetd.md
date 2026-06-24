@@ -117,3 +117,88 @@ between the car and the image file.
 **NEVER** put the LUN on dm-thin/CoW; never take an unbounded snapshot under the
 live LUN; never mount the Tesla FS RW while the car owns it; never reboot the Pi
 to "fix" the gadget while the car is writing.
+
+## 9. Lock-chime car pickup — PROVEN working behavior (do NOT regress)
+
+> **Status: HW-PROVEN & operator-confirmed on B-1 (`cybertruckusb.local`),
+> 2026-06-24.** Setting a lock chime in the SPA reaches the parked car and the
+> car plays the new chime on the next lock, with TeslaCam recording intact.
+> Evidence: session `files/hw-results.md` (Option A manual reenum
+> EngineRev→MarioFart; i2 auto-reenum EngineRev then PortalSentryMode, each
+> `reason=chime_apply`, lun.0 untouched; operator heard the new chime).
+
+### 9.1 The mechanism (what works, end to end)
+
+1. SPA **"Set Active"** → `POST /api/chimes/library/{name}/activate` (webd;
+   alias `/api/chime-scheduler/library/{filename}/activate`). webd installs the
+   chosen file as **`LockChime.wav` on p2 (media)** via the proven gadgetd
+   eject-handoff write path. The **scheduler/enforcement** activation
+   (`install_library_chime_as_active`) reuses this *same* write path, so this all
+   holds for scheduled/random chime changes too.
+2. After a **successful** `InstallFile(LockChime.wav)` on **p2**, gadgetd writes a
+   durable pending marker `chime-reenum.json` (sha256 token of the installed
+   bytes) at `<queue_dir>/chime-reenum.json` (on device
+   `/data/teslausb/gadgetd/chime-reenum.json`), persisted **before** the staged
+   blob is reclaimed so it survives power loss.
+3. gadgetd then **auto-fires a full USB re-enumeration** (`reenum::reenumerate`,
+   `reason="chime_apply"`) — soft-connect **disconnect → hold `REENUM_HOLD`
+   (700 ms) → connect**. Journal signature (on `gadgetd-control.service`):
+   `gadgetd reenumerate: reason=chime_apply`. `dmesg` shows
+   `bound driver configfs-gadget.teslausb` → `new device is high-speed` →
+   `new address N`. On success the pending marker is marked satisfied.
+4. The car re-reads **and re-decodes** `LockChime.wav` and plays the new chime on
+   the next lock.
+
+### 9.2 Why a full re-enumeration is required (the cache gotcha)
+
+A soft SCSI **medium-change** on p2 (used for directory-listing refresh) makes the
+car re-read the **file bytes** but it keeps its **decoded-audio cache** → it plays
+the **OLD** chime. **Only a full USB re-enumeration** makes the car re-read *and*
+re-decode. This is the single reason chimes use the re-enum path (§1.1 #2), not the
+soft medium-change used for new/deleted media listings. Do not "optimize" a chime
+change down to a medium-change — it will silently play the stale chime.
+
+### 9.3 Invariants that must hold (regression fences)
+
+- **Recording is never gated.** lun.0 (`teslacam.img`) is never ejected, swapped,
+  or `ro`-flipped for a chime change. The re-enum is a whole-device soft-connect
+  blip (~700 ms = one TeslaCam clip boundary), accepted only because changing the
+  chime is a deliberate operator act. The file-storage kthread PID and
+  `lun.0/file` are unchanged across the reenum.
+- **Trigger scope is exactly one mutation.** Only an **install of `LockChime.wav`
+  on p2** triggers the reenum — not deletes, not other files, not p1. Locked by
+  `mutation_requires_chime_reenum_matches_lock_chime_install_only` (ipc.rs).
+- **Recording-idle gated (`force=false`).** If the car is actively recording at the
+  apply moment, the reenum **defers** (`Deferred{reason:"recording_active"}`) and
+  retries from the durable marker; it never punches a hole in a save. Locked by the
+  `is_recording_idle*` and deferral tests in `reenum.rs`.
+- **Durable pending state.** `chime-reenum.json` is written before blob reclaim and
+  survives reboot/power loss; a deferred reenum resumes after restart. Locked by
+  `chime_reenum_state_pending_derivation` + `chime_reenum_state_persist_roundtrip`.
+- **Restart-safe deploy.** Only `gadgetd-control.service` (the IPC `serve`) is
+  restarted on deploy; the binder `gadgetd.service` (oneshot `up`,
+  `RemainAfterExit`) is never touched. A healthy restart is a **no-op** (no blip):
+  `startup_needs_connect` only reconnects when `rebound || udc_state=="not attached"`.
+
+### 9.4 How to verify (no regression check)
+
+- **Automated:** `cargo test -p gadgetd` (the named tests above lock the trigger
+  scope, the recording-idle gate, and the durable pending state).
+- **On hardware:** `POST /api/chimes/library/<Other>.wav/activate`, then confirm
+  (a) `GET /api/chimes` `size_bytes` flips to the new file's size, (b)
+  `journalctl -u gadgetd-control.service` shows `reason=chime_apply`, (c)
+  `lun.0/file` + the file-storage kthread PID are unchanged, and (d) the operator
+  hears the new chime on the next lock. Always arm the dead-man reboot first
+  (see the hardware-test skill); use `force=false` unless the operator explicitly
+  accepts a mid-recording clip boundary.
+
+### 9.5 Known operational gotcha (not a bug)
+
+The SPA's displayed "active chime" can be **stale** if a server-side change (a
+scheduled/random pick, another browser tab, or an API call) flipped it after the
+page loaded. "Set Active" on a chime the SPA *thinks* is already active no-ops and
+never reaches webd — so the car keeps whatever was last installed. **Hard-refresh
+the Lock Chimes page** (Ctrl+Shift+R) before relying on the displayed active chime.
+(The HTTP passthrough of `chime_reenum_pending` to the SPA "Syncing chime to your
+car" overlay — slice **i3** — is implemented but **not yet deployed**; it is UX
+polish and is not required for the chime change to reach the car.)

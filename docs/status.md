@@ -688,9 +688,22 @@ LUNs) is the single make-or-break that still needs the car.**
   `tesla_cache_invalidate.sh` behavior into gadgetd)**
 - [ ] **Full USB re-enumeration** ONLY for an active-`LockChime.wav` change, with a
   bounded health check that recording resumes. **(port `tesla_gadget_rebind.sh`)**
+  **(SOFTWARE DONE — gated:C car-pickup proof.** Two slices: **i1** = the gated
+  `reenum::reenumerate` primitive with the recording-idle health gate (HW-PROVEN,
+  shipped `2ea8ddb`); **i2** = gadgetd auto-fires that primitive after a successful
+  `InstallFile(LockChime.wav)` on P2 so the SPA "set chime" reaches the parked car
+  with no manual IPC (committed `73e2414`). i2: durable sha256-token pending state
+  persisted *before* the staged blob is reclaimed (never lost across power loss),
+  separate 2s scheduler thread gated on recording-idle + all-queues-empty, exp
+  backoff on failure, `gadget_status` exposes `chime_reenum_pending`+`last_reenum`.
+  GPT-5.5 adversarial review GO (2 cycles); `cargo test -p gadgetd` = 148 pass;
+  aarch64 cross-build verified. **Recording (`lun.0`) never gated.** End-to-end
+  car-pickup is the (C) hardware test below.)**
 - [ ] **Hardware test:** confirm the car actually picks up directory changes via
   soft medium-change, and a chime change via re-enumeration (Requirements §1.1
-  is a v1-observed behavior to re-verify on B-1). **(C)**
+  is a v1-observed behavior to re-verify on B-1). **(C)** **(i2 ready to verify:
+  set chime in SPA → car re-reads + plays it after the auto-reenum, recording
+  intact. Needs operator GO; device currently runs the i1 fix.)**
 
 ---
 

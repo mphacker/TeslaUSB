@@ -162,6 +162,14 @@ pub(crate) fn get_trip(
     Ok(Some(TripDetailDto { trip, points }))
 }
 
+/// `GET /api/events/:id`: a single event row.
+/// `None` when no event has that id.
+pub(crate) fn get_event(conn: &Connection, id: i64) -> Result<Option<EventDto>, rusqlite::Error> {
+    let sql = format!("{EVENT_COLS} WHERE id = ?1");
+    let mut stmt = conn.prepare(&sql)?;
+    stmt.query_row(params![id], map_event).optional()
+}
+
 /// `GET /api/events`: newest-first keyset page of event bubbles, optionally
 /// filtered to a single `trip`.
 pub(crate) fn list_events(

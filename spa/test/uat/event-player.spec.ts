@@ -100,6 +100,7 @@ function expectedHud(t: number): ExpectedHud {
 // SUCCESS (range request), not an error.
 const ALLOWED_API: { re: RegExp; params: (sp: URLSearchParams) => boolean }[] = [
   { re: /^\/api\/events$/, params: (sp) => [...sp.keys()].every((k) => ["after", "limit", "trip"].includes(k)) },
+  { re: /^\/api\/events\/\d+$/, params: (sp) => [...sp.keys()].length === 0 },
   { re: /^\/api\/clips$/, params: (sp) => [...sp.keys()].every((k) => ["after", "limit", "folder_class"].includes(k)) },
   { re: /^\/api\/clips\/\d+$/, params: (sp) => [...sp.keys()].length === 0 },
   {
@@ -111,8 +112,14 @@ const ALLOWED_API: { re: RegExp; params: (sp: URLSearchParams) => boolean }[] = 
 ];
 
 function assertCleanConsole(probe: Probe) {
+  const consoleErrors = probe.consoleErrors.filter((entry) => {
+    if (!entry.text.includes("Failed to load resource: the server responded with a status of 404")) {
+      return true;
+    }
+    return !/\/api\/events\/\d+(?::\d+)?$/.test(entry.location);
+  });
   expect(probe.pageErrors, `pageerror(s): ${JSON.stringify(probe.pageErrors)}`).toEqual([]);
-  expect(probe.consoleErrors, `console error(s): ${JSON.stringify(probe.consoleErrors)}`).toEqual([]);
+  expect(consoleErrors, `console error(s): ${JSON.stringify(consoleErrors)}`).toEqual([]);
   expect(probe.consoleWarnings, `console warning(s): ${JSON.stringify(probe.consoleWarnings)}`).toEqual([]);
 }
 
@@ -172,6 +179,27 @@ async function gotoPlayerHudOff(page: Page) {
   await page.goto("/events", { waitUntil: "load" });
   await expect(page.locator("[data-screen=event-player]")).toBeVisible();
   await expect(page.locator("#mainVideo")).toHaveAttribute("src", /\/api\/clips\/\d+\/stream/);
+}
+
+async function routeTrimEventListDropId(page: Page, dropId: number) {
+  await page.route("**/api/events*", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (/^\/api\/events$/.test(path)) {
+      const resp = await route.fetch();
+      const body = await resp.json() as {
+        items?: Array<{ id?: number; [k: string]: unknown }>;
+        [k: string]: unknown;
+      };
+      body.items = (body.items ?? []).filter((e) => e.id !== dropId);
+      await route.fulfill({ response: resp, json: body });
+      return;
+    }
+    if (/^\/api\/events\/\d+$/.test(path)) {
+      await route.fallback();
+      return;
+    }
+    await route.fallback();
+  });
 }
 
 interface DecodeEvidence {
@@ -300,7 +328,10 @@ test.describe("event-player UAT", () => {
     );
     expect(mutating, `mutating request(s): ${JSON.stringify(mutating)}`).toEqual([]);
     const bad = probe.responses.filter(
-      (r) => new URL(r.url).origin === origin && r.status >= 400,
+      (r) =>
+        new URL(r.url).origin === origin &&
+        r.status >= 400 &&
+        !(r.status === 404 && /^\/api\/events\/\d+$/.test(new URL(r.url).pathname)),
     );
     expect(bad, `non-2xx same-origin response(s): ${JSON.stringify(bad)}`).toEqual([]);
   });
@@ -957,6 +988,66 @@ test.describe("event-player UAT", () => {
     await page.screenshot({ path: hudShot, fullPage: true });
     await testInfo.attach(`event-player-hud-${viewport}.png`, { path: hudShot, contentType: "image/png" });
     console.log(`[uat][screenshot:event-player-hud:${viewport}] ${hudShot}`);
+  });
+
+  test("deep-link — out-of-window ?event resolves via by-id lookup and plays", async ({
+    page,
+    probe,
+  }) => {
+    const streams = trackStreams(page);
+    const requestedPaths: string[] = [];
+    page.on("request", (r) => {
+      try { requestedPaths.push(new URL(r.url()).pathname); } catch { /* ignore */ }
+    });
+    await routeTrimEventListDropId(page, 2);
+    await page.goto("/events?event=2", { waitUntil: "load" });
+    await expect(page.locator(".event-location")).toHaveText("Hard acceleration");
+    await expect(page.locator("#mainVideo")).toHaveAttribute("src", /\/api\/clips\/3\/stream/);
+
+    const mediaResp = streams.responses.filter(
+      (r) => r.resourceType === "media" && /\/api\/clips\/3\/stream/.test(r.url),
+    );
+    expect(mediaResp.length, "by-id event target must issue a media request").toBeGreaterThan(0);
+    expect(
+      mediaResp.some((r) => r.status === 206),
+      "by-id event target media request must be 206",
+    ).toBe(true);
+    const partial = mediaResp.find((r) => r.status === 206)!;
+    expect(partial.acceptRanges).toBe("bytes");
+    expect(partial.contentRange, `content-range=${partial.contentRange}`).toMatch(
+      /^bytes \d+-\d+\/\d+$/,
+    );
+
+    await expect(page.locator("[data-testid=event-nav]")).toHaveCount(0);
+    assertCleanConsole(probe);
+    expect(
+      requestedPaths.includes("/api/events/2"),
+      "out-of-window deep-link must use the by-id lookup",
+    ).toBe(true);
+    expect(
+      requestedPaths.some((p) => /^\/api\/clips\/2(\/stream)?$/.test(p)),
+      "playlist-top clip 2 must never be fetched on the out-of-window path",
+    ).toBe(false);
+  });
+
+  test("deep-link — missing ?event falls back to top with a notice, no console error", async ({
+    page,
+    probe,
+  }) => {
+    await routeTrimEventListDropId(page, 2);
+    await page.goto("/events?event=999999", { waitUntil: "load" });
+    await expect(page.locator(".event-location")).toHaveText("Harsh braking");
+    await expect(page.locator("#mainVideo")).toHaveAttribute("src", /\/api\/clips\/2\/stream/);
+    await expect(page.locator(".event-player-notice")).toContainText("no longer available");
+    assertCleanConsole(probe);
+  });
+
+  test("deep-link — ?event=bad&clip=N preserves clip fallback", async ({
+    page,
+  }) => {
+    await routeTrimEventListDropId(page, 2);
+    await page.goto("/events?event=999999&clip=4", { waitUntil: "load" });
+    await expect(page.locator("#mainVideo")).toHaveAttribute("src", /\/api\/clips\/4\/stream/);
   });
 
   // ── Gate 7: deep-link — `?event=` / `?clip=` start the playlist on a

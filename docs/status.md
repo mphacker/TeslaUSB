@@ -772,8 +772,25 @@ LUNs) is the single make-or-break that still needs the car.**
 - [ ] Filters follow-up: optionally also let the panel be **filtered** to match the map
   (v1 filtered map markers only; superseded above by the global-catalog-browser directive —
   revisit only if per-tab filtering is later requested). **(not started)**
-- [ ] EventPlayer follow-up: `?event=` deep-links resolve beyond the newest 100 events
-  (pre-existing 100-event fetch cap; needs paginate-until-found or by-id lookup). **(not started)**
+- [x] EventPlayer follow-up: `?event=` deep-links resolve beyond the newest 100 events
+  (pre-existing 100-event fetch cap). **(SHIPPED — by-id lookup, not paginate-until-found.
+  New `GET /api/events/:id` point lookup (`query.rs::get_event` + `route.rs::event_detail`,
+  mirrors `trip_detail`); SPA `api.eventById`. EventPlayer gains a "direct-event" mode
+  (separate `directEvent` state, symmetric with direct-clip): when `?event=<id>` falls
+  outside the newest-100 window the event is fetched by id and played directly while the
+  playlist `events` array stays pristine (nav hidden, no false fallback to the newest
+  event). Stale-async guarded (per-effect AbortController + `resolveSeqRef` generation
+  token); the rare out-of-window initial load awaits the by-id resolve BEFORE publishing
+  the playlist so `currentEvent` never flashes `events[0]`/fires a wrong clip fetch (the
+  common in-window path stays atomic). Genuine 404 / no-clip / abort all distinguished;
+  `?clip=` fallback preserved on miss. Spec: `docs/specs/contracts/webd-api.md` §2.1 +
+  `docs/specs/spa.md`. Verified: `cargo test -p webd` 287 (incl. `event_by_id_returns_the_event`,
+  `event_by_id_missing_returns_404`); `tsc` clean; full `event-player` UAT 34 passed
+  (desktop 1280 + mobile 375) incl. 3 new deep-link tests — out-of-window by-id resolve+206
+  (asserts `/api/events/:id` used AND wrong playlist-top clip never fetched), missing-event
+  notice fallback, `?event=bad&clip=N` clip fallback — plus the pre-existing gate-7 deep-link
+  test; console clean. GPT-5.5 design 2nd-opinion + adversarial diff review → GO (2 SHOULD-FIX
+  reconciled & fixed: non-atomic out-of-window load + tightened UAT proof).)**
 - [x] Side panel tabs (Events / Trips / All Clips) + source folder switch. **(proven;
   **All Clips tab LIVE-verified on hardware 2026-06-16** — the panel rendered all 4
   real device clips from the live catalog with correct `folder_class` labels

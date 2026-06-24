@@ -212,6 +212,9 @@ export const api = {
   events: (params: EventsParams = {}, signal?: AbortSignal) =>
     getJson<Page<EventItem>>(`/api/events${qs({ ...params })}`, signal),
 
+  eventById: (id: number, signal?: AbortSignal) =>
+    getJson<EventItem>(`/api/events/${id}`, signal),
+
   clips: (params: ClipsParams = {}, signal?: AbortSignal) =>
     getJson<Page<Clip>>(`/api/clips${qs({ ...params })}`, signal),
 

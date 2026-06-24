@@ -316,6 +316,46 @@ async fn events_cursor_paginate() {
 }
 
 #[tokio::test]
+async fn event_by_id_returns_the_event() {
+    let fx = fixture();
+    let (status, body) = get_json(&fx.app, "/api/events").await;
+    assert_eq!(status, StatusCode::OK);
+    let item = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|it| it["id"] == 1)
+        .unwrap()
+        .clone();
+
+    let (status, body) = get_json(&fx.app, "/api/events/1").await;
+    assert_eq!(status, StatusCode::OK);
+    for key in [
+        "id",
+        "type",
+        "severity",
+        "t",
+        "lat",
+        "lon",
+        "clip_id",
+        "trip_id",
+        "front_frame_index",
+        "front_frame_offset_ms",
+        "description",
+    ] {
+        assert_eq!(body[key], item[key], "field mismatch: {key}");
+    }
+}
+
+#[tokio::test]
+async fn event_by_id_missing_returns_404() {
+    let fx = fixture();
+    let (status, body) = get_json(&fx.app, "/api/events/999999").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "not_found");
+}
+
+#[tokio::test]
 async fn events_filter_by_trip_and_reject_bad_params() {
     let fx = fixture();
     let (status, body) = get_json(&fx.app, "/api/events?trip=1").await;

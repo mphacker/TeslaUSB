@@ -56,6 +56,7 @@ pub(crate) fn router(state: AppState, static_dir: PathBuf) -> Router {
         .route("/trips/page", get(trips_page))
         .route("/trips/{id}", get(trip_detail))
         .route("/events", get(events))
+        .route("/events/{id}", get(event_detail))
         .route("/media-events", get(media_events_stream))
         .route("/clips", get(clips))
         .route("/clips/{id}", get(clip_detail).delete(delete_clip))
@@ -301,6 +302,14 @@ async fn events(
         |event| event.t,
         |event| event.id,
     )))
+}
+
+async fn event_detail(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<EventDto>, ApiError> {
+    let out = read(state.catalog, move |conn| query::get_event(conn, id)).await?;
+    out.map(Json).ok_or(ApiError::NotFound)
 }
 
 async fn clips(

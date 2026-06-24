@@ -272,6 +272,7 @@ export function EventPlayer() {
   const [events, setEvents] = useState<EventItem[] | null>(null);
   const [index, setIndex] = useState(0);
   const [directClipId, setDirectClipId] = useState<number | null>(null);
+  const [directEvent, setDirectEvent] = useState<EventItem | null>(null);
   const [search, setSearch] = useState(
     () => (typeof window !== "undefined" ? window.location.search : ""),
   );
@@ -288,10 +289,11 @@ export function EventPlayer() {
   const [deleteFail, setDeleteFail] = useState<DeleteFailure | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const deleteAbortRef = useRef<AbortController | null>(null);
+  const resolveSeqRef = useRef(0);
 
   const inDirectMode = directClipId != null;
   const currentEvent =
-    !inDirectMode && events && events.length ? events[index] : undefined;
+    directEvent ?? (!inDirectMode && events && events.length ? events[index] : undefined);
   const currentAngle = clip?.angles.find((a) => a.camera === camera);
   // Only build a stream URL for an angle webd will actually serve; pointing the
   // <video> at a non-archive (ro_usb) angle 404s and logs a console error.
@@ -308,6 +310,54 @@ export function EventPlayer() {
   const selectedClipId = currentEvent?.clip_id ?? directClipId;
   const clipReady = !!clip && clip.id === selectedClipId;
   const angleDownloadReady = clipReady && !!clip && isStreamableAngle(currentAngle);
+
+  const applyPlain = (current: EventItem[], dl: DeepLink) => {
+    const sel = initialSelection(current, dl);
+    setDirectEvent(null);
+    setIndex(sel.index);
+    setDirectClipId(sel.directClipId);
+  };
+
+  const resolveSelection = async (
+    current: EventItem[],
+    dl: DeepLink,
+    signal: AbortSignal,
+  ) => {
+    const seq = ++resolveSeqRef.current;
+    const stale = () => signal.aborted || seq !== resolveSeqRef.current;
+    const wantLookup =
+      dl.eventId != null &&
+      Number.isInteger(dl.eventId) &&
+      dl.eventId > 0 &&
+      !current.some((e) => e.id === dl.eventId);
+    if (!wantLookup) {
+      applyPlain(current, dl);
+      return;
+    }
+    let ev: EventItem | null = null;
+    try {
+      ev = await api.eventById(dl.eventId!, signal);
+    } catch (err) {
+      if (stale()) return;
+      const status = err instanceof ApiError ? err.status : 0;
+      setNotice(
+        status === 404
+          ? "That event is no longer available."
+          : "Couldn't load that event.",
+      );
+      applyPlain(current, { eventId: null, clipId: dl.clipId });
+      return;
+    }
+    if (stale()) return;
+    if (ev && ev.clip_id != null) {
+      setDirectClipId(null);
+      setDirectEvent(ev);
+      setIndex(0);
+    } else {
+      setNotice("That event has no playable video.");
+      applyPlain(current, { eventId: null, clipId: dl.clipId });
+    }
+  };
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -353,13 +403,53 @@ export function EventPlayer() {
         const playable = page.items
           .filter((e) => e.clip_id != null)
           .sort((a, b) => a.t - b.t || a.id - b.id);
-        // Resolve the deep-link selection atomically with the playlist so no
-        // intermediate render can fall back to events[0] (which would flash the
-        // wrong event's metadata and kick off a wasted clip fetch).
-        const selection = initialSelection(playable, deepLink());
-        setEvents(playable);
-        setIndex(selection.index);
-        setDirectClipId(selection.directClipId);
+        const dl = deepLink();
+        const wantLookup =
+          dl.eventId != null &&
+          Number.isInteger(dl.eventId) &&
+          dl.eventId > 0 &&
+          !playable.some((e) => e.id === dl.eventId);
+        if (!wantLookup) {
+          const selection = initialSelection(playable, dl);
+          setEvents(playable);
+          setDirectEvent(null);
+          setIndex(selection.index);
+          setDirectClipId(selection.directClipId);
+        } else {
+          // Rare out-of-window deep-link: await by-id first so publishing the
+          // playlist cannot briefly expose events[0]; in-window path above is
+          // already atomic.
+          const seq = ++resolveSeqRef.current;
+          try {
+            const ev = await api.eventById(dl.eventId as number, ac.signal);
+            if (ac.signal.aborted || seq !== resolveSeqRef.current) return;
+            if (ev && ev.clip_id != null) {
+              setDirectClipId(null);
+              setDirectEvent(ev);
+              setIndex(0);
+              setEvents(playable);
+            } else {
+              setNotice("That event has no playable video.");
+              const plain = initialSelection(playable, { eventId: null, clipId: dl.clipId });
+              setEvents(playable);
+              setDirectEvent(null);
+              setIndex(plain.index);
+              setDirectClipId(plain.directClipId);
+            }
+          } catch (err) {
+            if (ac.signal.aborted || seq !== resolveSeqRef.current) return;
+            setNotice(
+              err instanceof ApiError && err.status === 404
+                ? "That event is no longer available."
+                : "Couldn't load that event.",
+            );
+            const plain = initialSelection(playable, { eventId: null, clipId: dl.clipId });
+            setEvents(playable);
+            setDirectEvent(null);
+            setIndex(plain.index);
+            setDirectClipId(plain.directClipId);
+          }
+        }
       } catch (err) {
         if (ac.signal.aborted) return;
         setError(errMessage(err));
@@ -379,9 +469,9 @@ export function EventPlayer() {
   // closure, so the read below is current.
   useEffect(() => {
     if (!events) return;
-    const sel = initialSelection(events, deepLink());
-    setIndex(sel.index);
-    setDirectClipId(sel.directClipId);
+    const ac = new AbortController();
+    void resolveSelection(events, deepLink(), ac.signal);
+    return () => ac.abort();
   }, [search]);
 
   // ── Create the imperative HUD controller once the DOM is mounted. ──
@@ -489,7 +579,7 @@ export function EventPlayer() {
   // ── Playlist navigation: step through the loaded events. The clip/stream/HUD
   //    effects all key off `currentEvent`, so flipping the index re-resolves the
   //    clip and reloads the video — no extra plumbing needed. ──
-  const eventCount = !inDirectMode && events ? events.length : 0;
+  const eventCount = directEvent || inDirectMode ? 0 : events ? events.length : 0;
   const canPrev = index > 0;
   const canNext = index < eventCount - 1;
   const goPrev = () => setIndex((i) => Math.max(0, i - 1));

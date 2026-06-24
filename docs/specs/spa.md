@@ -69,6 +69,18 @@ Every capability above must exist post-rebuild; appearance must match.
   telemetry. Archive-backed clips stream; `ro_usb` (not-yet-archived) clips show
   the "Not yet archived" overlay (`data-testid=video-unarchived`) and fire no
   doomed `/stream` request.
+- **Deep-link to any event (`/events?event=<id>`):** the player loads the newest
+  page of events for its in-screen playlist, so a deep-linked event **older than
+  that window** (or one filtered out for having no clip) won't be found in the
+  loaded list. Rather than silently falling back to the newest event, the player
+  resolves the id directly via `GET /api/events/{id}` and plays that event in a
+  **direct-event mode** (full event metadata + HUD seek to `front_frame_offset_ms`,
+  but no prev/next playlist nav — the surrounding events aren't loaded), symmetric
+  with the `?clip=<id>` direct-clip mode. If the lookup `404`s (event deleted /
+  unknown id) it falls back to the playlist top — or, when a `?clip=<id>` is also
+  present, to that clip — and shows a brief non-blocking notice; a transient
+  fetch/server error shows a distinct "couldn't load" notice. The same resolution
+  runs on a same-path `?event=` change while mounted (no remount).
 - **Downloads (§4.2):** the event player's camera selector exposes two download
   affordances, both gated on the clip being archive-backed and resolved. (1)
   **Download All** (`#downloadButton`) — the whole clip as a ZIP of its archive

@@ -20,8 +20,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 use crate::config::{self, GadgetConfig};
 use crate::exec::{self, LiveLun, MtimeSaveGuard};
@@ -50,6 +51,8 @@ const ACCEPT_POLL: Duration = Duration::from_millis(100);
 /// apply at the next safe window. Sub-second so an enqueue that lands during an
 /// idle period applies promptly, but cheap enough to poll continuously.
 const DRAIN_POLL: Duration = Duration::from_secs(1);
+const REENUM_POLL: Duration = Duration::from_secs(2);
+const REENUM_IDLE_SAMPLE: Duration = Duration::from_millis(200);
 const LOCK_CHIME_REL_PATH: &str = "LockChime.wav";
 
 /// Per-partition exponential backoff for the transient "LUN busy" retry path, so
@@ -61,9 +64,73 @@ struct BusyBackoff {
     next_eligible: Instant,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+struct ChimeReenumState {
+    pending_target: Option<String>,
+    reenumerated: Option<String>,
+}
+
+impl ChimeReenumState {
+    fn pending(&self) -> bool {
+        self.pending_target.is_some() && self.pending_target != self.reenumerated
+    }
+
+    fn load(path: &Path) -> Self {
+        match std::fs::read(path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+                eprintln!(
+                    "gadgetd reenum: state {} unreadable ({e}); starting empty",
+                    path.display()
+                );
+                Self::default()
+            }),
+            Err(ref e) if e.kind() == io::ErrorKind::NotFound => Self::default(),
+            Err(e) => {
+                eprintln!(
+                    "gadgetd reenum: state {} read failed ({e}); starting empty",
+                    path.display()
+                );
+                Self::default()
+            }
+        }
+    }
+
+    fn persist(&self, path: &Path) -> io::Result<()> {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let tmp = with_tmp_suffix(path);
+        let bytes = serde_json::to_vec_pretty(self).map_err(io::Error::other)?;
+        {
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(&bytes)?;
+            f.sync_all()?;
+        }
+        std::fs::rename(&tmp, path)?;
+        let dir = std::fs::File::open(parent)?;
+        dir.sync_all()?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct LastReenum {
+    result: String,
+    disconnect_ms: Option<u64>,
+    reason: Option<String>,
+    detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ReenumFailureBackoff {
+    attempts: u32,
+    next_eligible: Instant,
+}
+
 /// Base/cap for the busy backoff. Exponential: 1s, 2s, 4s, ... capped at 60s.
 const BUSY_BACKOFF_BASE: Duration = Duration::from_secs(1);
 const BUSY_BACKOFF_CAP: Duration = Duration::from_secs(60);
+const REENUM_FAILURE_BACKOFF_BASE: Duration = Duration::from_secs(1);
+const REENUM_FAILURE_BACKOFF_CAP: Duration = Duration::from_secs(60);
 
 fn busy_backoff_delay(attempts: u32) -> Duration {
     // attempts is 1-based (first busy = attempt 1 -> BASE).
@@ -72,6 +139,24 @@ fn busy_backoff_delay(attempts: u32) -> Duration {
         .checked_mul(1u32 << shift)
         .unwrap_or(BUSY_BACKOFF_CAP);
     scaled.min(BUSY_BACKOFF_CAP)
+}
+
+fn reenum_failure_backoff_delay(attempts: u32) -> Duration {
+    let shift = attempts.saturating_sub(1).min(16);
+    let scaled = REENUM_FAILURE_BACKOFF_BASE
+        .checked_mul(1u32 << shift)
+        .unwrap_or(REENUM_FAILURE_BACKOFF_CAP);
+    scaled.min(REENUM_FAILURE_BACKOFF_CAP)
+}
+
+fn mutation_requires_chime_reenum(partition: Partition, mutation: &Mutation) -> bool {
+    if partition != Partition::P2 {
+        return false;
+    }
+    let Mutation::InstallFile { rel_path, .. } = mutation else {
+        return false;
+    };
+    rel_path.eq_ignore_ascii_case(LOCK_CHIME_REL_PATH)
 }
 
 /// A wire request (`cmd`-tagged JSON).
@@ -153,6 +238,14 @@ struct ServeState {
     queue: Mutex<MutationQueue>,
     /// JSON journal backing `queue` (atomically rewritten on every transition).
     queue_path: PathBuf,
+    /// Durable auto-reenum state for LockChime install transitions.
+    chime_reenum: Mutex<ChimeReenumState>,
+    /// JSON journal backing `chime_reenum`.
+    chime_reenum_path: PathBuf,
+    /// Latest auto/manual re-enumeration outcome for status visibility.
+    last_reenum: Mutex<Option<LastReenum>>,
+    /// Exponential retry backoff for failed auto re-enumeration attempts.
+    reenum_failure_backoff: Mutex<Option<ReenumFailureBackoff>>,
     /// Persistent read-only mount of the media image for the web read path. Its
     /// gate is suspended/resumed around media (P2) handoffs.
     media_ro: Arc<MediaRoMount>,
@@ -252,6 +345,8 @@ pub(crate) fn serve(
             eprintln!("gadgetd serve: persisting requeued state failed: {e}");
         }
     }
+    let chime_reenum_path = queue_path.with_file_name("chime-reenum.json");
+    let chime_reenum = ChimeReenumState::load(&chime_reenum_path);
 
     let state = Arc::new(ServeState {
         cfg,
@@ -262,6 +357,10 @@ pub(crate) fn serve(
         next_id: AtomicU64::new(1),
         queue: Mutex::new(queue),
         queue_path,
+        chime_reenum: Mutex::new(chime_reenum),
+        chime_reenum_path,
+        last_reenum: Mutex::new(None),
+        reenum_failure_backoff: Mutex::new(None),
         media_ro,
         busy_backoff: Mutex::new(HashMap::new()),
     });
@@ -270,6 +369,10 @@ pub(crate) fn serve(
     {
         let st = Arc::clone(&state);
         std::thread::spawn(move || drain_worker(&st));
+    }
+    {
+        let st = Arc::clone(&state);
+        std::thread::spawn(move || reenum_scheduler_worker(&st));
     }
 
     let mut last_health = Instant::now();
@@ -513,10 +616,47 @@ fn request_reenumerate(
 
     match outcome {
         ReEnumOutcome::Done { disconnect_ms } => {
+            // Crash window: if the daemon exits after Done but before persisting
+            // this marker, one extra auto re-enumeration can occur on restart.
+            if let Err(e) = mark_chime_reenum_satisfied(state) {
+                eprintln!("gadgetd reenum: persist after manual done failed: {e}");
+            }
+            clear_reenum_failure_backoff(state);
+            set_last_reenum(
+                state,
+                LastReenum {
+                    result: "done".to_owned(),
+                    disconnect_ms: Some(disconnect_ms),
+                    reason: None,
+                    detail: None,
+                },
+            );
             json!({ "result":"done", "disconnect_ms": disconnect_ms })
         }
-        ReEnumOutcome::Deferred { reason } => json!({ "result":"deferred", "reason": reason }),
-        ReEnumOutcome::Failed { detail } => json!({ "result":"failed", "detail": detail }),
+        ReEnumOutcome::Deferred { reason } => {
+            set_last_reenum(
+                state,
+                LastReenum {
+                    result: "deferred".to_owned(),
+                    disconnect_ms: None,
+                    reason: Some(reason.clone()),
+                    detail: None,
+                },
+            );
+            json!({ "result":"deferred", "reason": reason })
+        }
+        ReEnumOutcome::Failed { detail } => {
+            set_last_reenum(
+                state,
+                LastReenum {
+                    result: "failed".to_owned(),
+                    disconnect_ms: None,
+                    reason: None,
+                    detail: Some(detail.clone()),
+                },
+            );
+            json!({ "result":"failed", "detail": detail })
+        }
     }
 }
 
@@ -525,6 +665,12 @@ fn gadget_status(state: &ServeState) -> serde_json::Value {
     let record = state.record.lock().ok().and_then(|r| r.clone());
     let handoff_active = state.handoff_lock.try_lock().is_err();
     let (pending, applying) = queue_counts(state);
+    let chime_reenum_pending = state
+        .chime_reenum
+        .lock()
+        .map(|s| s.pending())
+        .unwrap_or(false);
+    let last_reenum = state.last_reenum.lock().ok().and_then(|v| v.clone());
     let (media_ro_mounted, media_ro_path, media_ro_error) = state.media_ro.health_snapshot();
     json!({
         "present": status.present,
@@ -539,6 +685,8 @@ fn gadget_status(state: &ServeState) -> serde_json::Value {
         "media_ro_mounted": media_ro_mounted,
         "media_ro_path": media_ro_path,
         "media_ro_error": media_ro_error,
+        "chime_reenum_pending": chime_reenum_pending,
+        "last_reenum": last_reenum,
         "last_result": record.as_ref().and_then(|r| r.result.clone()),
         "last_handoff_id": record.as_ref().map(|r| r.id.clone()),
     })
@@ -613,6 +761,21 @@ fn request_mutation(state: &ServeState, partition: u8, mutation: &Mutation) -> s
         state.allow_hot,
         |phase| update_phase(state, phase.as_str()),
     );
+
+    if matches!(outcome, HandoffOutcome::Done) && mutation_requires_chime_reenum(partition, mutation)
+    {
+        // webd routes chime installs through enqueue; this direct path is legacy.
+        match chime_reenum_token_for_install(mutation) {
+            Ok(token) => {
+                if let Err(e) = set_chime_reenum_pending_target(state, token) {
+                    eprintln!("gadgetd reenum: pending-state persist failed (direct handoff): {e}");
+                }
+            }
+            Err(e) => {
+                eprintln!("gadgetd reenum: chime token compute failed (direct handoff): {e}");
+            }
+        }
+    }
 
     finalize_record(state, &id, &outcome);
     match &outcome {
@@ -701,6 +864,13 @@ fn drain_worker(state: &ServeState) {
     }
 }
 
+fn reenum_scheduler_worker(state: &ServeState) {
+    loop {
+        std::thread::sleep(REENUM_POLL);
+        maybe_run_chime_reenum(state);
+    }
+}
+
 fn drain_once(state: &ServeState) {
     let partitions = match state.queue.lock() {
         Ok(q) => q.pending_partitions(),
@@ -708,6 +878,132 @@ fn drain_once(state: &ServeState) {
     };
     for partition in partitions {
         apply_partition(state, partition);
+    }
+}
+
+fn maybe_run_chime_reenum(state: &ServeState) {
+    let pending_target = match state.chime_reenum.lock() {
+        Ok(chime) if chime.pending() => chime.pending_target.clone(),
+        Ok(_) => None,
+        Err(_) => None,
+    };
+    let Some(target) = pending_target else {
+        return;
+    };
+
+    if reenum_failure_backoff_active(state) {
+        return;
+    }
+
+    let activity = reenum::ProcWriteActivity;
+    if !reenum::is_recording_idle(&activity, &std::thread::sleep, REENUM_IDLE_SAMPLE) {
+        return;
+    }
+
+    let Ok(_guard) = state.handoff_lock.try_lock() else {
+        return;
+    };
+
+    let queue_has_pending = match state.queue.lock() {
+        Ok(q) => !q.pending_partitions().is_empty(),
+        Err(_) => true,
+    };
+    if queue_has_pending {
+        return;
+    }
+    // Re-check immediately before the gated primitive to avoid entering the
+    // 10s gate when writes resumed after the first cheap probe.
+    if !reenum::is_recording_idle(&activity, &std::thread::sleep, REENUM_IDLE_SAMPLE) {
+        return;
+    }
+
+    if let Err(resp) = staged_precheck(state.media_ro.medium_file_present(LOCK_CHIME_REL_PATH)) {
+        if resp
+            .get("detail")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|d| d == "no chime staged")
+        {
+            if let Err(e) = mark_chime_reenum_satisfied_if_target(state, &target) {
+                eprintln!("gadgetd reenum: persist after staged-clear failed: {e}");
+            }
+        } else {
+            let detail = resp
+                .get("detail")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("staged precheck failed")
+                .to_owned();
+            note_reenum_failure_backoff(state);
+            set_last_reenum(
+                state,
+                LastReenum {
+                    result: "failed".to_owned(),
+                    disconnect_ms: None,
+                    reason: Some("staged_precheck".to_owned()),
+                    detail: Some(detail),
+                },
+            );
+        }
+        return;
+    }
+    // Narrow (but don't eliminate) the enqueue-vs-reenum race: if new queued work
+    // landed after precheck, skip now and let queue drain first. The residual
+    // window is an accepted recording-safe trade-off.
+    let queue_has_pending = match state.queue.lock() {
+        Ok(q) => !q.pending_partitions().is_empty(),
+        Err(_) => true,
+    };
+    if queue_has_pending {
+        return;
+    }
+
+    match reenum::reenumerate(
+        &state.cfg,
+        &ReEnumOpts {
+            reason: Some("chime_apply".to_owned()),
+            force: false,
+            method: ReEnumMethod::SoftConnect,
+        },
+    ) {
+        ReEnumOutcome::Done { disconnect_ms } => {
+            // Crash window: if we exit after Done but before persisting this
+            // marker, one extra auto re-enumeration may happen on restart.
+            if let Err(e) = mark_chime_reenum_satisfied_if_target(state, &target) {
+                eprintln!("gadgetd reenum: persist after auto done failed: {e}");
+            }
+            clear_reenum_failure_backoff(state);
+            set_last_reenum(
+                state,
+                LastReenum {
+                    result: "done".to_owned(),
+                    disconnect_ms: Some(disconnect_ms),
+                    reason: Some("chime_apply".to_owned()),
+                    detail: None,
+                },
+            );
+        }
+        ReEnumOutcome::Deferred { reason } => {
+            set_last_reenum(
+                state,
+                LastReenum {
+                    result: "deferred".to_owned(),
+                    disconnect_ms: None,
+                    reason: Some(reason),
+                    detail: None,
+                },
+            );
+        }
+        ReEnumOutcome::Failed { detail } => {
+            note_reenum_failure_backoff(state);
+            set_last_reenum(
+                state,
+                LastReenum {
+                    result: "failed".to_owned(),
+                    disconnect_ms: None,
+                    reason: Some("chime_apply".to_owned()),
+                    detail: Some(detail),
+                },
+            );
+        }
     }
 }
 
@@ -807,6 +1103,26 @@ fn run_batch_handoffs(
         finalize_record(state, &id, &outcome);
         match outcome {
             HandoffOutcome::Done => {
+                if mutation_requires_chime_reenum(partition, mutation) {
+                    let token = match chime_reenum_token_for_install(mutation) {
+                        Ok(token) => token,
+                        Err(e) => {
+                            eprintln!("gadgetd reenum: chime token compute failed: {e}");
+                            // Defensive: staged blobs are immutable until retire, so
+                            // this should be near-impossible before reclaim.
+                            transient = true;
+                            break;
+                        }
+                    };
+                    if let Err(e) = set_chime_reenum_pending_target(state, token) {
+                        eprintln!("gadgetd reenum: pending-state persist failed: {e}");
+                        // Keep this entry queued so its staged blob is never
+                        // reclaimed until the pending re-enumeration marker is
+                        // durable.
+                        transient = true;
+                        break;
+                    }
+                }
                 if let Some(group) = plan.apply_seq_groups.get(idx) {
                     retire_seqs(state, group, MutationState::Applied);
                 }
@@ -937,6 +1253,90 @@ fn clear_busy_backoff(state: &ServeState, partition: u8) {
     }
 }
 
+fn reenum_failure_backoff_active(state: &ServeState) -> bool {
+    match state.reenum_failure_backoff.lock() {
+        Ok(backoff) => backoff
+            .as_ref()
+            .is_some_and(|b| Instant::now() < b.next_eligible),
+        Err(_) => false,
+    }
+}
+
+fn note_reenum_failure_backoff(state: &ServeState) -> u32 {
+    let Ok(mut slot) = state.reenum_failure_backoff.lock() else {
+        return 0;
+    };
+    let mut entry = slot.take().unwrap_or(ReenumFailureBackoff {
+        attempts: 0,
+        next_eligible: Instant::now(),
+    });
+    entry.attempts = entry.attempts.saturating_add(1);
+    entry.next_eligible = Instant::now() + reenum_failure_backoff_delay(entry.attempts);
+    let attempts = entry.attempts;
+    *slot = Some(entry);
+    attempts
+}
+
+fn clear_reenum_failure_backoff(state: &ServeState) {
+    if let Ok(mut slot) = state.reenum_failure_backoff.lock() {
+        *slot = None;
+    }
+}
+
+fn set_last_reenum(state: &ServeState, last: LastReenum) {
+    if let Ok(mut slot) = state.last_reenum.lock() {
+        *slot = Some(last);
+    }
+}
+
+fn set_chime_reenum_pending_target(state: &ServeState, token: String) -> io::Result<()> {
+    let Ok(mut chime) = state.chime_reenum.lock() else {
+        return Err(io::Error::other("chime reenum state unavailable"));
+    };
+    chime.pending_target = Some(token);
+    chime.persist(&state.chime_reenum_path)
+}
+
+fn mark_chime_reenum_satisfied(state: &ServeState) -> io::Result<()> {
+    let Ok(mut chime) = state.chime_reenum.lock() else {
+        return Err(io::Error::other("chime reenum state unavailable"));
+    };
+    chime.reenumerated = chime.pending_target.clone();
+    chime.persist(&state.chime_reenum_path)
+}
+
+fn mark_chime_reenum_satisfied_if_target(state: &ServeState, target: &str) -> io::Result<()> {
+    let Ok(mut chime) = state.chime_reenum.lock() else {
+        return Err(io::Error::other("chime reenum state unavailable"));
+    };
+    if chime.pending_target.as_deref() != Some(target) {
+        return Ok(());
+    }
+    chime.reenumerated = Some(target.to_owned());
+    chime.persist(&state.chime_reenum_path)
+}
+
+fn bytes_sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn chime_reenum_token_for_install(mutation: &Mutation) -> io::Result<String> {
+    let Mutation::InstallFile { source_path, .. } = mutation else {
+        return Err(io::Error::other(
+            "chime token requested for non-install mutation",
+        ));
+    };
+    let bytes = std::fs::read(source_path)?;
+    Ok(bytes_sha256_hex(&bytes))
+}
+
+fn with_tmp_suffix(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".tmp");
+    path.with_file_name(name)
+}
+
 /// Set a non-terminal state and persist. Used for Applying (pre-handoff) and the
 /// transient Applying->Queued revert.
 fn mark_and_persist(state: &ServeState, seqs: &[u64], new_state: MutationState) {
@@ -1001,11 +1401,13 @@ fn finalize_record(state: &ServeState, id: &str, outcome: &HandoffOutcome) {
 #[allow(clippy::panic, clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::{
-        MAX_FRAME, Request, ServeState, busy_backoff_delay, dispatch, fatal_split, read_frame,
-        request_reenumerate, requeue_suffix, staged_precheck, startup_needs_connect, write_frame,
+        ChimeReenumState, MAX_FRAME, Request, ServeState, busy_backoff_delay, dispatch,
+        fatal_split, mutation_requires_chime_reenum, note_reenum_failure_backoff, read_frame,
+        reenum_failure_backoff_active, request_reenumerate, requeue_suffix, staged_precheck,
+        startup_needs_connect, write_frame,
     };
     use crate::config::GadgetConfig;
-    use crate::handoff::Mutation;
+    use crate::handoff::{Mutation, Partition};
     use crate::mediamount::MediaRoMount;
     use crate::queue::MutationQueue;
     use std::io::Cursor;
@@ -1146,6 +1548,10 @@ mod tests {
             next_id: AtomicU64::new(1),
             queue: Mutex::new(MutationQueue::default()),
             queue_path: PathBuf::from("queue.json"),
+            chime_reenum: Mutex::new(ChimeReenumState::default()),
+            chime_reenum_path: PathBuf::from("chime-reenum.json"),
+            last_reenum: Mutex::new(None),
+            reenum_failure_backoff: Mutex::new(None),
             media_ro: Arc::new(MediaRoMount::new(PathBuf::from("media.img"))),
             busy_backoff: Mutex::new(HashMap::new()),
         }
@@ -1287,6 +1693,122 @@ mod tests {
     fn fatal_split_last_group_failed() {
         let groups = vec![vec![1], vec![2], vec![3]];
         assert_eq!(fatal_split(&groups, 2), (vec![3], vec![]));
+    }
+
+    #[test]
+    fn mutation_requires_chime_reenum_matches_lock_chime_install_only() {
+        assert!(mutation_requires_chime_reenum(
+            Partition::P2,
+            &Mutation::InstallFile {
+                rel_path: "LockChime.wav".to_owned(),
+                source_path: "/stage/a".to_owned(),
+            }
+        ));
+        assert!(mutation_requires_chime_reenum(
+            Partition::P2,
+            &Mutation::InstallFile {
+                rel_path: "lockchime.wav".to_owned(),
+                source_path: "/stage/b".to_owned(),
+            }
+        ));
+        assert!(!mutation_requires_chime_reenum(
+            Partition::P2,
+            &Mutation::InstallFile {
+                rel_path: "nested/path/LockChime.wav".to_owned(),
+                source_path: "/stage/c".to_owned(),
+            }
+        ));
+        assert!(!mutation_requires_chime_reenum(
+            Partition::P2,
+            &Mutation::InstallFile {
+                rel_path: "Music/x.mp3".to_owned(),
+                source_path: "/stage/d".to_owned(),
+            }
+        ));
+        assert!(!mutation_requires_chime_reenum(
+            Partition::P1,
+            &Mutation::InstallFile {
+                rel_path: "LockChime.wav".to_owned(),
+                source_path: "/stage/e".to_owned(),
+            }
+        ));
+        assert!(!mutation_requires_chime_reenum(
+            Partition::P2,
+            &Mutation::DeletePath {
+                rel_path: "LockChime.wav".to_owned(),
+            }
+        ));
+    }
+
+    #[test]
+    fn chime_reenum_state_pending_derivation() {
+        let none_none = ChimeReenumState {
+            pending_target: None,
+            reenumerated: None,
+        };
+        assert!(!none_none.pending());
+
+        let some_none = ChimeReenumState {
+            pending_target: Some("a".to_owned()),
+            reenumerated: None,
+        };
+        assert!(some_none.pending());
+
+        let some_same = ChimeReenumState {
+            pending_target: Some("a".to_owned()),
+            reenumerated: Some("a".to_owned()),
+        };
+        assert!(!some_same.pending());
+
+        let some_diff = ChimeReenumState {
+            pending_target: Some("a".to_owned()),
+            reenumerated: Some("b".to_owned()),
+        };
+        assert!(some_diff.pending());
+    }
+
+    #[test]
+    fn chime_reenum_state_persist_roundtrip() {
+        let dir = scratch_dir("chime-state");
+        let path = dir.join("chime-reenum.json");
+        let original = ChimeReenumState {
+            pending_target: Some("target-1".to_owned()),
+            reenumerated: Some("target-0".to_owned()),
+        };
+        original.persist(&path).expect("persist");
+        let loaded = ChimeReenumState::load(&path);
+        assert_eq!(loaded, original);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn reenum_failure_backoff_advances_and_resets() {
+        let state = test_state();
+        assert!(!reenum_failure_backoff_active(&state));
+
+        let first_attempt = note_reenum_failure_backoff(&state);
+        let first_next = state
+            .reenum_failure_backoff
+            .lock()
+            .expect("lock")
+            .as_ref()
+            .expect("backoff")
+            .next_eligible;
+        assert_eq!(first_attempt, 1);
+        assert!(reenum_failure_backoff_active(&state));
+
+        let second_attempt = note_reenum_failure_backoff(&state);
+        let second = state.reenum_failure_backoff.lock().expect("lock");
+        let second_backoff = second.as_ref().expect("backoff");
+        assert_eq!(second_attempt, 2);
+        assert!(second_backoff.next_eligible > first_next);
+        drop(second);
+
+        super::clear_reenum_failure_backoff(&state);
+        assert!(!reenum_failure_backoff_active(&state));
+
+        let reset_attempt = note_reenum_failure_backoff(&state);
+        assert_eq!(reset_attempt, 1);
     }
 
     use super::{bind_listener, socket_path_healthy};

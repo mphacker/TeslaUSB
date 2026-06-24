@@ -29,6 +29,7 @@ use crate::handoff::{self, HandoffOutcome, ImageMutator, LunControl, Mutation, P
 use crate::mediamount::MediaRoMount;
 use crate::mutate::LoopMutator;
 use crate::queue::{BatchPlan, MutationQueue, MutationState};
+use crate::reenum::{self, ReEnumMethod, ReEnumOpts, ReEnumOutcome};
 
 /// Maximum accepted frame size (a handful of small JSON fields).
 const MAX_FRAME: u32 = 1 << 20;
@@ -49,6 +50,7 @@ const ACCEPT_POLL: Duration = Duration::from_millis(100);
 /// apply at the next safe window. Sub-second so an enqueue that lands during an
 /// idle period applies promptly, but cheap enough to poll continuously.
 const DRAIN_POLL: Duration = Duration::from_secs(1);
+const LOCK_CHIME_REL_PATH: &str = "LockChime.wav";
 
 /// Per-partition exponential backoff for the transient "LUN busy" retry path, so
 /// a car that holds a LUN for hours doesn't make the drain worker hammer configfs
@@ -113,6 +115,19 @@ enum Request {
     HandoffStatus {
         /// The id returned by a previous `request_mutation`.
         handoff_id: String,
+    },
+    /// Recording-safe gated USB re-enumeration primitive.
+    #[serde(rename = "reenumerate")]
+    ReEnumerate {
+        /// Optional operator-visible reason/context.
+        #[serde(default)]
+        reason: Option<String>,
+        /// Explicit override to bypass the recording-idle gate.
+        #[serde(default)]
+        force: bool,
+        /// Method selector (`soft_connect` default, `udc_rebind` contingency).
+        #[serde(default)]
+        method: Option<String>,
     },
 }
 
@@ -212,6 +227,7 @@ pub(crate) fn serve(
     // This clears any stale loop/mount on the media image, so the persistent
     // read-only mount below starts from a clean slate.
     recover_interrupted_handoff(&cfg, &runtime_root);
+    startup_self_heal(&cfg);
 
     // Establish the persistent read-only media mount (best-effort: a failure
     // only degrades the web read path — it must never block serving, gadget
@@ -381,6 +397,126 @@ fn dispatch(req: Request, state: &ServeState) -> serde_json::Value {
         } => enqueue_mutation(state, partition, mutation, blob_path, idempotency_key),
         Request::QueueStatus { job_id } => queue_status(state, &job_id),
         Request::HandoffStatus { handoff_id } => handoff_status(state, &handoff_id),
+        Request::ReEnumerate {
+            reason,
+            force,
+            method,
+        } => request_reenumerate(state, reason, force, method.as_deref()),
+    }
+}
+
+fn startup_self_heal(cfg: &GadgetConfig) {
+    let udc = match exec::detect_udc(None) {
+        Ok(name) => name,
+        Err(e) => {
+            eprintln!("gadgetd serve: startup self-heal skipped (no udc): {e}");
+            return;
+        }
+    };
+    // Crash-mid-udc_rebind recovery: configfs gadget stays fully configured across a
+    // udc unbind/rebind, so if it is configured-but-unbound on startup, re-bind it.
+    // (Normal boot: gadgetd.service (Requires/After) already bound it -> bound==true -> skip.)
+    let status = exec::read_status(cfg);
+    let bound = status.bound_udc.as_deref().is_some_and(|u| !u.is_empty());
+    let mut rebound = false;
+    if !bound {
+        match std::fs::write(cfg.udc_path(), &udc) {
+            Ok(()) => rebound = true,
+            Err(e) => {
+                eprintln!("gadgetd serve: startup self-heal re-bind UDC failed (best-effort): {e}");
+            }
+        }
+    }
+    // Only re-assert the USB `connect` pull-up when recovery genuinely needs it.
+    // Re-asserting `connect` on an already-enumerated dwc2 gadget forces a full
+    // host-visible USB RE-ENUMERATION, which would blip TeslaCam recording on EVERY
+    // gadgetd-control restart/crash (Restart=always ⇒ a crash-loop becomes a
+    // blip-storm). A healthy restart — gadget already `configured`, or host-driven
+    // `suspended` — MUST be a true no-op. We assert connect only after an actual
+    // rebind (above), or when the controller reports `not attached` (e.g. a crash
+    // mid-reenum-blip left it soft-disconnected). Transient enumerating states
+    // (powered/default/addressed) and an unreadable state are left alone so any
+    // in-progress enumeration completes on its own.
+    //
+    // TRADE-OFF (rebind path): writing the UDC name above auto-connects via the
+    // kernel's `usb_udc_connect_control` when VBUS is present, so this explicit
+    // connect can be redundant and cause ONE extra blip in the RARE crash-mid-rebind
+    // recovery. We keep it fail-safe (ensure-connected beats risk-stranded) since
+    // that path already re-enumerates (bind == fresh enumeration). The exact rebind
+    // behavior + the `not attached` disconnect string are to be CONFIRMED on hardware
+    // during i1-hw (write `disconnect`, read `state`; rebind, observe auto-connect)
+    // and the gate broadened only if the device reports otherwise.
+    if startup_needs_connect(rebound, status.udc_state.as_deref()) {
+        if let Err(e) = reenum::set_soft_connect(&udc, true) {
+            eprintln!("gadgetd serve: startup soft_connect self-heal failed: {e}");
+        }
+    }
+}
+
+/// Decide whether startup self-heal must re-assert the USB `connect` pull-up.
+///
+/// Returns `true` only when recovery genuinely needs it: right after an actual UDC
+/// rebind, or when the controller reports `not attached` — the kernel
+/// `usb_state_string(USB_STATE_NOTATTACHED)` value that `usb_gadget_disconnect`
+/// sets, i.e. a crash mid-reenum-blip can leave the bound gadget soft-disconnected.
+/// Every already-attached or in-progress state (`configured`, `suspended`,
+/// `powered`, `default`, `addressed`) and an unreadable state (`None`) return
+/// `false`, so a healthy restart is a no-op and never forces a re-enumeration that
+/// would blip `TeslaCam` recording.
+fn startup_needs_connect(rebound: bool, udc_state: Option<&str>) -> bool {
+    rebound || matches!(udc_state, Some("not attached"))
+}
+
+fn parse_reenum_method(method: Option<&str>) -> Result<ReEnumMethod, String> {
+    match method.unwrap_or("soft_connect") {
+        "soft_connect" => Ok(ReEnumMethod::SoftConnect),
+        "udc_rebind" => Ok(ReEnumMethod::UdcRebind),
+        other => Err(format!(
+            "bad request: unsupported reenumerate method `{other}`"
+        )),
+    }
+}
+
+fn staged_precheck(present: io::Result<bool>) -> Result<(), serde_json::Value> {
+    match present {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(json!({ "result":"failed", "detail":"no chime staged" })),
+        Err(e) => Err(json!({ "result":"failed", "detail": format!("verify chime staged: {e}") })),
+    }
+}
+
+fn request_reenumerate(
+    state: &ServeState,
+    reason: Option<String>,
+    force: bool,
+    method: Option<&str>,
+) -> serde_json::Value {
+    let method = match parse_reenum_method(method) {
+        Ok(value) => value,
+        Err(detail) => return json!({ "result":"failed", "detail": detail }),
+    };
+
+    let Ok(_guard) = state.handoff_lock.try_lock() else {
+        return json!({ "result":"busy", "reason":"handoff_in_progress" });
+    };
+
+    if let Err(resp) = staged_precheck(state.media_ro.medium_file_present(LOCK_CHIME_REL_PATH)) {
+        return resp;
+    }
+
+    let opts = ReEnumOpts {
+        reason,
+        force,
+        method,
+    };
+    let outcome = reenum::reenumerate(&state.cfg, &opts);
+
+    match outcome {
+        ReEnumOutcome::Done { disconnect_ms } => {
+            json!({ "result":"done", "disconnect_ms": disconnect_ms })
+        }
+        ReEnumOutcome::Deferred { reason } => json!({ "result":"deferred", "reason": reason }),
+        ReEnumOutcome::Failed { detail } => json!({ "result":"failed", "detail": detail }),
     }
 }
 
@@ -865,12 +1001,18 @@ fn finalize_record(state: &ServeState, id: &str, outcome: &HandoffOutcome) {
 #[allow(clippy::panic, clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::{
-        MAX_FRAME, Request, busy_backoff_delay, fatal_split, read_frame, requeue_suffix,
-        write_frame,
+        MAX_FRAME, Request, ServeState, busy_backoff_delay, dispatch, fatal_split, read_frame,
+        request_reenumerate, requeue_suffix, staged_precheck, startup_needs_connect, write_frame,
     };
+    use crate::config::GadgetConfig;
     use crate::handoff::Mutation;
+    use crate::mediamount::MediaRoMount;
+    use crate::queue::MutationQueue;
     use std::io::Cursor;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
+    use std::{collections::HashMap, path::PathBuf};
 
     #[test]
     fn frame_roundtrips() {
@@ -975,6 +1117,125 @@ mod tests {
             Request::QueueStatus { job_id } => assert_eq!(job_id, "m-7"),
             other => panic!("expected queue_status, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_reenumerate_with_defaults() {
+        let req: Request = serde_json::from_slice(br#"{"cmd":"reenumerate"}"#).expect("parse");
+        match req {
+            Request::ReEnumerate {
+                reason,
+                force,
+                method,
+            } => {
+                assert!(reason.is_none());
+                assert!(!force);
+                assert!(method.is_none());
+            }
+            other => panic!("expected reenumerate, got {other:?}"),
+        }
+    }
+
+    fn test_state() -> ServeState {
+        ServeState {
+            cfg: GadgetConfig::teslausb(PathBuf::from("teslacam.img"), PathBuf::from("media.img")),
+            runtime_root: PathBuf::from("."),
+            allow_hot: false,
+            record: Mutex::new(None),
+            handoff_lock: Mutex::new(()),
+            next_id: AtomicU64::new(1),
+            queue: Mutex::new(MutationQueue::default()),
+            queue_path: PathBuf::from("queue.json"),
+            media_ro: Arc::new(MediaRoMount::new(PathBuf::from("media.img"))),
+            busy_backoff: Mutex::new(HashMap::new()),
+        }
+    }
+
+    #[test]
+    fn reenumerate_bad_method_returns_failed_bad_request() {
+        let state = test_state();
+        let response = request_reenumerate(&state, None, false, Some("not_a_method"));
+        assert_eq!(response.get("result"), Some(&serde_json::json!("failed")));
+        assert!(
+            response
+                .get("detail")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|d| d.contains("bad request")),
+            "expected bad-request detail, got {response:?}"
+        );
+    }
+
+    #[test]
+    fn dispatch_routes_reenumerate_bad_method() {
+        let state = test_state();
+        let response = dispatch(
+            Request::ReEnumerate {
+                reason: None,
+                force: false,
+                method: Some("bad".to_owned()),
+            },
+            &state,
+        );
+        assert_eq!(response.get("result"), Some(&serde_json::json!("failed")));
+    }
+
+    #[test]
+    fn staged_precheck_ok_when_present() {
+        assert!(staged_precheck(Ok(true)).is_ok());
+    }
+
+    #[test]
+    fn startup_needs_connect_skips_when_configured() {
+        assert!(!startup_needs_connect(false, Some("configured")));
+    }
+
+    #[test]
+    fn startup_needs_connect_skips_when_suspended() {
+        assert!(!startup_needs_connect(false, Some("suspended")));
+    }
+
+    #[test]
+    fn startup_needs_connect_skips_transient_and_unknown_states() {
+        assert!(!startup_needs_connect(false, Some("powered")));
+        assert!(!startup_needs_connect(false, Some("default")));
+        assert!(!startup_needs_connect(false, Some("addressed")));
+        assert!(!startup_needs_connect(false, None));
+    }
+
+    #[test]
+    fn startup_needs_connect_recovers_when_not_attached() {
+        assert!(startup_needs_connect(false, Some("not attached")));
+    }
+
+    #[test]
+    fn startup_needs_connect_always_after_rebind() {
+        assert!(startup_needs_connect(true, Some("configured")));
+        assert!(startup_needs_connect(true, None));
+        assert!(startup_needs_connect(true, Some("not attached")));
+    }
+
+    #[test]
+    fn staged_precheck_failed_when_absent() {
+        let response = staged_precheck(Ok(false)).expect_err("absent must fail");
+        assert_eq!(response.get("result"), Some(&serde_json::json!("failed")));
+        assert_eq!(
+            response.get("detail"),
+            Some(&serde_json::json!("no chime staged"))
+        );
+    }
+
+    #[test]
+    fn staged_precheck_failed_when_unverifiable() {
+        let response =
+            staged_precheck(Err(std::io::Error::other("mount failed"))).expect_err("err must fail");
+        assert_eq!(response.get("result"), Some(&serde_json::json!("failed")));
+        assert!(
+            response
+                .get("detail")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|d| d.contains("verify chime staged")),
+            "expected verification failure detail, got {response:?}"
+        );
     }
 
     #[test]

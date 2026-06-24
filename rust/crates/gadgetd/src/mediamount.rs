@@ -89,6 +89,13 @@ impl MediaRoMount {
         }
     }
 
+    /// Best-effort presence check for `rel_path` on the medium. Ensures the RO
+    /// mount is up first; Err means the medium could not be read (cannot verify).
+    pub(crate) fn medium_file_present(&self, rel_path: &str) -> io::Result<bool> {
+        self.ensure_mounted()?;
+        Ok(self.mount_dir.join(rel_path).is_file())
+    }
+
     /// Read-only mount once (caller has confirmed we are not already mounted).
     fn mount_once(&self) -> io::Result<()> {
         // Never stack a read mount on an image that already has a loop device:

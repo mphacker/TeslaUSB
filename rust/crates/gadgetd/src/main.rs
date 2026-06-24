@@ -39,6 +39,8 @@ mod mediamount;
 mod mutate;
 mod provision;
 mod queue;
+#[cfg(unix)]
+mod reenum;
 
 use std::path::PathBuf;
 use std::process::ExitCode;

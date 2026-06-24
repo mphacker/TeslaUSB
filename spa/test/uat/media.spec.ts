@@ -893,6 +893,25 @@ test.describe("media (lock chimes) UAT", () => {
       };
     }
 
+    const GADGET_BASE = {
+      present: true,
+      bound: false,
+      bound_udc: null,
+      udc_state: "configured",
+      lun_file: "/data/teslausb/cam.img",
+      media_lun_file: "/data/teslausb/media.img",
+      handoff_active: false,
+      pending_mutations: 0,
+      applying_mutations: 0,
+      media_ro_mounted: true,
+      media_ro_path: "/run/teslausb/media-ro",
+      media_ro_error: null,
+      chime_reenum_pending: false,
+      last_reenum: null,
+      last_handoff_id: null,
+      last_result: null,
+    };
+
     async function gotoActivationMedia(page: Page) {
       await page.goto("/media", { waitUntil: "load" });
       await expect(page.locator(".container[data-screen=media]")).toBeVisible();
@@ -957,6 +976,255 @@ test.describe("media (lock chimes) UAT", () => {
       );
       await expect(page.locator("[data-testid=activation-notice]")).toContainText("is now your active lock chime");
       expect(navigations).toBe(0);
+    });
+
+    test("set-active shows the keep-doors-closed reenum overlay until reenum clears", async ({
+      page,
+      probe,
+    }) => {
+      await page.clock.install({ time: new Date("2024-01-01T00:00:00Z") });
+      let activated = false;
+      let gadgetReads = 0;
+      const oldInstalled = {
+        name: "LockChime.wav",
+        rel_path: "LockChime.wav",
+        size_bytes: 1024,
+        modified: "2026-06-15T23:57:58",
+      };
+      const convergedInstalled = {
+        name: "LockChime.wav",
+        rel_path: "LockChime.wav",
+        size_bytes: 2048,
+        modified: "2026-06-15T23:58:00",
+      };
+
+      await page.route("**/api/chime-scheduler", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        return jsonRoute(route, 200, snapshot([{ filename: "Sparkle.wav", bytes: 2048 }]));
+      });
+      await page.route("**/api/chime-scheduler/library/*/activate", (route) => {
+        if (route.request().method() !== "POST") return route.continue();
+        activated = true;
+        return route.fulfill({
+          status: 202,
+          contentType: "application/json",
+          body: JSON.stringify({ state: "queued", job_id: "a1" }),
+        });
+      });
+      await page.route("**/api/chimes", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        return jsonRoute(route, 200, { installed: activated ? convergedInstalled : oldInstalled });
+      });
+      await page.route("**/api/gadget/status", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        gadgetReads += 1;
+        return jsonRoute(route, 200, {
+          ...GADGET_BASE,
+          chime_reenum_pending: gadgetReads <= 2,
+          last_reenum: null,
+        });
+      });
+
+      await gotoActivationMedia(page);
+      await page.locator("[data-testid=library-set-active]").first().click();
+      await expect(page.locator("[data-testid=reenum-overlay]")).toBeVisible();
+      await expect(page.locator("[data-testid=reenum-overlay-message]")).toContainText(
+        /keep the car.?s doors closed/i,
+      );
+
+      await page.clock.fastForward(7000);
+      await expect(page.locator("[data-testid=reenum-overlay]")).toHaveCount(0, { timeout: 10000 });
+      await expect(page.locator("[data-testid=activation-notice]")).toContainText("next lock");
+      assertCleanConsole(probe);
+    });
+
+    test("reenum overlay is dismissable", async ({ page, probe }) => {
+      await page.clock.install({ time: new Date("2024-01-01T00:00:00Z") });
+      let activated = false;
+      const oldInstalled = {
+        name: "LockChime.wav",
+        rel_path: "LockChime.wav",
+        size_bytes: 1024,
+        modified: "2026-06-15T23:57:58",
+      };
+      const convergedInstalled = {
+        name: "LockChime.wav",
+        rel_path: "LockChime.wav",
+        size_bytes: 2048,
+        modified: "2026-06-15T23:58:00",
+      };
+
+      await page.route("**/api/chime-scheduler", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        return jsonRoute(route, 200, snapshot([{ filename: "Sparkle.wav", bytes: 2048 }]));
+      });
+      await page.route("**/api/chime-scheduler/library/*/activate", (route) => {
+        if (route.request().method() !== "POST") return route.continue();
+        activated = true;
+        return route.fulfill({
+          status: 202,
+          contentType: "application/json",
+          body: JSON.stringify({ state: "queued", job_id: "a1" }),
+        });
+      });
+      await page.route("**/api/chimes", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        return jsonRoute(route, 200, { installed: activated ? convergedInstalled : oldInstalled });
+      });
+      await page.route("**/api/gadget/status", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        return jsonRoute(route, 200, {
+          ...GADGET_BASE,
+          chime_reenum_pending: true,
+          last_reenum: null,
+        });
+      });
+
+      await gotoActivationMedia(page);
+      await page.locator("[data-testid=library-set-active]").first().click();
+      await expect(page.locator("[data-testid=reenum-overlay]")).toBeVisible();
+      await page.locator("[data-testid=reenum-overlay-dismiss]").click();
+      await expect(page.locator("[data-testid=reenum-overlay]")).toHaveCount(0);
+      assertCleanConsole(probe);
+    });
+
+    test("a stale reenum poll from an earlier activation can't mislabel a later one", async ({
+      page,
+      probe,
+    }) => {
+      // Regression: activation A converges (so its Set Active buttons re-enable)
+      // but the SPA never observes chime_reenum_pending===true for A — so A's
+      // reenum poll keeps running. The user then activates B. A's still-running
+      // poll must NOT own B's reenum and label the "next lock" notice with A's
+      // filename. Activation tokens must be globally unique for this to hold.
+      await page.clock.install({ time: new Date("2024-01-01T00:00:00Z") });
+      const v0 = { name: "LockChime.wav", rel_path: "LockChime.wav", size_bytes: 512, modified: "2026-06-15T23:57:58" };
+      const v1 = { name: "LockChime.wav", rel_path: "LockChime.wav", size_bytes: 1024, modified: "2026-06-15T23:58:30" };
+      const v2 = { name: "LockChime.wav", rel_path: "LockChime.wav", size_bytes: 2048, modified: "2026-06-15T23:59:10" };
+      let activatePosts = 0;
+      let gadgetReadsAfterB = 0;
+
+      await page.route("**/api/chime-scheduler", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        return jsonRoute(
+          route,
+          200,
+          snapshot([
+            { filename: "AlphaChime.wav", bytes: 1024 },
+            { filename: "BravoChime.wav", bytes: 2048 },
+          ]),
+        );
+      });
+      await page.route("**/api/chime-scheduler/library/*/activate", (route) => {
+        if (route.request().method() !== "POST") return route.continue();
+        activatePosts += 1;
+        return route.fulfill({
+          status: 202,
+          contentType: "application/json",
+          body: JSON.stringify({ state: "queued", job_id: `a${activatePosts}` }),
+        });
+      });
+      // Each activation's convergence lands on the very next /api/chimes read, so
+      // the per-op poll resolves immediately without depending on a fake re-arm.
+      await page.route("**/api/chimes", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        const installed = activatePosts >= 2 ? v2 : activatePosts >= 1 ? v1 : v0;
+        return jsonRoute(route, 200, { installed });
+      });
+      // Pending is only ever reported true AFTER B is activated, and only for a
+      // couple of reads — so A never latches an overlay, and only B's reenum does.
+      await page.route("**/api/gadget/status", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        let pending = false;
+        if (activatePosts >= 2) {
+          gadgetReadsAfterB += 1;
+          pending = gadgetReadsAfterB <= 2;
+        }
+        return jsonRoute(route, 200, { ...GADGET_BASE, chime_reenum_pending: pending });
+      });
+
+      await gotoActivationMedia(page);
+      const buttons = page.locator("[data-testid=library-set-active]");
+
+      // Activation A (Alpha, 1 KB) — converges immediately (512 B → 1 KB),
+      // re-enabling the buttons; its reenum poll keeps running with pending=false.
+      await buttons.first().click();
+      await expect(page.locator("[data-testid=active-chime]")).toContainText("1 KB");
+      await expect(buttons.nth(1)).toBeEnabled();
+
+      // Activation B (Bravo) — converges (2 KB → 4 KB); its reenum goes pending
+      // then clears, and only B's poll may own the resulting notice.
+      await buttons.nth(1).click();
+      await page.clock.fastForward(3000);
+      await expect(page.locator("[data-testid=reenum-overlay]")).toBeVisible();
+      await page.clock.fastForward(5000);
+      await expect(page.locator("[data-testid=reenum-overlay]")).toHaveCount(0, { timeout: 10000 });
+
+      const notice = page.locator("[data-testid=activation-notice]");
+      await expect(notice).toContainText("next lock");
+      await expect(notice).toContainText("BravoChime.wav");
+      await expect(notice).not.toContainText("AlphaChime.wav");
+      assertCleanConsole(probe);
+    });
+
+    test("reenum that clears before convergence still yields the next-lock notice", async ({
+      page,
+      probe,
+    }) => {
+      // Regression: the reenum poll and the chime-convergence poll are independent.
+      // If reenum clears FIRST (sets the "next lock" notice while it's still hidden
+      // behind pendingActivation), the later convergence must NOT overwrite it with
+      // the plain success copy — i3's whole point is the "next lock" guidance.
+      await page.clock.install({ time: new Date("2024-01-01T00:00:00Z") });
+      const v0 = { name: "LockChime.wav", rel_path: "LockChime.wav", size_bytes: 512, modified: "2026-06-15T23:57:58" };
+      const v1 = { name: "LockChime.wav", rel_path: "LockChime.wav", size_bytes: 1024, modified: "2026-06-15T23:58:30" };
+      let chimeConverged = false;
+      let gadgetReads = 0;
+
+      await page.route("**/api/chime-scheduler", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        return jsonRoute(route, 200, snapshot([{ filename: "Sparkle.wav", bytes: 1024 }]));
+      });
+      await page.route("**/api/chime-scheduler/library/*/activate", (route) => {
+        if (route.request().method() !== "POST") return route.continue();
+        return route.fulfill({
+          status: 202,
+          contentType: "application/json",
+          body: JSON.stringify({ state: "queued", job_id: "a1" }),
+        });
+      });
+      await page.route("**/api/chimes", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        return jsonRoute(route, 200, { installed: chimeConverged ? v1 : v0 });
+      });
+      // Reenum reports pending on the first read only, so it clears on the first
+      // fast-forward — before convergence is allowed to happen.
+      await page.route("**/api/gadget/status", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        gadgetReads += 1;
+        return jsonRoute(route, 200, { ...GADGET_BASE, chime_reenum_pending: gadgetReads <= 1 });
+      });
+
+      await gotoActivationMedia(page);
+      await page.locator("[data-testid=library-set-active]").first().click();
+      // The overlay appears while reenum is pending.
+      await expect(page.locator("[data-testid=reenum-overlay]")).toBeVisible();
+
+      // First fast-forward: reenum clears (notice queued but hidden behind
+      // pendingActivation); convergence is still gated off, so pending stays.
+      await page.clock.fastForward(2000);
+      await expect(page.locator("[data-testid=reenum-overlay]")).toHaveCount(0, { timeout: 10000 });
+      await expect(page.locator("[data-testid=activation-status]")).toBeVisible();
+
+      // Now allow convergence and let the convergence poll re-arm fire.
+      chimeConverged = true;
+      await page.clock.fastForward(2000);
+
+      const notice = page.locator("[data-testid=activation-notice]");
+      await expect(notice).toBeVisible();
+      await expect(notice).toContainText("next lock");
+      await expect(notice).toContainText("Sparkle.wav");
+      assertCleanConsole(probe);
     });
 
     test("all Set Active buttons disable while pending", async ({ page }) => {

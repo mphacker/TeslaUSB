@@ -688,7 +688,7 @@ LUNs) is the single make-or-break that still needs the car.**
   `tesla_cache_invalidate.sh` behavior into gadgetd)**
 - [ ] **Full USB re-enumeration** ONLY for an active-`LockChime.wav` change, with a
   bounded health check that recording resumes. **(port `tesla_gadget_rebind.sh`)**
-  **(SOFTWARE DONE — gated:C car-pickup proof.** Two slices: **i1** = the gated
+  **(SOFTWARE DONE — gated:C car-pickup proof.** Three slices: **i1** = the gated
   `reenum::reenumerate` primitive with the recording-idle health gate (HW-PROVEN,
   shipped `2ea8ddb`); **i2** = gadgetd auto-fires that primitive after a successful
   `InstallFile(LockChime.wav)` on P2 so the SPA "set chime" reaches the parked car
@@ -697,7 +697,15 @@ LUNs) is the single make-or-break that still needs the car.**
   separate 2s scheduler thread gated on recording-idle + all-queues-empty, exp
   backoff on failure, `gadget_status` exposes `chime_reenum_pending`+`last_reenum`.
   GPT-5.5 adversarial review GO (2 cycles); `cargo test -p gadgetd` = 148 pass;
-  aarch64 cross-build verified. **Recording (`lun.0`) never gated.** End-to-end
+  aarch64 cross-build verified. **i3** = the SPA shows a full-screen blocking
+  "Syncing chime to your car — keep the doors closed" overlay while
+  `chime_reenum_pending` is true, then updates the activation notice to
+  "…on the next lock" when it clears (webd `map_gadget_status` passes through
+  `chime_reenum_pending`+`last_reenum`; monotonic per-activation tokens close a
+  stale-poll race that could mislabel/clobber the notice). GPT-5.5 adversarial
+  review GO (3 cycles); full `media.spec.ts` = 54 pass at desktop-1280 + mobile-375,
+  incl. 2 new race regression tests (each verified RED on the pre-fix code).
+  **Recording (`lun.0`) never gated.** End-to-end
   car-pickup is the (C) hardware test below.)**
 - [ ] **Hardware test:** confirm the car actually picks up directory changes via
   soft medium-change, and a chime change via re-enumeration (Requirements §1.1

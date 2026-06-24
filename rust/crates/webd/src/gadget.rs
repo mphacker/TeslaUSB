@@ -374,7 +374,10 @@ pub(crate) fn map_status(resp: &Value) -> Option<Value> {
 /// `502`). All other fields degrade to `false`/`null` so the read never 500s on
 /// a partial reply. The `media_ro_*` fields (RO media-mount health) and the
 /// `pending_mutations`/`applying_mutations` queue counts are passed through for
-/// observability; they are `null` when an older `gadgetd` omits them.
+/// observability; they are `null` when an older `gadgetd` omits them. The
+/// `chime_reenum_pending` flag + `last_reenum` object drive the SPA's "syncing
+/// chime to the car — keep the doors closed" overlay (i2 auto-reenum); they
+/// degrade to `false`/`null` so an older `gadgetd` simply never shows the overlay.
 pub(crate) fn map_gadget_status(resp: &Value) -> Option<Value> {
     if resp.get("error").is_some() {
         return None;
@@ -395,6 +398,8 @@ pub(crate) fn map_gadget_status(resp: &Value) -> Option<Value> {
         "media_ro_mounted": field("media_ro_mounted"),
         "media_ro_path": field("media_ro_path"),
         "media_ro_error": field("media_ro_error"),
+        "chime_reenum_pending": flag("chime_reenum_pending"),
+        "last_reenum": field("last_reenum"),
         "last_handoff_id": field("last_handoff_id"),
         "last_result": field("last_result"),
     }))
@@ -848,6 +853,22 @@ mod tests {
     }
 
     #[test]
+    fn gadget_status_passes_through_chime_reenum_fields() {
+        // i2 auto-reenum: the pending flag + last_reenum object the SPA overlay
+        // consumes must survive the passthrough verbatim.
+        let resp = json!({
+            "present": true,
+            "chime_reenum_pending": true,
+            "last_reenum": { "result": "done", "disconnect_ms": 420, "reason": "chime_apply" },
+        });
+        let out = map_gadget_status(&resp).unwrap();
+        assert_eq!(out["chime_reenum_pending"], true);
+        assert_eq!(out["last_reenum"]["result"], "done");
+        assert_eq!(out["last_reenum"]["disconnect_ms"], 420);
+        assert_eq!(out["last_reenum"]["reason"], "chime_apply");
+    }
+
+    #[test]
     fn gadget_status_degrades_media_ro_to_null_when_absent() {
         // An older gadgetd that omits the media_ro_* / count fields must not
         // 500 the read; the new keys degrade to null.
@@ -858,6 +879,10 @@ mod tests {
         assert_eq!(out["media_ro_error"], Value::Null);
         assert_eq!(out["pending_mutations"], Value::Null);
         assert_eq!(out["applying_mutations"], Value::Null);
+        // i2: a gadgetd that predates auto-reenum must default the overlay off
+        // (pending=false) and report no last_reenum, never 500.
+        assert_eq!(out["chime_reenum_pending"], false);
+        assert_eq!(out["last_reenum"], Value::Null);
     }
 
     #[test]

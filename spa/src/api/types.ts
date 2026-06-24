@@ -266,8 +266,31 @@ export interface GadgetStatus {
   media_ro_mounted: boolean | null;
   media_ro_path: string | null;
   media_ro_error: string | null;
+  /**
+   * i2 auto-reenum (chime apply). `chime_reenum_pending` is true while gadgetd
+   * still owes the parked car a USB re-enumeration after a `LockChime.wav`
+   * install — the SPA shows its "syncing to the car, keep the doors closed"
+   * overlay until this flips false. Defaults to false on an older gadgetd (no
+   * overlay). `last_reenum` is the terminal result of the most recent
+   * re-enumeration (or null before any has run).
+   */
+  chime_reenum_pending: boolean;
+  last_reenum: ReenumResult | null;
   last_handoff_id: string | null;
   last_result: unknown | null;
+}
+
+/**
+ * Terminal result of a USB re-enumeration, as reported by gadgetd's
+ * `last_reenum`. `result` is `"done"` on success; `disconnect_ms` is how long
+ * the gadget was detached; `reason` tags what triggered it (e.g.
+ * `"chime_apply"`). All but `result` are best-effort and may be absent.
+ */
+export interface ReenumResult {
+  result: string;
+  disconnect_ms?: number | null;
+  reason?: string | null;
+  detail?: string | null;
 }
 
 /**

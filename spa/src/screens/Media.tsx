@@ -46,6 +46,17 @@ import "../styles/media.css";
 const DASH = "\u2014";
 const ACT_POLL_INTERVAL_MS = 2000;
 const ACT_POLL_MAX_MS = 60000;
+const REENUM_POLL_INTERVAL_MS = 2000;
+const REENUM_SYNCING_MAX_MS = 30000;
+const REENUM_POLL_MAX_MS = 120000;
+
+function activationSuccessMessage(filename: string): string {
+  return `“${filename}” is now your active lock chime.`;
+}
+
+function activationNoticeNextLock(filename: string): string {
+  return `“${filename}” is now your active lock chime — your car will play it on the next lock.`;
+}
 
 /**
  * True once `GET /api/chimes` shows the activated chime has actually landed on
@@ -337,6 +348,15 @@ export function Media() {
     phase: "syncing" | "waiting";
   } | null>(null);
   const [activationNotice, setActivationNotice] = useState<string | null>(null);
+  const [reenumOverlay, setReenumOverlay] = useState<{
+    filename: string;
+    token: number;
+    phase: "syncing" | "waiting";
+  } | null>(null);
+  const [reenumPoll, setReenumPoll] = useState<{
+    filename: string;
+    token: number;
+  } | null>(null);
   // The chime library (reported up by the embedded ChimeScheduler) + the chime
   // activated this session, used only to resolve the active card's source name.
   const [library, setLibrary] = useState<LibraryEntry[]>([]);
@@ -348,6 +368,20 @@ export function Media() {
   const nextStagedIdRef = useRef(0);
   const uploadAbortRef = useRef<AbortController | null>(null);
   const activationAbortRef = useRef<AbortController | null>(null);
+  const reenumAbortRef = useRef<AbortController | null>(null);
+  const reenumStopRef = useRef<(() => void) | null>(null);
+  const reenumSawPendingRef = useRef(false);
+  const latestActivationTokenRef = useRef<number>(0);
+  // Records the activation token whose reenum has already cleared, so the
+  // independent chime-convergence poll can't clobber the "next lock" notice with
+  // the plain success copy when reenum finishes before convergence is observed.
+  const reenumDoneTokenRef = useRef<number>(0);
+  // Monotonic activation sequence: every activation gets a globally unique token
+  // so the poll effects (keyed on token) always restart + clean up the prior
+  // poll. Deriving the token from the previous `pendingActivation` would reset to
+  // 1 at rest, letting a still-running earlier reenum poll share a token with a
+  // later activation and mislabel its "next lock" notice.
+  const activationSeqRef = useRef(0);
 
   /** Reload `GET /api/chimes` after a successful mutation (or initial mount). */
   const refetch = (signal?: AbortSignal) =>
@@ -376,6 +410,8 @@ export function Media() {
       ctrl.abort();
       uploadAbortRef.current?.abort();
       activationAbortRef.current?.abort();
+      reenumAbortRef.current?.abort();
+      reenumStopRef.current?.();
     };
   }, []);
 
@@ -563,16 +599,26 @@ export function Media() {
     }
   }
 
+  /** Pick the activation notice: the "next lock" copy once reenum has cleared
+   * for this token, otherwise the plain success copy. */
+  function activationNoticeForToken(filename: string, token: number): string {
+    return reenumDoneTokenRef.current === token
+      ? activationNoticeNextLock(filename)
+      : activationSuccessMessage(filename);
+  }
+
   function onChimeActivated(filename: string, bytes: number) {
     setActivationNotice(null);
-    setPendingActivation((prev) => ({
+    const token = (activationSeqRef.current += 1);
+    latestActivationTokenRef.current = token;
+    setPendingActivation({
       filename,
       bytes,
-      token: (prev?.token ?? 0) + 1,
+      token,
       preModified: installed?.modified ?? null,
       preSize: installed?.size_bytes ?? null,
       phase: "syncing",
-    }));
+    });
   }
 
   async function refreshActivationNow() {
@@ -582,8 +628,10 @@ export function Media() {
       setInstalled(c.installed);
       if (activationConverged(c.installed, pendingActivation)) {
         setLastActivated({ filename: pendingActivation.filename, bytes: pendingActivation.bytes });
+        setActivationNotice(
+          activationNoticeForToken(pendingActivation.filename, pendingActivation.token),
+        );
         setPendingActivation(null);
-        setActivationNotice(`“${pendingActivation.filename}” is now your active lock chime.`);
       }
     } catch {
       // keep current waiting state when the catalog is unavailable.
@@ -616,8 +664,10 @@ export function Media() {
         if (activationConverged(c.installed, pendingActivation)) {
           stopPolling();
           setLastActivated({ filename: pendingActivation.filename, bytes: pendingActivation.bytes });
+          setActivationNotice(
+            activationNoticeForToken(pendingActivation.filename, pendingActivation.token),
+          );
           setPendingActivation(null);
-          setActivationNotice(`“${pendingActivation.filename}” is now your active lock chime.`);
           return;
         }
       } catch {
@@ -658,11 +708,126 @@ export function Media() {
     };
   }, [pendingActivation?.token]);
 
+  useEffect(() => {
+    if (!pendingActivation?.token) return;
+    reenumSawPendingRef.current = false;
+    setReenumOverlay(null);
+    setReenumPoll({ filename: pendingActivation.filename, token: pendingActivation.token });
+  }, [pendingActivation?.token]);
+
+  useEffect(() => {
+    if (!reenumPoll?.token) return;
+
+    let cancelled = false;
+    const ctrl = new AbortController();
+    reenumAbortRef.current = ctrl;
+    let pollId: ReturnType<typeof setTimeout> | null = null;
+    let syncingId: ReturnType<typeof setTimeout> | null = null;
+    let maxId: ReturnType<typeof setTimeout> | null = null;
+
+    const stopPolling = () => {
+      if (pollId) clearTimeout(pollId);
+      if (syncingId) clearTimeout(syncingId);
+      if (maxId) clearTimeout(maxId);
+      pollId = null;
+      syncingId = null;
+      maxId = null;
+    };
+    reenumStopRef.current = stopPolling;
+
+    const runPoll = async () => {
+      if (cancelled || ctrl.signal.aborted) return;
+      try {
+        const status = await api.gadgetStatus(ctrl.signal);
+        if (cancelled || ctrl.signal.aborted) return;
+        // A newer activation has superseded this poll (its effect cleanup may not
+        // have run yet): stop without touching overlay/notice state so a stale
+        // poll can never own a later activation's UI.
+        if (latestActivationTokenRef.current !== reenumPoll.token) {
+          stopPolling();
+          return;
+        }
+        if (status.chime_reenum_pending) {
+          reenumSawPendingRef.current = true;
+          setReenumOverlay((current) => {
+            if (current && current.token === reenumPoll.token && current.phase === "waiting") {
+              return current;
+            }
+            return { filename: reenumPoll.filename, token: reenumPoll.token, phase: "syncing" };
+          });
+        } else if (reenumSawPendingRef.current) {
+          stopPolling();
+          setReenumOverlay((current) =>
+            current && current.token === reenumPoll.token ? null : current,
+          );
+          reenumDoneTokenRef.current = reenumPoll.token;
+          setActivationNotice(activationNoticeNextLock(reenumPoll.filename));
+          setReenumPoll((current) =>
+            current && current.token === reenumPoll.token ? null : current,
+          );
+          return;
+        }
+      } catch {
+        if (cancelled || ctrl.signal.aborted) return;
+      }
+      pollId = setTimeout(() => {
+        void runPoll();
+      }, REENUM_POLL_INTERVAL_MS);
+    };
+
+    void runPoll();
+    syncingId = setTimeout(() => {
+      if (cancelled || ctrl.signal.aborted) return;
+      setReenumOverlay((current) =>
+        current && current.token === reenumPoll.token
+          ? { ...current, phase: "waiting" }
+          : current,
+      );
+    }, REENUM_SYNCING_MAX_MS);
+
+    maxId = setTimeout(() => {
+      if (cancelled) return;
+      ctrl.abort();
+      stopPolling();
+      setReenumOverlay((current) =>
+        current && current.token === reenumPoll.token
+          ? { ...current, phase: "waiting" }
+          : current,
+      );
+      setReenumPoll((current) =>
+        current && current.token === reenumPoll.token ? null : current,
+      );
+    }, REENUM_POLL_MAX_MS);
+
+    return () => {
+      cancelled = true;
+      ctrl.abort();
+      stopPolling();
+      if (reenumAbortRef.current === ctrl) reenumAbortRef.current = null;
+      if (reenumStopRef.current === stopPolling) reenumStopRef.current = null;
+    };
+  }, [reenumPoll?.token]);
+
+  function dismissReenumOverlay() {
+    if (!reenumOverlay) return;
+    const token = reenumOverlay.token;
+    // Only abort the live poll when the dismissed overlay actually belongs to it;
+    // during a rapid re-activation the visible overlay can be a stale token, and
+    // aborting then would kill the NEW activation's poll.
+    if (reenumPoll?.token === token) {
+      reenumAbortRef.current?.abort();
+      reenumStopRef.current?.();
+      setReenumPoll(null);
+    }
+    setReenumOverlay(null);
+  }
+
   const validCount = staged.filter((item) => item.error === null).length;
   const validating = staged.some((item) => item.error === undefined);
 
   return (
-    <div class="container media-page" data-page="media" data-screen="media">
+    <>
+      <div class="container media-page" data-page="media" data-screen="media">
       {/* ── Media pill sub-nav (v1 media_hub_nav.html parity) ── */}
       <MediaPills active="chimes" />
 
@@ -892,14 +1057,43 @@ export function Media() {
       </details>
 
       {/* ── Chime Scheduler · Random Groups · Library ── (live: schedulerd via webd) */}
-      <ChimeScheduler
-        pendingUpload={pendingUpload}
-        onActivated={onChimeActivated}
-        onLibraryLoaded={setLibrary}
-        activationBusy={!!pendingActivation}
-      />
-
-
-    </div>
+        <ChimeScheduler
+          pendingUpload={pendingUpload}
+          onActivated={onChimeActivated}
+          onLibraryLoaded={setLibrary}
+          activationBusy={!!pendingActivation}
+        />
+      </div>
+      {reenumOverlay && (
+        <div
+          class="media-page reenum-overlay-backdrop"
+          data-testid="reenum-overlay"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div class="reenum-overlay-card">
+            <span class="reenum-overlay-spinner" aria-hidden="true" />
+            <h3 class="reenum-overlay-title">Syncing chime to your car</h3>
+            <p
+              class="reenum-overlay-message"
+              data-testid="reenum-overlay-message"
+              aria-live="assertive"
+            >
+              {reenumOverlay.phase === "syncing"
+                ? "Keep the car’s doors closed for a few seconds while the USB drive reconnects so your new lock chime takes effect."
+                : "This is taking a little longer — it will finish once the car is idle. Keep the doors closed, or close them now to let it complete."}
+            </p>
+            <button
+              type="button"
+              class="action-btn reenum-overlay-dismiss"
+              data-testid="reenum-overlay-dismiss"
+              onClick={dismissReenumOverlay}
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
+    </>
   );
 }

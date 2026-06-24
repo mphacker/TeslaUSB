@@ -295,6 +295,58 @@
   }
 }
 
+.media-page.reenum-overlay-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgb(0 0 0 / 0.55);
+  backdrop-filter: blur(4px);
+}
+.media-page .reenum-overlay-card {
+  width: min(460px, 100%);
+  display: grid;
+  gap: 12px;
+  padding: 18px 20px;
+  border-radius: 10px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  box-shadow: 0 18px 42px rgb(0 0 0 / 0.35);
+}
+.media-page .reenum-overlay-title {
+  margin: 0;
+  color: var(--text-primary);
+}
+.media-page .reenum-overlay-message {
+  margin: 0;
+  line-height: 1.45;
+}
+.media-page .reenum-overlay-spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid rgb(127 127 127 / 0.45);
+  border-top-color: var(--btn-primary-bg, var(--text-primary));
+  border-radius: 50%;
+  animation: reenum-spin 0.8s linear infinite;
+}
+.media-page .reenum-overlay-dismiss {
+  justify-self: end;
+}
+@keyframes reenum-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .media-page .reenum-overlay-spinner {
+    animation: none;
+  }
+}
+
 /* ── Chime scheduler (schedulerd-backed) ── */
 .scheduler-grid {
   display: grid;

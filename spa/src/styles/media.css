@@ -295,6 +295,52 @@
   }
 }
 
+.media-page.busy-overlay-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1090;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.media-page.busy-overlay-backdrop.busy-overlay-visible {
+  background: rgb(0 0 0 / 0.55);
+  backdrop-filter: blur(4px);
+}
+.media-page .busy-overlay-card {
+  width: min(460px, 100%);
+  display: grid;
+  gap: 12px;
+  padding: 18px 20px;
+  border-radius: 10px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  box-shadow: 0 18px 42px rgb(0 0 0 / 0.35);
+}
+.media-page .busy-overlay-title {
+  margin: 0;
+  color: var(--text-primary);
+}
+.media-page .busy-overlay-message {
+  margin: 0;
+  line-height: 1.45;
+}
+.media-page .busy-overlay-spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid rgb(127 127 127 / 0.45);
+  border-top-color: var(--btn-primary-bg, var(--text-primary));
+  border-radius: 50%;
+  animation: reenum-spin 0.8s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .media-page .busy-overlay-spinner {
+    animation: none;
+  }
+}
+
 .media-page.reenum-overlay-backdrop {
   position: fixed;
   inset: 0;

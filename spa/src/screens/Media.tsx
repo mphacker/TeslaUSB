@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import { MediaPills } from "../components/MediaPills";
 import { Icon } from "../components/Icon";
 import { ChimeAudioEditor } from "../components/ChimeAudioEditor";
+import { BusyOverlay, useDelayedFlag } from "../components/BusyOverlay";
 import { ChimeScheduler } from "./ChimeScheduler";
 import { useFullWidthScreen } from "../hooks/useFullWidthScreen";
 import { useFileDrop } from "../hooks/useFileDrop";
@@ -327,6 +328,7 @@ export function Media() {
   const [staged, setStaged] = useState<StagedChime[]>([]);
   const [editorFile, setEditorFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [childBusy, setChildBusy] = useState(false);
   const [uploadItems, setUploadItems] = useState<ChimeUploadItem[]>([]);
   const [uploadProgress, setUploadProgress] = useState<{
     current: number;
@@ -372,6 +374,16 @@ export function Media() {
   const reenumStopRef = useRef<(() => void) | null>(null);
   const reenumSawPendingRef = useRef(false);
   const latestActivationTokenRef = useRef<number>(0);
+  // The reenum overlay is the single-overlay arbiter at the render boundary
+  // (`show={showBusy && !reenumOverlay}`), so pageBusy intentionally does NOT
+  // exclude reenumOverlay here: keeping pageBusy true across the reenum phase
+  // means the 1s debounce timer doesn't reset, so the busy overlay reappears
+  // instantly if activation is still syncing after reenum clears.
+  const pageBusy =
+    uploading ||
+    childBusy ||
+    (!!pendingActivation && pendingActivation.phase !== "waiting");
+  const showBusy = useDelayedFlag(pageBusy, 1000);
   // Records the activation token whose reenum has already cleared, so the
   // independent chime-convergence poll can't clobber the "next lock" notice with
   // the plain success copy when reenum finishes before convergence is observed.
@@ -1062,8 +1074,10 @@ export function Media() {
           onActivated={onChimeActivated}
           onLibraryLoaded={setLibrary}
           activationBusy={!!pendingActivation}
+          onBusyChange={setChildBusy}
         />
       </div>
+      <BusyOverlay block={pageBusy && !reenumOverlay} visible={showBusy && !reenumOverlay} />
       {reenumOverlay && (
         <div
           class="media-page reenum-overlay-backdrop"

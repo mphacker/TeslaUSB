@@ -139,6 +139,7 @@ async function installScheduler(
   onDelete?: (filename: string, snap: Snapshot) => void,
   onBulkDelete?: (names: string[], snap: Snapshot) => void,
   onRename?: (from: string, to: string, snap: Snapshot) => void,
+  options?: { deleteResponseDelayMs?: number },
 ) {
   const snap: Snapshot = JSON.parse(JSON.stringify(initial));
   const cap: Captured = {
@@ -288,12 +289,15 @@ async function installScheduler(
 
   // Library item (DELETE). Hardware answers 202/200 and the row leaves the
   // catalog only on a LATER scannerd rescan; drive that lag via `onDelete`.
-  await page.route("**/api/chime-scheduler/library/*", (route) => {
+  await page.route("**/api/chime-scheduler/library/*", async (route) => {
     if (route.request().method() !== "DELETE") return route.continue();
     const filename = tail(route.request().url());
     cap.libraryDelete.push(filename);
     if (onDelete) onDelete(filename, snap);
     else snap.library = snap.library.filter((c) => c.filename !== filename);
+    if ((options?.deleteResponseDelayMs ?? 0) > 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, options.deleteResponseDelayMs));
+    }
     return json200(route, {});
   });
 
@@ -1057,23 +1061,62 @@ test.describe("chime scheduler UAT (A3b)", () => {
     assertCleanConsole(probe);
   });
 
-  test("library delete — two concurrent deletes both converge", async ({ page, probe }) => {
+  test("library delete — second rapid delete waits for the first request to finish", async ({
+    page,
+    probe,
+  }) => {
     await page.clock.install({ time: new Date("2024-01-01T00:00:00Z") });
-    const { cap } = await installScheduler(page, populatedSnapshot());
+    const { cap } = await installScheduler(
+      page,
+      populatedSnapshot(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { deleteResponseDelayMs: 600 },
+    );
     await gotoScheduler(page);
 
-    await expect(page.locator("[data-testid=library-row]")).toHaveCount(2);
-    // Delete both rows back-to-back: each owns its own budget so neither resets
-    // the other's clock, and both DELETE requests must fire exactly once.
-    await page.locator("[data-testid=library-row]").nth(0).locator(
-      "[data-testid=library-delete]",
-    ).click();
-    await page.locator("[data-testid=library-row]").nth(1).locator(
-      "[data-testid=library-delete]",
-    ).click();
+    const libraryRows = page.locator("[data-testid~=library-row]");
+    await expect(libraryRows).toHaveCount(2);
+    const firstDelete = libraryRows
+      .filter({ hasText: "Sparkle.wav" })
+      .locator("[data-testid=library-delete]");
+    const secondDelete = libraryRows
+      .filter({ hasText: "Chime2.wav" })
+      .locator("[data-testid=library-delete]");
 
-    await expect(page.locator("[data-testid~=library-row-deleting]")).toHaveCount(2);
+    // Trigger one DELETE, then prove a rapid second click is blocked while the
+    // first request is still in flight.
+    await firstDelete.click();
+    const busyOverlay = page.locator("[data-testid=busy-overlay]");
+    await expect(busyOverlay).toHaveCount(1);
+    let blocked = false;
+    try {
+      await secondDelete.click({ timeout: 300 });
+    } catch {
+      blocked = true;
+    }
+    const overlayCountAfterAttempt = await busyOverlay.count();
+    expect(
+      blocked || overlayCountAfterAttempt === 1,
+      "busy overlay should block rapid follow-up delete clicks",
+    ).toBe(true);
+    expect(cap.libraryDelete).toEqual(["Sparkle.wav"]);
+    await expect(page.locator("[data-testid~=library-row-deleting]")).toHaveCount(1);
+    await expect(busyOverlay).toHaveCount(0, { timeout: 5000 });
+
+    // Once the blocker clears, the second delete should fire normally.
+    await libraryRows
+      .filter({ hasText: "Chime2.wav" })
+      .locator("[data-testid=library-delete]")
+      .click();
+    await expect.poll(() => cap.libraryDelete.length).toBe(2);
+    expect(cap.libraryDelete.filter((name) => name === "Sparkle.wav")).toHaveLength(1);
+    expect(cap.libraryDelete.filter((name) => name === "Chime2.wav")).toHaveLength(1);
     expect([...cap.libraryDelete].sort()).toEqual(["Chime2.wav", "Sparkle.wav"]);
+    await expect(page.locator("[data-testid~=library-row-deleting]")).toHaveCount(2);
 
     await page.clock.fastForward(2001);
 
@@ -1087,9 +1130,10 @@ test.describe("chime scheduler UAT (A3b)", () => {
     const { cap } = await installScheduler(page, populatedSnapshot());
     await gotoScheduler(page);
 
-    const deleteBtn = page.locator("[data-testid=library-row]").first().locator(
-      "[data-testid=library-delete]",
-    );
+    const deleteBtn = page
+      .locator("[data-testid~=library-row]")
+      .filter({ hasText: "Sparkle.wav" })
+      .locator("[data-testid=library-delete]");
     // Two rapid clicks: the synchronous in-flight guard must collapse them into
     // a single DELETE before the row locks.
     await deleteBtn.click();
@@ -1180,7 +1224,7 @@ test.describe("chime scheduler UAT (A3b)", () => {
     );
     await firstRow.locator("[data-testid=library-set-active]").click();
 
-    await expect(firstRow.locator("[data-testid=library-set-active]")).toContainText("Syncing…");
+    await expect(page.locator("[data-testid=activation-status]")).toContainText("Applying");
     expect(cap.libraryActivate).toEqual(["Sparkle.wav"]);
     assertCleanConsole(probe);
   });

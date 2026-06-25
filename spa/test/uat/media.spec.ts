@@ -978,6 +978,152 @@ test.describe("media (lock chimes) UAT", () => {
       expect(navigations).toBe(0);
     });
 
+    test("slow activate shows busy overlay, blocks actions, then clears", async ({ page }) => {
+      const oldInstalled = {
+        name: "LockChime.wav",
+        rel_path: "LockChime.wav",
+        size_bytes: 1024,
+        modified: "2026-06-15T23:57:58",
+      };
+      const convergedInstalled = {
+        name: "LockChime.wav",
+        rel_path: "LockChime.wav",
+        size_bytes: 2048,
+        modified: "2026-06-15T23:58:00",
+      };
+      let activated = false;
+      let deleteCalls = 0;
+
+      await page.route("**/api/chime-scheduler", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        return jsonRoute(
+          route,
+          200,
+          snapshot([
+            { filename: "Sparkle.wav", bytes: 2048 },
+            { filename: "Bell.wav", bytes: 4096 },
+          ]),
+        );
+      });
+      await page.route("**/api/chime-scheduler/library/*/activate", async (route) => {
+        if (route.request().method() !== "POST") return route.continue();
+        await new Promise((resolve) => setTimeout(resolve, 2500));
+        activated = true;
+        return route.fulfill({
+          status: 202,
+          contentType: "application/json",
+          body: JSON.stringify({ state: "queued", job_id: "m-uat" }),
+        });
+      });
+      await page.route("**/api/chime-scheduler/library/*", (route) => {
+        if (route.request().method() !== "DELETE") return route.continue();
+        deleteCalls += 1;
+        return jsonRoute(route, 200, {});
+      });
+      await page.route("**/api/chimes", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        return jsonRoute(route, 200, { installed: activated ? convergedInstalled : oldInstalled });
+      });
+      await page.route("**/api/gadget/status", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        return jsonRoute(route, 200, { ...GADGET_BASE, chime_reenum_pending: false });
+      });
+
+      await gotoActivationMedia(page);
+      const busyOverlay = page.locator("[data-testid=busy-overlay]");
+      const busyOverlayCard = page.locator("[data-testid=busy-overlay-card]");
+      await page.locator("[data-testid=library-set-active]").first().click();
+      const cardTimeline = page.evaluate(async () => {
+        const started = performance.now();
+        let seenBefore700 = false;
+        let seenBy1500 = false;
+        while (performance.now() - started < 1700) {
+          const elapsed = performance.now() - started;
+          const seen = !!document.querySelector("[data-testid=busy-overlay-card]");
+          if (seen && elapsed < 700) seenBefore700 = true;
+          if (seen && elapsed <= 1500) seenBy1500 = true;
+          await new Promise<void>((resolve) => setTimeout(resolve, 50));
+        }
+        return { seenBefore700, seenBy1500 };
+      });
+      await page.waitForTimeout(150);
+      await expect(busyOverlay).toHaveCount(1);
+
+      await expect(page.locator("[data-testid=reenum-overlay]")).toHaveCount(0);
+
+      const secondDelete = page.locator("[data-testid=library-delete]").nth(1);
+      await expect(secondDelete).toBeEnabled();
+      let blocked = false;
+      try {
+        await secondDelete.click({ timeout: 400 });
+      } catch {
+        blocked = true;
+      }
+      expect(blocked, "overlay should intercept pointer actions while busy").toBe(true);
+      expect(deleteCalls, "blocked click must not trigger delete").toBe(0);
+      const cardStates = await cardTimeline;
+      expect(cardStates.seenBefore700, "busy card should not flash in the first ~700ms").toBe(false);
+      expect(cardStates.seenBy1500, "busy card should appear once the 1s debounce elapses").toBe(
+        true,
+      );
+      await expect(page.locator("[data-testid=reenum-overlay]")).toHaveCount(0);
+      await expect(busyOverlayCard).toHaveCount(0, { timeout: 5000 });
+
+      await expect(busyOverlay).toHaveCount(0, { timeout: 5000 });
+    });
+
+    test("fast activate never flashes busy overlay", async ({ page }) => {
+      const oldInstalled = {
+        name: "LockChime.wav",
+        rel_path: "LockChime.wav",
+        size_bytes: 1024,
+        modified: "2026-06-15T23:57:58",
+      };
+      const convergedInstalled = {
+        name: "LockChime.wav",
+        rel_path: "LockChime.wav",
+        size_bytes: 2048,
+        modified: "2026-06-15T23:58:00",
+      };
+      let activated = false;
+
+      await page.route("**/api/chime-scheduler", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        return jsonRoute(route, 200, snapshot([{ filename: "Sparkle.wav", bytes: 2048 }]));
+      });
+      await page.route("**/api/chime-scheduler/library/*/activate", (route) => {
+        if (route.request().method() !== "POST") return route.continue();
+        activated = true;
+        return route.fulfill({
+          status: 202,
+          contentType: "application/json",
+          body: JSON.stringify({ state: "queued", job_id: "m-fast" }),
+        });
+      });
+      await page.route("**/api/chimes", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        return jsonRoute(route, 200, { installed: activated ? convergedInstalled : oldInstalled });
+      });
+      await page.route("**/api/gadget/status", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        return jsonRoute(route, 200, { ...GADGET_BASE, chime_reenum_pending: false });
+      });
+
+      await gotoActivationMedia(page);
+      await page.locator("[data-testid=library-set-active]").first().click();
+      const sawBusy = await page.evaluate(async () => {
+        const started = performance.now();
+        while (performance.now() - started < 1300) {
+          if (document.querySelector("[data-testid=busy-overlay-card]")) return true;
+          await new Promise<void>((resolve) => setTimeout(resolve, 50));
+        }
+        return !!document.querySelector("[data-testid=busy-overlay-card]");
+      });
+
+      expect(sawBusy).toBe(false);
+      await expect(page.locator("[data-testid=busy-overlay-card]")).toHaveCount(0);
+    });
+
     test("set-active shows the keep-doors-closed reenum overlay until reenum clears", async ({
       page,
       probe,

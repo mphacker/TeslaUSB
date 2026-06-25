@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import { api, ApiError } from "../api/client";
 import { Icon } from "../components/Icon";
 import { subscribeMediaEvents } from "../api/mediaEvents";
@@ -110,6 +110,7 @@ interface ChimeSchedulerProps {
   onActivated?: (filename: string, bytes: number) => void;
   onLibraryLoaded?: (library: LibraryEntry[]) => void;
   activationBusy?: boolean;
+  onBusyChange?: (busy: boolean) => void;
 }
 
 export function ChimeScheduler({
@@ -117,6 +118,7 @@ export function ChimeScheduler({
   onActivated,
   onLibraryLoaded,
   activationBusy,
+  onBusyChange,
 }: ChimeSchedulerProps = {}) {
   const [status, setStatus] = useState<Status>("loading");
   const [snap, setSnap] = useState<SchedulerSnapshot | null>(null);
@@ -193,6 +195,7 @@ export function ChimeScheduler({
   // Filenames with an in-flight DELETE request — set synchronously before the
   // await so a rapid double-click can't fire two DELETEs before the row locks.
   const deleteInFlightRef = useRef<Set<string>>(new Set());
+  const [deleteBusyCount, setDeleteBusyCount] = useState(0);
   useEffect(() => {
     pendingDeletesRef.current = pendingDeletes;
   }, [pendingDeletes]);
@@ -205,6 +208,29 @@ export function ChimeScheduler({
   const [confirmBulk, setConfirmBulk] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkFail, setBulkFail] = useState<string | null>(null);
+  const childBusy =
+    sBusy ||
+    gBusy ||
+    randomBusy ||
+    tzBusy ||
+    activating !== null ||
+    renameBusy !== null ||
+    bulkBusy ||
+    deleteBusyCount > 0;
+
+  // useLayoutEffect (not useEffect) so the parent's blocking overlay mounts in
+  // the same pre-paint commit as the mutation that set childBusy — closing the
+  // window where a rapid second action could slip in before the page is blocked.
+  useLayoutEffect(() => {
+    onBusyChange?.(childBusy);
+  }, [childBusy, onBusyChange]);
+
+  useEffect(
+    () => () => {
+      onBusyChange?.(false);
+    },
+    [onBusyChange],
+  );
 
   const reload = async (signal?: AbortSignal): Promise<SchedulerSnapshot | null> => {
     try {
@@ -597,12 +623,16 @@ export function ChimeScheduler({
   }
 
   async function removeSchedule(id: string) {
+    if (sBusy) return;
+    setSBusy(true);
     try {
       await api.deleteSchedule(id);
       if (sEditId === id) resetScheduleForm();
       await reload();
     } catch (err) {
       setSError(failMessage(err, "Couldn't delete the schedule."));
+    } finally {
+      setSBusy(false);
     }
   }
 
@@ -653,11 +683,15 @@ export function ChimeScheduler({
   }
 
   async function removeGroup(id: string) {
+    if (gBusy) return;
+    setGBusy(true);
     try {
       await api.deleteGroup(id);
       await reload();
     } catch (err) {
       setRandomError(failMessage(err, "Couldn't delete the group."));
+    } finally {
+      setGBusy(false);
     }
   }
 
@@ -788,6 +822,7 @@ export function ChimeScheduler({
     if (pendingDeletesRef.current.some((d) => d.filename === filename)) return;
     if (deleteInFlightRef.current.has(filename)) return;
     deleteInFlightRef.current.add(filename);
+    setDeleteBusyCount((n) => n + 1);
     try {
       await api.deleteLibraryChime(filename);
     } catch (err) {
@@ -795,6 +830,7 @@ export function ChimeScheduler({
       return;
     } finally {
       deleteInFlightRef.current.delete(filename);
+      setDeleteBusyCount((n) => n - 1);
     }
 
     setPendingDeletes((prev) => {

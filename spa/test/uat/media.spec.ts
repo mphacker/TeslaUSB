@@ -1048,6 +1048,9 @@ test.describe("media (lock chimes) UAT", () => {
       });
       await page.waitForTimeout(150);
       await expect(busyOverlay).toHaveCount(1);
+      await expect
+        .poll(() => page.evaluate(() => document.body.classList.contains("media-overlay-lock")))
+        .toBe(true);
 
       await expect(page.locator("[data-testid=reenum-overlay]")).toHaveCount(0);
 
@@ -1070,6 +1073,9 @@ test.describe("media (lock chimes) UAT", () => {
       await expect(busyOverlayCard).toHaveCount(0, { timeout: 5000 });
 
       await expect(busyOverlay).toHaveCount(0, { timeout: 5000 });
+      await expect
+        .poll(() => page.evaluate(() => document.body.classList.contains("media-overlay-lock")))
+        .toBe(false);
     });
 
     test("fast activate never flashes busy overlay", async ({ page }) => {

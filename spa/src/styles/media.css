@@ -295,6 +295,19 @@
   }
 }
 
+/* Scroll-lock while any full-screen overlay is up: freeze the page behind it and
+   let the fixed inset:0 backdrops cover the viewport edge-to-edge. Mirrors the
+   app's html+body !important convention (mapping-active) so a more-specific base
+   rule can't override it and so the root scrollbar is removed regardless of the
+   body→viewport overflow-propagation quirk. The overlay effect adds a matching
+   body padding-right (scrollbar width) so removing the scrollbar doesn't shift
+   the content. */
+html.media-overlay-lock,
+body.media-overlay-lock {
+  overflow: hidden !important;
+  overscroll-behavior: none;
+}
+
 .media-page.busy-overlay-backdrop {
   position: fixed;
   inset: 0;

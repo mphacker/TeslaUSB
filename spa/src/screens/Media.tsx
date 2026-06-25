@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import { MediaPills } from "../components/MediaPills";
 import { Icon } from "../components/Icon";
 import { ChimeAudioEditor } from "../components/ChimeAudioEditor";
@@ -384,6 +384,36 @@ export function Media() {
     childBusy ||
     (!!pendingActivation && pendingActivation.phase !== "waiting");
   const showBusy = useDelayedFlag(pageBusy, 1000);
+  // Lock document scroll (and reserve the scrollbar gutter so the page doesn't
+  // jump) whenever a full-screen overlay is up — either the busy blocker or the
+  // reenum "keep doors closed" overlay. This stops the page being scrolled
+  // behind the overlay and lets the fixed `inset:0` backdrop cover the viewport
+  // edge-to-edge; otherwise the root scrollbar leaves an uncovered strip at the
+  // right edge. Mirrors the app's existing html+body scroll-lock convention
+  // (mapping-active). useLayoutEffect applies before paint so the first overlay
+  // frame never flashes the scrollbar strip. NOTE: a window resize while locked
+  // can leave the padding compensation marginally stale, but the overlay is
+  // transient (a few seconds during an activation) and overflow:hidden still
+  // removes the scrollbar regardless, so this is an accepted cosmetic trade-off.
+  const anyOverlayOpen = pageBusy || !!reenumOverlay;
+  useLayoutEffect(() => {
+    if (!anyOverlayOpen) return;
+    const { body } = document;
+    const html = document.documentElement;
+    const scrollbarWidth = window.innerWidth - html.clientWidth;
+    const prevInlinePaddingRight = body.style.paddingRight;
+    if (scrollbarWidth > 0) {
+      const basePaddingRight = parseFloat(getComputedStyle(body).paddingRight) || 0;
+      body.style.paddingRight = `${basePaddingRight + scrollbarWidth}px`;
+    }
+    html.classList.add("media-overlay-lock");
+    body.classList.add("media-overlay-lock");
+    return () => {
+      html.classList.remove("media-overlay-lock");
+      body.classList.remove("media-overlay-lock");
+      body.style.paddingRight = prevInlinePaddingRight;
+    };
+  }, [anyOverlayOpen]);
   // Records the activation token whose reenum has already cleared, so the
   // independent chime-convergence poll can't clobber the "next lock" notice with
   // the plain success copy when reenum finishes before convergence is observed.

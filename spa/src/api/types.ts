@@ -102,6 +102,8 @@ export interface Clip {
   canonical_key: string;
   started_at: number;
   ended_at: number | null;
+  lat?: number | null;
+  lon?: number | null;
   partition: string;
   folder_class: string;
   is_sentry: boolean;

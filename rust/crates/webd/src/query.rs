@@ -267,9 +267,14 @@ pub(crate) fn list_clips(
 
     let ids: Vec<i64> = clips.iter().map(|clip| clip.id).collect();
     let mut angles = angles_for_clips(conn, &ids)?;
+    let mut waypoints = waypoints_for_clips(conn, &ids)?;
     for clip in &mut clips {
         if let Some(set) = angles.remove(&clip.id) {
             clip.angles = set;
+        }
+        if let Some((lat, lon)) = waypoints.remove(&clip.id) {
+            clip.lat = Some(lat);
+            clip.lon = Some(lon);
         }
     }
     Ok(clips)
@@ -284,6 +289,11 @@ pub(crate) fn get_clip(conn: &Connection, id: i64) -> Result<Option<ClipDto>, ru
     };
     let mut angles = angles_for_clips(conn, &[id])?;
     clip.angles = angles.remove(&id).unwrap_or_default();
+    let mut waypoints = waypoints_for_clips(conn, &[id])?;
+    if let Some((lat, lon)) = waypoints.remove(&id) {
+        clip.lat = Some(lat);
+        clip.lon = Some(lon);
+    }
     Ok(Some(clip))
 }
 
@@ -480,6 +490,42 @@ pub(crate) fn angle_source(
     .optional()
 }
 
+/// Resolve one non-archive angle source for `(clip_id, camera)`.
+///
+/// `indexd` currently writes `'ro_usb'` for live car-volume angles
+/// (`indexd/src/apply.rs::view_kind_for`), but old catalogs may contain the
+/// legacy `'live'` value (see the DTO note). Treat any non-`archive` value as
+/// the live source for map-playback fallback.
+///
+/// Catalog membership is the stable-list gate, and `media.rs` adds a first-read
+/// guard. The catalog records `angles.size_bytes` from the file's
+/// `valid_data_length` at ingest, and a stable file has
+/// `valid_data_length == data_length`. On the first read the probe's served byte
+/// count (`readable_size` = current `valid_data_length`) AND file allocation
+/// (`ClipIdentity.total_size` = current `data_length`) must both equal that
+/// catalog size; otherwise the path was recreated/changed since ingest and
+/// streaming fails closed with `410` instead of serving wrong/partial bytes. The
+/// per-request `ClipIdentity` fence still covers any mid-stream identity change.
+///
+/// `size_bytes` is nullable. A `NULL` (or non-positive) size means the catalog
+/// cannot describe a stable size, so the angle is treated as unverifiable and the
+/// handler fails closed (`404`) rather than serving unverified bytes. Real
+/// `indexd`-ingested non-archive angles always carry a positive size.
+pub(crate) fn non_archive_angle_source(
+    conn: &Connection,
+    clip_id: i64,
+    camera: &str,
+) -> Result<Option<(String, Option<i64>)>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT file_ref, size_bytes FROM angles \
+         WHERE clip_id = ?1 AND camera = ?2 AND view_kind <> 'archive'",
+    )?;
+    stmt.query_row(params![clip_id, camera], |row| {
+        Ok((row.get(0)?, row.get(1)?))
+    })
+        .optional()
+}
+
 /// List the archive-view angles of a clip for the zip-export endpoint, as
 /// `(camera, file_ref)` pairs ordered by `camera`.
 ///
@@ -559,6 +605,41 @@ fn angles_for_clips(
     Ok(map)
 }
 
+/// Fetch a representative waypoint for each clip id in one query.
+///
+/// The representative point is the first waypoint whose `has_gps_fix = 1`,
+/// ordered by `seq ASC`.
+fn waypoints_for_clips(
+    conn: &Connection,
+    ids: &[i64],
+) -> Result<std::collections::HashMap<i64, (f64, f64)>, rusqlite::Error> {
+    use std::collections::HashMap;
+
+    let mut map: HashMap<i64, (f64, f64)> = HashMap::new();
+    if ids.is_empty() {
+        return Ok(map);
+    }
+    let placeholders = vec!["?"; ids.len()].join(",");
+    let sql = format!(
+        "SELECT clip_id, lat, lon FROM clip_waypoints \
+         WHERE clip_id IN ({placeholders}) AND has_gps_fix = 1 \
+         ORDER BY clip_id ASC, seq ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, f64>(1)?,
+            row.get::<_, f64>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (clip_id, lat, lon) = row?;
+        map.entry(clip_id).or_insert((lat, lon));
+    }
+    Ok(map)
+}
+
 /// Map a `TRIP_COLS` row to a [`TripDto`], decoding the polyline blob and
 /// collapsing the four bbox columns into an optional [`Bbox`].
 fn map_trip(row: &Row<'_>) -> Result<TripDto, rusqlite::Error> {
@@ -602,6 +683,8 @@ fn map_clip(row: &Row<'_>) -> Result<ClipDto, rusqlite::Error> {
         is_sentry: row.get(6)?,
         duration_s: row.get(7)?,
         availability: row.get(8)?,
+        lat: None,
+        lon: None,
         angles: Vec::new(),
     })
 }
@@ -747,9 +830,11 @@ pub(crate) fn list_wraps(conn: &Connection) -> Result<Vec<MediaItemDto>, rusqlit
 
 #[cfg(test)]
 mod tests {
-    use rusqlite::Connection;
+    use rusqlite::{Connection, params};
 
-    use super::list_chime_library;
+    use super::{
+        Keyset, SnapshotResource, get_clip, list_chime_library, list_clips, snapshot_max_id,
+    };
 
     fn seed_media_rows(conn: &Connection, rows: &[(&str, &str, &str, i64)]) {
         for (partition, rel_path, name, size_bytes) in rows {
@@ -760,6 +845,42 @@ mod tests {
             )
             .unwrap();
         }
+    }
+
+    fn test_conn() -> Connection {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        indexd::db::apply_migrations(&mut conn).unwrap();
+        conn
+    }
+
+    fn insert_clip(conn: &Connection, id: i64, started_at: i64) {
+        conn.execute(
+            "INSERT INTO clips (id, canonical_key, started_at, ended_at, partition, folder_class, \
+             is_sentry, duration_s, availability, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, 'slot0', 'SavedClips', 0, 60.0, 'present', 0, 0)",
+            params![id, format!("clip-{id}"), started_at, started_at + 60],
+        )
+        .unwrap();
+    }
+
+    fn insert_waypoint(
+        conn: &Connection,
+        clip_id: i64,
+        seq: i64,
+        lat: f64,
+        lon: f64,
+        has_gps_fix: bool,
+    ) {
+        conn.execute(
+            "INSERT INTO clip_waypoints
+                (clip_id, seq, frame_index, offset_ms, t, lat, lon, speed, heading,
+                 accel_x, accel_y, accel_z, autopilot, gear, has_gps_fix)
+             VALUES
+                (?1, ?2, ?3, ?4, NULL, ?5, ?6, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?7)",
+            params![clip_id, seq, seq, seq as f64, lat, lon, i64::from(has_gps_fix)],
+        )
+        .unwrap();
     }
 
     #[test]
@@ -793,5 +914,57 @@ mod tests {
             vec!["a.wav", "b.wav"]
         );
         assert!(items.iter().all(|item| item.rel_path.starts_with("Chimes/") && item.rel_path.matches('/').count() == 1));
+    }
+
+    #[test]
+    fn list_clips_uses_first_fixed_waypoint_by_seq_for_representative_lat_lon() {
+        let conn = test_conn();
+        insert_clip(&conn, 1, 1_000);
+        insert_waypoint(&conn, 1, 30, 30.0, -30.0, true);
+        insert_waypoint(&conn, 1, 10, 10.0, -10.0, true);
+        insert_waypoint(&conn, 1, 20, 20.0, -20.0, true);
+
+        let snap = snapshot_max_id(&conn, SnapshotResource::Clips)
+            .unwrap()
+            .unwrap();
+        let clips = list_clips(&conn, Keyset { snap, after: None }, 10, None).unwrap();
+        assert_eq!(clips.len(), 1);
+        assert_eq!(clips[0].lat, Some(10.0));
+        assert_eq!(clips[0].lon, Some(-10.0));
+    }
+
+    #[test]
+    fn get_clip_ignores_non_fixed_waypoint_before_fixed_representative_point() {
+        let conn = test_conn();
+        insert_clip(&conn, 2, 2_000);
+        insert_waypoint(&conn, 2, 1, 1.0, -1.0, false);
+        insert_waypoint(&conn, 2, 2, 2.0, -2.0, true);
+        insert_waypoint(&conn, 2, 3, 3.0, -3.0, true);
+
+        let clip = get_clip(&conn, 2).unwrap().unwrap();
+        assert_eq!(clip.lat, Some(2.0));
+        assert_eq!(clip.lon, Some(-2.0));
+    }
+
+    #[test]
+    fn get_clip_returns_none_lat_lon_when_only_non_fixed_waypoints_exist() {
+        let conn = test_conn();
+        insert_clip(&conn, 3, 3_000);
+        insert_waypoint(&conn, 3, 1, 40.0, -40.0, false);
+        insert_waypoint(&conn, 3, 2, 41.0, -41.0, false);
+
+        let clip = get_clip(&conn, 3).unwrap().unwrap();
+        assert_eq!(clip.lat, None);
+        assert_eq!(clip.lon, None);
+    }
+
+    #[test]
+    fn get_clip_returns_none_lat_lon_when_clip_has_no_waypoints() {
+        let conn = test_conn();
+        insert_clip(&conn, 4, 4_000);
+
+        let clip = get_clip(&conn, 4).unwrap().unwrap();
+        assert_eq!(clip.lat, None);
+        assert_eq!(clip.lon, None);
     }
 }

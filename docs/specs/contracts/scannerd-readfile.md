@@ -134,6 +134,22 @@ generation counters or per-chunk checksums:
 - **Catalog-`stable` only.** `webd` issues a read only for a clip the indexer
   lists as `stable`; the `valid_data_length` clamp alone is not sufficient (it
   doesn't guard MP4-metadata inconsistency or cluster reuse).
+  - **First-read size gate (`webd`).** Catalog membership names the stable list
+    but, on its own, doesn't prove the file still at the path is the ingested
+    incarnation on the *first* read (a path recreated with a different file before
+    the indexer re-scans — "cluster reuse"). So on the probe read `webd` compares
+    the on-disk size against the size the catalog recorded at ingest
+    (`angles.size_bytes`, taken from `valid_data_length`): both the served byte
+    count (`Ok.readable_size` = current `valid_data_length`) **and** the allocation
+    (`ClipIdentity.total_size` = current `data_length`) must equal it. For a stable
+    file `valid_data_length == data_length == size_bytes`, so a legitimate,
+    unchanged clip matches both; any mismatch → HTTP **410**. A non-archive angle
+    whose catalog row has no positive stable size (`NULL`/`0`) is treated as
+    unverifiable and fails closed with **404** rather than serving unverified
+    bytes. *Residual:* a substitute file identical in both `valid_data_length` and
+    `data_length` still passes the size gate (the within-request identity fence
+    then governs later chunks); closing that fully needs a content fingerprint
+    persisted at ingest — deferred (tracked separately).
 - **Identity fence per HTTP request.** First chunk captures `ClipIdentity`
   (`first_cluster` + `total_size` + `name_hash`); `webd` echoes it on every
   later chunk. If the on-disk entry no longer matches → `Changed` → HTTP **410
@@ -160,8 +176,10 @@ invariant. (`lun.1`/media never uses this seam — ADR-0003.)
 - New `webd` client module (mirror the `gadgetd` client): connect to
   `scannerd-read.sock`, send `ReadFileRequest`, read the header + binary tail.
 - Live-clip wiring in `media.rs`: when a clip is requested that is **not** in the
-  archive, fall back to a slot-0 `ReadFile` loop (stable-only); on `Changed`
-  return `410`. Archive copy is always preferred when present.
+  archive, fall back to a slot-0 `ReadFile` loop (stable-only). The probe read is
+  gated against the catalog's stable size (§5) — `404` if the catalog has no
+  positive size, `410` on a size mismatch — and any later `Changed` returns `410`.
+  Archive copy is always preferred when present.
 - **Media bytes do NOT use this client** — they are served by the RO `media.img`
   mount handler (separate task; see ADR-0003 / `docs/status.md`).
 

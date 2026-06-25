@@ -42,15 +42,14 @@
 //!   lease against and no evictor to race. The acquire/heartbeat/release would
 //!   hook in at the marked seam in [`stream`] (around the file open) and wrap
 //!   the returned body so the lease is released on drop. See the report note.
-//! * **`ro_usb` live-clip streaming**: raw exFAT byte-range reads of a live
-//!   `disk.img` are a separate hardware-sensitive seam (scannerd's raw reader).
-//!   Non-`archive` angles return `404` here.
 
+use std::io;
 use std::io::{Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use axum::body::Body;
+use axum::body::Bytes;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::header::{
     ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE,
@@ -60,11 +59,14 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::io::ReaderStream;
 
 use crate::AppState;
 use crate::error::ApiError;
 use crate::range::{ParsedRange, parse_byte_range};
+use crate::read_client::{MAX_READ_LEN, ReadFileError, ReadFileRequest};
 
 /// The MIME type all angles are served as. Tesla footage is H.264 in an mp4
 /// container (SPEC.md §7), played natively by every target browser.
@@ -170,29 +172,33 @@ pub(crate) async fn stream(
     // --- DEFERRED SEAM (webd.md §2.3): acquire the retentiond playback lease
     // here once D3 + retentiond exist, and attach a heartbeat/release guard to
     // the returned body so the file cannot be evicted mid-read. ---
-    let (file, size) = open_archive_angle(&state, id, &camera).await?;
     let head = method == Method::HEAD;
-
-    let response = match decide_range(&headers, size) {
-        RangeDecision::Full => {
-            let body = body_for(head, file, 0, size).await?;
-            build_media_response(StatusCode::OK, VIDEO_MIME, size, None, body)
+    match open_archive_angle(&state, id, &camera).await {
+        Ok((file, size)) => {
+            let response = match decide_range(&headers, size) {
+                RangeDecision::Full => {
+                    let body = body_for(head, file, 0, size).await?;
+                    build_media_response(StatusCode::OK, VIDEO_MIME, size, None, body)
+                }
+                RangeDecision::Satisfiable { start, end } => {
+                    let len = end - start + 1;
+                    let body = body_for(head, file, start, len).await?;
+                    let content_range = format!("bytes {start}-{end}/{size}");
+                    build_media_response(
+                        StatusCode::PARTIAL_CONTENT,
+                        VIDEO_MIME,
+                        len,
+                        Some(content_range),
+                        body,
+                    )
+                }
+                RangeDecision::Unsatisfiable => range_not_satisfiable(size, head),
+            };
+            Ok(response)
         }
-        RangeDecision::Satisfiable { start, end } => {
-            let len = end - start + 1;
-            let body = body_for(head, file, start, len).await?;
-            let content_range = format!("bytes {start}-{end}/{size}");
-            build_media_response(
-                StatusCode::PARTIAL_CONTENT,
-                VIDEO_MIME,
-                len,
-                Some(content_range),
-                body,
-            )
-        }
-        RangeDecision::Unsatisfiable => range_not_satisfiable(size, head),
-    };
-    Ok(response)
+        Err(ApiError::NotFound) => stream_non_archive_angle(&state, id, &camera, head, &headers).await,
+        Err(err) => Err(err),
+    }
 }
 
 /// `GET|HEAD /api/media/content?path=` — range-stream a media file from the
@@ -385,6 +391,232 @@ async fn open_archive_angle(
         return Err(ApiError::NotFound);
     }
     Ok((file, meta.len()))
+}
+
+async fn stream_non_archive_angle(
+    state: &AppState,
+    clip_id: i64,
+    camera: &str,
+    head: bool,
+    headers: &HeaderMap,
+) -> Result<Response, ApiError> {
+    let catalog = state.catalog.clone();
+    let camera_owned = camera.to_owned();
+    let source = crate::route::read(catalog, move |conn| {
+        crate::query::non_archive_angle_source(conn, clip_id, &camera_owned)
+    })
+    .await?;
+    let Some((file_ref, expected_size)) = source else {
+        return Err(ApiError::NotFound);
+    };
+    // Fail closed: a non-archive angle the catalog cannot describe with a positive
+    // stable size cannot be identity-verified on the first read, so refuse rather
+    // than serve unverified bytes (scannerd-readfile.md §5). Real indexd-ingested
+    // non-archive angles always carry a positive size (valid_data_length).
+    let Some(expected_size) = expected_size.filter(|&s| s > 0) else {
+        return Err(ApiError::NotFound);
+    };
+
+    let probe_req = ReadFileRequest {
+        path: file_ref.clone(),
+        offset: 0,
+        len: 1,
+        handle: None,
+    };
+    let probe = read_file_once(Arc::clone(&state.read_client), probe_req).await?;
+    // First-read stable-identity gate (scannerd-readfile.md §5). The catalog lists
+    // this clip as stable with a known size. `readable_size` is the file's current
+    // `valid_data_length` (the exact byte count we stream) and `total_size` is its
+    // `data_length`; indexd records `angles.size_bytes` from `valid_data_length` at
+    // ingest, and a stable file has `valid_data_length == data_length`. So a legit,
+    // unchanged clip matches BOTH — requiring both rejects a substitution that
+    // preserves only one dimension. A mismatch means the path was recreated/changed
+    // since ingest: fail closed with 410 rather than serving wrong/partial bytes.
+    // The per-request ClipIdentity fence still covers any mid-stream change.
+    let expected = u64::try_from(expected_size).unwrap_or(u64::MAX);
+    if probe.readable_size != expected || probe.identity.total_size != expected {
+        return Err(ApiError::status(
+            StatusCode::GONE,
+            "clip_changed",
+            "clip changed before streaming",
+        ));
+    }
+    let size = probe.readable_size;
+
+    let response = match decide_range(headers, size) {
+        RangeDecision::Full => {
+            let body = if head {
+                Body::empty()
+            } else {
+                body_for_non_archive_range(
+                    Arc::clone(&state.read_client),
+                    file_ref.clone(),
+                    0,
+                    size,
+                    probe.identity,
+                )
+                .await?
+            };
+            build_media_response(StatusCode::OK, VIDEO_MIME, size, None, body)
+        }
+        RangeDecision::Satisfiable { start, end } => {
+            let len = end - start + 1;
+            let body = if head {
+                Body::empty()
+            } else {
+                body_for_non_archive_range(
+                    Arc::clone(&state.read_client),
+                    file_ref.clone(),
+                    start,
+                    len,
+                    probe.identity,
+                )
+                .await?
+            };
+            let content_range = format!("bytes {start}-{end}/{size}");
+            build_media_response(
+                StatusCode::PARTIAL_CONTENT,
+                VIDEO_MIME,
+                len,
+                Some(content_range),
+                body,
+            )
+        }
+        RangeDecision::Unsatisfiable => range_not_satisfiable(size, head),
+    };
+    Ok(response)
+}
+
+fn map_read_file_error(err: &ReadFileError) -> ApiError {
+    match err {
+        ReadFileError::Changed => ApiError::status(
+            StatusCode::GONE,
+            "clip_changed",
+            "clip changed while streaming",
+        ),
+        ReadFileError::NotFound | ReadFileError::OutOfRange => ApiError::NotFound,
+        ReadFileError::Io(_)
+        | ReadFileError::FrameTooLarge { .. }
+        | ReadFileError::Decode(_)
+        | ReadFileError::Server { .. } => ApiError::Internal,
+    }
+}
+
+async fn read_file_once(
+    client: Arc<dyn crate::read_client::ReadFileClient + Send + Sync>,
+    req: ReadFileRequest,
+) -> Result<crate::read_client::ReadFileOk, ApiError> {
+    tokio::task::spawn_blocking(move || client.read_file(&req))
+        .await
+        .map_err(|_| ApiError::Internal)?
+        .map_err(|err| map_read_file_error(&err))
+}
+
+async fn body_for_non_archive_range(
+    client: Arc<dyn crate::read_client::ReadFileClient + Send + Sync>,
+    file_ref: String,
+    start: u64,
+    len: u64,
+    expected_identity: crate::read_client::ClipIdentity,
+) -> Result<Body, ApiError> {
+    if len == 0 {
+        return Ok(Body::empty());
+    }
+
+    let first_req = ReadFileRequest {
+        path: file_ref.clone(),
+        offset: start,
+        len: request_len_for(len),
+        handle: Some(expected_identity),
+    };
+    let first = read_file_once(Arc::clone(&client), first_req).await?;
+    let first_identity = first.identity;
+    let mut first_bytes = first.bytes;
+    let first_len = u64::try_from(first_bytes.len()).map_err(|_| ApiError::Internal)?;
+    if first_len == 0 || first_len > len {
+        return Err(ApiError::Internal);
+    }
+
+    let mut remaining = len.saturating_sub(first_len);
+    let mut next_offset = start.saturating_add(first_len);
+
+    if remaining > 0 && first.eof {
+        return Err(ApiError::Internal);
+    }
+
+    // Guard the first boundary before sending headers: if the identity already
+    // changed between adjacent windows, fail closed with `410`.
+    if remaining > 0 {
+        let guard_req = ReadFileRequest {
+            path: file_ref.clone(),
+            offset: next_offset,
+            len: request_len_for(remaining),
+            handle: Some(first_identity),
+        };
+        let _ = read_file_once(Arc::clone(&client), guard_req).await?;
+    }
+
+    let (tx, rx) = mpsc::channel::<Result<Bytes, io::Error>>(1);
+    tokio::task::spawn_blocking(move || {
+        if tx
+            .blocking_send(Ok(Bytes::from(std::mem::take(&mut first_bytes))))
+            .is_err()
+        {
+            return;
+        }
+
+        let mut handle = Some(first_identity);
+        while remaining > 0 {
+            let req = ReadFileRequest {
+                path: file_ref.clone(),
+                offset: next_offset,
+                len: request_len_for(remaining),
+                handle,
+            };
+            let window = match client.read_file(&req) {
+                Ok(window) => window,
+                Err(err) => {
+                    let _ = tx.blocking_send(Err(io::Error::other(err.to_string())));
+                    return;
+                }
+            };
+
+            if handle != Some(window.identity) {
+                let _ = tx.blocking_send(Err(io::Error::other("clip changed while streaming")));
+                return;
+            }
+
+            let Ok(chunk_len) = u64::try_from(window.bytes.len()) else {
+                let _ = tx.blocking_send(Err(io::Error::other("window length overflow")));
+                return;
+            };
+            if chunk_len == 0 || chunk_len > remaining {
+                let _ = tx.blocking_send(Err(io::Error::other("invalid read window length")));
+                return;
+            }
+            if tx.blocking_send(Ok(Bytes::from(window.bytes))).is_err() {
+                return;
+            }
+
+            remaining = remaining.saturating_sub(chunk_len);
+            next_offset = next_offset.saturating_add(chunk_len);
+            handle = Some(window.identity);
+
+            if window.eof && remaining > 0 {
+                let _ = tx.blocking_send(Err(io::Error::other("unexpected eof while streaming")));
+                return;
+            }
+            if window.eof {
+                break;
+            }
+        }
+    });
+
+    Ok(Body::from_stream(ReceiverStream::new(rx)))
+}
+
+fn request_len_for(remaining: u64) -> u32 {
+    u32::try_from(remaining.min(u64::from(MAX_READ_LEN))).unwrap_or(MAX_READ_LEN)
 }
 
 /// Outcome of jailing a `file_ref` under the archive root.

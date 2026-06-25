@@ -1118,4 +1118,125 @@ test.describe("trip map UAT", () => {
     await expect(page.locator("[data-screen=event-player]")).toBeVisible();
     await expect(page.locator("#mainVideo")).toHaveAttribute("src", /\/api\/clips\/1\/stream/);
   });
+
+  test("map panel — clips action buttons mirror v1 row controls", async ({
+    page,
+    probe,
+  }) => {
+    let clips = [
+      {
+        id: 101,
+        canonical_key: "clip-101",
+        started_at: 1717243200,
+        ended_at: 1717243260,
+        lat: 37.79,
+        lon: -122.42,
+        partition: "archive",
+        folder_class: "saved",
+        is_sentry: false,
+        duration_s: 60,
+        availability: "ready",
+        angles: [{ camera: "front", view_kind: "live", offset_ms: 0, duration_s: 60, size_bytes: 4096 }],
+      },
+      {
+        id: 102,
+        canonical_key: "clip-102",
+        started_at: 1717246800,
+        ended_at: 1717246860,
+        lat: null,
+        lon: null,
+        partition: "archive",
+        folder_class: "sentry",
+        is_sentry: true,
+        duration_s: 60,
+        availability: "ready",
+        angles: [{ camera: "front", view_kind: "live", offset_ms: 0, duration_s: 60, size_bytes: 4096 }],
+      },
+    ];
+    let deleteCount = 0;
+    await page.route("**/api/clips**", async (route) => {
+      const req = route.request();
+      const url = new URL(req.url());
+      if (req.method() === "GET" && url.pathname === "/api/clips") {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ items: clips, next_cursor: null, limit: 25 }),
+        });
+        return;
+      }
+      if (req.method() === "GET" && /^\/api\/clips\/\d+\/export$/.test(url.pathname)) {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/zip",
+          body: "PK\u0005\u0006",
+        });
+        return;
+      }
+      if (req.method() === "DELETE" && /^\/api\/clips\/\d+$/.test(url.pathname)) {
+        expect(url.searchParams.get("target")).toBe("car");
+        const id = Number(url.pathname.split("/").pop() ?? "0");
+        deleteCount += 1;
+        clips = clips.filter((clip) => clip.id !== id);
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ handoff_id: "handoff-1", state: "done" }),
+        });
+        return;
+      }
+      await route.continue();
+    });
+
+    await gotoMap(page);
+    await page.locator("#btnVideos").click();
+    await expect(page.locator("#videoPanel")).toHaveClass(/open/);
+    await page.locator("#vpTabClips").click();
+    await expect(page.locator("[data-testid=vp-clips] .vp-clip")).toHaveCount(2);
+
+    await expect(page.locator("[data-testid=vp-clip-play-101]")).toBeVisible();
+    await expect(page.locator("[data-testid=vp-clip-play-102]")).toBeVisible();
+    await expect(page.locator("[data-testid=vp-clip-map-101]")).toBeVisible();
+    await expect(page.locator("[data-testid=vp-clip-map-102]")).toHaveCount(0);
+    await expect(page.locator("[data-testid=vp-clip-link-101] .vp-clip-meta")).toHaveText(
+      /\d+ cam · \d+ MB/,
+    );
+    await expect(page.locator("[data-testid=vp-clip-dl-101]")).toBeVisible();
+    await expect(page.locator("[data-testid=vp-clip-dl-102]")).toBeVisible();
+    await expect(page.locator("[data-testid=vp-clip-del-101]")).toBeVisible();
+    await expect(page.locator("[data-testid=vp-clip-del-102]")).toBeVisible();
+    await expect(page.locator("[data-testid=vp-clips] .vp-btn-archive")).toHaveCount(0);
+
+    await page.locator("[data-testid=vp-clip-dl-101]").click();
+    expect(new URL(page.url()).pathname).toBe("/");
+
+    await page.locator("[data-testid=vp-clip-map-101]").click();
+    await expect(page.locator("#videoPanel")).not.toHaveClass(/open/);
+    expect(new URL(page.url()).pathname).toBe("/");
+    await expect(page.locator(".map-container[data-screen=trip-map] .map-flash-pin")).toHaveCount(1);
+    const center = await page.evaluate(() => {
+      const map = (window as unknown as { __TESLAUSB_MAP__?: { getCenter: () => { lat: number; lng: number } } })
+        .__TESLAUSB_MAP__;
+      if (!map) throw new Error("map unavailable");
+      const c = map.getCenter();
+      return [c.lat, c.lng];
+    });
+    expect(near(center[0], 37.79, 0.01)).toBe(true);
+    expect(near(center[1], -122.42, 0.01)).toBe(true);
+
+    await page.locator("#btnVideos").click();
+    await expect(page.locator("#videoPanel")).toHaveClass(/open/);
+    await page.locator("#vpTabClips").click();
+
+    page.once("dialog", async (dialog) => {
+      expect(dialog.type()).toBe("confirm");
+      await dialog.accept();
+    });
+    await page.locator("[data-testid=vp-clip-del-101]").click();
+    await expect(page.locator("[data-testid=vp-clips] .vp-clip")).toHaveCount(1);
+    await expect(page.locator("[data-testid=vp-clip-link-101]")).toHaveCount(0);
+    expect(deleteCount).toBe(1);
+    expect(new URL(page.url()).pathname).toBe("/");
+    assertCleanConsole(probe);
+  });
 });

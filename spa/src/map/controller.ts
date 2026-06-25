@@ -166,12 +166,14 @@ export class TripMapController {
   private readonly tripLayer: L.LayerGroup;
   private readonly eventCluster: L.MarkerClusterGroup;
   private readonly disambigHighlightLayer: L.LayerGroup;
+  private readonly flashPinLayer: L.LayerGroup;
   private readonly canvasRenderer: L.Canvas;
   private readonly hasTileLayer: boolean;
 
   private last: RenderInput | null = null;
   private visibleTrips: MapTrip[] = [];
   private moveendTimer: number | null = null;
+  private flashPinTimer: number | null = null;
   private disambigPopup: L.Popup | null = null;
   private hooks: MapHooks;
 
@@ -209,6 +211,7 @@ export class TripMapController {
       spiderfyOnMaxZoom: true,
     }).addTo(this.map);
     this.disambigHighlightLayer = L.layerGroup().addTo(this.map);
+    this.flashPinLayer = L.layerGroup().addTo(this.map);
 
     this.hooks = {
       tripPolylineCount: 0,
@@ -274,6 +277,34 @@ export class TripMapController {
   /** Leaflet needs a size recalculation once its container is laid out. */
   invalidate() {
     this.map.invalidateSize();
+  }
+
+  centerOn(lat: number, lon: number, zoom = 16): void {
+    this.map.setView([lat, lon], zoom, { animate: false });
+  }
+
+  flashLocation(lat: number, lon: number, zoom = 16): void {
+    if (this.flashPinTimer != null) {
+      window.clearTimeout(this.flashPinTimer);
+      this.flashPinTimer = null;
+    }
+    this.flashPinLayer.clearLayers();
+    this.centerOn(lat, lon, zoom);
+    const pin = L.marker([lat, lon], {
+      icon: L.divIcon({
+        className: "map-flash-pin",
+        html: '<span style="display:block;width:14px;height:14px;border-radius:50%;background:#2563EB;border:2px solid #fff;box-shadow:0 0 0 2px rgba(37,99,235,.35);"></span>',
+        iconSize: [14, 14],
+        iconAnchor: [7, 7],
+      }),
+      interactive: false,
+      keyboard: false,
+    });
+    pin.addTo(this.flashPinLayer);
+    this.flashPinTimer = window.setTimeout(() => {
+      this.flashPinTimer = null;
+      this.flashPinLayer.clearLayers();
+    }, 2000);
   }
 
   /** Re-render with a new display unit (re-colours polylines + speed popups). */
@@ -719,6 +750,11 @@ export class TripMapController {
       window.clearTimeout(this.moveendTimer);
       this.moveendTimer = null;
     }
+    if (this.flashPinTimer != null) {
+      window.clearTimeout(this.flashPinTimer);
+      this.flashPinTimer = null;
+    }
+    this.flashPinLayer.clearLayers();
     const win = window as unknown as {
       __TESLAUSB_MAP__?: L.Map;
       __TESLAUSB_MAP_HOOKS__?: MapHooks;

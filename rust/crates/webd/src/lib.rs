@@ -11,10 +11,10 @@
 //! * The catalog is opened **read-only** (`SQLITE_OPEN_READ_ONLY`). `indexd`
 //!   is the sole `SQLite` writer; `webd` never writes.
 //! * `webd` **never parses video / SEI** — every datum comes from the catalog.
-//! * Streaming/export serve **`archive`-view angles only** (Pi-side ext4
-//!   files), jailed under the configured archive root. The retentiond playback
-//!   lease, `ro_usb` live streaming, auth, mutations, and SSE are **not** in
-//!   this slice (see `media.rs` for the deferred-lease seam).
+//! * Streaming/export serve archive clips from the Pi-side ext4 files first,
+//!   with map-playback fallback to non-archive (`ro_usb`/legacy `live`) bytes
+//!   via `scannerd` `ReadFile`. The retentiond playback lease, auth, and most
+//!   mutations remain out of scope (see `media.rs` for the deferred-lease seam).
 //! * The HTTP listener must bind the **LAN/AP interface only** (the binary
 //!   takes the bind address from configuration; never the public internet).
 //!
@@ -50,6 +50,7 @@ mod plates;
 mod polyline;
 mod query;
 mod range;
+mod read_client;
 mod route;
 mod scheduler;
 mod sysinfo;
@@ -86,6 +87,7 @@ struct AppState {
     gadget: Arc<dyn gadget::GadgetClient>,
     scheduler: Arc<dyn scheduler::SchedulerClient>,
     indexd: Arc<dyn indexd_client::IndexdClient>,
+    read_client: Arc<dyn read_client::ReadFileClient + Send + Sync>,
     jobs: jobs::JobHub,
     /// Process-wide media-change bus: a background `data_version` monitor ticks
     /// this whenever `indexd` commits, and the `/api/media-events` SSE forwards
@@ -219,6 +221,42 @@ fn router_with_all_clients(
     indexd: Arc<dyn indexd_client::IndexdClient>,
     chime_library_dir: PathBuf,
 ) -> Router {
+    router_with_all_clients_and_read_client(
+        catalog,
+        static_dir,
+        media,
+        gadget,
+        scheduler,
+        indexd,
+        default_read_client(),
+        chime_library_dir,
+    )
+}
+
+fn default_read_client() -> Arc<dyn read_client::ReadFileClient + Send + Sync> {
+    #[cfg(unix)]
+    {
+        Arc::new(read_client::UnixReadFileClient::new(
+            read_client::SCANNERD_READ_SOCKET_PATH,
+        ))
+    }
+    #[cfg(not(unix))]
+    {
+        Arc::new(read_client::UnavailableReadFileClient)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn router_with_all_clients_and_read_client(
+    catalog: Catalog,
+    static_dir: PathBuf,
+    media: MediaConfig,
+    gadget: Arc<dyn gadget::GadgetClient>,
+    scheduler: Arc<dyn scheduler::SchedulerClient>,
+    indexd: Arc<dyn indexd_client::IndexdClient>,
+    read_client: Arc<dyn read_client::ReadFileClient + Send + Sync>,
+    chime_library_dir: PathBuf,
+) -> Router {
     let sys = SysHandle {
         probe: Arc::new(sysinfo::LinuxProbe),
         paths: Arc::new(sysinfo::SysPaths {
@@ -234,6 +272,7 @@ fn router_with_all_clients(
         gadget,
         scheduler,
         indexd,
+        read_client,
         jobs: jobs::JobHub::new(),
         media_events,
         chime_library_dir,

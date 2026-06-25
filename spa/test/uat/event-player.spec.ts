@@ -6,7 +6,7 @@ import {
   type Probe,
 } from "./helpers";
 import type { Page } from "@playwright/test";
-import { writeFileSync, statSync } from "node:fs";
+import { writeFileSync, statSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 // ── Task 5.3 UAT gate (spa.md §5/§40-42, .github/copilot-instructions.md) ──
@@ -66,6 +66,7 @@ const HUD_FIXTURE = [
 
 const KNOWN_CAMERAS = new Set(["front", "back", "left_repeater", "right_repeater"]);
 const MPS_TO_MPH = 2.23694;
+const CLIP_MP4 = readFileSync(resolve(process.cwd(), "test", "fixtures", "clip.mp4"));
 
 interface ExpectedHud {
   speed: number;
@@ -194,11 +195,36 @@ async function routeTrimEventListDropId(page: Page, dropId: number) {
       await route.fulfill({ response: resp, json: body });
       return;
     }
+
     if (/^\/api\/events\/\d+$/.test(path)) {
       await route.fallback();
       return;
     }
     await route.fallback();
+  });
+}
+
+async function routeClipAnglesAsRoUsb(page: Page) {
+  await page.route("**/api/clips/*", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (!/^\/api\/clips\/\d+$/.test(path)) {
+      await route.fallback();
+      return;
+    }
+
+    const resp = await route.fetch();
+    const body = await resp.json() as {
+      angles?: Array<{ camera?: string; view_kind?: string; [key: string]: unknown }>;
+      [key: string]: unknown;
+    };
+    const angles = Array.isArray(body.angles) ? body.angles : [];
+    expect(angles.length, `${path} should include seeded angles`).toBeGreaterThan(0);
+    for (const angle of angles) {
+      expect(typeof angle.camera, `${path} angle camera should be a string`).toBe("string");
+      expect(angle, `${path} angle should include view_kind`).toHaveProperty("view_kind");
+    }
+    body.angles = angles.map((angle) => ({ ...angle, view_kind: "ro_usb" }));
+    await route.fulfill({ response: resp, json: body });
   });
 }
 
@@ -785,35 +811,43 @@ test.describe("event-player UAT", () => {
     assertCleanConsole(probe);
   });
 
-  test("downloads — disabled + inert on an unarchived (ro_usb) clip", async ({
+  test("ro_usb clip playback parity — streams video without unarchived overlay", async ({
     page,
     probe,
   }) => {
-    await page.route("**/api/clips/*", async (route) => {
+    const streams = trackStreams(page);
+    await routeClipAnglesAsRoUsb(page);
+    await page.route("**/api/clips/*/stream*", async (route) => {
       const path = new URL(route.request().url()).pathname;
-      if (!/^\/api\/clips\/\d+$/.test(path)) {
+      if (!/^\/api\/clips\/\d+\/stream$/.test(path)) {
         await route.fallback();
         return;
       }
-
-      const resp = await route.fetch();
-      const body = await resp.json() as {
-        angles?: Array<{ camera?: string; view_kind?: string; [key: string]: unknown }>;
-        [key: string]: unknown;
+      const headers = {
+        "content-type": "video/mp4",
+        "accept-ranges": "bytes",
+        "content-length": String(CLIP_MP4.byteLength),
+        "content-range": `bytes 0-${Math.max(0, CLIP_MP4.byteLength - 1)}/${CLIP_MP4.byteLength}`,
       };
-      const angles = Array.isArray(body.angles) ? body.angles : [];
-      expect(angles.length, `${path} should include seeded angles`).toBeGreaterThan(0);
-      for (const angle of angles) {
-        expect(typeof angle.camera, `${path} angle camera should be a string`).toBe("string");
-        expect(angle, `${path} angle should include view_kind`).toHaveProperty("view_kind");
+      if (route.request().method().toUpperCase() === "HEAD") {
+        await route.fulfill({ status: 206, headers });
+        return;
       }
-      body.angles = angles.map((angle) => ({ ...angle, view_kind: "ro_usb" }));
-      await route.fulfill({ response: resp, json: body });
+      await route.fulfill({ status: 206, headers, body: CLIP_MP4 });
     });
 
     await page.goto("/events?clip=2", { waitUntil: "load" });
     await expect(page.locator("[data-screen=event-player]")).toBeVisible();
-    await expect(page.locator('[data-testid="video-unarchived"]')).toBeVisible();
+    await expect(page.locator("#mainVideo")).toHaveAttribute("src", /\/api\/clips\/2\/stream/);
+    await expect(page.locator('[data-testid="video-unarchived"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="video-stream-unavailable"]')).toHaveCount(0);
+    await expect
+      .poll(
+        () =>
+          streams.responses.filter((r) => r.resourceType === "media" && r.status === 206).length,
+        { timeout: 10_000 },
+      )
+      .toBeGreaterThan(0);
 
     const angleButton = page.locator("#downloadAngleButton");
     const zipButton = page.locator("#downloadButton");
@@ -838,6 +872,98 @@ test.describe("event-player UAT", () => {
     expect(page.url(), "disabled controls must not navigate").toBe(urlBefore);
     await expect(page.locator("[data-screen=event-player]")).toBeVisible();
 
+    assertCleanConsole(probe);
+  });
+
+  test("ro_usb stream 410 — shows graceful notice without console errors", async ({
+    page,
+    probe,
+  }) => {
+    await page.addInitScript(() => {
+      const originalFetch = window.fetch.bind(window);
+      window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
+        const requestUrl =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        const requestMethod =
+          init?.method ??
+          (typeof input === "string" || input instanceof URL
+            ? undefined
+            : input.method);
+        try {
+          const url = new URL(requestUrl, window.location.origin);
+          if (
+            /^\/api\/clips\/\d+\/stream$/.test(url.pathname) &&
+            (requestMethod ?? "GET").toUpperCase() === "HEAD"
+          ) {
+            return Promise.resolve(new Response(null, { status: 410, statusText: "Gone" }));
+          }
+        } catch {
+          /* fall through to real fetch */
+        }
+        return originalFetch(input, init);
+      };
+    });
+    await routeClipAnglesAsRoUsb(page);
+
+    await page.goto("/events?clip=2", { waitUntil: "load" });
+    await expect(page.locator("[data-screen=event-player]")).toBeVisible();
+    await expect(page.locator("#mainVideo")).not.toHaveAttribute("src", /\/api\/clips\/2\/stream/);
+    await expect(page.locator('[data-testid="video-unarchived"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="video-stream-unavailable"]')).toBeVisible();
+    await expect(page.locator('[data-testid="video-stream-unavailable"]')).toContainText(
+      "no longer available",
+    );
+    assertCleanConsole(probe);
+  });
+
+  test("ro_usb stream HEAD 500 — shows graceful notice and leaves video src empty", async ({
+    page,
+    probe,
+  }) => {
+    await page.addInitScript(() => {
+      const originalFetch = window.fetch.bind(window);
+      window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
+        const requestUrl =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        const requestMethod =
+          init?.method ??
+          (typeof input === "string" || input instanceof URL
+            ? undefined
+            : input.method);
+        try {
+          const url = new URL(requestUrl, window.location.origin);
+          if (
+            /^\/api\/clips\/\d+\/stream$/.test(url.pathname) &&
+            (requestMethod ?? "GET").toUpperCase() === "HEAD"
+          ) {
+            return Promise.resolve(
+              new Response(null, { status: 500, statusText: "Internal Server Error" }),
+            );
+          }
+        } catch {
+          /* fall through to real fetch */
+        }
+        return originalFetch(input, init);
+      };
+    });
+    await routeClipAnglesAsRoUsb(page);
+
+    await page.goto("/events?clip=2", { waitUntil: "load" });
+    await expect(page.locator("[data-screen=event-player]")).toBeVisible();
+    await expect(page.locator('[data-testid="video-stream-unavailable"]')).toBeVisible();
+    await expect(page.locator('[data-testid="video-stream-unavailable"]')).toContainText(
+      "no longer available",
+    );
+    const src = await page.locator("#mainVideo").evaluate((el: HTMLVideoElement) => el.getAttribute("src") ?? "");
+    expect(src).toBe("");
     assertCleanConsole(probe);
   });
 

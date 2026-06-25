@@ -95,17 +95,18 @@ function clipSize(clip: Clip | null): string {
   return `${(bytes / 1_000_000).toFixed(2)} MB`;
 }
 
-/** The one `view_kind` webd's stream/export handlers actually serve: the
- *  Pi-side archive copy of a clip angle. MUST match webd `media.rs`
- *  (`VIEW_ARCHIVE`). */
+/** The `view_kind` that guarantees archive-export/download support. */
 const VIEW_ARCHIVE = "archive";
 
-/** An angle is playable iff webd will stream it. Live `ro_usb` angles (a clip
- *  still on the car's USB, not yet archived) `404` on stream — raw exFAT
- *  byte-range streaming is a deferred seam — so we must not point a `<video>`
- *  at them. Any unknown kind is treated as not-yet-playable: a safe default
- *  that never fires a doomed request and respects `view_kind` being opaque. */
+/** Only explicitly unavailable angles are blocked from playback. */
 function isStreamableAngle(angle: Angle | undefined): boolean {
+  if (!angle) return false;
+  const kind = angle.view_kind.trim().toLowerCase();
+  return kind !== "unavailable";
+}
+
+/** Download endpoints remain archive-only. */
+function isDownloadableAngle(angle: Angle | undefined): boolean {
   return angle?.view_kind === VIEW_ARCHIVE;
 }
 
@@ -288,6 +289,11 @@ export function EventPlayer() {
   const [deleting, setDeleting] = useState(false);
   const [deleteFail, setDeleteFail] = useState<DeleteFailure | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [streamNotice, setStreamNotice] = useState<string | null>(null);
+  // Only the ro_usb (HEAD-probed) path needs async gating; the archive common
+  // case is served synchronously below. `probedStreamUrl` holds the URL a
+  // successful HEAD confirmed for the *current* candidate.
+  const [probedStreamUrl, setProbedStreamUrl] = useState("");
   const deleteAbortRef = useRef<AbortController | null>(null);
   const resolveSeqRef = useRef(0);
 
@@ -295,12 +301,22 @@ export function EventPlayer() {
   const currentEvent =
     directEvent ?? (!inDirectMode && events && events.length ? events[index] : undefined);
   const currentAngle = clip?.angles.find((a) => a.camera === camera);
-  // Only build a stream URL for an angle webd will actually serve; pointing the
-  // <video> at a non-archive (ro_usb) angle 404s and logs a console error.
-  const streamUrl =
+  const streamCandidateUrl =
     clip && isStreamableAngle(currentAngle) ? api.streamUrl(clip.id, camera) : "";
-  // A clip is playable when any angle is archive-backed. ro_usb-only clips are
-  // still live on the car's USB and have nothing webd can stream or export yet.
+  const shouldProbeStream = !!currentAngle && !isDownloadableAngle(currentAngle);
+  // Archive angles are always servable, so point <video> at them synchronously
+  // (no probe, no extra render round-trip — preserves the original timing the
+  // deep-link UAT relies on). ro_usb angles must be HEAD-probed first so we
+  // never aim <video> at a doomed URL (which would log a console error); their
+  // URL is only used once the probe confirms it for the current candidate.
+  const streamUrl =
+    clip && streamCandidateUrl
+      ? shouldProbeStream
+        ? probedStreamUrl === streamCandidateUrl
+          ? probedStreamUrl
+          : ""
+        : streamCandidateUrl
+      : "";
   const clipPlayable = !!clip && clip.angles.some(isStreamableAngle);
   // The clip id the current selection points at (the event's clip, or the direct
   // clip). `clip` resolves asynchronously, so it can briefly lag the selection
@@ -309,7 +325,8 @@ export function EventPlayer() {
   // the newly-selected one is still loading.
   const selectedClipId = currentEvent?.clip_id ?? directClipId;
   const clipReady = !!clip && clip.id === selectedClipId;
-  const angleDownloadReady = clipReady && !!clip && isStreamableAngle(currentAngle);
+  const angleDownloadReady = clipReady && !!clip && isDownloadableAngle(currentAngle);
+  const clipDownloadable = !!clip && clip.angles.some(isDownloadableAngle);
 
   const applyPlain = (current: EventItem[], dl: DeepLink) => {
     const sel = initialSelection(current, dl);
@@ -527,6 +544,53 @@ export function EventPlayer() {
   //    while the overlay is on (matches the legacy "load SEI on toggle" path
   //    and avoids fetching the whole MP4 when the HUD is hidden). ──
   useEffect(() => {
+    if (!clip) {
+      setProbedStreamUrl("");
+      setStreamNotice(null);
+      return;
+    }
+    if (!streamCandidateUrl) {
+      setProbedStreamUrl("");
+      setStreamNotice("Video is unavailable for this clip.");
+      return;
+    }
+    if (!shouldProbeStream) {
+      // Archive: streamUrl is derived synchronously; nothing to probe.
+      setProbedStreamUrl("");
+      setStreamNotice(null);
+      return;
+    }
+
+    const ac = new AbortController();
+    (async () => {
+      try {
+        const resp = await fetch(streamCandidateUrl, {
+          method: "HEAD",
+          credentials: "same-origin",
+          signal: ac.signal,
+        });
+        if (ac.signal.aborted) return;
+        if (!resp.ok) {
+          setProbedStreamUrl("");
+          setStreamNotice(
+            "This clip stream is no longer available. It may have changed or rolled off. Reload and try again.",
+          );
+          return;
+        }
+        setStreamNotice(null);
+        setProbedStreamUrl(streamCandidateUrl);
+      } catch {
+        if (ac.signal.aborted) return;
+        setProbedStreamUrl("");
+        setStreamNotice(
+          "This clip stream is no longer available. It may have changed or rolled off. Reload and try again.",
+        );
+      }
+    })();
+    return () => ac.abort();
+  }, [clip?.id, shouldProbeStream, streamCandidateUrl]);
+
+  useEffect(() => {
     const ctrl = ctrlRef.current;
     if (!ctrl || !streamUrl || !hudOn) return;
     void ctrl.loadTelemetry(streamUrl);
@@ -685,11 +749,17 @@ export function EventPlayer() {
         {clip && !clipPlayable && (
           <div class="video-unavailable-overlay" data-testid="video-unarchived">
             <Icon name="hard-drive" class="video-unavailable-icon" />
-            <p class="video-unavailable-title">Not yet archived</p>
+            <p class="video-unavailable-title">Video unavailable</p>
             <p class="video-unavailable-detail">
-              This clip is still on the car's USB drive. Playback and download
-              become available once it's archived to the device.
+              No playable camera stream is currently available for this clip.
             </p>
+          </div>
+        )}
+        {clip && clipPlayable && streamNotice && (
+          <div class="video-unavailable-overlay" data-testid="video-stream-unavailable">
+            <Icon name="hard-drive" class="video-unavailable-icon" />
+            <p class="video-unavailable-title">Video unavailable</p>
+            <p class="video-unavailable-detail">{streamNotice}</p>
           </div>
         )}
       </div>
@@ -848,11 +918,11 @@ export function EventPlayer() {
             resolved clip matches the current selection (so a query change in
             flight can't hand back a ZIP of the previously-shown clip). */}
         <a
-          class={`camera-option download-option${clipPlayable && clipReady ? "" : " disabled"}`}
+          class={`camera-option download-option${clipDownloadable && clipReady ? "" : " disabled"}`}
           id="downloadButton"
-          href={clipPlayable && clipReady && clip ? api.exportUrl(clip.id) : undefined}
+          href={clipDownloadable && clipReady && clip ? api.exportUrl(clip.id) : undefined}
           download
-          aria-disabled={clipPlayable && clipReady ? "false" : "true"}
+          aria-disabled={clipDownloadable && clipReady ? "false" : "true"}
         >
           <Icon name="download" class="camera-icon" />
           <div class="camera-label">Download All</div>

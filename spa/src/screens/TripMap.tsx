@@ -16,6 +16,8 @@ const KM_PER_MILE = 1.609344;
 
 type PanelTab = "events" | "trips" | "clips";
 const PANEL_PAGE_SIZE = 25;
+// B-1 has no cloud backend yet; keep the V1 cloud-provider gate false.
+const cloudConnected = false;
 
 interface PanelTabState<T> {
   items: T[] | null;
@@ -166,6 +168,8 @@ export function TripMap() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [prefError, setPrefError] = useState<string | null>(null);
+  const [clipActionNotice, setClipActionNotice] = useState<string | null>(null);
+  const [deletingClipIds, setDeletingClipIds] = useState<Set<number>>(new Set());
   const [mapTrips, setMapTrips] = useState<MapTrip[]>([]);
   const [mapEvents, setMapEvents] = useState<MapEvent[]>([]);
 
@@ -606,6 +610,78 @@ export function TripMap() {
     );
   };
 
+  const navigateTo = useCallback((to: string) => {
+    const current = window.location.pathname + window.location.search + window.location.hash;
+    if (to !== current) {
+      window.history.pushState({}, "", to);
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    }
+    window.scrollTo(0, 0);
+  }, []);
+
+  const onClipPlay = useCallback((clip: Clip) => {
+    setClipActionNotice(null);
+    navigateTo(`/events?clip=${clip.id}`);
+  }, [navigateTo]);
+
+  const onClipShowOnMap = useCallback((clip: Clip) => {
+    if (clip.lat == null || clip.lon == null) return;
+    setClipActionNotice(null);
+    ctrlRef.current?.flashLocation(clip.lat, clip.lon);
+    setPanelOpen(false);
+  }, []);
+
+  const onClipDownload = useCallback((clip: Clip) => {
+    setClipActionNotice(null);
+    const anchor = document.createElement("a");
+    anchor.href = api.exportUrl(clip.id);
+    anchor.setAttribute("download", "");
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+  }, []);
+
+  const onClipDelete = useCallback(async (clip: Clip) => {
+    if (
+      !window.confirm(
+        `Delete "${clip.canonical_key}" and all its camera angles?`,
+      )
+    ) {
+      return;
+    }
+    let started = false;
+    setDeletingClipIds((prev) => {
+      if (prev.has(clip.id)) return prev;
+      started = true;
+      const next = new Set(prev);
+      next.add(clip.id);
+      return next;
+    });
+    if (!started) return;
+    setClipActionNotice(null);
+    try {
+      await api.deleteClip(clip.id);
+      setPanelState((prev) => {
+        if (!prev.clips.items) return prev;
+        return {
+          ...prev,
+          clips: {
+            ...prev.clips,
+            items: prev.clips.items.filter((item) => item.id !== clip.id),
+          },
+        };
+      });
+    } catch (err) {
+      setClipActionNotice(`Couldn't delete clip. ${errMessage(err)}`);
+    } finally {
+      setDeletingClipIds((prev) => {
+        const next = new Set(prev);
+        next.delete(clip.id);
+        return next;
+      });
+    }
+  }, []);
+
   const onToggleUnit = (next: SpeedUnit) => {
     if (next === unit) return;
     const prev = unit;
@@ -939,6 +1015,11 @@ export function TripMap() {
           {prefError}
         </div>
       )}
+      {clipActionNotice && (
+        <div class="map-pref-error" role="status" aria-live="polite">
+          {clipActionNotice}
+        </div>
+      )}
 
       <div class={`video-panel${panelOpen ? " open" : ""}`} id="videoPanel">
         <div class="video-panel-header">
@@ -1005,6 +1086,12 @@ export function TripMap() {
               error={panelState.clips.error}
               sentinelRef={setActiveSentinel}
               onRetry={() => retryPanelTab("clips")}
+              cloudConnected={cloudConnected}
+              deletingClipIds={deletingClipIds}
+              onPlay={onClipPlay}
+              onShowOnMap={onClipShowOnMap}
+              onDownload={onClipDownload}
+              onDelete={onClipDelete}
             />
           )}
         </div>
@@ -1206,6 +1293,12 @@ function ClipsTab({
   error,
   sentinelRef,
   onRetry,
+  cloudConnected,
+  deletingClipIds,
+  onPlay,
+  onShowOnMap,
+  onDownload,
+  onDelete,
 }: {
   clips: Clip[] | null;
   clock: ClockPref;
@@ -1214,6 +1307,12 @@ function ClipsTab({
   error: boolean;
   sentinelRef: (node: HTMLDivElement | null) => void;
   onRetry: () => void;
+  cloudConnected: boolean;
+  deletingClipIds: Set<number>;
+  onPlay: (clip: Clip) => void;
+  onShowOnMap: (clip: Clip) => void;
+  onDownload: (clip: Clip) => void;
+  onDelete: (clip: Clip) => void;
 }) {
   if (clips === null) {
     if (error && !loading)
@@ -1238,23 +1337,104 @@ function ClipsTab({
   }
   return (
     <div data-testid="vp-clips">
-      {clips.map((c) => (
-        <a
-          class="vp-clip vp-clip-link"
-          key={c.id}
-          href={`/events?clip=${c.id}`}
-          data-testid={`vp-clip-link-${c.id}`}
-          aria-label={`Open clip ${fmtClock(c.started_at, clock)}`}
-        >
-          <div class="vp-clip-info">
-            <div class="vp-clip-date">{fmtClock(c.started_at, clock)}</div>
-            <div class="vp-clip-meta">
-              {c.angles.length} cam · {c.folder_class}
+      {clips.map((c) => {
+        const hasLocation = c.lat != null && c.lon != null;
+        const rowBusy = deletingClipIds.has(c.id);
+        const mb = Math.round(
+          c.angles.reduce((sum, a) => sum + (a.size_bytes ?? 0), 0) / (1024 * 1024),
+        );
+        return (
+          <div class="vp-clip" key={c.id} aria-busy={rowBusy ? "true" : "false"}>
+            <a
+              class="vp-clip-info vp-clip-link"
+              href={`/events?clip=${c.id}`}
+              data-testid={`vp-clip-link-${c.id}`}
+              aria-label={`Open clip ${fmtClock(c.started_at, clock)}`}
+            >
+              <div class="vp-clip-date">{fmtClock(c.started_at, clock)}</div>
+              <div class="vp-clip-meta">
+                {c.angles.length} cam · {mb} MB
+              </div>
+              {c.is_sentry && <div class="vp-clip-reason">sentry</div>}
+            </a>
+            <div class="vp-actions">
+              <button
+                type="button"
+                class="vp-btn vp-btn-play"
+                title="Play"
+                data-testid={`vp-clip-play-${c.id}`}
+                disabled={rowBusy}
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onPlay(c);
+                }}
+              >
+                ▶
+              </button>
+              {hasLocation && (
+                <button
+                  type="button"
+                  class="vp-btn vp-btn-map"
+                  title="Show on Map"
+                  data-testid={`vp-clip-map-${c.id}`}
+                  disabled={rowBusy}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    onShowOnMap(c);
+                  }}
+                >
+                  📍
+                </button>
+              )}
+              <button
+                type="button"
+                class="vp-btn vp-btn-dl"
+                title="Download ZIP"
+                data-testid={`vp-clip-dl-${c.id}`}
+                disabled={rowBusy}
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onDownload(c);
+                }}
+              >
+                ⏬
+              </button>
+              {cloudConnected && (
+                <button
+                  type="button"
+                  class="vp-btn vp-btn-archive"
+                  title="Archive to Cloud"
+                  style="color:#32ADE6"
+                  disabled={rowBusy}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                  }}
+                >
+                  ☁
+                </button>
+              )}
+              <button
+                type="button"
+                class="vp-btn vp-btn-danger vp-btn-del"
+                title="Delete"
+                data-testid={`vp-clip-del-${c.id}`}
+                disabled={rowBusy}
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  void onDelete(c);
+                }}
+              >
+                🗑
+              </button>
             </div>
-            {c.is_sentry && <div class="vp-clip-reason">sentry</div>}
           </div>
-        </a>
-      ))}
+        );
+      })}
       {loading && <div class="vp-loading">Loading…</div>}
       {error && !loading && (
         <div class="vp-error" data-testid="vp-error-clips">

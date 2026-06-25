@@ -862,10 +862,35 @@ LUNs) is the single make-or-break that still needs the car.**
   (`VDL==DataLength`), but if a real car ever leaves `ValidDataLength` stale-small with
   recoverable data the clamp would silently truncate — a latent zero-clip-loss risk.
   Verify against real footage. **(follow-up from `p1-playwright`; gated:C3)**
-- [ ] **Stream a not-yet-archived clip directly from USB** (the lun.0 `ReadFile`
-  fallback — ADR-0003 / `contracts/scannerd-readfile.md`). **(DEFERRED — distinct
-  from the archive-then-play path above; raw exFAT byte-range streaming without
-  copying is a separate seam.)**
+- [x] **Stream a not-yet-archived clip directly from USB** (the lun.0 `ReadFile`
+  fallback — ADR-0003 / `contracts/scannerd-readfile.md`). **DONE 2026-06-25.**
+  `webd media.rs` falls back to a slot-0 `ReadFile` loop for a non-archive
+  (`ro_usb`/`live`) angle when no `archive` copy exists; archive is always
+  preferred. Hardened with a **first-read stable-size gate** (`contracts/
+  scannerd-readfile.md` §5): on the probe read BOTH `readable_size`
+  (valid_data_length) AND `total_size` (data_length) must equal the catalog's
+  ingested `angles.size_bytes` → else **410** `clip_changed`; a NULL/≤0 catalog
+  size fails **closed** (404, never serve unverified bytes); the per-request
+  identity fence still governs later chunks. For a stable clip
+  vdl==dlen==size_bytes ⇒ zero false-positive on legit clips. Implemented
+  (gpt-5.3-codex) + 2 gpt-5.5 adversarial cycles (both-dimensions + fail-closed
+  adopted). Gates: podman `cargo test -p webd` **306 pass**; SPA UAT trip-map
+  **66/66** + event-player **38/38**. **PROVEN LIVE 2026-06-25** (device in-car,
+  Sentry ON, recording untouched): `GET /api/clips/3/stream` (`ro_usb`) → **206**
+  video/mp4 + `HEAD` 200 `content-length:49192` (gate passed: on-disk == catalog),
+  driven through the real SPA `/events?clip=3` (HEAD-probe 200, player chrome +
+  all 6 angle controls render, 0 console errors). Archive regression clean (clip 6
+  real 60 MB footage decodes 2896×1876, playback advances 0→1.49 s). Perf TTFB
+  368 ms / FCP 980 ms / load 1.2 s. Deployed webd+SPA only (gadgetd/USB/recording
+  never touched; zero USB events in the deploy window). *Residuals (deferred):*
+  a substitute file identical in BOTH vdl AND dlen passes the size gate (needs a
+  content fingerprint at ingest); a >16 MB clip can truncate mid-stream after
+  headers (errors the body, never serves wrong bytes as complete). Evidence:
+  `files/hw-results.md`, `hw-clip6-desktop-1280.png`, `hw-clip6-mobile-375.png`.
+  *Live limitation:* per-clip All-Clips controls + map pin-flash not exercisable
+  on-device (catalog has 0 events / 0 GPS fixes); covered by UAT 66/66. The
+  `ro_usb` test clips are 49 KB synthetic stubs (don't decode — data, not code;
+  streaming/gate wiring proven 206/200).
 - [x] Switch camera angle (position preserved where possible). **(proven)**
 - [x] Navigate clips within an event (prev/next). **(A6b proven)**
 - [ ] Telemetry HUD overlay (SEI: speed/gear/brake/throttle/steering/AP-FSD), synced. **(partial: client-side SEI parse exists — A7; verify full HUD)**

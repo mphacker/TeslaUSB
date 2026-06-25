@@ -172,6 +172,12 @@ pub(crate) struct ClipDto {
     pub duration_s: Option<f64>,
     /// `clips.availability`.
     pub availability: String,
+    /// Representative GPS-fixed waypoint; `null` when the clip has no GPS fix
+    /// (e.g. stationary non-event sentry).
+    pub lat: Option<f64>,
+    /// Representative GPS-fixed waypoint; `null` when the clip has no GPS fix
+    /// (e.g. stationary non-event sentry).
+    pub lon: Option<f64>,
     /// Camera angles, ordered by `camera`.
     pub angles: Vec<AngleDto>,
 }

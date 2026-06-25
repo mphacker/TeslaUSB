@@ -21,16 +21,21 @@ use http_body_util::BodyExt;
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use std::path::PathBuf;
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
 use crate::gadget::{GadgetClient, TransportError};
 use crate::indexd_client;
+use crate::read_client::{
+    ClipIdentity, MAX_READ_LEN, ReadFileClient, ReadFileError, ReadFileOk, ReadFileRequest,
+    UnavailableReadFileClient,
+};
 use crate::scheduler::SchedulerClient;
 use crate::{
-    Catalog, MediaConfig, build_router, router_with_all_clients, router_with_clients,
-    router_with_gadget,
+    Catalog, MediaConfig, build_router, router_with_all_clients,
+    router_with_all_clients_and_read_client, router_with_clients, router_with_gadget,
 };
 
 /// A live fixture: a seeded catalog + its router. `_dir` keeps the temp files
@@ -707,6 +712,36 @@ struct MediaFixture {
     app: Router,
 }
 
+#[derive(Default)]
+struct FakeReadFileClient {
+    requests: Arc<Mutex<Vec<ReadFileRequest>>>,
+    replies: Arc<Mutex<VecDeque<Result<ReadFileOk, ReadFileError>>>>,
+}
+
+impl FakeReadFileClient {
+    fn with_replies(replies: Vec<Result<ReadFileOk, ReadFileError>>) -> Self {
+        Self {
+            requests: Arc::new(Mutex::new(Vec::new())),
+            replies: Arc::new(Mutex::new(replies.into())),
+        }
+    }
+
+    fn requests(&self) -> Vec<ReadFileRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+impl ReadFileClient for FakeReadFileClient {
+    fn read_file(&self, req: &ReadFileRequest) -> Result<ReadFileOk, ReadFileError> {
+        self.requests.lock().unwrap().push(req.clone());
+        self.replies
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| Err(ReadFileError::Decode("missing fake response".to_owned())))
+    }
+}
+
 /// Deterministic byte pattern so range slices can be asserted exactly.
 fn pattern(len: usize) -> Vec<u8> {
     (0..len).map(|i| u8::try_from(i % 256).unwrap()).collect()
@@ -748,6 +783,12 @@ fn media_content_app(files: &[(&str, &[u8])], create_root: bool) -> (TempDir, Ro
 /// clip 10, a `ro_usb` angle (must 404), a `..`-traversal and an absolute-path
 /// reinjection angle (both must 404), and a ~1 MiB clip for the streamed proof.
 fn media_fixture() -> MediaFixture {
+    media_fixture_with_read_client(Arc::new(UnavailableReadFileClient))
+}
+
+fn media_fixture_with_read_client(
+    read_client: Arc<dyn ReadFileClient + Send + Sync>,
+) -> MediaFixture {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("catalog.db");
     let archive = dir.path().join("archive");
@@ -792,8 +833,21 @@ fn media_fixture() -> MediaFixture {
 
     let catalog = Catalog::open(&db_path).unwrap();
     let media = MediaConfig::new(archive, cache);
-    let gadget_sock = dir.path().join("gadgetd.sock");
-    let app = build_router(catalog, static_dir, media, gadget_sock);
+    let gadget = crate::default_gadget_client(dir.path().join("gadgetd.sock"));
+    let scheduler = crate::scheduler::default_client(dir.path().join("schedulerd.sock"));
+    let indexd = crate::indexd_client::default_client(dir.path().join("indexd.sock"));
+    let chime_dir = dir.path().join("chimes");
+    std::fs::create_dir_all(&chime_dir).unwrap();
+    let app = router_with_all_clients_and_read_client(
+        catalog,
+        static_dir,
+        media,
+        gadget,
+        scheduler,
+        indexd,
+        read_client,
+        chime_dir,
+    );
     MediaFixture { _dir: dir, app }
 }
 
@@ -813,7 +867,10 @@ fn seed_media(path: &std::path::Path, big: usize, secret_abs: &str) {
             (16, 'clip-16', 1000, 1200, 'p1', 'SavedClips', 0, 60.0, 'present', 0, 0),
             (17, 'clip-17', 1000, 1200, 'p1', 'SavedClips', 0, 60.0, 'present', 0, 0),
             (18, 'clip-18', 1000, 1200, 'p1', 'SavedClips', 0, 60.0, 'present', 0, 0),
-            (19, 'clip-19', 1000, 1200, 'p1', 'SavedClips', 0, 60.0, 'present', 0, 0);
+            (19, 'clip-19', 1000, 1200, 'p1', 'SavedClips', 0, 60.0, 'present', 0, 0),
+            (20, 'clip-20', 1000, 1200, 'slot0', 'RecentClips', 0, 60.0, 'present', 0, 0),
+            (21, 'clip-21', 1000, 1200, 'slot0', 'RecentClips', 0, 60.0, 'present', 0, 0),
+            (22, 'clip-22', 1000, 1200, 'slot0', 'RecentClips', 0, 60.0, 'present', 0, 0);
          INSERT INTO angles (id, clip_id, camera, file_ref, view_kind, offset_ms, duration_s, size_bytes) VALUES
             (10, 10, 'front', 'p1/clip-10/front.mp4', 'archive', 0, 60.0, 100),
             (11, 10, 'back',  'p1/clip-10/back.mp4',  'archive', 0, 60.0, 40),
@@ -824,6 +881,30 @@ fn seed_media(path: &std::path::Path, big: usize, secret_abs: &str) {
             (17, 16, 'front', 'p1/clip-16/missing.mp4', 'archive', 0, 60.0, 10),
             (19, 18, 'front', 'p1/clip-18/empty.mp4', 'archive', 0, 0.0, 999),
             (20, 19, 'front', 'p1/clip-19/evil.mp4', 'archive', 0, 60.0, 10);",
+    )
+    .unwrap();
+    // Multi-window non-archive ('live') angles whose stable sizes exceed
+    // MAX_READ_LEN, seeded via params so the first-read size gate (which requires
+    // the on-disk size to equal the catalog size) is satisfied. clip-20 and clip-21
+    // get distinct sizes so the windowing and identity-change tests don't collide.
+    conn.execute(
+        "INSERT INTO angles (id, clip_id, camera, file_ref, view_kind, offset_ms, duration_s, size_bytes)
+         VALUES (21, 20, 'front', 'TeslaCam/RecentClips/clip-20-front.mp4', 'live', 0, 60.0, ?1)",
+        params![i64::from(MAX_READ_LEN) + 4],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO angles (id, clip_id, camera, file_ref, view_kind, offset_ms, duration_s, size_bytes)
+         VALUES (22, 21, 'front', 'TeslaCam/RecentClips/clip-21-front.mp4', 'live', 0, 60.0, ?1)",
+        params![i64::from(MAX_READ_LEN) + 1],
+    )
+    .unwrap();
+    // Non-archive angle with no stable size (NULL): the handler must fail closed
+    // (404) without issuing any read.
+    conn.execute(
+        "INSERT INTO angles (id, clip_id, camera, file_ref, view_kind, offset_ms, duration_s, size_bytes)
+         VALUES (23, 22, 'front', 'TeslaCam/RecentClips/clip-22-front.mp4', 'live', 0, 60.0, NULL)",
+        [],
     )
     .unwrap();
     // Absolute-path reinjection angle (path is platform-specific).
@@ -1202,7 +1283,311 @@ async fn stream_head_has_headers_no_body() {
 }
 
 #[tokio::test]
-async fn stream_404s_for_missing_clip_camera_and_ro_usb() {
+async fn stream_archive_first_serves_archive_and_skips_read_file_client() {
+    let fake = Arc::new(FakeReadFileClient::default());
+    let fx = media_fixture_with_read_client(fake.clone());
+
+    let (status, _, body) = request(&fx.app, Method::GET, "/api/clips/10/stream", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, pattern(100));
+    assert!(fake.requests().is_empty(), "archive path must not call scannerd");
+}
+
+#[tokio::test]
+async fn stream_falls_back_to_non_archive_read_file_windows_and_echoes_identity() {
+    let identity = ClipIdentity {
+        first_cluster: 42,
+        total_size: u64::from(MAX_READ_LEN) + 4,
+        name_hash: 7,
+    };
+    let first_window = pattern(MAX_READ_LEN as usize);
+    let tail = vec![250, 251, 252, 253];
+    let fake = Arc::new(FakeReadFileClient::with_replies(vec![
+        Ok(ReadFileOk {
+            identity,
+            readable_size: identity.total_size,
+            eof: false,
+            bytes: vec![0],
+        }),
+        Ok(ReadFileOk {
+            identity,
+            readable_size: identity.total_size,
+            eof: false,
+            bytes: first_window.clone(),
+        }),
+        Ok(ReadFileOk {
+            identity,
+            readable_size: identity.total_size,
+            eof: true,
+            bytes: tail.clone(),
+        }),
+        Ok(ReadFileOk {
+            identity,
+            readable_size: identity.total_size,
+            eof: true,
+            bytes: tail.clone(),
+        }),
+    ]));
+    let fx = media_fixture_with_read_client(fake.clone());
+
+    let range = format!("bytes=0-{}", identity.total_size - 1);
+    let (status, headers, body) = request(
+        &fx.app,
+        Method::GET,
+        "/api/clips/20/stream?camera=front",
+        Some(&range),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    let expected_content_range = format!("bytes 0-{}/{}", identity.total_size - 1, identity.total_size);
+    let expected_content_length = identity.total_size.to_string();
+    assert_eq!(
+        header(&headers, "content-range"),
+        Some(expected_content_range.as_str())
+    );
+    assert_eq!(
+        header(&headers, "content-length"),
+        Some(expected_content_length.as_str())
+    );
+    assert_eq!(
+        body.len(),
+        usize::try_from(identity.total_size).unwrap(),
+        "body length must match range length"
+    );
+    assert_eq!(&body[..first_window.len()], first_window.as_slice());
+    assert_eq!(
+        &body[body.len() - tail.len()..],
+        tail.as_slice(),
+        "final short window must be appended"
+    );
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(requests[0].offset, 0);
+    assert_eq!(requests[0].len, 1);
+    assert!(requests[0].handle.is_none());
+    assert_eq!(requests[1].offset, 0);
+    assert_eq!(requests[1].len, MAX_READ_LEN);
+    assert_eq!(requests[1].handle, Some(identity));
+    assert_eq!(requests[2].offset, u64::from(MAX_READ_LEN));
+    assert_eq!(requests[2].len, 4);
+    assert_eq!(requests[2].handle, Some(identity));
+    assert_eq!(requests[3].offset, u64::from(MAX_READ_LEN));
+    assert_eq!(requests[3].len, 4);
+    assert_eq!(requests[3].handle, Some(identity));
+}
+
+#[tokio::test]
+async fn stream_falls_back_for_ro_usb_view_kind_written_by_indexd() {
+    let identity = ClipIdentity {
+        first_cluster: 91,
+        total_size: 10,
+        name_hash: 11,
+    };
+    let fake = Arc::new(FakeReadFileClient::with_replies(vec![
+        Ok(ReadFileOk {
+            identity,
+            readable_size: 10,
+            eof: false,
+            bytes: vec![0],
+        }),
+        Ok(ReadFileOk {
+            identity,
+            readable_size: 10,
+            eof: true,
+            bytes: b"abcdefghij".to_vec(),
+        }),
+    ]));
+    let fx = media_fixture_with_read_client(fake.clone());
+
+    let (status, headers, body) = request(
+        &fx.app,
+        Method::GET,
+        "/api/clips/10/stream?camera=left_repeater",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(header(&headers, "content-length"), Some("10"));
+    assert_eq!(body, b"abcdefghij");
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].path, "p1/clip-10/left.mp4");
+    assert_eq!(requests[1].path, "p1/clip-10/left.mp4");
+}
+
+#[tokio::test]
+async fn stream_non_archive_size_mismatch_is_410() {
+    // Finding-2 regression guard: the on-disk allocation (`total_size`) still
+    // matches the catalog size (10), but the *readable* size
+    // (`valid_data_length`, the bytes actually streamed) is smaller (6). Gating
+    // on `total_size` would wrongly serve a truncated/substituted file; gating
+    // on `readable_size` correctly fails closed with 410.
+    let identity = ClipIdentity {
+        first_cluster: 91,
+        total_size: 10,
+        name_hash: 11,
+    };
+    let fake = Arc::new(FakeReadFileClient::with_replies(vec![Ok(ReadFileOk {
+        identity,
+        readable_size: 6,
+        eof: false,
+        bytes: vec![0],
+    })]));
+    let fx = media_fixture_with_read_client(fake.clone());
+
+    let (status, _, _) = request(
+        &fx.app,
+        Method::GET,
+        "/api/clips/10/stream?camera=left_repeater",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::GONE);
+    assert_eq!(fake.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn stream_non_archive_size_match_streams_ok() {
+    let identity = ClipIdentity {
+        first_cluster: 91,
+        total_size: 10,
+        name_hash: 11,
+    };
+    let fake = Arc::new(FakeReadFileClient::with_replies(vec![
+        Ok(ReadFileOk {
+            identity,
+            readable_size: 10,
+            eof: false,
+            bytes: vec![0],
+        }),
+        Ok(ReadFileOk {
+            identity,
+            readable_size: 10,
+            eof: true,
+            bytes: b"abcdefghij".to_vec(),
+        }),
+    ]));
+    let fx = media_fixture_with_read_client(fake.clone());
+
+    let (status, headers, body) = request(
+        &fx.app,
+        Method::GET,
+        "/api/clips/10/stream?camera=left_repeater",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(header(&headers, "content-length"), Some("10"));
+    assert_eq!(body, b"abcdefghij");
+}
+
+#[tokio::test]
+async fn stream_non_archive_total_size_mismatch_is_410() {
+    // Finding-A guard: the readable size matches the catalog (10) but the file
+    // allocation (`total_size` = data_length) differs — a substituted file with the
+    // same valid byte count but different allocation. Must fail closed with 410.
+    let identity = ClipIdentity {
+        first_cluster: 91,
+        total_size: 6,
+        name_hash: 11,
+    };
+    let fake = Arc::new(FakeReadFileClient::with_replies(vec![Ok(ReadFileOk {
+        identity,
+        readable_size: 10,
+        eof: false,
+        bytes: vec![0],
+    })]));
+    let fx = media_fixture_with_read_client(fake.clone());
+
+    let (status, _, _) = request(
+        &fx.app,
+        Method::GET,
+        "/api/clips/10/stream?camera=left_repeater",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::GONE);
+    assert_eq!(fake.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn stream_non_archive_missing_stable_size_is_404() {
+    // A non-archive angle with no stable size (NULL `size_bytes`) cannot be
+    // identity-verified on the first read, so the handler fails closed (404)
+    // without issuing any read.
+    let fake = Arc::new(FakeReadFileClient::default());
+    let fx = media_fixture_with_read_client(fake.clone());
+
+    let (status, _, _) = request(
+        &fx.app,
+        Method::GET,
+        "/api/clips/22/stream?camera=front",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(fake.requests().is_empty());
+}
+
+#[tokio::test]
+async fn stream_non_archive_identity_change_between_windows_is_410() {
+    let identity = ClipIdentity {
+        first_cluster: 8,
+        total_size: u64::from(MAX_READ_LEN) + 1,
+        name_hash: 9,
+    };
+    let fake = Arc::new(FakeReadFileClient::with_replies(vec![
+        Ok(ReadFileOk {
+            identity,
+            readable_size: identity.total_size,
+            eof: false,
+            bytes: vec![0],
+        }),
+        Ok(ReadFileOk {
+            identity,
+            readable_size: identity.total_size,
+            eof: false,
+            bytes: vec![1],
+        }),
+        Err(ReadFileError::Changed),
+    ]));
+    let fx = media_fixture_with_read_client(fake.clone());
+
+    let range = format!("bytes=0-{}", identity.total_size - 1);
+    let (status, _, _) = request(
+        &fx.app,
+        Method::GET,
+        "/api/clips/21/stream?camera=front",
+        Some(&range),
+    )
+    .await;
+    assert_eq!(status, StatusCode::GONE);
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[2].handle, Some(identity));
+}
+
+#[tokio::test]
+async fn stream_non_archive_missing_angle_is_404_without_read_calls() {
+    let fake = Arc::new(FakeReadFileClient::default());
+    let fx = media_fixture_with_read_client(fake.clone());
+
+    let (status, _, _) = request(
+        &fx.app,
+        Method::GET,
+        "/api/clips/20/stream?camera=back",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(fake.requests().is_empty());
+}
+
+#[tokio::test]
+async fn stream_404s_for_missing_clip_and_camera() {
     let fx = media_fixture();
     // Missing clip.
     let (status, _, _) = request(&fx.app, Method::GET, "/api/clips/999/stream", None).await;
@@ -1212,15 +1597,6 @@ async fn stream_404s_for_missing_clip_camera_and_ro_usb() {
         &fx.app,
         Method::GET,
         "/api/clips/10/stream?camera=nonexistent",
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    // ro_usb angle is never streamable from the archive endpoint.
-    let (status, _, _) = request(
-        &fx.app,
-        Method::GET,
-        "/api/clips/10/stream?camera=left_repeater",
         None,
     )
     .await;

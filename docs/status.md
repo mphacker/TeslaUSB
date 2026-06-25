@@ -1,6 +1,45 @@
 # TeslaUSB B-1 — Build Status (vs. `Requirements.md`)
 
-> ## ⏯️ RESUME HERE (2026-06-22) — Phase-1 archive daemons live; `p1-playwright` SPA wiring DONE+proven; live DECODE gated on real footage (C3)
+> ## ⏯️ RESUME HERE (2026-06-25) — Live-clip playback COMPLETE end-to-end; Map V1-parity shipped; Phase-2 deleter still deferred
+>
+> **§4.2 "live-clip map playback" is now fully closed — both paths proven on real
+> hardware.** Two independent routes get a not-yet-archived clip to the player:
+> 1. **Archive-then-play** (Phase-1 archive loop) — PROVEN LIVE on real footage
+>    2026-06-23 (C3 gate): real RecentClips archived → webd 206 → Chromium decode
+>    2896×1876, 0 dropped frames. retentiond `moov`/decodability gate DONE; the
+>    earlier synthetic-stub decode block is resolved.
+> 2. **Direct-from-USB streaming** — DONE + live-verified + committed/pushed
+>    2026-06-25 (`2e0db7c`). webd `media.rs` falls back to a slot-0 `ReadFile`
+>    loop for a non-archive (`ro_usb`/`live`) angle (new `read_client.rs`), archive
+>    always preferred. Hardened with a **first-read stable-size gate** (both
+>    `readable_size` & `total_size` must equal catalog `angles.size_bytes` → else
+>    410; NULL/≤0 → fail-closed 404; per-request identity fence governs later
+>    chunks). 2 gpt-5.5 review cycles. Gates: podman webd 306 + UAT trip-map 66/66
+>    & event-player 38/38. Live (`cybertruckusb.local`, in-car, Sentry ON): `ro_usb`
+>    clip → 206 via the SPA, archive clip 6 (60 MB) decodes+plays, 0 console errors,
+>    recording never disturbed (0 USB events in the deploy window). See §4.2 +
+>    `files/hw-results.md`.
+>
+> **Map page V1 parity** (operator "exact V1 mirror"): All-Clips per-clip action
+> buttons (Play / Show-on-Map / Download / Archive[cloud-gated] / Delete) + ClipDto
+> `lat/lon`; EventPlayer `ro_usb` playback. Same commit. (UAT trip-map 66/66.)
+>
+> **Deferred residuals (operator-aware):** (a) a substitute file identical in BOTH
+> `valid_data_length` AND `data_length` still passes the size gate — needs a content
+> fingerprint at ingest; (b) a >16 MB clip can truncate mid-stream after headers
+> (errors the body, never serves wrong bytes as complete).
+>
+> **NEXT (operator-queued):** systematic V1-parity audit across all parity screens
+> (exact-mirror UX); verify "all videos except stationary non-event sentry carry
+> SEI/GPS" (§4.2/§5). **Phase-2 (the deleter) stays deferred + GATED — do NOT start
+> autonomously.**
+>
+> Build/test via podman from PowerShell (see copilot-instructions.md) — never local WSL/cargo.
+>
+> ---
+> _Earlier resume snapshots below are historical._
+
+> ## (history 2026-06-22) — Phase-1 archive daemons live; `p1-playwright` SPA wiring DONE+proven; live DECODE gated on real footage (C3)
 >
 > **Phase-1 (archive-only, non-destructive) is CODE-COMPLETE + host-green; on-device
 > verification is what remains.** The operator-approved two-phase plan split the
@@ -801,6 +840,12 @@ LUNs) is the single make-or-break that still needs the car.**
   [RecentClips/SavedClips/SentryClips], angle counts, sentry flags + timestamps;
   no doomed `/clips/*/stream` request for the `ro_usb` clips; console clean. See
   `files/hw-results.md` "clips browse live".)**
+  - [x] **All-Clips per-clip action controls (V1 mirror)** — each clip row carries
+    Play / Show-on-Map / Download / Archive (cloud-gated → hidden) / Delete,
+    matching v1's `mapping.html` row controls; ClipDto gains nullable `lat/lon`
+    (representative GPS fix; omitted for stationary non-event sentry per operator
+    rule). Shipped 2026-06-25 (`2e0db7c`); UAT trip-map 66/66 (`spa/test/uat/
+    trip-map.spec.ts` "map panel — clips action buttons mirror v1 row controls").
 - [x] Units & timezone preferences re-render speeds/times. **(server-persisted: speed unit (mph/kph) + display clock (local/UTC) re-render trip-map speeds & times and survive reload; optimistic write with per-key serialized PUT /api/settings→indexd and rollback to the last server-confirmed value. Playwright: `spa/test/uat/trip-map.spec.ts` "display preferences (server-persisted)" — 20/20 green desktop+mobile, console clean. Follow-up: full IANA-zone picker + cross-screen time propagation.)**
 
 ### 4.2 Event / Video Player — `Requirements.md` §4.2

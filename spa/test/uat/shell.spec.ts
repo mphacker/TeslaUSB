@@ -144,10 +144,10 @@ test.describe("shell UAT", () => {
     expect(otherBad, `unexpected non-2xx: ${JSON.stringify(otherBad)}`).toEqual([]);
   });
 
-  test("mode dot stays green and shows syncing label during handoff", async ({
+  test("operation banner appears during handoff-active sync", async ({
     page,
     probe,
-  }) => {
+  }, testInfo) => {
     const currentProbe: Probe = probe;
     await page.unroute("**/api/gadget/status");
     await page.route("**/api/gadget/status", (route) =>
@@ -167,8 +167,45 @@ test.describe("shell UAT", () => {
     await expect(modeDot).toHaveAttribute("title", "USB drive busy — syncing");
     await expect(modeDot).toHaveAttribute("aria-label", "USB drive busy — syncing");
 
+    const banner = page.getByTestId("operation-banner");
+    await expect(banner).toBeVisible();
+    await expect(banner).toHaveAttribute("role", "alert");
+    await expect(banner).toContainText("File operation in progress...");
+    await expect(page.getByTestId("operation-details")).toHaveText("Completing soon...");
+    await expect(banner.locator("strong")).toHaveText("File operation in progress...");
+
     assertCleanConsole(currentProbe);
     assertCleanNetwork(currentProbe);
+    await captureScreenshot(page, testInfo, `${SCREEN}-operation-active`);
+  });
+
+  test("operation banner stays hidden when handoff is inactive", async ({
+    page,
+    probe,
+  }, testInfo) => {
+    const currentProbe: Probe = probe;
+    await page.unroute("**/api/gadget/status");
+    await page.route("**/api/gadget/status", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ...GADGET_STATUS_OK, handoff_active: false }),
+      }),
+    );
+
+    await page.goto(PATH, { waitUntil: "load" });
+    await expect(page.locator(".container[data-screen='cloud-archive']")).toBeVisible();
+
+    const modeDot = page.locator("#mode-dot");
+    await expect(modeDot).toBeVisible();
+    await expect(modeDot).toHaveClass(/\bstatus-present\b/);
+    await expect(modeDot).toHaveAttribute("title", "USB drive connected to vehicle");
+    await expect(modeDot).toHaveAttribute("aria-label", "USB drive connected to vehicle");
+    await expect(page.getByTestId("operation-banner")).toHaveCount(0);
+
+    assertCleanConsole(currentProbe);
+    assertCleanNetwork(currentProbe);
+    await captureScreenshot(page, testInfo, `${SCREEN}-operation-inactive`);
   });
 
   test("theme toggle persists and flips both ways", async ({ page }) => {

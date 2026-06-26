@@ -15,6 +15,7 @@ const METERS_PER_MILE = 1609.344;
 const KM_PER_MILE = 1.609344;
 
 type PanelTab = "events" | "trips" | "clips";
+type ClipsFolder = "RecentClips" | "SavedClips" | "SentryClips" | "ArchivedClips";
 const PANEL_PAGE_SIZE = 25;
 // B-1 has no cloud backend yet; keep the V1 cloud-provider gate false.
 const cloudConnected = false;
@@ -178,6 +179,7 @@ export function TripMap() {
   const [displayVisible, setDisplayVisible] = useState(false);
   const [panelOpen, setPanelOpen] = useState(false);
   const [panelTab, setPanelTab] = useState<PanelTab>("events");
+  const [clipsFolder, setClipsFolder] = useState<ClipsFolder>("RecentClips");
   const [panelState, setPanelState] = useState<PanelState>({
     events: newPanelTabState<EventItem>(),
     trips: newPanelTabState<Trip>(),
@@ -379,7 +381,7 @@ export function TripMap() {
   }, []);
 
   const loadPanelPage = useCallback(
-    async (tab: PanelTab, initial: boolean) => {
+    async (tab: PanelTab, initial: boolean, clipsFolderOverride?: ClipsFolder) => {
       if (panelInFlightRef.current[tab]) return;
       const state = panelStateRef.current[tab];
       if (state.loading) return;
@@ -454,7 +456,11 @@ export function TripMap() {
           return;
         }
         const page = await api.clips(
-          { cursor, limit: PANEL_PAGE_SIZE },
+          {
+            cursor,
+            limit: PANEL_PAGE_SIZE,
+            folder_class: (clipsFolderOverride ?? clipsFolder) || undefined,
+          },
           controller.signal,
         );
         if (controller.signal.aborted || panelRequestSeqRef.current[tab] !== seq) {
@@ -492,7 +498,7 @@ export function TripMap() {
         }
       }
     },
-    [],
+    [clipsFolder],
   );
 
   const retryPanelTab = useCallback((tab: PanelTab) => {
@@ -503,6 +509,19 @@ export function TripMap() {
     const initial = panelStateRef.current[tab].items === null;
     void loadPanelPage(tab, initial);
   }, [loadPanelPage]);
+
+  const handleClipsFolderChange = useCallback(
+    (nextFolder: ClipsFolder) => {
+      setClipsFolder(nextFolder);
+      abortTabRequest("clips");
+      setPanelState((prev) => ({
+        ...prev,
+        clips: newPanelTabState<Clip>(),
+      }));
+      void loadPanelPage("clips", true, nextFolder);
+    },
+    [abortTabRequest, loadPanelPage],
+  );
 
   useEffect(() => {
     const previousTab = activePanelTabRef.current;
@@ -1078,21 +1097,37 @@ export function TripMap() {
             />
           )}
           {panelTab === "clips" && (
-            <ClipsTab
-              clips={panelState.clips.items}
-              clock={clock}
-              loading={panelState.clips.loading}
-              endReached={panelState.clips.endReached}
-              error={panelState.clips.error}
-              sentinelRef={setActiveSentinel}
-              onRetry={() => retryPanelTab("clips")}
-              cloudConnected={cloudConnected}
-              deletingClipIds={deletingClipIds}
-              onPlay={onClipPlay}
-              onShowOnMap={onClipShowOnMap}
-              onDownload={onClipDownload}
-              onDelete={onClipDelete}
-            />
+            <>
+              <div class="vp-folder-row">
+                <select
+                  aria-label="Filter clips by folder"
+                  data-testid="vp-folder-select"
+                  value={clipsFolder}
+                  onChange={(event) =>
+                    handleClipsFolderChange(event.currentTarget.value as ClipsFolder)}
+                >
+                  <option value="RecentClips">Recent Clips</option>
+                  <option value="SavedClips">Saved Clips</option>
+                  <option value="SentryClips">Sentry Clips</option>
+                  <option value="ArchivedClips">Archived Clips</option>
+                </select>
+              </div>
+              <ClipsTab
+                clips={panelState.clips.items}
+                clock={clock}
+                loading={panelState.clips.loading}
+                endReached={panelState.clips.endReached}
+                error={panelState.clips.error}
+                sentinelRef={setActiveSentinel}
+                onRetry={() => retryPanelTab("clips")}
+                cloudConnected={cloudConnected}
+                deletingClipIds={deletingClipIds}
+                onPlay={onClipPlay}
+                onShowOnMap={onClipShowOnMap}
+                onDownload={onClipDownload}
+                onDelete={onClipDelete}
+              />
+            </>
           )}
         </div>
       </div>

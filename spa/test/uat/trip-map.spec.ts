@@ -106,6 +106,30 @@ function assertCleanConsole(probe: Probe) {
   ).toEqual([]);
 }
 
+function buildMockRecentFolderCatalog(count = 30) {
+  const newestStart = Date.UTC(2024, 5, 2, 12, 0, 0) / 1000;
+  return Array.from({ length: count }, (_, index) => {
+    const started_at = newestStart - index * 3 * 3600;
+    const id = 900 + index;
+    return {
+      id,
+      canonical_key: `clip-${id}`,
+      started_at,
+      ended_at: started_at + 60,
+      lat: 37.9 - index * 0.001,
+      lon: -122.5 + index * 0.001,
+      partition: "archive",
+      folder_class: "RecentClips",
+      is_sentry: false,
+      duration_s: 60,
+      availability: "ready",
+      angles: [
+        { camera: "front", view_kind: "live", offset_ms: 0, duration_s: 60, size_bytes: 4096 },
+      ],
+    };
+  });
+}
+
 test.describe("trip map UAT", () => {
   test.beforeEach(async ({ page }) => {
     const overrides = new Map<string, string>();
@@ -307,17 +331,18 @@ test.describe("trip map UAT", () => {
     await expect(vpTrips).toContainText("Trip #1");
     await expect(vpTrips).toContainText("Trip #2");
     await expect(vpTrips).toContainText("Trip #3");
-    // All Clips tab → first page is capped at PANEL_PAGE_SIZE (25).
+    // Clips tab defaults to V1's RecentClips folder (single-folder, not merged).
     await page.locator("#vpTabClips").click();
-    await expect(page.locator("[data-testid=vp-clips] .vp-clip")).toHaveCount(25);
+    await expect(page.locator("[data-testid=vp-clips] .vp-clip")).toHaveCount(10);
     const clipLinks = page.locator("[data-testid=vp-clips] a[data-testid^=vp-clip-link-]");
-    await expect(clipLinks).toHaveCount(25);
-    for (const id of [1, 2, 3, 4, 5, 6]) {
+    await expect(clipLinks).toHaveCount(10);
+    for (const id of [1, 5]) {
       await expect(page.locator(`[data-testid=vp-clip-link-${id}]`)).toHaveAttribute(
         "href",
         `/events?clip=${id}`,
       );
     }
+    await expect(page.locator("[data-testid=vp-clip-link-2]")).toHaveCount(0);
 
     // (g) Marker clustering active (done LAST — it zooms the map out): the 2
     //     event bubbles collapse into a SINGLE `.marker-cluster` whose badge
@@ -334,10 +359,149 @@ test.describe("trip map UAT", () => {
     await expect(page.locator(".event-svg-icon")).toHaveCount(0);
   });
 
-  test("panel — progressive infinite scroll loads the whole clip catalog newest-first", async ({
+  test("panel — clips folder filter mirrors v1 options and sends folder_class", async ({
+    page,
+  }) => {
+    const allClips = [
+      {
+        id: 401,
+        canonical_key: "clip-401",
+        started_at: 1717243200,
+        ended_at: 1717243260,
+        lat: 37.79,
+        lon: -122.42,
+        partition: "archive",
+        folder_class: "recent",
+        is_sentry: false,
+        duration_s: 60,
+        availability: "ready",
+        angles: [{ camera: "front", view_kind: "live", offset_ms: 0, duration_s: 60, size_bytes: 4096 }],
+      },
+      {
+        id: 402,
+        canonical_key: "clip-402",
+        started_at: 1717246800,
+        ended_at: 1717246860,
+        lat: 37.78,
+        lon: -122.41,
+        partition: "archive",
+        folder_class: "saved",
+        is_sentry: false,
+        duration_s: 60,
+        availability: "ready",
+        angles: [{ camera: "front", view_kind: "live", offset_ms: 0, duration_s: 60, size_bytes: 4096 }],
+      },
+    ];
+    const sentryClips = [
+      {
+        id: 499,
+        canonical_key: "clip-499",
+        started_at: 1717250400,
+        ended_at: 1717250460,
+        lat: 37.8,
+        lon: -122.4,
+        partition: "archive",
+        folder_class: "sentry",
+        is_sentry: true,
+        duration_s: 60,
+        availability: "ready",
+        angles: [{ camera: "front", view_kind: "live", offset_ms: 0, duration_s: 60, size_bytes: 4096 }],
+      },
+    ];
+    const clipRequestUrls: string[] = [];
+    await page.route("**/api/clips**", async (route) => {
+      const req = route.request();
+      const url = new URL(req.url());
+      if (req.method() === "GET" && url.pathname === "/api/clips") {
+        clipRequestUrls.push(req.url());
+        const folder = url.searchParams.get("folder_class");
+        const items = folder === "SentryClips" ? sentryClips : allClips;
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ items, next_cursor: null, limit: 25 }),
+        });
+        return;
+      }
+      await route.continue();
+    });
+
+    await gotoMap(page);
+    await page.locator("#btnVideos").click();
+    await expect(page.locator("#videoPanel")).toHaveClass(/open/);
+    await page.locator("#vpTabClips").click();
+
+    const folderSelect = page.locator("[data-testid=vp-folder-select]");
+    await expect(folderSelect).toBeVisible();
+    await expect(folderSelect).toHaveAttribute("aria-label", "Filter clips by folder");
+    await expect(folderSelect.locator("option")).toHaveText([
+      "Recent Clips",
+      "Saved Clips",
+      "Sentry Clips",
+      "Archived Clips",
+    ]);
+    const optionValues = await folderSelect
+      .locator("option")
+      .evaluateAll((opts) => opts.map((opt) => (opt as HTMLOptionElement).value));
+    expect(optionValues).toEqual([
+      "RecentClips",
+      "SavedClips",
+      "SentryClips",
+      "ArchivedClips",
+    ]);
+    await expect(folderSelect).toHaveValue("RecentClips");
+    await expect
+      .poll(() => (clipRequestUrls.length ? new URL(clipRequestUrls[0]).searchParams.get("folder_class") : null))
+      .toBe("RecentClips");
+
+    await expect(page.locator("[data-testid=vp-clip-link-401]")).toBeVisible();
+    await expect(page.locator("[data-testid=vp-clip-link-499]")).toHaveCount(0);
+
+    await folderSelect.selectOption("SentryClips");
+    await expect.poll(() => clipRequestUrls.length).toBeGreaterThan(1);
+    await expect
+      .poll(() => new URL(clipRequestUrls[clipRequestUrls.length - 1]).searchParams.get("folder_class"))
+      .toBe("SentryClips");
+    await expect(page.locator("[data-testid=vp-clip-link-499]")).toBeVisible();
+    await expect(page.locator("[data-testid=vp-clip-link-401]")).toHaveCount(0);
+
+    const requestsBeforeRecent = clipRequestUrls.length;
+    await folderSelect.selectOption("RecentClips");
+    await expect.poll(() => clipRequestUrls.length).toBeGreaterThan(requestsBeforeRecent);
+    await expect
+      .poll(() => new URL(clipRequestUrls[clipRequestUrls.length - 1]).searchParams.get("folder_class"))
+      .toBe("RecentClips");
+    await expect(page.locator("[data-testid=vp-clip-link-401]")).toBeVisible();
+    await expect(page.locator("[data-testid=vp-clip-link-499]")).toHaveCount(0);
+  });
+
+  test("panel — progressive infinite scroll pages the selected folder newest-first", async ({
     page,
     probe,
   }, testInfo) => {
+    const recentClips = buildMockRecentFolderCatalog(30);
+    const page2Cursor = "recent-page-2";
+    const clipRequestUrls: string[] = [];
+    await page.route("**/api/clips**", async (route) => {
+      const req = route.request();
+      const url = new URL(req.url());
+      if (req.method() === "GET" && url.pathname === "/api/clips") {
+        clipRequestUrls.push(req.url());
+        const cursor = url.searchParams.get("cursor");
+        const body =
+          cursor === page2Cursor
+            ? { items: recentClips.slice(25), next_cursor: null, limit: 25 }
+            : { items: recentClips.slice(0, 25), next_cursor: page2Cursor, limit: 25 };
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(body),
+        });
+        return;
+      }
+      await route.continue();
+    });
+
     await gotoMap(page);
     await page.locator("#btnVideos").click();
     await expect(page.locator("#videoPanel")).toHaveClass(/open/);
@@ -358,14 +522,7 @@ test.describe("trip map UAT", () => {
     expect(clipIds).toHaveLength(30);
     expect(new Set(clipIds).size).toBe(30);
 
-    const clipTimes = await page.evaluate(async () => {
-      const resp = await fetch("/api/clips?limit=500", { credentials: "same-origin" });
-      const body = (await resp.json()) as {
-        items?: { id: number; started_at: number }[];
-      };
-      return body.items ?? [];
-    });
-    const byId = new Map(clipTimes.map((clip) => [clip.id, clip.started_at]));
+    const byId = new Map(recentClips.map((clip) => [clip.id, clip.started_at]));
     const started = clipIds.map((id) => byId.get(id) ?? 0);
     for (let i = 1; i < started.length; i += 1) {
       expect(started[i - 1]).toBeGreaterThanOrEqual(started[i]);
@@ -387,6 +544,10 @@ test.describe("trip map UAT", () => {
       (req) => new URL(req.url).pathname === "/api/clips",
     ).length;
     expect(clipReqAfter).toBe(clipReqBefore);
+    expect(clipRequestUrls.length).toBeGreaterThan(0);
+    for (const reqUrl of clipRequestUrls) {
+      expect(new URL(reqUrl).searchParams.get("folder_class")).toBe("RecentClips");
+    }
 
     await page.setViewportSize({ width: 1280, height: 800 });
     const desktopShot = resolve(
@@ -417,16 +578,34 @@ test.describe("trip map UAT", () => {
     page,
     probe,
   }) => {
+    const recentClips = buildMockRecentFolderCatalog(30);
+    const page2Cursor = "recent-page-2";
     let failCursorPage = true;
     let failedCursorHits = 0;
+    const clipsFolderParams: (string | null)[] = [];
     await page.route("**/api/clips**", async (route) => {
-      const reqUrl = new URL(route.request().url());
-      if (failCursorPage && reqUrl.searchParams.has("cursor")) {
-        failedCursorHits += 1;
+      const req = route.request();
+      const reqUrl = new URL(req.url());
+      if (req.method() === "GET" && reqUrl.pathname === "/api/clips") {
+        clipsFolderParams.push(reqUrl.searchParams.get("folder_class"));
+        const cursor = reqUrl.searchParams.get("cursor");
+        if (failCursorPage && cursor === page2Cursor) {
+          failedCursorHits += 1;
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: "{invalid-json",
+          });
+          return;
+        }
+        const body =
+          cursor === page2Cursor
+            ? { items: recentClips.slice(25), next_cursor: null, limit: 25 }
+            : { items: recentClips.slice(0, 25), next_cursor: page2Cursor, limit: 25 };
         await route.fulfill({
           status: 200,
           contentType: "application/json",
-          body: "{invalid-json",
+          body: JSON.stringify(body),
         });
         return;
       }
@@ -451,6 +630,10 @@ test.describe("trip map UAT", () => {
     await page.locator("[data-testid=vp-retry-clips]").click();
     await expect(clipRows).toHaveCount(30);
     await expect(page.locator("[data-testid=vp-end-clips]")).toBeVisible();
+    // Every clips request — initial, failed page-2, manual retry — must carry the
+    // selected RecentClips folder; a retry-only merged-catalog regression must fail.
+    expect(clipsFolderParams.length).toBeGreaterThanOrEqual(3);
+    expect(clipsFolderParams.every((f) => f === "RecentClips")).toBe(true);
     assertCleanConsole(probe);
   });
 
@@ -458,16 +641,34 @@ test.describe("trip map UAT", () => {
     page,
     probe,
   }) => {
+    const recentClips = buildMockRecentFolderCatalog(30);
+    const page2Cursor = "recent-page-2";
     let failFirst = true;
     let firstHits = 0;
+    const clipsFolderParams: (string | null)[] = [];
     await page.route("**/api/clips**", async (route) => {
-      const reqUrl = new URL(route.request().url());
-      if (failFirst && !reqUrl.searchParams.has("cursor")) {
-        firstHits += 1;
+      const req = route.request();
+      const reqUrl = new URL(req.url());
+      if (req.method() === "GET" && reqUrl.pathname === "/api/clips") {
+        clipsFolderParams.push(reqUrl.searchParams.get("folder_class"));
+        const cursor = reqUrl.searchParams.get("cursor");
+        if (failFirst && !cursor) {
+          firstHits += 1;
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: "{invalid-json",
+          });
+          return;
+        }
+        const body =
+          cursor === page2Cursor
+            ? { items: recentClips.slice(25), next_cursor: null, limit: 25 }
+            : { items: recentClips.slice(0, 25), next_cursor: page2Cursor, limit: 25 };
         await route.fulfill({
           status: 200,
           contentType: "application/json",
-          body: "{invalid-json",
+          body: JSON.stringify(body),
         });
         return;
       }
@@ -495,6 +696,9 @@ test.describe("trip map UAT", () => {
     await page.locator("[data-testid=vp-sentinel-clips]").scrollIntoViewIfNeeded();
     await expect(clipRows).toHaveCount(30);
     await expect(page.locator("[data-testid=vp-end-clips]")).toBeVisible();
+    // Every clips request — failed initial, retry, page-2 — must carry RecentClips.
+    expect(clipsFolderParams.length).toBeGreaterThanOrEqual(3);
+    expect(clipsFolderParams.every((f) => f === "RecentClips")).toBe(true);
     assertCleanConsole(probe);
   });
 
@@ -507,12 +711,18 @@ test.describe("trip map UAT", () => {
     expect(base.tripCount).toBe(3);
     expect(base.eventMarkerCount).toBe(2);
 
-    // Panel list is global/unfiltered: first page stays 25 even as map filters change.
+    // Panel list shows the selected RecentClips folder; map filters do not alter it.
     await page.locator("#btnVideos").click();
     await expect(page.locator("#videoPanel")).toHaveClass(/open/);
     await page.locator("#vpTabClips").click();
     const panelClips = page.locator("[data-testid=vp-clips] .vp-clip");
-    await expect(panelClips).toHaveCount(25);
+    await expect(panelClips).toHaveCount(10);
+    // Count alone is ambiguous (Saved/Sentry also have 10) — pin the actual folder:
+    // selector stays RecentClips and the list holds Recent ids 1 & 5, not Saved id 2.
+    await expect(page.locator("[data-testid=vp-folder-select]")).toHaveValue("RecentClips");
+    await expect(page.locator("[data-testid=vp-clip-link-1]")).toBeVisible();
+    await expect(page.locator("[data-testid=vp-clip-link-5]")).toBeVisible();
+    await expect(page.locator("[data-testid=vp-clip-link-2]")).toHaveCount(0);
     await page.locator("#videoPanel .close-btn").click();
     await expect(page.locator("#videoPanel")).not.toHaveClass(/open/);
 
@@ -529,7 +739,10 @@ test.describe("trip map UAT", () => {
     await page.locator("#btnVideos").click();
     await expect(page.locator("#videoPanel")).toHaveClass(/open/);
     await page.locator("#vpTabClips").click();
-    await expect(panelClips).toHaveCount(25);
+    await expect(panelClips).toHaveCount(10);
+    await expect(page.locator("[data-testid=vp-folder-select]")).toHaveValue("RecentClips");
+    await expect(page.locator("[data-testid=vp-clip-link-1]")).toBeVisible();
+    await expect(page.locator("[data-testid=vp-clip-link-2]")).toHaveCount(0);
     await page.locator("#videoPanel .close-btn").click();
     await expect(page.locator("#videoPanel")).not.toHaveClass(/open/);
     let coords = await eventLatLngs(page);

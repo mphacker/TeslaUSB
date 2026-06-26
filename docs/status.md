@@ -844,6 +844,19 @@ LUNs) is the single make-or-break that still needs the car.**
   adds a second 503 when gadgetd is down; the non-503 `other` filter still catches real leaks).
   Tier-2 flow: gpt-5.3-codex implemented, gpt-5.4-mini review clean, build clean, 38 affected
   specs pass (shell + media-hub + analytics). COMMITTED `5fb4531` (mhackermsft/b1-clean).)**
+- [x] **Operation-in-progress banner (V1 `base.html` parity).** When a USB
+  file-operation/handoff is running, V1 renders a top banner under the header
+  ("File operation in progress…" / "Completing soon…"). **(DONE — `Shell.tsx`
+  derives `operationActive` from `handoff_active` in the existing 30s
+  `api.gadgetStatus` poll (no new request); renders a `role=alert`/`aria-live=polite`
+  banner after `</header>` with the exact V1 copy + a spinner. Error-path clears the
+  flag (guarded by `superseded()`) so it can't stick on after a status blip.
+  `style.css` `.operation-banner` reworked to design-system tokens (dropped the
+  garish gradient + pulse/bounce per the anti-AI-aesthetic charter; removed a
+  duplicate `@keyframes spin`); dark-theme spinner gets `border-top-color:currentColor`.
+  UAT `spa/test/uat/shell.spec.ts` (active/inactive) 12 pass at 375+1280. LIVE-verified
+  on hardware 2026-06-26: banner correctly **hidden** when no handoff active, both
+  viewports, console + network clean. See `files/hw-results.md` "bb-folder+op-banner live".)**
 - [ ] Samba status dot (shown only when sharing on). **(depends on §2)**
 - [ ] Primary nav (sidebar desktop / bottom tabs mobile), availability-gated items. **(partial: nav present; per-feature availability gating to finish — A9)**
 - [ ] Feedback model: JSON for AJAX + flash banners; live-poll views. **(partial: proven on media routes; not yet audited across all routes — see §5 error-code audit)**
@@ -901,12 +914,24 @@ LUNs) is the single make-or-break that still needs the car.**
   notice fallback, `?event=bad&clip=N` clip fallback — plus the pre-existing gate-7 deep-link
   test; console clean. GPT-5.5 design 2nd-opinion + adversarial diff review → GO (2 SHOULD-FIX
   reconciled & fixed: non-atomic out-of-window load + tightened UAT proof).)**
-- [x] Side panel tabs (Events / Trips / All Clips) + source folder switch. **(proven;
-  **All Clips tab LIVE-verified on hardware 2026-06-16** — the panel rendered all 4
-  real device clips from the live catalog with correct `folder_class` labels
-  [RecentClips/SavedClips/SentryClips], angle counts, sentry flags + timestamps;
-  no doomed `/clips/*/stream` request for the `ro_usb` clips; console clean. See
-  `files/hw-results.md` "clips browse live".)**
+- [x] Side panel tabs (Events / Trips / Clips) + source folder switch. **(proven;
+  **V1-parity folder selector LIVE-verified on hardware 2026-06-26** — the Clips tab
+  now mirrors V1 `mapping.html` `vpFolder` exactly: a 4-option folder selector
+  (Recent / Saved / Sentry / Archived Clips) defaulting to **RecentClips**, one folder
+  at a time, **no "All Clips" superset option**. (Operator decision: match V1 exactly
+  rather than ship B-1's earlier whole-catalog "All Clips" view.) Every `/api/clips`
+  request — including infinite-scroll paging and error-retry — carries
+  `folder_class=<selected>`; switching folders aborts the in-flight fetch and refetches.
+  `TripMap.tsx` `ClipsFolder` type drops `""`; UAT `spa/test/uat/trip-map.spec.ts`
+  reworked to the per-folder model (synthetic 30-item RecentClips catalog preserves
+  cursor-paging / no-retry-storm / end-reached coverage; retry tests assert
+  `folder_class` on every request; filters test pins the folder stayed RecentClips via
+  known Recent/Saved ids). Full trip-map+shell UAT 42 pass at 375+1280, console clean.
+  GPT-5.5 adversarial review ×3 (caught the original "All Clips" parity miss + 2 test
+  assertion-weakening SHOULD-FIX, all reconciled). Live proof: default RecentClips both
+  viewports, exactly 4 V1 options in order, folder switch refetches with
+  `folder_class=SavedClips`, zero console errors / non-2xx. See `files/hw-results.md`
+  "bb-folder+op-banner live".)**
   - [x] **All-Clips per-clip action controls (V1 mirror)** — each clip row carries
     Play / Show-on-Map / Download / Archive (cloud-gated → hidden) / Delete,
     matching v1's `mapping.html` row controls; ClipDto gains nullable `lat/lon`

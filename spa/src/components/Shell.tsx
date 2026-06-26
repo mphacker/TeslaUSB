@@ -71,6 +71,7 @@ export function Shell({
   children: ComponentChildren;
 }) {
   const [theme, setTheme] = useState<"light" | "dark">(currentTheme());
+  const [operationActive, setOperationActive] = useState(false);
   const dotRef = useRef<HTMLSpanElement>(null);
   const linkRef = useRef<HTMLAnchorElement>(null);
   const modeDotRef = useRef<HTMLSpanElement>(null);
@@ -134,6 +135,7 @@ export function Shell({
       try {
         const g = await api.gadgetStatus(ctrl.signal);
         if (superseded()) return;
+        setOperationActive(g.handoff_active === true);
         const present = g.present && g.bound && g.udc_state === "configured";
         const dot = modeDotRef.current;
         if (!dot) return;
@@ -147,7 +149,10 @@ export function Shell({
         dot.setAttribute("aria-label", label);
       } catch {
         // Network blip or abort (supersede/unmount included) — keep the last
-        // known dot colour.
+        // known dot colour. But never leave the operation banner stuck on: if
+        // this poll wasn't superseded, handoff state is now unknown, so hide the
+        // banner (it must appear only on a confirmed handoff_active === true).
+        if (!superseded()) setOperationActive(false);
       }
     }
     void poll().catch(() => {});
@@ -230,6 +235,29 @@ export function Shell({
           </button>
         </div>
       </header>
+
+      {operationActive ? (
+        <div
+          class="operation-banner"
+          id="operation-banner"
+          data-testid="operation-banner"
+          role="alert"
+          aria-live="polite"
+        >
+          <div class="operation-content">
+            <div class="operation-icon">
+              <Icon name="alert-triangle" />
+            </div>
+            <div class="operation-message">
+              <strong>File operation in progress...</strong>
+              <span id="operation-details" data-testid="operation-details">
+                Completing soon...
+              </span>
+            </div>
+            <div class="spinner" aria-hidden="true" />
+          </div>
+        </div>
+      ) : null}
 
       <nav class="sidebar-rail" id="sidebarRail" aria-label="Main navigation">
         {NAV.map((n) => (

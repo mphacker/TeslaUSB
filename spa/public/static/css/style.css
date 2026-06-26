@@ -1867,94 +1867,75 @@ button:disabled {
 
 /* Operation In Progress Banner */
 .operation-banner {
-    background: linear-gradient(135deg, var(--ds-accent-warning, #ffc107) 0%, var(--accent-warning, #ff9800) 100%);
-    color: var(--bg-primary, #000);
-    padding: 15px 20px;
-    margin-bottom: 20px;
-    border-radius: 8px;
-    box-shadow: 0 2px 8px var(--shadow, rgba(0,0,0,0.15));
-    animation: pulse-glow 2s ease-in-out infinite;
-    position: sticky;
-    top: 0;
-    z-index: 1000;
+    margin: 12px 20px 0 calc(var(--sidebar-collapsed) + 20px);
+    max-width: 1200px;
+    background: var(--msg-warning-bg);
+    color: var(--msg-warning-text);
+    border: 1px solid var(--warning-border);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-sm);
+    z-index: 80;
 }
 
 .operation-content {
     display: flex;
     align-items: center;
-    gap: 15px;
+    gap: var(--space-3);
+    padding: 12px 16px;
 }
 
 .operation-icon {
-    font-size: 24px;
-    animation: bounce 1s ease-in-out infinite;
+    color: var(--msg-warning-text);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.operation-icon .nav-icon {
+    width: 18px;
+    height: 18px;
 }
 
 .operation-message {
     flex: 1;
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 2px;
 }
 
 .operation-message strong {
-    font-size: 16px;
+    font-size: var(--text-base);
     font-weight: 600;
+    line-height: 1.2;
 }
 
 .operation-message #operation-details {
-    font-size: 14px;
-    opacity: 0.8;
+    font-size: var(--text-sm);
+    color: var(--msg-warning-text);
 }
 
 .operation-countdown {
-    margin-top: 10px;
-    font-size: 13px;
-    opacity: 0.9;
-    font-style: italic;
+    display: none;
 }
 
 /* Spinner Animation (operation banner context) */
 .operation-banner .spinner {
-    width: 24px;
-    height: 24px;
-    border: 3px solid rgba(0,0,0,0.1);
+    width: 18px;
+    height: 18px;
+    border: 2px solid rgba(0, 0, 0, 0.15);
     border-top-color: currentColor;
     border-radius: 50%;
     animation: spin 1s linear infinite;
 }
 
-@keyframes spin {
-    to { transform: rotate(360deg); }
+[data-theme="dark"] .operation-banner .spinner {
+    border-color: rgba(255, 255, 255, 0.2);
+    border-top-color: currentColor;
 }
 
-@keyframes pulse-glow {
-    0%, 100% {
-        box-shadow: 0 2px 8px rgba(0,0,0,0.15);
-    }
-    50% {
-        box-shadow: 0 2px 16px rgba(255,152,0,0.4);
-    }
-}
-
-@keyframes bounce {
-    0%, 100% {
-        transform: translateY(0);
-    }
-    50% {
-        transform: translateY(-5px);
-    }
-}
-
-@media (max-width: 768px) {
+@media (max-width: 1023px) {
     .operation-banner {
-        position: relative;
-        top: auto;
-    }
-
-    .operation-content {
-        flex-direction: column;
-        text-align: center;
+        margin: 10px 10px 0;
     }
 }
 

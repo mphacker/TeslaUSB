@@ -97,6 +97,9 @@ function clipSize(clip: Clip | null): string {
 
 /** The `view_kind` that guarantees archive-export/download support. */
 const VIEW_ARCHIVE = "archive";
+const DL_DOWNLOADING_MS = 1000;
+const DL_RESET_MS = 8000;
+type DlPhase = "idle" | "preparing" | "downloading";
 
 /** Only explicitly unavailable angles are blocked from playback. */
 function isStreamableAngle(angle: Angle | undefined): boolean {
@@ -281,6 +284,16 @@ export function EventPlayer() {
   const [camera, setCamera] = useState("front");
   const [hudOn, setHudOn] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [exportPhase, setExportPhase] = useState<DlPhase>("idle");
+  const [anglePhase, setAnglePhase] = useState<DlPhase>("idle");
+  const exportTimers = useRef<number[]>([]);
+  const angleTimers = useRef<number[]>([]);
+  // Synchronous in-flight guard (mirrors V1 `downloadInProgress`). A ref, not
+  // state, so a rapid double-click or keyboard re-activation is blocked in the
+  // same tick — before preact re-renders the `.busy` class — and can't fire a
+  // second native anchor download.
+  const exportBusyRef = useRef(false);
+  const angleBusyRef = useRef(false);
 
   // ── Clip-delete (operator-gated destructive action) ──
   const [pending, setPending] = useState<{ clipId: number; label: string } | null>(
@@ -327,6 +340,43 @@ export function EventPlayer() {
   const clipReady = !!clip && clip.id === selectedClipId;
   const angleDownloadReady = clipReady && !!clip && isDownloadableAngle(currentAngle);
   const clipDownloadable = !!clip && clip.angles.some(isDownloadableAngle);
+  const clearDownloadTimers = (timers: { current: number[] }) => {
+    for (const id of timers.current) {
+      window.clearTimeout(id);
+    }
+    timers.current = [];
+  };
+  const startDownloadFeedback = (
+    e: Event,
+    which: "export" | "angle",
+    ready: boolean,
+  ) => {
+    const busyRef = which === "export" ? exportBusyRef : angleBusyRef;
+    // Block the native anchor download (default action) when the control is not
+    // downloadable or a download is already in flight — and skip the cosmetic
+    // feedback. `.disabled` only dims the control; it does not stop pointer/key
+    // activation, and `.busy`'s pointer-events:none never blocks keyboard Enter.
+    if (!ready || busyRef.current) {
+      e.preventDefault();
+      return;
+    }
+    busyRef.current = true;
+    const setPhase = which === "export" ? setExportPhase : setAnglePhase;
+    const timers = which === "export" ? exportTimers : angleTimers;
+    clearDownloadTimers(timers);
+    setPhase("preparing");
+    timers.current.push(
+      window.setTimeout(() => {
+        setPhase("downloading");
+      }, DL_DOWNLOADING_MS),
+    );
+    timers.current.push(
+      window.setTimeout(() => {
+        setPhase("idle");
+        busyRef.current = false;
+      }, DL_RESET_MS),
+    );
+  };
 
   const applyPlain = (current: EventItem[], dl: DeepLink) => {
     const sel = initialSelection(current, dl);
@@ -665,6 +715,23 @@ export function EventPlayer() {
     return () => clearTimeout(id);
   }, [notice]);
 
+  useEffect(() => {
+    clearDownloadTimers(exportTimers);
+    clearDownloadTimers(angleTimers);
+    exportBusyRef.current = false;
+    angleBusyRef.current = false;
+    setExportPhase("idle");
+    setAnglePhase("idle");
+  }, [clip?.id]);
+
+  useEffect(
+    () => () => {
+      clearDownloadTimers(exportTimers);
+      clearDownloadTimers(angleTimers);
+    },
+    [],
+  );
+
   // ── Abort any in-flight delete if the screen unmounts. ──
   useEffect(() => () => deleteAbortRef.current?.abort(), []);
 
@@ -918,25 +985,57 @@ export function EventPlayer() {
             resolved clip matches the current selection (so a query change in
             flight can't hand back a ZIP of the previously-shown clip). */}
         <a
-          class={`camera-option download-option${clipDownloadable && clipReady ? "" : " disabled"}`}
+          class={`camera-option download-option${clipDownloadable && clipReady ? "" : " disabled"}${exportPhase !== "idle" ? " busy" : ""}`}
           id="downloadButton"
           href={clipDownloadable && clipReady && clip ? api.exportUrl(clip.id) : undefined}
           download
           aria-disabled={clipDownloadable && clipReady ? "false" : "true"}
+          onClick={(e) => startDownloadFeedback(e, "export", clipDownloadable && clipReady)}
         >
-          <Icon name="download" class="camera-icon" />
-          <div class="camera-label">Download All</div>
+          <Icon
+            name={
+              exportPhase === "preparing"
+                ? "hourglass"
+                : exportPhase === "downloading"
+                  ? "cloud-download"
+                  : "download"
+            }
+            class="camera-icon"
+          />
+          <div class="camera-label">
+            {exportPhase === "preparing"
+              ? "Preparing..."
+              : exportPhase === "downloading"
+                ? "Downloading..."
+                : "Download All"}
+          </div>
         </a>
 
         <a
-          class={`camera-option download-option${angleDownloadReady ? "" : " disabled"}`}
+          class={`camera-option download-option${angleDownloadReady ? "" : " disabled"}${anglePhase !== "idle" ? " busy" : ""}`}
           id="downloadAngleButton"
           href={angleDownloadReady && clip ? api.downloadUrl(clip.id, camera) : undefined}
           download={angleDownloadReady ? true : undefined}
           aria-disabled={angleDownloadReady ? "false" : "true"}
+          onClick={(e) => startDownloadFeedback(e, "angle", angleDownloadReady)}
         >
-          <Icon name="download" class="camera-icon" />
-          <div class="camera-label">Download Angle</div>
+          <Icon
+            name={
+              anglePhase === "preparing"
+                ? "hourglass"
+                : anglePhase === "downloading"
+                  ? "cloud-download"
+                  : "download"
+            }
+            class="camera-icon"
+          />
+          <div class="camera-label">
+            {anglePhase === "preparing"
+              ? "Preparing..."
+              : anglePhase === "downloading"
+                ? "Downloading..."
+                : "Download Angle"}
+          </div>
         </a>
 
         {/* Archive to cloud — DEFERRED (webd 5.1c): inert. */}

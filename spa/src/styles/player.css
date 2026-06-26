@@ -495,6 +495,11 @@
   color: rgba(52, 199, 89, 1);
 }
 
+.event-player-container .download-option.busy {
+  pointer-events: none;
+  opacity: 0.5;
+}
+
 /* Archive to Cloud Button */
 .event-player-container .archive-option {
   border-color: rgba(50, 173, 230, 0.6);

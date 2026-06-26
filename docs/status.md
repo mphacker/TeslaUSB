@@ -64,9 +64,11 @@
 > (exact-mirror UX). **Phase-2 (the deleter) stays deferred + GATED — do NOT start
 > autonomously.**
 > Parity-audit progress: **Slice 2 (indexer-liveness health dot)**, **A5 (Music
-> rename-during-move)** + **A6 (Chimes "Edit"/re-trim)** shipped & live-verified 2026-06-26.
-> Next bucket-A SPA item: **A7 (EventPlayer download progress)** — verify each
-> against V1 source before building (see `files/v1-parity-audit.md`).
+> rename-during-move)**, **A6 (Chimes "Edit"/re-trim)** + **A7 (EventPlayer
+> download progress)** shipped & live-verified 2026-06-26.
+> Next bucket-A SPA item: **A8 (LightShows mobile checkbox overlap — needs design
+> decision first)** — verify each against V1 source before building (see
+> `files/v1-parity-audit.md`).
 >
 > Build/test via podman from PowerShell (see copilot-instructions.md) — never local WSL/cargo.
 >
@@ -1004,7 +1006,7 @@ LUNs) is the single make-or-break that still needs the car.**
 - [x] Switch camera angle (position preserved where possible). **(proven)**
 - [x] Navigate clips within an event (prev/next). **(A6b proven)**
 - [ ] Telemetry HUD overlay (SEI: speed/gear/brake/throttle/steering/AP-FSD), synced. **(partial: client-side SEI parse exists — A7; verify full HUD)**
-- [x] Download single angle + download whole event as ZIP. **(A8 proven — single-angle "Download Angle" + whole-clip "Download All" ZIP UI in EventPlayer; webd `GET|HEAD /api/clips/:id/export` + `/api/clips/:id/angles/:camera/download`; event-player.spec.ts "downloads —" happy-path + ro_usb disabled/inert tests, 28 passed)**
+- [x] Download single angle + download whole event as ZIP. **(A8 proven — single-angle "Download Angle" + whole-clip "Download All" ZIP UI in EventPlayer; webd `GET|HEAD /api/clips/:id/export` + `/api/clips/:id/angles/:camera/download`; event-player.spec.ts "downloads —" happy-path + ro_usb disabled/inert tests, 28 passed)** **(A7 2026-06-26 — V1 Preparing→Downloading…→reset cosmetic feedback added to BOTH buttons w/ re-entry guard; live-verified bundle `index-cXtV-Iin.js`, see `files/hw-results.md` §A7)**
 - [ ] Archive event to cloud. **(gated:B3)**
 - [ ] Delete event/clip (confirm) via privileged path-validated helper; car re-reads. **(partial: TeslaCam delete via handoff — verify end-to-end)**
 

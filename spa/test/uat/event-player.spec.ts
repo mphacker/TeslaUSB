@@ -3,6 +3,7 @@ import {
   expect,
   loadState,
   ARTIFACTS,
+  GADGET_STATUS_OK,
   type Probe,
 } from "./helpers";
 import type { Page } from "@playwright/test";
@@ -807,6 +808,65 @@ test.describe("event-player UAT", () => {
       path: mobileShot,
       contentType: "image/png",
     });
+
+    assertCleanConsole(probe);
+  });
+
+  test("downloads — click feedback shows Preparing then Downloading without breaking native download", async ({
+    page,
+    probe,
+  }) => {
+    await page.unroute("**/api/gadget/status");
+    await page.route("**/api/gadget/status", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(GADGET_STATUS_OK),
+      }),
+    );
+
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await gotoPlayerHudOff(page);
+
+    const src = await page.locator("#mainVideo").getAttribute("src");
+    const clipMatch = src?.match(/\/api\/clips\/(\d+)\/stream/);
+    expect(clipMatch, `mainVideo src did not include clip id: ${src}`).toBeTruthy();
+    const clipId = clipMatch![1];
+    const activeCamera = await page
+      .locator(".camera-option.active[data-camera]")
+      .first()
+      .getAttribute("data-camera");
+    expect(activeCamera, "active camera data-camera").toBeTruthy();
+
+    const exportButton = page.locator("#downloadButton");
+    const exportLabel = exportButton.locator(".camera-label");
+    const exportHref = `/api/clips/${clipId}/export`;
+    await expect(exportButton).toHaveAttribute("href", exportHref);
+    // Start listening BEFORE the click so we prove the native anchor download
+    // still fires even though the click also kicks off the cosmetic feedback.
+    const zipDlPromise = page.waitForEvent("download");
+    await exportButton.click();
+    // Cosmetic feedback engages immediately, and the href is NOT stripped while
+    // busy (busy only dims/blocks re-clicks — the in-flight download is real).
+    await expect(exportLabel).toHaveText("Preparing...");
+    await expect(exportButton).toHaveClass(/busy/);
+    await expect(exportButton).toHaveAttribute("href", exportHref);
+    const zipDl = await zipDlPromise;
+    expect(zipDl.suggestedFilename()).toBe(`clip-${clipId}.zip`);
+    await expect(exportLabel).toHaveText("Downloading...", { timeout: 3000 });
+
+    const angleButton = page.locator("#downloadAngleButton");
+    const angleLabel = angleButton.locator(".camera-label");
+    const angleHref = `/api/clips/${clipId}/angles/${activeCamera}/download`;
+    await expect(angleButton).toHaveAttribute("href", angleHref);
+    const angleDlPromise = page.waitForEvent("download");
+    await angleButton.click();
+    await expect(angleLabel).toHaveText("Preparing...");
+    await expect(angleButton).toHaveClass(/busy/);
+    await expect(angleButton).toHaveAttribute("href", angleHref);
+    const angleDl = await angleDlPromise;
+    expect(angleDl.suggestedFilename()).toBe(`clip-${clipId}-${activeCamera}.mp4`);
+    await expect(angleLabel).toHaveText("Downloading...", { timeout: 3000 });
 
     assertCleanConsole(probe);
   });

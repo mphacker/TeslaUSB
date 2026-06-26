@@ -46,6 +46,7 @@ export function Music() {
   const [folderInput, setFolderInput] = useState("");
   // Move-dialog destination (folder path relative under Music/, "" = root)
   const [moveDest, setMoveDest] = useState("");
+  const [moveNewName, setMoveNewName] = useState("");
 
   // ── Storage stats ──────────────────────────────────────────────────────────
   const fs = storageInfo?.filesystems[0] ?? null;
@@ -792,6 +793,16 @@ export function Music() {
                 </option>
               ))}
           </select>
+          <input
+            type="text"
+            value={moveNewName}
+            onInput={(e) =>
+              setMoveNewName((e.target as HTMLInputElement).value)
+            }
+            aria-label="New filename (optional)"
+            placeholder="Keep original name"
+            data-testid="music-move-newname"
+          />
           {lib.moveFail && (
             <p role="alert" style="color: var(--accent-error);">
               {lib.moveFail.message}
@@ -801,8 +812,9 @@ export function Music() {
             <button
               class="action-btn"
               onClick={() => {
-                lib.onConfirmMove(moveDest);
+                lib.onConfirmMove(moveDest, moveNewName);
                 setMoveDest("");
+                setMoveNewName("");
               }}
               disabled={lib.moveBusy}
               aria-busy={lib.moveBusy}
@@ -812,7 +824,11 @@ export function Music() {
             </button>{" "}
             <button
               class="action-btn"
-              onClick={lib.closeMoveDialog}
+              onClick={() => {
+                setMoveDest("");
+                setMoveNewName("");
+                lib.closeMoveDialog();
+              }}
               disabled={lib.moveBusy}
             >
               Cancel
@@ -823,4 +839,3 @@ export function Music() {
     </div>
   );
 }
-

@@ -242,7 +242,7 @@ export interface UseMusicLibrary {
   moveDialogRelPath: string | null;
   openMoveDialog: (relPath: string) => void;
   closeMoveDialog: () => void;
-  onConfirmMove: (destFolderPath: string) => void;
+  onConfirmMove: (destFolderPath: string, newName?: string) => void;
   moveBusy: boolean;
   moveFail: MediaFailure | null;
 
@@ -696,12 +696,29 @@ export function useMusicLibrary(): UseMusicLibrary {
     setMoveFail(null);
   }
 
-  async function onConfirmMove(destFolderPath: string) {
+  async function onConfirmMove(destFolderPath: string, newName?: string) {
     if (!moveDialogRelPath || moveBusy) return;
-    const filename = moveDialogRelPath.split("/").pop() ?? "";
+    const original = moveDialogRelPath.split("/").pop() ?? "";
+    const typed = (newName ?? "").trim().split(/[\\/]/).pop() ?? "";
+    let destName: string;
+    if (typed === "") {
+      destName = original;
+    } else {
+      const musicExts = ["mp3", "flac", "wav", "aac", "m4a"];
+      const hasExt = musicExts.some((e) =>
+        typed.toLowerCase().endsWith(`.${e}`),
+      );
+      if (hasExt) {
+        destName = typed;
+      } else {
+        const dot = original.lastIndexOf(".");
+        const srcExt = dot > 0 ? original.slice(dot) : "";
+        destName = `${typed}${srcExt}`;
+      }
+    }
     // `from` and `to` are subpaths relative under Music/ (no "Music/" prefix)
     const from = stripMusicPrefix(moveDialogRelPath);
-    const to = destFolderPath ? `${destFolderPath}/${filename}` : filename;
+    const to = destFolderPath ? `${destFolderPath}/${destName}` : destName;
     setMoveBusy(true);
     setMoveFail(null);
     const ac = new AbortController();
@@ -711,7 +728,7 @@ export function useMusicLibrary(): UseMusicLibrary {
       const sourceItem = items.find((i) => i.rel_path === moveDialogRelPath);
       addPendingOp({
         kind: "move",
-        label: filename,
+        label: destName,
         targetPath: `Music/${to}`,
         moveFrom: moveDialogRelPath,
         moveTo: `Music/${to}`,

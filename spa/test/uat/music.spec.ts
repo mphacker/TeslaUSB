@@ -1,4 +1,4 @@
-import { test, expect, loadState } from "./helpers";
+import { test, expect, loadState, GADGET_STATUS_OK } from "./helpers";
 import {
   gotoScreen,
   assertMediaChrome,
@@ -407,139 +407,177 @@ test.describe("music UAT", () => {
     await expect(page.locator(sel.deleteBtn("gone.mp3"))).toHaveCount(0);
   });
 
-  test("move file — two-phase: delete fires after copy confirmed, source disappears", async ({
-    page,
-  }, testInfo) => {
-    const sel = viewportSelectors(testInfo.project.name);
-    let musicCallCount = 0;
-    await page.route("**/api/music", (route) => {
-      if (route.request().method() !== "GET") return route.continue();
-      musicCallCount++;
-      let items: Array<{
-        name: string;
-        rel_path: string;
-        size_bytes: number;
-        modified: string | null;
-      }>;
-      if (musicCallCount === 1) {
-        // Initial: source at root + a keep-file so DaftPunk appears as a folder.
-        items = [
-          {
-            name: "track.mp3",
-            rel_path: "Music/track.mp3",
-            size_bytes: 1024,
-            modified: null,
-          },
-          {
-            name: ".teslausb-keep",
-            rel_path: "Music/DaftPunk/.teslausb-keep",
-            size_bytes: 0,
-            modified: null,
-          },
-        ];
-      } else if (musicCallCount === 2) {
-        // After copy lands: both source and destination present → phase 1 converges.
-        items = [
-          {
-            name: "track.mp3",
-            rel_path: "Music/track.mp3",
-            size_bytes: 1024,
-            modified: null,
-          },
-          {
-            name: ".teslausb-keep",
-            rel_path: "Music/DaftPunk/.teslausb-keep",
-            size_bytes: 0,
-            modified: null,
-          },
-          {
-            name: "track.mp3",
-            rel_path: "Music/DaftPunk/track.mp3",
-            size_bytes: 1024,
-            modified: null,
-          },
-        ];
-      } else {
-        // After source-delete: only destination present → phase 2 converges.
-        items = [
-          {
-            name: ".teslausb-keep",
-            rel_path: "Music/DaftPunk/.teslausb-keep",
-            size_bytes: 0,
-            modified: null,
-          },
-          {
-            name: "track.mp3",
-            rel_path: "Music/DaftPunk/track.mp3",
-            size_bytes: 1024,
-            modified: null,
-          },
-        ];
-      }
-      return route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: musicListBody(items),
+  for (const tc of [
+    {
+      name: "rename + move preserves source extension",
+      typedName: "renamed",
+      expectedTo: "DaftPunk/renamed.mp3",
+      expectedDestName: "renamed.mp3",
+    },
+    {
+      name: "blank rename keeps original filename",
+      typedName: "",
+      expectedTo: "DaftPunk/track.mp3",
+      expectedDestName: "track.mp3",
+    },
+    {
+      name: "explicit extension is respected",
+      typedName: "song.wav",
+      expectedTo: "DaftPunk/song.wav",
+      expectedDestName: "song.wav",
+    },
+  ]) {
+    test(`move file — ${tc.name}`, async ({ page }, testInfo) => {
+      const sel = viewportSelectors(testInfo.project.name);
+      let musicCallCount = 0;
+      await page.route("**/api/music", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        musicCallCount++;
+        let items: Array<{
+          name: string;
+          rel_path: string;
+          size_bytes: number;
+          modified: string | null;
+        }>;
+        if (musicCallCount === 1) {
+          // Initial: source at root + a keep-file so DaftPunk appears as a folder.
+          items = [
+            {
+              name: "track.mp3",
+              rel_path: "Music/track.mp3",
+              size_bytes: 1024,
+              modified: null,
+            },
+            {
+              name: ".teslausb-keep",
+              rel_path: "Music/DaftPunk/.teslausb-keep",
+              size_bytes: 0,
+              modified: null,
+            },
+          ];
+        } else if (musicCallCount === 2) {
+          // After copy lands: both source and destination present → phase 1 converges.
+          items = [
+            {
+              name: "track.mp3",
+              rel_path: "Music/track.mp3",
+              size_bytes: 1024,
+              modified: null,
+            },
+            {
+              name: ".teslausb-keep",
+              rel_path: "Music/DaftPunk/.teslausb-keep",
+              size_bytes: 0,
+              modified: null,
+            },
+            {
+              name: tc.expectedDestName,
+              rel_path: `Music/DaftPunk/${tc.expectedDestName}`,
+              size_bytes: 1024,
+              modified: null,
+            },
+          ];
+        } else {
+          // After source-delete: only destination present → phase 2 converges.
+          items = [
+            {
+              name: ".teslausb-keep",
+              rel_path: "Music/DaftPunk/.teslausb-keep",
+              size_bytes: 0,
+              modified: null,
+            },
+            {
+              name: tc.expectedDestName,
+              rel_path: `Music/DaftPunk/${tc.expectedDestName}`,
+              size_bytes: 1024,
+              modified: null,
+            },
+          ];
+        }
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: musicListBody(items),
+        });
       });
+
+      await page.route("**/api/music/move", (route) =>
+        route.fulfill({
+          status: 202,
+          contentType: "application/json",
+          body: QUEUED_BODY,
+        }),
+      );
+      await page.route("**/api/gadget/status", (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(GADGET_STATUS_OK),
+        }),
+      );
+      await page.route("**/api/music/delete", (route) =>
+        route.fulfill({
+          status: 202,
+          contentType: "application/json",
+          body: QUEUED_BODY,
+        }),
+      );
+
+      const consoleErrors: string[] = [];
+      page.on("console", (msg) => {
+        if (msg.type() === "error") consoleErrors.push(msg.text());
+      });
+      page.on("pageerror", (err) => consoleErrors.push(err.message));
+
+      await gotoScreen(page, PATH, SCREEN);
+      // Source file visible at root.
+      await expect(page.locator(sel.fileList)).toContainText("track.mp3");
+
+      // Open the move dialog from the visible layout.
+      await page.locator(sel.moveBtn("track.mp3")).click();
+      // Select DaftPunk as the destination.
+      await page.locator("[data-testid=music-move-dest]").selectOption("DaftPunk");
+      await page.locator("[data-testid=music-move-newname]").fill(tc.typedName);
+
+      // Capture move + phase-2 source-delete BEFORE clicking confirm.
+      const moveReqPromise = page.waitForRequest("**/api/music/move");
+      const deleteReqPromise = page.waitForRequest("**/api/music/delete");
+      await page.locator("[data-testid=music-move-confirm-btn]").click();
+
+      const moveReq = await moveReqPromise;
+      const moveBody = JSON.parse(moveReq.postData() ?? "{}");
+      expect(moveBody).toEqual({
+        from: "track.mp3",
+        to: tc.expectedTo,
+      });
+      if (tc.typedName === "song.wav") {
+        expect(moveBody.to.endsWith(".wav.mp3")).toBe(false);
+      }
+
+      // Phase-1 convergence fires the source-delete; verify stripped subpath.
+      const deleteReq = await deleteReqPromise;
+      expect(JSON.parse(deleteReq.postData() ?? "{}")).toEqual({
+        paths: ["track.mp3"],
+      });
+
+      // Phase-2 convergence: source is absent → root shows empty-folder state.
+      await expect(
+        page.locator("[data-testid=music-empty-folder]"),
+      ).toBeVisible({ timeout: 10000 });
+
+      // DaftPunk folder still present in folder list (visible layout).
+      await expect(page.locator(sel.folderList)).toContainText("DaftPunk");
+
+      // Navigate into DaftPunk and confirm the destination file is there.
+      await page.locator(sel.folderRow("DaftPunk")).click();
+      await expect(page.locator(sel.fileList)).toContainText(tc.expectedDestName);
+
+      expect(
+        consoleErrors,
+        `console errors during move flow: ${JSON.stringify(consoleErrors)}`,
+      ).toEqual([]);
     });
-
-    await page.route("**/api/music/move", (route) =>
-      route.fulfill({
-        status: 202,
-        contentType: "application/json",
-        body: QUEUED_BODY,
-      }),
-    );
-    await page.route("**/api/music/delete", (route) =>
-      route.fulfill({
-        status: 202,
-        contentType: "application/json",
-        body: QUEUED_BODY,
-      }),
-    );
-
-    const consoleErrors: string[] = [];
-    page.on("console", (msg) => {
-      if (msg.type() === "error") consoleErrors.push(msg.text());
-    });
-    page.on("pageerror", (err) => consoleErrors.push(err.message));
-
-    await gotoScreen(page, PATH, SCREEN);
-    // Source file visible at root
-    await expect(page.locator(sel.fileList)).toContainText("track.mp3");
-
-    // Open the move dialog from the visible layout
-    await page.locator(sel.moveBtn("track.mp3")).click();
-    // Select DaftPunk as the destination
-    await page.locator("[data-testid=music-move-dest]").selectOption("DaftPunk");
-
-    // Register listener for the phase-2 source-delete BEFORE clicking confirm.
-    const deleteReqPromise = page.waitForRequest("**/api/music/delete");
-    await page.locator("[data-testid=music-move-confirm-btn]").click();
-
-    // Phase-1 convergence fires the source-delete; verify the stripped subpath.
-    const deleteReq = await deleteReqPromise;
-    expect(JSON.parse(deleteReq.postData() ?? "{}")).toEqual({
-      paths: ["track.mp3"],
-    });
-
-    // Phase-2 convergence: source is absent → root shows empty-folder state.
-    await expect(
-      page.locator("[data-testid=music-empty-folder]"),
-    ).toBeVisible({ timeout: 10000 });
-
-    // DaftPunk folder still present in folder list (visible layout).
-    await expect(page.locator(sel.folderList)).toContainText("DaftPunk");
-
-    // Navigate into DaftPunk and confirm the destination file is there.
-    await page.locator(sel.folderRow("DaftPunk")).click();
-    await expect(page.locator(sel.fileList)).toContainText("track.mp3");
-
-    expect(
-      consoleErrors,
-      `console errors during move flow: ${JSON.stringify(consoleErrors)}`,
-    ).toEqual([]);
-  });
+  }
 
   test("file input accepts multiple files", async ({ page }) => {
     await gotoScreen(page, PATH, SCREEN);
@@ -555,6 +593,13 @@ test.describe("music UAT", () => {
     const sel = viewportSelectors(testInfo.project.name);
     let musicGetCount = 0;
     const postFilenames: string[] = [];
+    await page.route("**/api/gadget/status", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(GADGET_STATUS_OK),
+      }),
+    );
     await page.route("**/api/music", (route) => {
       const req = route.request();
       if (req.method() !== "GET") {
@@ -645,5 +690,3 @@ test.describe("music UAT", () => {
     ).toEqual([]);
   });
 });
-
-

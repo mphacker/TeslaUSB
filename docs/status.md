@@ -63,6 +63,10 @@
 > **NEXT (operator-queued):** systematic V1-parity audit across all parity screens
 > (exact-mirror UX). **Phase-2 (the deleter) stays deferred + GATED — do NOT start
 > autonomously.**
+> Parity-audit progress: **Slice 2 (indexer-liveness health dot)** + **A5 (Music
+> rename-during-move)** shipped & live-verified 2026-06-26. Next bucket-A SPA items:
+> **A6 (Chimes "Edit"/re-trim)**, **A7 (EventPlayer download progress)** — verify each
+> against V1 source before building (see `files/v1-parity-audit.md`).
 >
 > Build/test via podman from PowerShell (see copilot-instructions.md) — never local WSL/cargo.
 >
@@ -1274,6 +1278,20 @@ LUNs) is the single make-or-break that still needs the car.**
   exFAT (`/run/teslausb/media-ro`); two pre-existing orphaned empty dirs (`test`,
   `zz-deploytest`) deleted via folder-delete and removed. gadget never torn down
   (control-daemon-only restart), NRestarts=0. See `files/hw-results.md` "folder-delete".)**
+- [x] Rename a file during move (V1 parity — A5). **(DONE 2026-06-26 — V1's move dialog
+  prompts a destination folder THEN an optional new filename ("leave blank to keep name"); B-1's
+  move dialog had a destination select only. Added an optional filename input
+  (`data-testid=music-move-newname`, "Keep original name" placeholder) + destName algorithm in
+  `useMusicLibrary.onConfirmMove(dest, newName?)`: blank/whitespace → keep original; typed value
+  with a music extension → use as-is; typed value without one → append the SOURCE file's extension
+  (so webd's `check_extension` doesn't 422); path-traversal stripped via `split(/[\\/]/).pop()`.
+  Pure SPA change — `move_music {from,to}` already supported rename (the dest basename is `to`'s
+  last component). 3 files: `useMusicLibrary.ts`, `Music.tsx`, `music.spec.ts` (move test
+  parameterized into 3 cases asserting the `to` payload: renamed.mp3 / track.mp3 / song.wav).
+  GPT-5.5 reviewed clean. `npx playwright test music.spec.ts` 34/34 strict (zero-console). Deployed
+  to device (SPA static-dir swap, bundle `index-1Qwn-Imu.js`); live Playwright proved the live JS
+  emits `to:"DaftPunk/renamed.mp3"`, bundle actually loaded, 0 console errors, no real file moved.
+  See `files/hw-results.md` §A5.)**
 - [x] Media-drive storage usage (used/free/total). **(proven)**
 
 ### 4.7 Boombox — `Requirements.md` §4.7

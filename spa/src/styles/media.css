@@ -538,6 +538,16 @@ body.media-overlay-lock {
   border-radius: 8px;
   background: var(--bg-secondary);
 }
+.media-page .chime-editor-badge {
+  justify-self: start;
+  background: var(--btn-success-bg);
+  color: var(--btn-success-text);
+  padding: 4px 12px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
 .media-page .chime-editor-loading {
   display: flex;
   align-items: center;

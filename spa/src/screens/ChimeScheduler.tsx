@@ -109,6 +109,7 @@ interface ChimeSchedulerProps {
   pendingUpload?: PendingUpload | null;
   onActivated?: (filename: string, bytes: number) => void;
   onLibraryLoaded?: (library: LibraryEntry[]) => void;
+  onEditChime?: (filename: string) => void;
   activationBusy?: boolean;
   onBusyChange?: (busy: boolean) => void;
 }
@@ -117,6 +118,7 @@ export function ChimeScheduler({
   pendingUpload,
   onActivated,
   onLibraryLoaded,
+  onEditChime,
   activationBusy,
   onBusyChange,
 }: ChimeSchedulerProps = {}) {
@@ -1748,6 +1750,15 @@ export function ChimeScheduler({
                             >
                               Download
                             </a>
+                            <button
+                              type="button"
+                              class="action-btn"
+                              data-testid="library-edit"
+                              disabled={actionLocked || !onEditChime}
+                              onClick={() => onEditChime?.(c.filename)}
+                            >
+                              Edit
+                            </button>
                             <button
                               type="button"
                               class="action-btn primary"

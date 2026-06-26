@@ -60,6 +60,7 @@ interface ChimeAudioEditorProps {
   file: File;
   onUpload: (file: File) => Promise<void>;
   onCancel: () => void;
+  editingLabel?: string;
 }
 
 function toSecondsText(seconds: number): string {
@@ -103,7 +104,7 @@ function outputChannelCount(decoded: DecodedAudio | null): number {
   return decoded.channels.length > 2 ? 1 : Math.max(1, decoded.channels.length);
 }
 
-export function ChimeAudioEditor({ file, onUpload, onCancel }: ChimeAudioEditorProps) {
+export function ChimeAudioEditor({ file, onUpload, onCancel, editingLabel }: ChimeAudioEditorProps) {
   const engineRef = useRef<ChimeAudioEngine | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const loadTokenRef = useRef(0);
@@ -568,6 +569,11 @@ export function ChimeAudioEditor({ file, onUpload, onCancel }: ChimeAudioEditorP
 
   return (
     <section class="chime-editor-card" data-testid="chime-editor">
+      {editingLabel && (
+        <span class="chime-editor-badge" data-testid="chime-editor-editing-badge">
+          {editingLabel}
+        </span>
+      )}
       {mode === "loading" && (
         <p class="chime-editor-loading" role="status">
           <span class="chime-spinner" aria-hidden="true" />

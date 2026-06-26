@@ -1,4 +1,4 @@
-import { test, expect, type Probe } from "./helpers";
+import { test, expect, type Probe, GADGET_STATUS_OK } from "./helpers";
 import type { Page, Route, TestInfo } from "@playwright/test";
 import {
   assertMediaChrome,
@@ -1226,6 +1226,70 @@ test.describe("chime scheduler UAT (A3b)", () => {
 
     await expect(page.locator("[data-testid=activation-status]")).toContainText("Applying");
     expect(cap.libraryActivate).toEqual(["Sparkle.wav"]);
+    assertCleanConsole(probe);
+  });
+
+  test("library edit — opens editor from library chime with _edited suggestion", async ({
+    page,
+    probe,
+  }) => {
+    await installScheduler(page, {
+      ...emptySnapshot(),
+      library: [{ filename: "horn.wav", bytes: 2048 }],
+    });
+    await page.route("**/api/chime-scheduler/library/horn.wav/download", (route) =>
+      route.fulfill({ status: 200, contentType: "audio/wav", body: wavBuffer() }),
+    );
+    await page.route("**/api/gadget/status", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(GADGET_STATUS_OK),
+      }),
+    );
+    await gotoScheduler(page);
+
+    await page.locator("[data-testid=library-edit]").click();
+    await expect(page.locator("[data-testid=chime-editor]")).toBeVisible();
+    await expect(page.locator("[data-testid=chime-editor-editing-badge]")).toHaveText(
+      "Editing: horn.wav",
+    );
+    await expect(page.locator("[data-testid=chime-editor-filename]")).toHaveValue(
+      "horn_edited",
+    );
+
+    assertCleanConsole(probe);
+  });
+
+  test("library edit — suggests next _edited number when the name is taken", async ({
+    page,
+    probe,
+  }) => {
+    await installScheduler(page, {
+      ...emptySnapshot(),
+      library: [
+        { filename: "horn.wav", bytes: 2048 },
+        { filename: "horn_edited.wav", bytes: 2048 },
+      ],
+    });
+    await page.route("**/api/chime-scheduler/library/horn.wav/download", (route) =>
+      route.fulfill({ status: 200, contentType: "audio/wav", body: wavBuffer() }),
+    );
+    await page.route("**/api/gadget/status", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(GADGET_STATUS_OK),
+      }),
+    );
+    await gotoScheduler(page);
+
+    await page.locator("[data-testid=library-edit]").first().click();
+    await expect(page.locator("[data-testid=chime-editor]")).toBeVisible();
+    await expect(page.locator("[data-testid=chime-editor-filename]")).toHaveValue(
+      "horn_edited2",
+    );
+
     assertCleanConsole(probe);
   });
 

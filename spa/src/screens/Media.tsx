@@ -124,6 +124,44 @@ function catalogChimeName(raw: string): string {
   return (raw.split(/[\\/]/).pop() ?? raw).trim();
 }
 
+function filenameBase(name: string): string {
+  return name.replace(/\.[^.]+$/, "");
+}
+
+/** Port of V1 lock_chimes.js `generateUniqueFilename(base, '.wav', true)`:
+ * suggest the next free `_edited` name for re-trimming a library chime. First
+ * edit of `horn` → `horn_edited`, then `horn_edited2`, `horn_edited3`…; editing
+ * an already-`_edited[N]` name strips/increments the numeric suffix (never
+ * `horn_edited_edited` and never `_edited_2`). Collision check is on the full
+ * filename, matching V1. */
+function suggestEditedName(filename: string, library: LibraryEntry[]): string {
+  const ext = ".wav";
+  const base = filenameBase(filename);
+  const existing = new Set(library.map((entry) => entry.filename));
+  const edited = base.match(/^(.+?)_edited(\d*)$/);
+  let prefix: string;
+  let startNum: number | null;
+  if (edited) {
+    prefix = edited[1];
+    startNum = edited[2] ? parseInt(edited[2], 10) + 1 : 2;
+  } else {
+    prefix = base;
+    startNum = null;
+  }
+  if (startNum === null) {
+    const first = `${prefix}_edited${ext}`;
+    if (!existing.has(first)) return first;
+    startNum = 2;
+  }
+  let counter = startNum;
+  let name = `${prefix}_edited${counter}${ext}`;
+  while (existing.has(name)) {
+    counter += 1;
+    name = `${prefix}_edited${counter}${ext}`;
+  }
+  return name;
+}
+
 interface PendingUploadState {
   filename: string;
   bytes: number;
@@ -325,8 +363,10 @@ export function Media() {
 
   // ── Upload (install) state ──
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const editTokenRef = useRef(0);
   const [staged, setStaged] = useState<StagedChime[]>([]);
   const [editorFile, setEditorFile] = useState<File | null>(null);
+  const [editingLabel, setEditingLabel] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [childBusy, setChildBusy] = useState(false);
   const [uploadItems, setUploadItems] = useState<ChimeUploadItem[]>([]);
@@ -490,6 +530,8 @@ export function Media() {
 
   async function handleSelectedFiles(incoming: File[]) {
     if (incoming.length === 0) return;
+    editTokenRef.current += 1;
+    setEditingLabel(null);
     setUploadFail(null);
     setNotice(null);
     setUploadItems([]);
@@ -622,6 +664,7 @@ export function Media() {
       await api.uploadLibraryChime(uploadFile, ac.signal);
       applySingleUploadSuccess(catalogChimeName(uploadFile.name), uploadFile.size, setPendingUpload, setNotice);
       setEditorFile(null);
+      setEditingLabel(null);
       setUploadItems([]);
       setUploadProgress(null);
     } catch (err) {
@@ -638,6 +681,49 @@ export function Media() {
     } finally {
       if (uploadAbortRef.current === ac) uploadAbortRef.current = null;
       setUploading(false);
+    }
+  }
+
+  async function onEditChime(filename: string) {
+    const token = ++editTokenRef.current;
+    setUploadFail(null);
+    setNotice(null);
+    // Close any open editor while we fetch the source audio.
+    setEditorFile(null);
+    setEditingLabel(null);
+    const suggestedName = suggestEditedName(filename, library);
+
+    let blob: Blob;
+    try {
+      const res = await fetch(api.libraryDownloadUrl(filename));
+      if (!res.ok) {
+        if (editTokenRef.current === token) {
+          setUploadFail({
+            message: `Couldn’t load “${filename}” for editing. Please try again.`,
+            retryable: res.status >= 500,
+          });
+        }
+        return;
+      }
+      blob = await res.blob();
+    } catch {
+      if (editTokenRef.current === token) {
+        setUploadFail({
+          message: `Couldn’t load “${filename}” for editing. Please try again.`,
+          retryable: true,
+        });
+      }
+      return;
+    }
+    // A newer edit / file-pick / cancel superseded this one — drop stale result.
+    if (editTokenRef.current !== token) return;
+    const file = new File([blob], suggestedName, { type: "audio/wav" });
+    setEditingLabel(`Editing: ${filename}`);
+    setEditorFile(file);
+    if (typeof document !== "undefined") {
+      document
+        .getElementById("chimeUploadControls")
+        ?.scrollIntoView?.({ behavior: "smooth", block: "start" });
     }
   }
 
@@ -957,9 +1043,12 @@ export function Media() {
           {editorFile ? (
             <ChimeAudioEditor
               file={editorFile}
+              editingLabel={editingLabel ?? undefined}
               onUpload={handleEditorUpload}
               onCancel={() => {
+                editTokenRef.current += 1;
                 setEditorFile(null);
+                setEditingLabel(null);
                 setUploadFail(null);
                 setNotice(null);
               }}
@@ -1103,6 +1192,7 @@ export function Media() {
           pendingUpload={pendingUpload}
           onActivated={onChimeActivated}
           onLibraryLoaded={setLibrary}
+          onEditChime={onEditChime}
           activationBusy={!!pendingActivation}
           onBusyChange={setChildBusy}
         />

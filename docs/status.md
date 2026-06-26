@@ -63,9 +63,9 @@
 > **NEXT (operator-queued):** systematic V1-parity audit across all parity screens
 > (exact-mirror UX). **Phase-2 (the deleter) stays deferred + GATED — do NOT start
 > autonomously.**
-> Parity-audit progress: **Slice 2 (indexer-liveness health dot)** + **A5 (Music
-> rename-during-move)** shipped & live-verified 2026-06-26. Next bucket-A SPA items:
-> **A6 (Chimes "Edit"/re-trim)**, **A7 (EventPlayer download progress)** — verify each
+> Parity-audit progress: **Slice 2 (indexer-liveness health dot)**, **A5 (Music
+> rename-during-move)** + **A6 (Chimes "Edit"/re-trim)** shipped & live-verified 2026-06-26.
+> Next bucket-A SPA item: **A7 (EventPlayer download progress)** — verify each
 > against V1 source before building (see `files/v1-parity-audit.md`).
 >
 > Build/test via podman from PowerShell (see copilot-instructions.md) — never local WSL/cargo.
@@ -1079,6 +1079,23 @@ LUNs) is the single make-or-break that still needs the car.**
   FCP 96 ms, clean console — `spa/test/uat/chime-scheduler.spec.ts`,
   `spa/test/uat/artifacts/chime-rename-{desktop-1280,mobile-375}.png`,
   `perf-chime-rename-*.json`.)**
+- [x] Edit / re-trim a library chime (V1 parity — A6). **(DONE 2026-06-26 — V1's
+  `editChime()` reopens the trim editor in edit-mode: badge "Editing: <file>", a unique
+  `_edited` name suggestion, loads the existing chime audio, re-uploads as a NEW library file
+  (original untouched). Added per-row `Edit` button (`data-testid=library-edit`, order
+  Download→Edit→Set Active) + `onEditChime` prop in `ChimeScheduler.tsx`; `Media.tsx` fetches the
+  chime via `api.libraryDownloadUrl`, builds a `File` named by `suggestEditedName` — a faithful
+  port of V1's `generateUniqueFilename` (horn→horn_edited→horn_edited2…; strips/increments an
+  existing `_editedN`; full-filename collision check), opens the editor through a token-guarded
+  race-safe handler (edit/file-pick/cancel supersede a pending fetch); `editingLabel` badge in
+  `ChimeAudioEditor.tsx`; badge CSS in `media.css` mirroring V1's green pill. SPA-only, no backend
+  change. GPT-5.5 review found 3 issues (V1-parity name algo, `res.blob()` outside try, in-flight
+  race) → all fixed → focused re-review PASS. `npx playwright test chime-scheduler.spec.ts
+  chime-editor.spec.ts` 68/68 strict both viewports (+2 parity cases: `horn_edited`,
+  `horn_edited2`). Deployed to device (SPA static-dir swap, bundle `index-BLs6wbA5.js`); live
+  Playwright edited real `EngineRev.wav` → editor opened with decoded audio, badge
+  "Editing: EngineRev.wav", suggestion `EngineRev_edited`, 0 console errors / 0 non-2xx, no upload.
+  See `files/hw-results.md` §A6.)**
 - [x] **Set active** → copy library file to media-root `LockChime.wav`, applied
   **immediately** (per-partition hot-handoff on P2; no manual replug); UI shows which
   library chime is active. **(DONE 2026-06-15 bench-proven — `POST …/library/{name}/activate`

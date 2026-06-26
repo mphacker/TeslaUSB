@@ -82,6 +82,40 @@ the source of truth for the staging/manifest/verify steps; run it where a Linux
 `bash` *and* a PATH-visible `podman` coexist (its `--cross-podman` step is the same
 recipe above). For a one-off scoped binary deploy, the direct podman call is enough.
 
+## Speed & cost — risk-tiered effort (binding)
+
+Match the rigor to the risk. The heavy machinery (parallel second opinion +
+codex + review-until-clean + full Playwright) exists for changes where a bug is
+expensive; applying it uniformly to low-risk work is the main source of slow,
+costly iteration. **Default to the cheapest tier that fits; escalate by trigger.
+When unsure which tier applies, pick the higher one.**
+
+- **Tier 1 — Low risk.** Docs/comments/copy, CSS-only, test-only, config, or a
+  single-file surgical change (≲40 lines) with no behavior change to a daemon, a
+  contract, or the recording path. → **Opus edits directly at medium effort.** No
+  parallel second opinion, no separate review agent — self-review against the
+  five-axis checklist + the cheapest relevant test (unit and/or the one affected
+  Playwright spec). Commit.
+- **Tier 2 — Medium risk.** A feature or fix within one module/screen that is
+  well understood and touches no recording path, `gadgetd`/handoff,
+  `retentiond`/deletion, security, or shared contract. → codex implements; **one**
+  review pass (cheaper model first — see Model division — escalate to GPT-5.5 only
+  if it flags something real); cap the review loop at **1–2 cycles, not "until
+  clean"**. Scoped tests + the affected Playwright spec(s) during iteration; one
+  full UAT before commit.
+- **Tier 3 — High risk.** Recording path, `gadgetd`/handoff state machine,
+  `retentiond`/any delete, security, irreversible ops, cross-cutting architecture,
+  shared contracts, or anything live-hardware/deploy. → **full rigor, unchanged:**
+  mandatory parallel GPT-5.5 second opinion, codex implementation, GPT-5.5
+  review-until-clean, the full Playwright protocol, and the hardware-test skill.
+  No shortcuts here, ever.
+
+**Fail fast, cheap first.** Within any tier, run gates cheapest→most expensive
+and stop at the first failure: `tsc --noEmit` / `cargo clippy` → unit tests →
+affected Playwright spec → *(only if green)* full UAT + a review agent. **Never
+spawn a premium review or second-opinion agent on a diff that doesn't compile or
+fails unit tests.**
+
 ## Model division of labor (binding)
 
 The orchestrator is **Claude Opus 4.8**; it owns the session and routes work:
@@ -89,19 +123,31 @@ The orchestrator is **Claude Opus 4.8**; it owns the session and routes work:
 - **Plan / break-down / decide → Opus 4.8 (orchestrator).** Frames problems,
   designs the approach, owns `todos`/`todo_deps`/`plan.md`, sequences
   dependencies, and makes the final reconciled call. Opus does not delegate
-  planning.
-- **Write code → `gpt-5.3-codex` (background sub-agent).** All
-  substantive implementation (features, multi-file changes, porting v1 behavior)
-  is delegated with a self-contained prompt: exact files, the contract, the
-  constraints (this file + charter), and the acceptance tests to pass. Opus may
-  make only trivial/surgical edits directly. (Superseded `mai-code-1-flash-internal`
-  on 2026-06-18 by operator directive — mai produced unreliable self-reported
-  verification and unscoped workspace-wide reformatting; do NOT use mai for code.)
-- **Review → `gpt-5.5` (background sub-agent).** The single reviewer of record
-  for adversarial reviews, second opinions, and pre-deploy plan reviews.
+  planning. **Defaults to medium reasoning effort** for routine orchestration;
+  escalate to high/max only for genuinely hard planning or reconciliation.
+  Mechanical loop steps (running builds/tests, greps, log capture, status edits)
+  should be delegated to the `task`/Haiku agent rather than run inline at Opus
+  rates.
+- **Write code → `gpt-5.3-codex` (background sub-agent).** Substantive
+  implementation (features, multi-file changes, porting v1 behavior) is delegated
+  with a self-contained prompt: exact files, the contract, the constraints (this
+  file + charter), and the acceptance tests to pass. **Tier 1 changes Opus edits
+  directly; Tier 2–3 go to codex.** For a multi-step lane, keep **one persistent**
+  background coder agent (multi-turn) rather than spawning a fresh stateless agent
+  per micro-task — this stops re-transmitting files+contract+constraints every
+  cycle. (Superseded `mai-code-1-flash-internal` on 2026-06-18 by operator
+  directive — mai produced unreliable self-reported verification and unscoped
+  workspace-wide reformatting; do NOT use mai for code.)
+- **Review → tier-scaled.** **GPT-5.5 is the reviewer of record for Tier 3** and
+  the escalation target for all tiers — adversarial reviews, second opinions,
+  pre-deploy plan reviews. For **Tier 1–2** diffs a cheaper model
+  (`gpt-5.4-mini` / `gemini-3.5-flash` / `claude-haiku-4.5`) does the first-pass
+  review; escalate to GPT-5.5 only when it flags a real issue or the change is
+  Tier 3. **Batch related small changes into one review break** rather than
+  reviewing each micro-change.
 
 Delegation routes work, not judgment: Opus verifies the coder's diff (builds/tests/
-reads it) and reconciles GPT-5.5's findings against the artifact rather than
+reads it) and reconciles review findings against the artifact rather than
 rubber-stamping them.
 
 ## Implementation workflow — `docs/status.md` is the driver (binding)
@@ -118,14 +164,17 @@ runs the loop and routes each step per "Model division of labor":
    (`todos`/`todo_deps`). **Check for an existing spec/task/ADR first** and
    validate it still aligns with the open item; **if it has drifted, fix the
    spec/task before coding.** Write one if none exists.
-3. **Implement (GPT-5.3-codex).** Delegate the code to a `gpt-5.3-codex`
-   sub-agent with the acceptance tests it must make pass.
-4. **Review (GPT-5.5).** Adversarially review the coder's diff; reconcile findings;
-   **send issues back to the coder and re-review until clean** (bounded — escalate to
-   the operator if it doesn't converge in a few cycles).
-5. **Validate by test.** Unit/integration for logic; **Playwright for any UI
-   change** (see below); the hardware-test skill for device behavior. A box is
-   checked only after a tested-successful run.
+3. **Implement.** Tier 1: Opus edits directly. Tier 2–3: delegate the code to a
+   `gpt-5.3-codex` sub-agent with the acceptance tests it must make pass.
+4. **Review (tier-scaled).** Tier 1: self-review against the five-axis checklist.
+   Tier 2: one cheaper-model pass (escalate to GPT-5.5 only if it flags something
+   real), capped at 1–2 cycles. Tier 3: GPT-5.5 adversarial review, reconcile,
+   **send issues back to the coder and re-review until clean** (bounded — escalate
+   to the operator if it doesn't converge in a few cycles).
+5. **Validate by test (cheap first).** Unit/integration for logic; Playwright for
+   any UI change — **scoped to the affected spec(s) during iteration, full suite
+   once before commit** (see below); the hardware-test skill for device behavior.
+   A box is checked only after a tested-successful run.
 6. **Update `status.md`.** Tick `[x]`, link the evidence (Playwright report /
    `files/hw-results.md` / test name), and commit the status update with the change.
 
@@ -148,17 +197,24 @@ Run as many items in parallel as can proceed **without collision or rework**:
   reconciles, and updates `status.md` once per completed item.
 - **When unsure whether two items collide, assume they do and serialize.**
 
-## Problem-solving — mandatory parallel GPT-5.5 second opinion
+## Problem-solving — parallel GPT-5.5 second opinion (Tier 3)
 
-For any **non-trivial design decision or issue** (bug, regression, architecture
-call), don't rely solely on your own analysis: in parallel, launch a `gpt-5.5`
-sub-agent with a self-contained prompt (symptoms, relevant files, constraints,
-the specific question — it's stateless) to independently reach its own
-conclusion while you form yours. Then **reconcile**: surface your view, GPT-5.5's
-view, and the reconciled conclusion so the operator sees the reasoning; treat
-disagreement as a reason to dig deeper. Re-check the final fix/plan with GPT-5.5
-before anything risky (live-hardware or recording-critical). Any non-trivial
-code in the fix is implemented by GPT-5.3-codex, then reviewed by GPT-5.5.
+For any **Tier 3 decision** (recording-critical, `gadgetd`/handoff, retention/
+deletion, security, irreversible, architecture/contract-level, or live-hardware)
+— and for any genuinely hard or surprising **Tier 2** call at orchestrator
+discretion — don't rely solely on your own analysis: in parallel, launch a
+`gpt-5.5` sub-agent with a self-contained prompt (symptoms, relevant files,
+constraints, the specific question — it's stateless) to independently reach its
+own conclusion while you form yours. Then **reconcile**: surface your view,
+GPT-5.5's view, and the reconciled conclusion so the operator sees the reasoning;
+treat disagreement as a reason to dig deeper. Re-check the final fix/plan with
+GPT-5.5 before anything risky (live-hardware or recording-critical). Any
+non-trivial code in the fix is implemented by GPT-5.3-codex, then reviewed by
+GPT-5.5.
+
+For **Tier 1–2** work a separate parallel second opinion is **not** required —
+the tier-scaled code review already provides independent eyes; don't double-spend
+a design opinion *and* a review on the same low-risk change.
 
 ## UI work — Playwright verification is non-optional (binding)
 
@@ -168,7 +224,14 @@ styles, `webd` API payloads the UI consumes — anything served on
 "done". "Tests pass" and "endpoint returns 200" are not sufficient. Extend the
 existing UAT suite under `spa/test/uat/` rather than starting from scratch.
 
-For every UI-affecting change:
+**Tier the cost (binding).** During iteration, run only the **affected spec(s)**
+at one viewport with `UAT_FAST=1` for a fast inner loop. The full six-step
+protocol below — full suite, both viewports, perf + console + visual + wiring +
+report — is the **pre-commit gate, run once** before the change is marked done.
+Don't re-run 455×2 executions on every intermediate tweak; do run the full gate
+exactly once before commit, and always for Tier 3.
+
+For every UI-affecting change, the pre-commit gate asserts:
 
 1. **Drive the real page** (headless Chromium against `http://cybertruckusb.local/…`
    when deployed, or a local `webd` + SPA dev server) — confirm the browser runs

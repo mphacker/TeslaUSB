@@ -817,19 +817,27 @@ LUNs) is the single make-or-break that still needs the car.**
   GPT-5.5 adversarial review ×2 → caught 4 specs the first pass missed + the V1 hide-on-failure
   divergence; reconciled. Subsystem-richness of the health payload still tracked under §4.12.
   COMMITTED + PUSHED `38d160c` (mhackermsft/b1-clean).)**
-- [ ] **USB/recording mode status dot (Fix B — NEXT, semantics operator-approved).**
+- [x] **USB/recording mode status dot (Fix B — semantics operator-approved).**
   V1 `base.html` shows a mode dot in the top bar: GREEN `status-present` when
   `present && bound && udc_state=="configured"`; stays green w/ tooltip change on
-  `handoff_active`; GRAY `status-unknown` otherwise; NEVER blue `status-edit`. Same
-  `Shell.tsx` surface as the health dot (serialized after it — now unblocked). Apply the
-  V1-parity keep-last-known/stay-gray-on-failure pattern (no hide, no blue).
-  **Implementation cost (operator decision pending):** the mode dot must poll
-  `/api/gadget/status` globally, but the UAT harness spawns webd with NO gadget socket →
-  `/api/gadget/status` returns **503** on Windows → a global poll trips suite-wide
-  `assertCleanConsole`/`assertCleanNetwork`. Recommended fix = a centralized harness default
-  mock (`/api/gadget/status`→200, specs override for their own 503-degradation tests) +
-  add `/api/gadget/status` to `SHELL_POLL_ALLOWLIST` + extend `shell.spec.ts`. No prod-code
-  risk; mirrors real hardware (gadgetd present → 200). Resume here next session.
+  `handoff_active`; GRAY `status-unknown` otherwise; NEVER blue `status-edit`. **(B-shell-2
+  done: `Shell.tsx` adds a second 30s `api.gadgetStatus` poll driving a bare always-visible
+  `#mode-dot` span inserted between the health dot and the theme toggle — mirrors the health
+  dot's mounted/inFlight AbortController + superseded() out-of-order guard + no-op catch
+  (keep-last-colour). Always visible (V1 server-rendered it on every page), starts gray, never
+  blue. Tooltips: "USB drive connected to vehicle" / "USB drive busy — syncing" (handoff) /
+  "USB status unknown" — faithful approximations; exact V1 Python `mode_label` strings are
+  unrecoverable (v1 not in-repo) and are pending operator confirmation. Harness: the host's
+  webd has no gadget socket (→503), so `/api/gadget/status` added to the shared
+  `SHELL_POLL_ALLOWLIST` (one edit covers all 11 spec consumers incl. analytics' 2 loops) +
+  a centralized default 200 route (`GADGET_STATUS_OK`) in the `probe` fixture (`helpers.ts`),
+  overridable per-spec (Playwright LIFO) so media-hub's 503-degradation test still works.
+  `shell.spec.ts` extended: present/syncing/gray-on-503 class+tooltip, DOM order
+  (health→mode→theme), clean console/network + perf + screenshots at 375 + 1280.
+  media-hub's 503 test loosened "exactly one 503 log" → ">=1" (the new global poll legitimately
+  adds a second 503 when gadgetd is down; the non-503 `other` filter still catches real leaks).
+  Tier-2 flow: gpt-5.3-codex implemented, gpt-5.4-mini review clean, build clean, 38 affected
+  specs pass (shell + media-hub + analytics). COMMITTED `380a13e` (mhackermsft/b1-clean).)**
 - [ ] Samba status dot (shown only when sharing on). **(depends on §2)**
 - [ ] Primary nav (sidebar desktop / bottom tabs mobile), availability-gated items. **(partial: nav present; per-feature availability gating to finish — A9)**
 - [ ] Feedback model: JSON for AJAX + flash banners; live-poll views. **(partial: proven on media routes; not yet audited across all routes — see §5 error-code audit)**

@@ -461,13 +461,19 @@ test.describe("settings dashboard UAT", () => {
     await expect(page.locator("[data-testid=usb-gadget-unavailable]")).toBeVisible();
     await expect(page.locator("[data-testid=usb-present]")).toHaveCount(0);
     // Chromium itself logs a "Failed to load resource: …503…" console error for
-    // the failed fetch — that's the browser, not the app. Tolerate exactly that
-    // one message for /api/gadget/status; assert nothing else leaked (no
-    // pageerror, no warning, no other console error, no SECOND 503).
+    // each failed fetch — that's the browser, not the app. Two independent
+    // consumers poll /api/gadget/status when gadgetd is down — the settings USB
+    // card AND the global shell mode dot — so >=1 such browser log is expected
+    // (each honestly degrades). Tolerate any number of these /api/gadget/status
+    // 503 logs; assert nothing else leaked (no pageerror, no warning, no other
+    // console error).
     const expected503 = probe.consoleErrors.filter(
       (e) => e.text.includes("503") && e.location.includes("/api/gadget/status"),
     );
-    expect(expected503.length, "expected exactly one 503 resource-load log").toBe(1);
+    expect(
+      expected503.length,
+      "expected at least one 503 resource-load log",
+    ).toBeGreaterThanOrEqual(1);
     const other = probe.consoleErrors.filter(
       (e) => !(e.text.includes("503") && e.location.includes("/api/gadget/status")),
     );

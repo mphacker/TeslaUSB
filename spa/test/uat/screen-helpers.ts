@@ -82,10 +82,14 @@ export function assertCleanConsole(probe: Probe) {
   ).toEqual([]);
 }
 
-// Shell polls health on every page for v1 parity; allow only this global read.
+// Shell polls health + gadget status on every page for v1 parity; allow only
+// these global reads.
 // Exported so the per-screen read-only specs (which inline their own /api/
 // guards rather than calling assertReadOnly) can skip the same global poll.
-export const SHELL_POLL_ALLOWLIST = new Set(["/api/system/health"]);
+export const SHELL_POLL_ALLOWLIST = new Set([
+  "/api/system/health",
+  "/api/gadget/status",
+]);
 
 /** No mutating HTTP, no websockets, no /api/ calls, no mutation surface. */
 export async function assertReadOnly(

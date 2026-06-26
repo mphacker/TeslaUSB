@@ -1,4 +1,11 @@
-import { test, expect, loadState, ARTIFACTS, type Probe } from "./helpers";
+import {
+  test,
+  expect,
+  loadState,
+  ARTIFACTS,
+  GADGET_STATUS_OK,
+  type Probe,
+} from "./helpers";
 import {
   assertCleanConsole,
   assertCleanNetwork,
@@ -55,9 +62,113 @@ test.describe("shell UAT", () => {
     await expect(link).toHaveAttribute("title", /\S+/);
     await expect(link).toHaveAttribute("aria-label", /\S+/);
 
+    const modeDot = page.locator("#mode-dot");
+    await expect(modeDot).toBeVisible();
+    await expect(modeDot).toHaveClass(/\bstatus-present\b/);
+    await expect(modeDot).toHaveAttribute("title", "USB drive connected to vehicle");
+    await expect(modeDot).toHaveAttribute("aria-label", "USB drive connected to vehicle");
+    const shellOrder = await page.locator(".top-bar-right").evaluate((el) => {
+      const nodes = Array.from(el.children);
+      const idx = (selector: string) =>
+        nodes.findIndex((n) => n.matches(selector));
+      return {
+        health: idx("#health-dot-link"),
+        mode: idx("#mode-dot"),
+        theme: idx(".theme-toggle-btn"),
+      };
+    });
+    expect(shellOrder.health).toBeGreaterThanOrEqual(0);
+    expect(shellOrder.mode).toBeGreaterThan(shellOrder.health);
+    expect(shellOrder.theme).toBeGreaterThan(shellOrder.mode);
+
     assertCleanConsole(currentProbe);
     assertCleanNetwork(currentProbe);
     await captureScreenshot(page, testInfo, SCREEN);
+  });
+
+  test("mode dot stays visible and gray when gadget status is unavailable", async ({
+    page,
+    probe,
+  }) => {
+    const currentProbe: Probe = probe;
+    await page.unroute("**/api/gadget/status");
+    await page.route("**/api/gadget/status", (route) =>
+      route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "gadget unavailable" }),
+      }),
+    );
+
+    await page.goto(PATH, { waitUntil: "load" });
+    await expect(page.locator(".container[data-screen='cloud-archive']")).toBeVisible();
+
+    const modeDot = page.locator("#mode-dot");
+    await expect(modeDot).toBeVisible();
+    await expect(modeDot).toHaveClass(/\bstatus-unknown\b/);
+    await expect(modeDot).toHaveAttribute("title", "USB status unknown");
+    await expect(modeDot).toHaveAttribute("aria-label", "USB status unknown");
+
+    const expected503 = currentProbe.consoleErrors.filter(
+      (e) => e.text.includes("503") && e.location.includes("/api/gadget/status"),
+    );
+    expect(expected503.length, "expected exactly one 503 resource-load log").toBe(1);
+    const otherConsoleErrors = currentProbe.consoleErrors.filter(
+      (e) => !(e.text.includes("503") && e.location.includes("/api/gadget/status")),
+    );
+    expect(
+      otherConsoleErrors,
+      `unexpected console error(s): ${JSON.stringify(otherConsoleErrors)}`,
+    ).toEqual([]);
+    expect(
+      currentProbe.pageErrors,
+      `pageerror(s): ${JSON.stringify(currentProbe.pageErrors)}`,
+    ).toEqual([]);
+    expect(
+      currentProbe.consoleWarnings,
+      `console warning(s): ${JSON.stringify(currentProbe.consoleWarnings)}`,
+    ).toEqual([]);
+    expect(
+      currentProbe.failedRequests,
+      `failed request(s): ${JSON.stringify(currentProbe.failedRequests)}`,
+    ).toEqual([]);
+    const bad = currentProbe.responses.filter((r) => {
+      const u = new URL(r.url);
+      return u.pathname === "/api/gadget/status" && r.status === 503;
+    });
+    expect(bad.length).toBeGreaterThanOrEqual(1);
+    const otherBad = currentProbe.responses.filter((r) => {
+      const u = new URL(r.url);
+      return r.status >= 400 && u.pathname !== "/api/gadget/status";
+    });
+    expect(otherBad, `unexpected non-2xx: ${JSON.stringify(otherBad)}`).toEqual([]);
+  });
+
+  test("mode dot stays green and shows syncing label during handoff", async ({
+    page,
+    probe,
+  }) => {
+    const currentProbe: Probe = probe;
+    await page.unroute("**/api/gadget/status");
+    await page.route("**/api/gadget/status", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ...GADGET_STATUS_OK, handoff_active: true }),
+      }),
+    );
+
+    await page.goto(PATH, { waitUntil: "load" });
+    await expect(page.locator(".container[data-screen='cloud-archive']")).toBeVisible();
+
+    const modeDot = page.locator("#mode-dot");
+    await expect(modeDot).toBeVisible();
+    await expect(modeDot).toHaveClass(/\bstatus-present\b/);
+    await expect(modeDot).toHaveAttribute("title", "USB drive busy — syncing");
+    await expect(modeDot).toHaveAttribute("aria-label", "USB drive busy — syncing");
+
+    assertCleanConsole(currentProbe);
+    assertCleanNetwork(currentProbe);
   });
 
   test("theme toggle persists and flips both ways", async ({ page }) => {

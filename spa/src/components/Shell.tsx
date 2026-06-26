@@ -73,6 +73,7 @@ export function Shell({
   const [theme, setTheme] = useState<"light" | "dark">(currentTheme());
   const dotRef = useRef<HTMLSpanElement>(null);
   const linkRef = useRef<HTMLAnchorElement>(null);
+  const modeDotRef = useRef<HTMLSpanElement>(null);
 
   useEffect(() => {
     let timer: number | undefined;
@@ -107,6 +108,46 @@ export function Shell({
         // parity: base.html's poll() does nothing on !r.ok / catch
         // ("network blip — keep last known colour"); the dot's only hidden
         // state is its pre-first-success default.
+      }
+    }
+    void poll().catch(() => {});
+    timer = window.setInterval(() => void poll().catch(() => {}), 30000);
+    return () => {
+      mounted = false;
+      inFlight?.abort();
+      if (timer) window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    let timer: number | undefined;
+    let mounted = true;
+    let inFlight: AbortController | undefined;
+    async function poll() {
+      const ctrl = new AbortController();
+      inFlight?.abort();
+      inFlight = ctrl;
+      // Guard against an out-of-order resolve: once a newer tick (or unmount)
+      // supersedes this poll, its result must not overwrite the dot with stale
+      // data. (Aborts are swallowed below — keep the last known colour.)
+      const superseded = () => !mounted || inFlight !== ctrl;
+      try {
+        const g = await api.gadgetStatus(ctrl.signal);
+        if (superseded()) return;
+        const present = g.present && g.bound && g.udc_state === "configured";
+        const dot = modeDotRef.current;
+        if (!dot) return;
+        const label = present
+          ? g.handoff_active
+            ? "USB drive busy — syncing"
+            : "USB drive connected to vehicle"
+          : "USB status unknown";
+        dot.className = `status-dot ${present ? "status-present" : "status-unknown"}`;
+        dot.title = label;
+        dot.setAttribute("aria-label", label);
+      } catch {
+        // Network blip or abort (supersede/unmount included) — keep the last
+        // known dot colour.
       }
     }
     void poll().catch(() => {});
@@ -172,6 +213,14 @@ export function Shell({
               ref={dotRef}
             />
           </a>
+          <span
+            class="status-dot status-unknown"
+            id="mode-dot"
+            data-status-dot="mode"
+            title="USB status unknown"
+            aria-label="USB status unknown"
+            ref={modeDotRef}
+          />
           <button
             class="theme-toggle-btn"
             onClick={toggleTheme}

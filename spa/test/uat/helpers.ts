@@ -33,6 +33,23 @@ export interface Probe {
   failedRequests: { url: string; failure: string }[];
 }
 
+export const GADGET_STATUS_OK = {
+  present: true,
+  bound: true,
+  bound_udc: "fe980000.usb",
+  udc_state: "configured",
+  lun_file: "/data/teslausb/cam.img",
+  media_lun_file: "/data/teslausb/media.img",
+  handoff_active: false,
+  pending_mutations: 0,
+  applying_mutations: 0,
+  media_ro_mounted: true,
+  media_ro_path: "/run/teslausb/media-ro",
+  media_ro_error: null,
+  last_handoff_id: "h-42",
+  last_result: "done",
+};
+
 export const test = base.extend<{ probe: Probe }>({
   probe: async ({ page }, use) => {
     const probe: Probe = {
@@ -63,6 +80,13 @@ export const test = base.extend<{ probe: Probe }>({
       probe.failedRequests.push({
         url: r.url(),
         failure: r.failure()?.errorText ?? "unknown",
+      }),
+    );
+    await page.route("**/api/gadget/status", (r) =>
+      r.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(GADGET_STATUS_OK),
       }),
     );
     await use(probe);

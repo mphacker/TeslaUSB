@@ -140,7 +140,7 @@ export function LicensePlates() {
                         data-testid="license-plates-empty"
                       >
                         <Icon name="image" class="license-plates-empty-icon" />
-                        <p>No custom license plates installed yet.</p>
+                        <p>No license-plate files found in the LicensePlate folder.</p>
                       </div>
                     </td>
                   </tr>
@@ -173,6 +173,14 @@ export function LicensePlates() {
                         <td class="media-card-title">{item.name}</td>
                         <td data-label="Size">{fmtBytes(item.size_bytes)}</td>
                         <td class="media-card-actions">
+                          <a
+                            class="action-btn"
+                            href={api.mediaContentUrl(item.rel_path, item.modified)}
+                            download={item.name}
+                            aria-label={`Download ${item.name}`}
+                          >
+                            Download
+                          </a>{" "}
                           <button
                             class="action-btn"
                             onClick={() => cat.onRequestRemove(item.name)}

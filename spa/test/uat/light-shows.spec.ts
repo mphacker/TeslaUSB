@@ -54,6 +54,17 @@ test.describe("light shows UAT", () => {
     await expect(audio).toHaveCount(1);
     await expect(audio.first()).toHaveAttribute("preload", "none");
     await expect(audio.first()).toHaveAttribute("src", /\/api\/media\/content\?path=LightShow%2FShow\.mp3&v=/);
+    for (const [name, encoded] of [
+      ["Show.mp3", "LightShow%2FShow.mp3"],
+      ["Show.fseq", "LightShow%2FShow.fseq"],
+    ] as const) {
+      const download = page.locator(`a[aria-label="Download ${name}"]`);
+      await expect(download).toHaveAttribute("download", name);
+      await expect(download).toHaveAttribute(
+        "href",
+        new RegExp(`/api/media/content\\?path=${encoded}&v=`),
+      );
+    }
     // preload="none" must defer the byte fetch: nothing hits the content endpoint on render.
     await page.waitForTimeout(200);
     expect(
@@ -90,7 +101,7 @@ test.describe("light shows UAT", () => {
     // Honest empty state from real GET /api/lightshows.
     await expect(page.locator("[data-testid=light-shows-empty]")).toBeVisible();
     await expect(page.locator("[data-testid=light-shows-empty]")).toContainText(
-      "No light show files installed yet",
+      "No light show files found in the LightShow folders",
     );
   });
 

@@ -19,7 +19,7 @@ const PATH = "/wraps";
 const SCREEN = "wraps";
 
 test.describe("wraps UAT", () => {
-  test("mocked list — preview thumbnail renders real image bytes", async ({ page }) => {
+  test("mocked list — dimensions column and per-row download link render", async ({ page }) => {
     await page.route("**/api/wraps", (route) => {
       if (route.request().method() !== "GET") return route.continue();
       return route.fulfill({
@@ -46,7 +46,17 @@ test.describe("wraps UAT", () => {
       "src",
       /\/api\/media\/content\?path=Wraps%2FUAT-Wrap\.png&v=/,
     );
-    await expect.poll(async () => thumb.evaluate((el: HTMLImageElement) => el.naturalWidth)).toBeGreaterThan(0);
+    await expect(page.locator("th.wraps-dimensions-col")).toHaveText("Dimensions");
+    const row = page.locator(".wraps-table tbody tr").first();
+    const download = row.locator('a[aria-label="Download UAT-Wrap.png"]');
+    await expect(download).toHaveAttribute("download", "UAT-Wrap.png");
+    await expect(download).toHaveAttribute(
+      "href",
+      /\/api\/media\/content\?path=Wraps%2FUAT-Wrap\.png&v=/,
+    );
+    await expect(row.locator('td[data-label="Dimensions"]')).toContainText(
+      /^(—|\d+x\d+)$/,
+    );
   });
 
   test("parity — media nav active, pills, requirements/upload-form/empty", async ({
@@ -73,7 +83,7 @@ test.describe("wraps UAT", () => {
     await expect(page.locator("[data-testid=wraps-library]")).toBeVisible();
     await expect(page.locator("[data-testid=wraps-empty]")).toBeVisible();
     await expect(page.locator("[data-testid=wraps-empty]")).toContainText(
-      "No custom wraps installed yet",
+      "No custom wrap files found in the Wraps folder",
     );
   });
 
@@ -215,4 +225,3 @@ test.describe("wraps UAT", () => {
     ).toBeVisible();
   });
 });
-

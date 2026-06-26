@@ -1,4 +1,5 @@
 import { Icon } from "../components/Icon";
+import { useState } from "preact/hooks";
 import { MediaPills } from "../components/MediaPills";
 import { BulkDeleteBar } from "../components/BulkDeleteBar";
 import { useScreenHook } from "../components/screenHook";
@@ -26,6 +27,7 @@ export function Wraps() {
     bulkDelete: api.bulkDeleteWraps,
     accept: [".png"],
   });
+  const [dims, setDims] = useState<Record<string, string>>({});
 
   return (
     <div class="container media-page" data-page="wraps" data-screen="wraps">
@@ -129,6 +131,7 @@ export function Wraps() {
                   )}
                   <th class="wraps-preview-col">Preview</th>
                   <th class="wraps-filename-col">Filename</th>
+                  <th class="wraps-dimensions-col">Dimensions</th>
                   <th class="wraps-size-col">Size</th>
                   <th class="wraps-actions-col">Actions</th>
                 </tr>
@@ -136,10 +139,10 @@ export function Wraps() {
               <tbody>
                 {cat.state.items.length === 0 ? (
                   <tr>
-                    <td colSpan={4}>
+                    <td colSpan={5}>
                       <div class="wraps-empty" data-testid="wraps-empty">
                         <Icon name="palette" class="wraps-empty-icon" />
-                        <p>No custom wraps installed yet.</p>
+                        <p>No custom wrap files found in the Wraps folder.</p>
                       </div>
                     </td>
                   </tr>
@@ -167,11 +170,29 @@ export function Wraps() {
                             width={64}
                             height={64}
                             data-testid="wraps-thumb"
+                            onLoad={(e) => {
+                              const t = e.currentTarget;
+                              if (t.naturalWidth) {
+                                setDims((d) => ({
+                                  ...d,
+                                  [item.rel_path]: `${t.naturalWidth}x${t.naturalHeight}`,
+                                }));
+                              }
+                            }}
                           />
                         </td>
                         <td class="media-card-title">{item.name}</td>
+                        <td data-label="Dimensions">{dims[item.rel_path] ?? "—"}</td>
                         <td data-label="Size">{fmtBytes(item.size_bytes)}</td>
                         <td class="media-card-actions">
+                          <a
+                            class="action-btn"
+                            href={api.mediaContentUrl(item.rel_path, item.modified)}
+                            download={item.name}
+                            aria-label={`Download ${item.name}`}
+                          >
+                            Download
+                          </a>{" "}
                           <button
                             class="action-btn"
                             onClick={() => cat.onRequestRemove(item.name)}

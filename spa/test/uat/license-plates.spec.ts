@@ -47,6 +47,13 @@ test.describe("license plates UAT", () => {
       /\/api\/media\/content\?path=LicensePlate%2FUAT-Plate\.png&v=/,
     );
     await expect.poll(async () => thumb.evaluate((el: HTMLImageElement) => el.naturalWidth)).toBeGreaterThan(0);
+    const row = page.locator(".license-plates-table tbody tr").first();
+    const download = row.locator('a[aria-label="Download UAT-Plate.png"]');
+    await expect(download).toHaveAttribute("download", "UAT-Plate.png");
+    await expect(download).toHaveAttribute(
+      "href",
+      /\/api\/media\/content\?path=LicensePlate%2FUAT-Plate\.png&v=/,
+    );
   });
 
   test("parity — media nav active, pills, requirements/upload-form/empty", async ({
@@ -89,7 +96,7 @@ test.describe("license plates UAT", () => {
     ).toBeVisible();
     await expect(
       page.locator("[data-testid=license-plates-empty]"),
-    ).toContainText("No custom license plates installed yet");
+    ).toContainText("No license-plate files found in the LicensePlate folder");
   });
 
   test("wiring — served HTML runs the built bundle and the plates module ran", async ({

@@ -127,7 +127,7 @@ export function LightShows() {
                     <td colSpan={5}>
                       <div class="light-shows-empty" data-testid="light-shows-empty">
                         <Icon name="sparkles" class="empty-icon" />
-                        <p>No light show files installed yet.</p>
+                        <p>No light show files found in the LightShow folders.</p>
                       </div>
                     </td>
                   </tr>
@@ -162,6 +162,14 @@ export function LightShows() {
                           )}
                         </td>
                         <td class="media-card-actions">
+                          <a
+                            class="action-btn"
+                            href={api.mediaContentUrl(item.rel_path, item.modified)}
+                            download={item.name}
+                            aria-label={`Download ${item.name}`}
+                          >
+                            Download
+                          </a>{" "}
                           <button
                             class="action-btn"
                             onClick={() => cat.onRequestRemove(item.name)}

@@ -300,14 +300,26 @@ export function MediaHub() {
                 style="display:grid; grid-template-columns:auto auto 1fr; gap:6px 12px; align-items:center; font-size:0.9rem;"
               >
                 {SUBSYSTEMS.map((sub) => {
-                  // Video Indexer is catalog-derived (client-side); every other
-                  // row comes from the probe payload, or stays unknown/"—".
-                  const block =
-                    sub.key === "indexer"
-                      ? indexer
-                      : (health?.subsystems?.[sub.key] ?? null);
-                  const sev = block?.severity ?? "unknown";
-                  const msg = block?.message ?? "—";
+                  let sev: string;
+                  let msg: string;
+                  if (sub.key === "indexer") {
+                    const webdIdx = health?.subsystems?.indexer ?? null;
+                    const cat = indexer;
+                    sev =
+                      webdIdx && webdIdx.severity !== "unknown"
+                        ? webdIdx.severity
+                        : (cat?.severity ?? "unknown");
+                    const catMsg = cat?.message ?? null;
+                    if (webdIdx && (webdIdx.severity === "warn" || webdIdx.severity === "error")) {
+                      msg = catMsg ? `${webdIdx.message} — ${catMsg}` : webdIdx.message;
+                    } else {
+                      msg = catMsg ?? "—";
+                    }
+                  } else {
+                    const block = health?.subsystems?.[sub.key] ?? null;
+                    sev = block?.severity ?? "unknown";
+                    msg = block?.message ?? "—";
+                  }
                   return (
                     <Fragment key={sub.key}>
                       <div>

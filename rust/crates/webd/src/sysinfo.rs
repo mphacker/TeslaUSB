@@ -148,6 +148,8 @@ pub struct SysPaths {
     pub archive_root: PathBuf,
     /// Retention worker heartbeat path.
     pub worker_health_file: PathBuf,
+    /// `indexd` heartbeat path.
+    pub indexer_health_file: PathBuf,
 }
 
 /// One `{severity, message}` row of `GET /api/system/health`.
@@ -429,11 +431,10 @@ fn worker_block(raw: Option<String>, now: i64) -> HealthBlock {
         Ok(parsed) => parsed,
         Err(_) => return HealthBlock::new(Severity::Unknown, "Worker status unavailable"),
     };
-    let age = if now >= parsed.updated_at {
-        now - parsed.updated_at
-    } else {
-        0
-    };
+    // saturating_sub guards against a corrupt-but-parseable updated_at
+    // (e.g. i64::MIN) overflowing the subtraction; .max(0) clamps negative
+    // clock skew (updated_at in the future) to a zero age.
+    let age = now.saturating_sub(parsed.updated_at).max(0);
     if age > DEAD_SECS {
         return HealthBlock::new(Severity::Error, "Worker not running");
     }
@@ -447,11 +448,7 @@ fn worker_block(raw: Option<String>, now: i64) -> HealthBlock {
         return HealthBlock::new(Severity::Ok, "Idle, queue empty");
     }
     let last_progress_at = parsed.last_progress_at.unwrap_or(parsed.updated_at);
-    let since_progress = if now >= last_progress_at {
-        now - last_progress_at
-    } else {
-        0
-    };
+    let since_progress = now.saturating_sub(last_progress_at).max(0);
     if since_progress > PROGRESS_STALE {
         return HealthBlock::new(
             Severity::Warn,
@@ -467,14 +464,50 @@ fn worker_block(raw: Option<String>, now: i64) -> HealthBlock {
     HealthBlock::new(Severity::Ok, format!("{} pending", parsed.pending))
 }
 
+fn indexer_block(raw: Option<String>, now: i64) -> HealthBlock {
+    const STALE_SECS: i64 = 180;
+    const DEAD_SECS: i64 = 600;
+
+    #[derive(Debug, Deserialize)]
+    struct IndexerHeartbeat {
+        #[serde(rename = "schema")]
+        _schema: u32,
+        updated_at: i64,
+        running: bool,
+    }
+
+    let Some(raw) = raw else {
+        return HealthBlock::new(Severity::Unknown, "Indexer status unavailable");
+    };
+    let parsed: IndexerHeartbeat = match serde_json::from_str(&raw) {
+        Ok(parsed) => parsed,
+        Err(_) => return HealthBlock::new(Severity::Unknown, "Indexer status unavailable"),
+    };
+    // saturating_sub guards a corrupt updated_at from overflowing; .max(0)
+    // clamps future-dated (clock-skew) heartbeats to a zero age.
+    let age = now.saturating_sub(parsed.updated_at).max(0);
+    if age > DEAD_SECS {
+        return HealthBlock::new(Severity::Error, "Indexer not running");
+    }
+    if age > STALE_SECS {
+        return HealthBlock::new(Severity::Warn, "Indexer stalled");
+    }
+    if !parsed.running {
+        return HealthBlock::new(Severity::Error, "Indexer not running");
+    }
+    HealthBlock::new(Severity::Ok, "Indexer healthy")
+}
+
 /// Compose `GET /api/system/health` from the probe.
 #[must_use]
 pub fn system_health(probe: &dyn SystemProbe, paths: &SysPaths, now: i64) -> SystemHealth {
     let root = paths.archive_root.as_path();
     let worker = worker_block(probe.read_file_string(&paths.worker_health_file), now);
+    let indexer = indexer_block(probe.read_file_string(&paths.indexer_health_file), now);
     let blocks = [
         ("gadget", gadget_block(probe)),
         ("worker", (severity_from_wire(worker.severity), worker)),
+        ("indexer", (severity_from_wire(indexer.severity), indexer)),
         ("disk", disk_block(probe, root)),
         ("storage_writable", writable_block(probe, root)),
     ];
@@ -768,7 +801,8 @@ mod tests {
         writable: bool,
         udc: Option<String>,
         mount: Option<MountInfo>,
-        file: Option<String>,
+        worker_file: Option<String>,
+        indexer_file: Option<String>,
         cpu_temp: Option<i64>,
     }
 
@@ -788,8 +822,14 @@ mod tests {
         fn mount_for(&self, _path: &Path) -> Option<MountInfo> {
             self.mount.clone()
         }
-        fn read_file_string(&self, _path: &Path) -> Option<String> {
-            self.file.clone()
+        fn read_file_string(&self, path: &Path) -> Option<String> {
+            if path == paths().worker_health_file.as_path() {
+                return self.worker_file.clone();
+            }
+            if path == paths().indexer_health_file.as_path() {
+                return self.indexer_file.clone();
+            }
+            None
         }
         fn cpu_temp_millic(&self) -> Option<i64> {
             self.cpu_temp
@@ -800,6 +840,7 @@ mod tests {
         SysPaths {
             archive_root: PathBuf::from("/data/teslausb/archive"),
             worker_health_file: PathBuf::from("/run/teslausb/retentiond.health.json"),
+            indexer_health_file: PathBuf::from("/run/teslausb/indexd.health.json"),
         }
     }
 
@@ -949,6 +990,96 @@ mod tests {
         );
         assert_eq!(block.severity, "error");
         assert_eq!(block.message, "Worker not running");
+    }
+
+    #[test]
+    fn worker_block_corrupt_updated_at_does_not_overflow() {
+        // A parseable-but-garbage updated_at must not panic/overflow the age
+        // subtraction; i64::MIN saturates to a huge age → dead.
+        let block = worker_block(
+            Some(
+                r#"{"schema":1,"updated_at":-9223372036854775808,"running":true,"pending":0,"last_progress_at":0}"#
+                    .to_owned(),
+            ),
+            1_000,
+        );
+        assert_eq!(block.severity, "error");
+        assert_eq!(block.message, "Worker not running");
+    }
+
+    #[test]
+    fn indexer_block_corrupt_updated_at_does_not_overflow() {
+        let block = indexer_block(
+            Some(r#"{"schema":1,"updated_at":-9223372036854775808,"running":true}"#.to_owned()),
+            1_000,
+        );
+        assert_eq!(block.severity, "error");
+        assert_eq!(block.message, "Indexer not running");
+    }
+
+    #[test]
+    fn indexer_block_future_skew_is_ok() {
+        // updated_at in the future (clock skew) clamps to age 0 → healthy.
+        let block = indexer_block(
+            Some(r#"{"schema":1,"updated_at":5000,"running":true}"#.to_owned()),
+            1_000,
+        );
+        assert_eq!(block.severity, "ok");
+        assert_eq!(block.message, "Indexer healthy");
+    }
+
+    #[test]
+    fn indexer_block_none_is_unknown() {
+        let block = indexer_block(None, 1_000);
+        assert_eq!(block.severity, "unknown");
+        assert_eq!(block.message, "Indexer status unavailable");
+    }
+
+    #[test]
+    fn indexer_block_parse_fail_is_unknown() {
+        let block = indexer_block(Some("{oops".to_owned()), 1_000);
+        assert_eq!(block.severity, "unknown");
+        assert_eq!(block.message, "Indexer status unavailable");
+    }
+
+    #[test]
+    fn indexer_block_dead_is_error() {
+        let block = indexer_block(
+            Some(r#"{"schema":1,"updated_at":399,"running":true}"#.to_owned()),
+            1_000,
+        );
+        assert_eq!(block.severity, "error");
+        assert_eq!(block.message, "Indexer not running");
+    }
+
+    #[test]
+    fn indexer_block_stale_is_warn() {
+        let block = indexer_block(
+            Some(r#"{"schema":1,"updated_at":810,"running":true}"#.to_owned()),
+            1_000,
+        );
+        assert_eq!(block.severity, "warn");
+        assert_eq!(block.message, "Indexer stalled");
+    }
+
+    #[test]
+    fn indexer_block_not_running_is_error() {
+        let block = indexer_block(
+            Some(r#"{"schema":1,"updated_at":990,"running":false}"#.to_owned()),
+            1_000,
+        );
+        assert_eq!(block.severity, "error");
+        assert_eq!(block.message, "Indexer not running");
+    }
+
+    #[test]
+    fn indexer_block_healthy_is_ok() {
+        let block = indexer_block(
+            Some(r#"{"schema":1,"updated_at":990,"running":true}"#.to_owned()),
+            1_000,
+        );
+        assert_eq!(block.severity, "ok");
+        assert_eq!(block.message, "Indexer healthy");
     }
 
     #[test]

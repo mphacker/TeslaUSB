@@ -264,6 +264,9 @@ fn router_with_all_clients_and_read_client(
             worker_health_file: std::env::var_os("WEBD_WORKER_HEALTH_FILE")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("/run/teslausb/retentiond.health.json")),
+            indexer_health_file: std::env::var_os("WEBD_INDEXER_HEALTH_FILE")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/run/teslausb/indexd.health.json")),
         }),
     };
     let media_events = media_events::MediaEvents::start(&catalog);

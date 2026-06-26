@@ -1357,7 +1357,19 @@ LUNs) is the single make-or-break that still needs the car.**
   "{n} pending" / "{n} pending (catch-up)" / "{n} pending — not draining" /
   "Worker heartbeat stale" / "Worker not running") fed by a retentiond heartbeat
   at `/run/teslausb/retentiond.health.json`; renders as the "Background Worker" row.
-  Evidence: `files/hf-live-desktop.png`, `files/hw-results.md`, sysinfo.rs worker_block tests)**
+  Evidence: `files/hf-live-desktop.png`, `files/hw-results.md`, sysinfo.rs worker_block tests.
+  Indexer-liveness subsystem (Slice 2) landed + live-verified 2026-06-26 — webd emits an
+  `indexer` block ("Indexer healthy" / "Indexer stalled" / "Indexer not running" /
+  "Indexer status unavailable") fed by an indexd process-liveness heartbeat at
+  `/run/teslausb/indexd.health.json`; drives the "Video Indexer" row dot from real
+  liveness while the row message stays the exact V1 catalog text ("N clips indexed;
+  newest is M d old") when healthy and composes "{reason} — {catalog}" when degraded.
+  Live wiring proof injected indexer:warn → dot flips warn + composes "Indexer
+  stalled — 26 clips indexed; newest is 0 d old" on served bundle index-4sS_cP36.js,
+  0 console errors. Also fixed a latent age-subtraction overflow in both worker_block
+  and indexer_block (saturating_sub).
+  Evidence: `files/s2-live-proof-warn.png`, `files/hw-results.md`, sysinfo.rs
+  indexer_block tests, media-hub UAT indexer fallback matrix)**
 - [ ] Online read-only `e2fsck` with fast-poll result. **(not started)**
 - [ ] Arm/cancel fsck on next boot. **(not started)**
 - [ ] Reboot device now (confirm). **(not started; gadgetd-gated reboot policy)**

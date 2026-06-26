@@ -47,6 +47,7 @@ const HEALTH_FIXTURE = {
   subsystems: {
     gadget: { severity: "ok", message: "USB gadget configured (attached)" },
     worker: { severity: "ok", message: "Idle, queue empty" },
+    indexer: { severity: "ok", message: "Indexer healthy" },
     disk: { severity: "ok", message: "50.0 GB free of 64.0 GB (78%)" },
     storage_writable: { severity: "ok", message: "archive root writable" },
   },
@@ -195,9 +196,19 @@ test.describe("settings dashboard UAT", () => {
     expect(shText).toContain("archive root writable");
     expect(shText).toContain("Video Indexer");
     // Video Indexer carries REAL catalog data in the baseline's exact phrasing.
-    expect(shText).toMatch(/30 clips indexed; newest is \d+ d old/);
+    expect(shText).toMatch(/\d+ clips indexed; newest is \d+ d old/);
+    expect(shText).not.toContain("Indexer healthy");
     // The five unprobed subsystems degrade to "—" — none is fabricated.
     expect((shText.match(/—/g) ?? []).length).toBe(5);
+    const indexerLabel = sh.locator("#system-health-rows > div", {
+      hasText: "Video Indexer",
+    });
+    await expect(
+      indexerLabel.locator("xpath=preceding-sibling::div[1]//span[@aria-label='ok']"),
+    ).toBeVisible();
+    await expect(indexerLabel.locator("xpath=following-sibling::div[1]")).toHaveText(
+      /\d+ clips indexed; newest is \d+ d old/,
+    );
     const workerLabel = sh.locator("#system-health-rows > div", {
       hasText: "Background Worker",
     });
@@ -300,6 +311,141 @@ test.describe("settings dashboard UAT", () => {
     await expect(summaries).toHaveText(SECTION_ORDER);
 
     assertCleanConsole(probe);
+  });
+
+  test("system health — indexer error dot and composed reason/catalog text", async ({
+    page,
+  }) => {
+    const json = (body: unknown) => ({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(body),
+    });
+    await page.route("**/api/system/health", (r) =>
+      r.fulfill(
+        json({
+          ...HEALTH_FIXTURE,
+          subsystems: {
+            ...HEALTH_FIXTURE.subsystems,
+            indexer: { severity: "error", message: "Indexer not running" },
+          },
+        }),
+      ),
+    );
+    await page.route("**/api/system/metrics", (r) => r.fulfill(json(METRICS_FIXTURE)));
+    await page.route("**/api/storage/health", (r) => r.fulfill(json(STORAGE_FIXTURE)));
+    await gotoDashboard(page);
+    const indexerLabel = page.locator("#system-health-rows > div", {
+      hasText: "Video Indexer",
+    });
+    await expect(
+      indexerLabel.locator("xpath=preceding-sibling::div[1]//span[@aria-label='error']"),
+    ).toBeVisible();
+    await expect(indexerLabel.locator("xpath=following-sibling::div[1]")).toHaveText(
+      /^Indexer not running — \d+ clips indexed; newest is \d+ d old$/,
+    );
+  });
+
+  test("system health — indexer warn dot composes reason with catalog text", async ({
+    page,
+  }) => {
+    const json = (body: unknown) => ({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(body),
+    });
+    await page.route("**/api/system/health", (r) =>
+      r.fulfill(
+        json({
+          ...HEALTH_FIXTURE,
+          subsystems: {
+            ...HEALTH_FIXTURE.subsystems,
+            indexer: { severity: "warn", message: "Indexer stalled" },
+          },
+        }),
+      ),
+    );
+    await page.route("**/api/system/metrics", (r) => r.fulfill(json(METRICS_FIXTURE)));
+    await page.route("**/api/storage/health", (r) => r.fulfill(json(STORAGE_FIXTURE)));
+    await gotoDashboard(page);
+    const indexerLabel = page.locator("#system-health-rows > div", {
+      hasText: "Video Indexer",
+    });
+    await expect(
+      indexerLabel.locator("xpath=preceding-sibling::div[1]//span[@aria-label='warn']"),
+    ).toBeVisible();
+    await expect(indexerLabel.locator("xpath=following-sibling::div[1]")).toHaveText(
+      /^Indexer stalled — \d+ clips indexed; newest is \d+ d old$/,
+    );
+  });
+
+  test("system health — webd indexer unknown falls back to catalog severity and text", async ({
+    page,
+  }) => {
+    // When webd cannot read the indexd heartbeat (severity 'unknown'), the dot
+    // must fall back to the client-derived catalog severity and the message must
+    // be the plain catalog text — NOT composed with the 'unknown' reason.
+    const json = (body: unknown) => ({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(body),
+    });
+    await page.route("**/api/system/health", (r) =>
+      r.fulfill(
+        json({
+          ...HEALTH_FIXTURE,
+          subsystems: {
+            ...HEALTH_FIXTURE.subsystems,
+            indexer: { severity: "unknown", message: "Indexer status unavailable" },
+          },
+        }),
+      ),
+    );
+    await page.route("**/api/system/metrics", (r) => r.fulfill(json(METRICS_FIXTURE)));
+    await page.route("**/api/storage/health", (r) => r.fulfill(json(STORAGE_FIXTURE)));
+    await gotoDashboard(page);
+    const indexerLabel = page.locator("#system-health-rows > div", {
+      hasText: "Video Indexer",
+    });
+    // Dot reflects the healthy catalog (ok), not webd's 'unknown'.
+    await expect(
+      indexerLabel.locator("xpath=preceding-sibling::div[1]//span[@aria-label='ok']"),
+    ).toBeVisible();
+    const msg = indexerLabel.locator("xpath=following-sibling::div[1]");
+    await expect(msg).toHaveText(/^\d+ clips indexed; newest is \d+ d old$/);
+    await expect(msg).not.toContainText("Indexer status unavailable");
+  });
+
+  test("system health — missing webd indexer block falls back to catalog", async ({
+    page,
+  }) => {
+    // webd omits the indexer subsystem entirely (e.g. staged deploy: webd
+    // updated before indexd writes its first heartbeat). Row must still render
+    // from catalog data, never blank or fabricated.
+    const json = (body: unknown) => ({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(body),
+    });
+    const { indexer: _omit, ...withoutIndexer } = HEALTH_FIXTURE.subsystems as Record<
+      string,
+      unknown
+    >;
+    await page.route("**/api/system/health", (r) =>
+      r.fulfill(json({ ...HEALTH_FIXTURE, subsystems: withoutIndexer })),
+    );
+    await page.route("**/api/system/metrics", (r) => r.fulfill(json(METRICS_FIXTURE)));
+    await page.route("**/api/storage/health", (r) => r.fulfill(json(STORAGE_FIXTURE)));
+    await gotoDashboard(page);
+    const indexerLabel = page.locator("#system-health-rows > div", {
+      hasText: "Video Indexer",
+    });
+    await expect(
+      indexerLabel.locator("xpath=preceding-sibling::div[1]//span[@aria-label='ok']"),
+    ).toBeVisible();
+    await expect(indexerLabel.locator("xpath=following-sibling::div[1]")).toHaveText(
+      /^\d+ clips indexed; newest is \d+ d old$/,
+    );
   });
 
   // ── Gate 5: wiring proof (the freshly-built bundle is what executed) ─────

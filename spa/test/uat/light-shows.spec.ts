@@ -270,7 +270,7 @@ test.describe("light shows UAT", () => {
     await expect(page.getByText("Couldn't reach the device", { exact: false })).toHaveCount(0);
   });
 
-  test("layout — row checkbox sits in its own column, not over the show name", async ({
+  test("layout — row checkbox never overlaps the show name (own column on desktop, pinned right on mobile)", async ({
     page,
   }) => {
     await page.route("**/api/lightshows", (route) => {
@@ -302,7 +302,24 @@ test.describe("light shows UAT", () => {
     const name = await nameCell.boundingBox();
     expect(cb).not.toBeNull();
     expect(name).not.toBeNull();
-    // The checkbox must finish before the name cell begins — i.e. its own column.
-    expect(cb!.x + cb!.width).toBeLessThanOrEqual(name!.x + 1);
+
+    const vw = page.viewportSize()?.width ?? 1280;
+    if (vw <= 640) {
+      // Mobile card layout: the checkbox cell is absolutely pinned to the card's
+      // top-right and the title cell reserves a right gutter (padding-right) so
+      // the show name's text never renders under the checkbox. Assert the
+      // checkbox starts at/after the title's text content box, and that the
+      // gutter is actually reserved.
+      const padRight = await nameCell.evaluate((el) =>
+        parseFloat(getComputedStyle(el).paddingRight),
+      );
+      expect(padRight).toBeGreaterThanOrEqual(30);
+      const titleTextRight = name!.x + name!.width - padRight;
+      expect(cb!.x).toBeGreaterThanOrEqual(titleTextRight - 2);
+    } else {
+      // Desktop table layout: the checkbox has its own left column and must
+      // finish before the name cell begins.
+      expect(cb!.x + cb!.width).toBeLessThanOrEqual(name!.x + 1);
+    }
   });
 });

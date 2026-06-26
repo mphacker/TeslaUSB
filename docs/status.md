@@ -837,7 +837,7 @@ LUNs) is the single make-or-break that still needs the car.**
   media-hub's 503 test loosened "exactly one 503 log" → ">=1" (the new global poll legitimately
   adds a second 503 when gadgetd is down; the non-503 `other` filter still catches real leaks).
   Tier-2 flow: gpt-5.3-codex implemented, gpt-5.4-mini review clean, build clean, 38 affected
-  specs pass (shell + media-hub + analytics). COMMITTED `380a13e` (mhackermsft/b1-clean).)**
+  specs pass (shell + media-hub + analytics). COMMITTED `5fb4531` (mhackermsft/b1-clean).)**
 - [ ] Samba status dot (shown only when sharing on). **(depends on §2)**
 - [ ] Primary nav (sidebar desktop / bottom tabs mobile), availability-gated items. **(partial: nav present; per-feature availability gating to finish — A9)**
 - [ ] Feedback model: JSON for AJAX + flash banners; live-poll views. **(partial: proven on media routes; not yet audited across all routes — see §5 error-code audit)**

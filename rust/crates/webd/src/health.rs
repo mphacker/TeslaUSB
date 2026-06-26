@@ -38,8 +38,11 @@ fn now_epoch() -> Option<u64> {
 
 async fn system_health(State(state): State<AppState>) -> Json<SystemHealth> {
     let sys = state.sys;
+    let now = now_epoch()
+        .and_then(|s| i64::try_from(s).ok())
+        .unwrap_or(0);
     let out = tokio::task::spawn_blocking(move || {
-        sysinfo::system_health(sys.probe.as_ref(), sys.paths.as_ref())
+        sysinfo::system_health(sys.probe.as_ref(), sys.paths.as_ref(), now)
     })
     .await
     .unwrap_or_else(|_| SystemHealth::degraded());

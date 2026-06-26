@@ -261,6 +261,9 @@ fn router_with_all_clients_and_read_client(
         probe: Arc::new(sysinfo::LinuxProbe),
         paths: Arc::new(sysinfo::SysPaths {
             archive_root: media.archive_root_path(),
+            worker_health_file: std::env::var_os("WEBD_WORKER_HEALTH_FILE")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/run/teslausb/retentiond.health.json")),
         }),
     };
     let media_events = media_events::MediaEvents::start(&catalog);

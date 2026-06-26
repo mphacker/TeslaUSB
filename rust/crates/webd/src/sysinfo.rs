@@ -23,7 +23,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Free-fraction at or above which a filesystem is healthy.
 const DISK_OK_FRAC: f64 = 0.15;
@@ -130,6 +130,8 @@ pub trait SystemProbe: Send + Sync {
     fn udc_state(&self) -> Option<String>;
     /// The [`MountInfo`] of the filesystem that `path` lives on.
     fn mount_for(&self, path: &Path) -> Option<MountInfo>;
+    /// Read a text file as UTF-8.
+    fn read_file_string(&self, path: &Path) -> Option<String>;
     /// `SoC` temperature in milli-degrees Celsius (e.g. `47000` = 47.0 °C), read
     /// from `/sys/class/thermal/thermal_zone0/temp`; `None` when no thermal zone
     /// is exposed (e.g. the non-Linux build host or a board without a sensor).
@@ -144,6 +146,8 @@ pub trait SystemProbe: Send + Sync {
 pub struct SysPaths {
     /// `WEBD_ARCHIVE_ROOT` — the data filesystem to report as the "SD Card".
     pub archive_root: PathBuf,
+    /// Retention worker heartbeat path.
+    pub worker_health_file: PathBuf,
 }
 
 /// One `{severity, message}` row of `GET /api/system/health`.
@@ -392,12 +396,85 @@ fn gadget_block(probe: &dyn SystemProbe) -> (Severity, HealthBlock) {
     }
 }
 
+fn severity_from_wire(severity: &str) -> Severity {
+    match severity {
+        "ok" => Severity::Ok,
+        "warn" => Severity::Warn,
+        "error" => Severity::Error,
+        _ => Severity::Unknown,
+    }
+}
+
+fn worker_block(raw: Option<String>, now: i64) -> HealthBlock {
+    const STALE_SECS: i64 = 180;
+    const DEAD_SECS: i64 = 600;
+    const PROGRESS_STALE: i64 = 300;
+    const CATCHUP: u64 = 200;
+
+    #[derive(Debug, Deserialize)]
+    struct WorkerHeartbeat {
+        #[serde(rename = "schema")]
+        _schema: u32,
+        updated_at: i64,
+        running: bool,
+        pending: u64,
+        #[serde(default)]
+        last_progress_at: Option<i64>,
+    }
+
+    let Some(raw) = raw else {
+        return HealthBlock::new(Severity::Unknown, "Worker status unavailable");
+    };
+    let parsed: WorkerHeartbeat = match serde_json::from_str(&raw) {
+        Ok(parsed) => parsed,
+        Err(_) => return HealthBlock::new(Severity::Unknown, "Worker status unavailable"),
+    };
+    let age = if now >= parsed.updated_at {
+        now - parsed.updated_at
+    } else {
+        0
+    };
+    if age > DEAD_SECS {
+        return HealthBlock::new(Severity::Error, "Worker not running");
+    }
+    if age > STALE_SECS {
+        return HealthBlock::new(Severity::Warn, "Worker heartbeat stale");
+    }
+    if !parsed.running {
+        return HealthBlock::new(Severity::Error, "Worker not running");
+    }
+    if parsed.pending == 0 {
+        return HealthBlock::new(Severity::Ok, "Idle, queue empty");
+    }
+    let last_progress_at = parsed.last_progress_at.unwrap_or(parsed.updated_at);
+    let since_progress = if now >= last_progress_at {
+        now - last_progress_at
+    } else {
+        0
+    };
+    if since_progress > PROGRESS_STALE {
+        return HealthBlock::new(
+            Severity::Warn,
+            format!("{} pending — not draining", parsed.pending),
+        );
+    }
+    if parsed.pending > CATCHUP {
+        return HealthBlock::new(
+            Severity::Warn,
+            format!("{} pending (catch-up)", parsed.pending),
+        );
+    }
+    HealthBlock::new(Severity::Ok, format!("{} pending", parsed.pending))
+}
+
 /// Compose `GET /api/system/health` from the probe.
 #[must_use]
-pub fn system_health(probe: &dyn SystemProbe, paths: &SysPaths) -> SystemHealth {
+pub fn system_health(probe: &dyn SystemProbe, paths: &SysPaths, now: i64) -> SystemHealth {
     let root = paths.archive_root.as_path();
+    let worker = worker_block(probe.read_file_string(&paths.worker_health_file), now);
     let blocks = [
         ("gadget", gadget_block(probe)),
+        ("worker", (severity_from_wire(worker.severity), worker)),
         ("disk", disk_block(probe, root)),
         ("storage_writable", writable_block(probe, root)),
     ];
@@ -627,6 +704,19 @@ impl SystemProbe for LinuxProbe {
         parse_best_mount(&mounts, path)
     }
 
+    fn read_file_string(&self, path: &Path) -> Option<String> {
+        use std::io::Read;
+        // Bounded read: the heartbeat is ~100 bytes. Cap the read so a network-
+        // facing health probe can never be made to allocate/block on a huge or
+        // never-ending file. (The file lives in root-owned tmpfs /run, so symlink
+        // TOCTOU is outside our threat model.)
+        const MAX_BYTES: u64 = 64 * 1024;
+        let file = std::fs::File::open(path).ok()?;
+        let mut buf = String::new();
+        file.take(MAX_BYTES).read_to_string(&mut buf).ok()?;
+        Some(buf)
+    }
+
     fn cpu_temp_millic(&self) -> Option<i64> {
         let raw = std::fs::read_to_string("/sys/class/thermal/thermal_zone0/temp").ok()?;
         raw.trim().parse::<i64>().ok()
@@ -678,6 +768,7 @@ mod tests {
         writable: bool,
         udc: Option<String>,
         mount: Option<MountInfo>,
+        file: Option<String>,
         cpu_temp: Option<i64>,
     }
 
@@ -697,6 +788,9 @@ mod tests {
         fn mount_for(&self, _path: &Path) -> Option<MountInfo> {
             self.mount.clone()
         }
+        fn read_file_string(&self, _path: &Path) -> Option<String> {
+            self.file.clone()
+        }
         fn cpu_temp_millic(&self) -> Option<i64> {
             self.cpu_temp
         }
@@ -705,6 +799,7 @@ mod tests {
     fn paths() -> SysPaths {
         SysPaths {
             archive_root: PathBuf::from("/data/teslausb/archive"),
+            worker_health_file: PathBuf::from("/run/teslausb/retentiond.health.json"),
         }
     }
 
@@ -730,9 +825,10 @@ mod tests {
             udc: Some("configured".to_owned()),
             ..FakeProbe::default()
         };
-        let health = system_health(&probe, &paths());
+        let health = system_health(&probe, &paths(), 1_000);
         assert_eq!(health.overall, "error");
         assert_eq!(health.subsystems["gadget"].severity, "ok");
+        assert_eq!(health.subsystems["worker"].severity, "unknown");
         assert_eq!(health.subsystems["disk"].severity, "error");
         assert_eq!(health.subsystems["storage_writable"].severity, "ok");
     }
@@ -743,11 +839,116 @@ mod tests {
             writable: true,
             ..FakeProbe::default()
         };
-        let health = system_health(&probe, &paths());
+        let health = system_health(&probe, &paths(), 1_000);
         // gadget=unknown, disk=unknown, storage_writable=ok → overall ok.
         assert_eq!(health.overall, "ok");
         assert_eq!(health.subsystems["disk"].severity, "unknown");
         assert_eq!(health.subsystems["gadget"].severity, "unknown");
+    }
+
+    #[test]
+    fn worker_block_none_is_unknown() {
+        let block = worker_block(None, 1_000);
+        assert_eq!(block.severity, "unknown");
+        assert_eq!(block.message, "Worker status unavailable");
+    }
+
+    #[test]
+    fn worker_block_parse_fail_is_unknown() {
+        let block = worker_block(Some("{oops".to_owned()), 1_000);
+        assert_eq!(block.severity, "unknown");
+        assert_eq!(block.message, "Worker status unavailable");
+    }
+
+    #[test]
+    fn worker_block_fresh_not_running_is_error() {
+        let block = worker_block(
+            Some(
+                r#"{"schema":1,"updated_at":990,"running":false,"pending":0,"last_progress_at":990}"#
+                    .to_owned(),
+            ),
+            1_000,
+        );
+        assert_eq!(block.severity, "error");
+        assert_eq!(block.message, "Worker not running");
+    }
+
+    #[test]
+    fn worker_block_fresh_idle_is_ok() {
+        let block = worker_block(
+            Some(
+                r#"{"schema":1,"updated_at":990,"running":true,"pending":0,"last_progress_at":990}"#
+                    .to_owned(),
+            ),
+            1_000,
+        );
+        assert_eq!(block.severity, "ok");
+        assert_eq!(block.message, "Idle, queue empty");
+    }
+
+    #[test]
+    fn worker_block_fresh_pending_draining_is_ok() {
+        let block = worker_block(
+            Some(
+                r#"{"schema":1,"updated_at":990,"running":true,"pending":200,"last_progress_at":950}"#
+                    .to_owned(),
+            ),
+            1_000,
+        );
+        assert_eq!(block.severity, "ok");
+        assert_eq!(block.message, "200 pending");
+    }
+
+    #[test]
+    fn worker_block_fresh_pending_catchup_is_warn() {
+        let block = worker_block(
+            Some(
+                r#"{"schema":1,"updated_at":990,"running":true,"pending":201,"last_progress_at":980}"#
+                    .to_owned(),
+            ),
+            1_000,
+        );
+        assert_eq!(block.severity, "warn");
+        assert_eq!(block.message, "201 pending (catch-up)");
+    }
+
+    #[test]
+    fn worker_block_fresh_pending_not_draining_is_warn() {
+        let block = worker_block(
+            Some(
+                r#"{"schema":1,"updated_at":990,"running":true,"pending":9,"last_progress_at":600}"#
+                    .to_owned(),
+            ),
+            1_000,
+        );
+        assert_eq!(block.severity, "warn");
+        assert_eq!(block.message, "9 pending — not draining");
+    }
+
+    #[test]
+    fn worker_block_stale_is_warn() {
+        let block = worker_block(
+            Some(
+                r#"{"schema":1,"updated_at":810,"running":true,"pending":1,"last_progress_at":810}"#
+                    .to_owned(),
+            ),
+            1_000,
+        );
+        assert_eq!(block.severity, "warn");
+        assert_eq!(block.message, "Worker heartbeat stale");
+    }
+
+    #[test]
+    fn worker_block_dead_is_error() {
+        let block = worker_block(
+            Some(
+                r#"{"schema":1,"updated_at":399,"running":true,"pending":1,"last_progress_at":399}"#
+                    .to_owned(),
+            ),
+            1_000,
+        );
+        assert_eq!(block.severity, "error");
+        assert_eq!(block.message, "Worker not running");
     }
 
     #[test]

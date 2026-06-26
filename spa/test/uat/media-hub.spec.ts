@@ -46,6 +46,7 @@ const HEALTH_FIXTURE = {
   overall: "ok",
   subsystems: {
     gadget: { severity: "ok", message: "USB gadget configured (attached)" },
+    worker: { severity: "ok", message: "Idle, queue empty" },
     disk: { severity: "ok", message: "50.0 GB free of 64.0 GB (78%)" },
     storage_writable: { severity: "ok", message: "archive root writable" },
   },
@@ -175,9 +176,9 @@ test.describe("settings dashboard UAT", () => {
     await expect(card).toContainText("Online");
     await expect(card).toContainText("All systems nominal.");
 
-    // System Health — open. overall + the three probed subsystem rows come from
+    // System Health — open. overall + the four probed subsystem rows come from
     // the fixture; Video Indexer comes from the real catalog (seed = 30 clips);
-    // the remaining six subsystems have no probe data and degrade to "—".
+    // the remaining five subsystems have no probe data and degrade to "—".
     const sh = page.locator("#system-health-section");
     await expect(sh).toHaveAttribute("open", "");
     await expect(page.locator("#system-health-overall-text")).toHaveText("Healthy");
@@ -189,12 +190,24 @@ test.describe("settings dashboard UAT", () => {
     const shText = await page.locator("#system-health-rows").innerText();
     expect(shText).toContain("USB Gadget");
     expect(shText).toContain("USB gadget configured (attached)"); // probe message
+    expect(shText).toContain("Background Worker");
+    expect(shText).toContain("Idle, queue empty");
     expect(shText).toContain("archive root writable");
     expect(shText).toContain("Video Indexer");
     // Video Indexer carries REAL catalog data in the baseline's exact phrasing.
     expect(shText).toMatch(/30 clips indexed; newest is \d+ d old/);
-    // The six unprobed subsystems degrade to "—" — none is fabricated.
-    expect((shText.match(/—/g) ?? []).length).toBe(6);
+    // The five unprobed subsystems degrade to "—" — none is fabricated.
+    expect((shText.match(/—/g) ?? []).length).toBe(5);
+    const workerLabel = sh.locator("#system-health-rows > div", {
+      hasText: "Background Worker",
+    });
+    await expect(workerLabel).toHaveText("Background Worker");
+    await expect(
+      workerLabel.locator("xpath=preceding-sibling::div[1]//span[@aria-label='ok']"),
+    ).toBeVisible();
+    await expect(workerLabel.locator("xpath=following-sibling::div[1]")).toHaveText(
+      "Idle, queue empty",
+    );
 
     // Live Metrics — open; load/mem/uptime from the fixture, CPU + SD/USB I/O
     // and the (null) swap stay "—" (webd does not sample those — not fabricated).

@@ -1352,7 +1352,12 @@ LUNs) is the single make-or-break that still needs the car.**
 ### 4.12 Storage Health — `Requirements.md` §4.12
 
 - [ ] View health: mount status, FS error counts, SMART/health severity, alerts. **(partial:
-  Linux/Pi-gated probes — A5)**
+  Linux/Pi-gated probes — A5; archive-worker progress-freshness subsystem landed +
+  live-verified 2026-06-26 — webd emits a `worker` block ("Idle, queue empty" /
+  "{n} pending" / "{n} pending (catch-up)" / "{n} pending — not draining" /
+  "Worker heartbeat stale" / "Worker not running") fed by a retentiond heartbeat
+  at `/run/teslausb/retentiond.health.json`; renders as the "Background Worker" row.
+  Evidence: `files/hf-live-desktop.png`, `files/hw-results.md`, sysinfo.rs worker_block tests)**
 - [ ] Online read-only `e2fsck` with fast-poll result. **(not started)**
 - [ ] Arm/cancel fsck on next boot. **(not started)**
 - [ ] Reboot device now (confirm). **(not started; gadgetd-gated reboot policy)**

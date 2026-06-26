@@ -11,7 +11,7 @@ mod live;
 use std::process::ExitCode;
 
 #[cfg(unix)]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(unix)]
@@ -21,6 +21,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
 use live::LiveArchiveStore;
+#[cfg(unix)]
+use serde::Serialize;
 #[cfg(unix)]
 use retentiond::archive_driver::{DriverState, archive_recent_once};
 #[cfg(unix)]
@@ -36,9 +38,21 @@ const DEFAULT_SLOT: u8 = 0;
 const DEFAULT_INTERVAL_SECS: u64 = 20;
 #[cfg(unix)]
 const DEFAULT_INDEXD_DB_PATH: &str = "/var/lib/teslausb/index.sqlite3";
+#[cfg(unix)]
+const DEFAULT_HEALTH_FILE: &str = "/run/teslausb/retentiond.health.json";
 
 #[cfg(unix)]
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+#[cfg(unix)]
+#[derive(Debug, Serialize)]
+struct HealthHeartbeat {
+    schema: u32,
+    updated_at: i64,
+    running: bool,
+    pending: u64,
+    last_progress_at: i64,
+}
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -119,6 +133,20 @@ fn run_serve(args: &[String]) -> ExitCode {
     );
     let register = UnixRegisterClient::new(&parsed.indexd_socket);
     let mut state = DriverState::new();
+    let health_file = std::env::var_os("RETENTIOND_HEALTH_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_HEALTH_FILE));
+    let startup_now = now_epoch_s_saturating();
+    let mut last_progress_at = startup_now;
+    let mut last_pending: u64 = 0;
+    let mut health_write_error_logged = false;
+    write_health_heartbeat_best_effort(
+        &health_file,
+        startup_now,
+        last_pending,
+        last_progress_at,
+        &mut health_write_error_logged,
+    );
 
     while !SHUTDOWN.load(Ordering::Relaxed) {
         let now_epoch_s = now_epoch_s_saturating();
@@ -156,8 +184,27 @@ fn run_serve(args: &[String]) -> ExitCode {
                         report.pending_len
                     );
                 }
+                if report.observed > 0 || report.registered > 0 || report.registered_from_pending > 0
+                {
+                    last_progress_at = now_epoch_s;
+                }
+                last_pending = u64::try_from(report.pending_len).unwrap_or(u64::MAX);
+                write_health_heartbeat_best_effort(
+                    &health_file,
+                    now_epoch_s,
+                    last_pending,
+                    last_progress_at,
+                    &mut health_write_error_logged,
+                );
             }
-            Err(err) => eprintln!("retentiond archive_recent_only: cycle error: {err}"),
+            Err(err) => {
+                // Intentionally do NOT refresh the heartbeat on a failed cycle: a
+                // worker that errors every loop must not keep reporting a fresh
+                // "Idle, queue empty" / "{n} pending" status. Leaving updated_at
+                // frozen lets webd age it into "stale" then "Worker not running",
+                // which is the whole point of this health signal.
+                eprintln!("retentiond archive_recent_only: cycle error: {err}");
+            }
         }
         sleep_interruptible(parsed.interval_secs);
     }
@@ -180,6 +227,52 @@ fn now_epoch_s_saturating() -> i64 {
     match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(duration) => i64::try_from(duration.as_secs()).unwrap_or(i64::MAX),
         Err(_) => 0,
+    }
+}
+
+#[cfg(unix)]
+fn render_health(now: i64, pending: u64, last_progress_at: i64) -> String {
+    let heartbeat = HealthHeartbeat {
+        schema: 1,
+        updated_at: now,
+        running: true,
+        pending,
+        last_progress_at,
+    };
+    serde_json::to_string(&heartbeat).unwrap_or_else(|_| {
+        format!(
+            "{{\"schema\":1,\"updated_at\":{now},\"running\":true,\"pending\":{pending},\"last_progress_at\":{last_progress_at}}}"
+        )
+    })
+}
+
+#[cfg(unix)]
+fn write_health_heartbeat_atomic(path: &Path, body: &str) -> std::io::Result<()> {
+    let mut tmp = path.as_os_str().to_os_string();
+    tmp.push(".tmp");
+    let tmp_path = PathBuf::from(tmp);
+    std::fs::write(&tmp_path, body)?;
+    std::fs::rename(&tmp_path, path)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_health_heartbeat_best_effort(
+    path: &Path,
+    now: i64,
+    pending: u64,
+    last_progress_at: i64,
+    write_error_logged: &mut bool,
+) {
+    let body = render_health(now, pending, last_progress_at);
+    if let Err(err) = write_health_heartbeat_atomic(path, &body) {
+        if !*write_error_logged {
+            eprintln!(
+                "retentiond archive_recent_only: health heartbeat write failed at {}: {err}",
+                path.display()
+            );
+            *write_error_logged = true;
+        }
     }
 }
 
@@ -290,7 +383,7 @@ fn install_shutdown_handlers() {
 #[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
-    use super::parse_serve_args;
+    use super::{parse_serve_args, render_health};
 
     #[test]
     fn parse_serve_args_rejects_zero_interval_secs() {
@@ -333,5 +426,19 @@ mod tests {
             parsed.scannerd_read_socket.to_str(),
             Some("/run/teslausb/scannerd-read.sock")
         );
+    }
+
+    #[test]
+    fn render_health_serializes_expected_fields() {
+        let raw = render_health(1234, 42, 1200);
+        let value: serde_json::Value = match serde_json::from_str(&raw) {
+            Ok(value) => value,
+            Err(err) => panic!("render_health should produce valid json: {err}"),
+        };
+        assert_eq!(value["schema"], 1);
+        assert_eq!(value["updated_at"], 1234);
+        assert_eq!(value["running"], true);
+        assert_eq!(value["pending"], 42);
+        assert_eq!(value["last_progress_at"], 1200);
     }
 }

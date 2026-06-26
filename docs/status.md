@@ -815,7 +815,21 @@ LUNs) is the single make-or-break that still needs the car.**
   shared `SHELL_POLL_ALLOWLIST` (boombox/license-plates/light-shows/music/wraps/media +
   analytics/event-player/failed-jobs/trip-map). Full UAT 455 pass, 0 Fix-A regressions.
   GPT-5.5 adversarial review ×2 → caught 4 specs the first pass missed + the V1 hide-on-failure
-  divergence; reconciled. Subsystem-richness of the health payload still tracked under §4.12.)**
+  divergence; reconciled. Subsystem-richness of the health payload still tracked under §4.12.
+  COMMITTED + PUSHED `38d160c` (mhackermsft/b1-clean).)**
+- [ ] **USB/recording mode status dot (Fix B — NEXT, semantics operator-approved).**
+  V1 `base.html` shows a mode dot in the top bar: GREEN `status-present` when
+  `present && bound && udc_state=="configured"`; stays green w/ tooltip change on
+  `handoff_active`; GRAY `status-unknown` otherwise; NEVER blue `status-edit`. Same
+  `Shell.tsx` surface as the health dot (serialized after it — now unblocked). Apply the
+  V1-parity keep-last-known/stay-gray-on-failure pattern (no hide, no blue).
+  **Implementation cost (operator decision pending):** the mode dot must poll
+  `/api/gadget/status` globally, but the UAT harness spawns webd with NO gadget socket →
+  `/api/gadget/status` returns **503** on Windows → a global poll trips suite-wide
+  `assertCleanConsole`/`assertCleanNetwork`. Recommended fix = a centralized harness default
+  mock (`/api/gadget/status`→200, specs override for their own 503-degradation tests) +
+  add `/api/gadget/status` to `SHELL_POLL_ALLOWLIST` + extend `shell.spec.ts`. No prod-code
+  risk; mirrors real hardware (gadgetd present → 200). Resume here next session.
 - [ ] Samba status dot (shown only when sharing on). **(depends on §2)**
 - [ ] Primary nav (sidebar desktop / bottom tabs mobile), availability-gated items. **(partial: nav present; per-feature availability gating to finish — A9)**
 - [ ] Feedback model: JSON for AJAX + flash banners; live-poll views. **(partial: proven on media routes; not yet audited across all routes — see §5 error-code audit)**

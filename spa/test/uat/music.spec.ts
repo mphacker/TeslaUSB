@@ -8,6 +8,7 @@ import {
   assertWiring,
   capturePerf,
   captureScreenshot,
+  SHELL_POLL_ALLOWLIST,
 } from "./screen-helpers";
 
 // Music UAT — covers live catalog-path wiring (real webd) and mocked-API
@@ -166,7 +167,11 @@ test.describe("music UAT", () => {
     for (const req of probe.requests) {
       const u = new URL(req.url);
       expect(u.origin, `off-origin request to ${req.url}`).toBe(origin);
-      if (u.pathname.startsWith("/api/") && u.pathname !== "/api/media-events") {
+      if (
+        u.pathname.startsWith("/api/") &&
+        u.pathname !== "/api/media-events" &&
+        !SHELL_POLL_ALLOWLIST.has(u.pathname)
+      ) {
         const call = `${req.method.toUpperCase()} ${u.pathname}`;
         expect(
           ALLOWED_API.has(u.pathname) && req.method.toUpperCase() === "GET",

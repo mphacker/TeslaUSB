@@ -1,4 +1,5 @@
 import { test, expect, loadState, ARTIFACTS, type Probe } from "./helpers";
+import { SHELL_POLL_ALLOWLIST } from "./screen-helpers";
 import type { Page } from "@playwright/test";
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -910,6 +911,7 @@ test.describe("trip map UAT", () => {
       const u = new URL(req.url);
       expect(u.origin, `off-origin request to ${req.url}`).toBe(origin);
       if (!u.pathname.startsWith("/api/")) continue;
+      if (SHELL_POLL_ALLOWLIST.has(u.pathname)) continue;
       expect(req.method.toUpperCase(), `${req.method} ${u.pathname}`).toBe("GET");
       expect(apiAllowed(u.pathname), `unexpected API path ${u.pathname}`).toBe(true);
       apiSeen.set(u.pathname, u.search);

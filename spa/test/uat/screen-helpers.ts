@@ -82,6 +82,11 @@ export function assertCleanConsole(probe: Probe) {
   ).toEqual([]);
 }
 
+// Shell polls health on every page for v1 parity; allow only this global read.
+// Exported so the per-screen read-only specs (which inline their own /api/
+// guards rather than calling assertReadOnly) can skip the same global poll.
+export const SHELL_POLL_ALLOWLIST = new Set(["/api/system/health"]);
+
 /** No mutating HTTP, no websockets, no /api/ calls, no mutation surface. */
 export async function assertReadOnly(
   page: Page,
@@ -100,7 +105,7 @@ export async function assertReadOnly(
     const u = new URL(req.url);
     expect(u.origin, `off-origin request to ${req.url}`).toBe(origin);
     expect(
-      u.pathname.startsWith("/api/"),
+      u.pathname.startsWith("/api/") && !SHELL_POLL_ALLOWLIST.has(u.pathname),
       `unexpected API call ${req.method} ${u.pathname}`,
     ).toBe(false);
   }

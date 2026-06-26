@@ -8,6 +8,7 @@ import {
   assertWiring,
   capturePerf,
   captureScreenshot,
+  SHELL_POLL_ALLOWLIST,
 } from "./screen-helpers";
 
 // License Plates UAT — live catalog-path wiring. GET /api/plates on mount
@@ -117,7 +118,11 @@ test.describe("license plates UAT", () => {
     for (const req of probe.requests) {
       const u = new URL(req.url);
       expect(u.origin, `off-origin request to ${req.url}`).toBe(origin);
-      if (u.pathname.startsWith("/api/") && u.pathname !== "/api/media-events") {
+      if (
+        u.pathname.startsWith("/api/") &&
+        u.pathname !== "/api/media-events" &&
+        !SHELL_POLL_ALLOWLIST.has(u.pathname)
+      ) {
         expect(
           `${req.method.toUpperCase()} ${u.pathname}`,
           `unexpected API call ${req.method} ${u.pathname}`,

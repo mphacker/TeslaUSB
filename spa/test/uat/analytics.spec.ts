@@ -1,4 +1,5 @@
 import { test, expect, loadState, ARTIFACTS, type Probe } from "./helpers";
+import { SHELL_POLL_ALLOWLIST } from "./screen-helpers";
 import type { Page } from "@playwright/test";
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -390,6 +391,7 @@ test.describe("analytics UAT", () => {
       const u = new URL(req.url);
       expect(u.origin, `off-origin request to ${req.url}`).toBe(origin);
       if (!u.pathname.startsWith("/api/")) continue;
+      if (SHELL_POLL_ALLOWLIST.has(u.pathname)) continue;
       expect(req.method.toUpperCase(), `${req.method} ${u.pathname}`).toBe("GET");
       expect(ANALYTICS_API.has(u.pathname), `unexpected API path ${u.pathname}`).toBe(true);
       expect(u.search, `unexpected query on ${u.pathname}`).toBe("");
@@ -404,6 +406,7 @@ test.describe("analytics UAT", () => {
     );
     for (const r of dataPlane) {
       const u = new URL(r.url);
+      if (SHELL_POLL_ALLOWLIST.has(u.pathname)) continue;
       expect(
         u.pathname === "/api/analytics" && u.search === "",
         `unexpected data fetch (${r.rtype}) ${u.pathname}${u.search}`,

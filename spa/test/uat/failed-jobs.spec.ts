@@ -8,6 +8,7 @@ import {
 import type { Page } from "@playwright/test";
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { SHELL_POLL_ALLOWLIST } from "./screen-helpers";
 
 // ── Failed jobs screen UAT (fe-failed-jobs) ───────────────────────────────
 // Each test drives the REAL bundle served by webd against the seeded read-only
@@ -263,6 +264,7 @@ test.describe("failed jobs UAT", () => {
       const u = new URL(req.url);
       expect(u.origin, `off-origin request to ${req.url}`).toBe(origin);
       if (!u.pathname.startsWith("/api/")) continue;
+      if (SHELL_POLL_ALLOWLIST.has(u.pathname)) continue;
       expect(req.method.toUpperCase(), `${req.method} ${u.pathname}`).toBe("GET");
       expect(ALLOWED_API.has(u.pathname), `unexpected API path ${u.pathname}`).toBe(true);
       if (u.pathname === "/api/jobs/failed") jobsGets += 1;

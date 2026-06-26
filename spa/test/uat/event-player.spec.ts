@@ -8,8 +8,7 @@ import {
 import type { Page } from "@playwright/test";
 import { writeFileSync, statSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-
-// ── Task 5.3 UAT gate (spa.md §5/§40-42, .github/copilot-instructions.md) ──
+import { SHELL_POLL_ALLOWLIST } from "./screen-helpers";
 // Each test drives the REAL bundle served by webd against a seeded read-only
 // catalog with materialised archive MP4 fixtures (global-setup). Fresh context
 // per test ⇒ cold cache, no bleed.
@@ -605,6 +604,7 @@ test.describe("event-player UAT", () => {
       for (const req of probe.requests) {
         const u = new URL(req.url);
         if (!u.pathname.startsWith("/api/")) continue;
+        if (SHELL_POLL_ALLOWLIST.has(u.pathname)) continue;
         expect(["GET", "HEAD"].includes(req.method.toUpperCase()), `${req.method} ${u.pathname}`).toBe(true);
         const rule = ALLOWED_API.find((r) => r.re.test(u.pathname));
         expect(rule, `unexpected API path ${u.pathname}`).toBeTruthy();

@@ -29,9 +29,39 @@
 > fingerprint at ingest; (b) a >16 MB clip can truncate mid-stream after headers
 > (errors the body, never serves wrong bytes as complete).
 >
+> **SEI/GPS coverage requirement — VERIFIED 2026-06-25 (no code change).** Operator
+> rule: "all videos except stationary non-event sentry should have SEI/GPS data."
+> Audited the full pipeline (Opus read + explore-agent map + a gpt-5.5 adversarial
+> disconfirm review, all reconciled): `scannerd produce.rs::shape_front` runs the SEI
+> walk for **every front clip across all folder classes** (no class gate, only the
+> stability gate); per-sample `has_gps_fix` (`lat≠0||lon≠0`) persists to indexd
+> `clip_waypoints` unconditionally; `webd waypoints_for_clips` exposes `ClipDto.lat/lon`
+> = first `has_gps_fix=1` waypoint. So a moving/event clip always surfaces its GPS, and
+> only stationary clips with no fix lack a pin. The live device's 0 GPS fixes = parked
+> Sentry footage (compliant). gpt-5.5 raised 9 items; reconciled: #1 decimation
+> (1/s, v1-parity), #2 256 MiB read cap (4–8× any real 1-min clip), #3 degraded-parse,
+> #4 front-only SEI, #8 (0,0)-as-no-fix → all **parity-faithful / not reachable by real
+> footage**; #7 GPS-bearing SentryClip not materialized as trip/event → **verbatim v1
+> port** (`derive.rs:469`, `materializer.rs::materialize_sentry_clip`) — data still
+> persists in `clip_waypoints`/`ClipDto`; #9 HUD parses the *selected* camera stream
+> → **v1-parity-faithful** (v1 `switchCamera`→`loadVideoWithCache`→`loadSEIData(selectedUrl)`
+> does the same; "always-front" would DIVERGE). Two genuine V1-parity follow-ups FILED
+> (separate lanes, not this requirement): see below.
+>
+> **FILED V1-parity follow-ups (from the SEI/GPS doubt review):**
+> - [ ] **event.json as event-pin location source** — v1 `event_player`/mapping use the
+>   Tesla `event.json` (`reason`, `city`, est `lat/lon`, `timestamp`) for event metadata;
+>   B-1 derives events from SEI waypoints only, so a no-GPS Sentry **event** gets
+>   `lat/lon = None` (`derive.rs::materialize_sentry_clip`) and no map pin where v1 may
+>   show one. **ASK-FIRST** (parity-critical `derive.rs`, `indexd.md §7`) — verify v1's
+>   actual map/event-pin behavior before any change.
+> - [ ] **HUD client parser timing fallback parity** — B-1 `spa/src/player/dashcam-mp4.ts`
+>   requires the full `moov/trak/mdia/minf/stbl/stts` chain and returns `[]` on any miss;
+>   v1 `dashcam-mp4.js` falls back to 33 ms/frame (`config.durations[i] || 33`). Narrow
+>   edge (malformed `stts` in real footage is rare) but a HUD-parity gap — verify vs v1.
+>
 > **NEXT (operator-queued):** systematic V1-parity audit across all parity screens
-> (exact-mirror UX); verify "all videos except stationary non-event sentry carry
-> SEI/GPS" (§4.2/§5). **Phase-2 (the deleter) stays deferred + GATED — do NOT start
+> (exact-mirror UX). **Phase-2 (the deleter) stays deferred + GATED — do NOT start
 > autonomously.**
 >
 > Build/test via podman from PowerShell (see copilot-instructions.md) — never local WSL/cargo.
@@ -775,8 +805,17 @@ LUNs) is the single make-or-break that still needs the car.**
 
 - [x] Single responsive SPA (mobile + desktop), reached at device host. **(proven)**
 - [x] Top bar: brand→Map, theme toggle (persisted). **(proven)**
-- [ ] System-health status dot polling `/api/system/health` (green/amber/red/grey;
-  click→Settings health). **(partial: thin health data — see §4.12/A5)**
+- [x] System-health status dot polling `/api/system/health` (green/amber/red/grey;
+  click→Settings health). **(A-shell-1 UAT-proven: `Shell.tsx` polls on mount + every 30s
+  via `api.systemHealth`, parses string `overall`, maps severity→dot-class + tooltip; hidden
+  until first successful poll; on failure keeps last-known colour and NEVER hides — exact V1
+  `base.html` parity, verified against v1 source. UAT `spa/test/uat/shell.spec.ts`
+  (dot visibility/class/tooltip + theme persistence + clean console/network + perf, 375 + 1280).
+  The global poll fires on every screen, so 10 read-only specs were taught to skip it via the
+  shared `SHELL_POLL_ALLOWLIST` (boombox/license-plates/light-shows/music/wraps/media +
+  analytics/event-player/failed-jobs/trip-map). Full UAT 455 pass, 0 Fix-A regressions.
+  GPT-5.5 adversarial review ×2 → caught 4 specs the first pass missed + the V1 hide-on-failure
+  divergence; reconciled. Subsystem-richness of the health payload still tracked under §4.12.)**
 - [ ] Samba status dot (shown only when sharing on). **(depends on §2)**
 - [ ] Primary nav (sidebar desktop / bottom tabs mobile), availability-gated items. **(partial: nav present; per-feature availability gating to finish — A9)**
 - [ ] Feedback model: JSON for AJAX + flash banners; live-poll views. **(partial: proven on media routes; not yet audited across all routes — see §5 error-code audit)**
@@ -1238,6 +1277,12 @@ LUNs) is the single make-or-break that still needs the car.**
   Table column widths rebalanced for the new Play column [visual gate].)**
 - [ ] Upload `.fseq`/audio single ≤100 MB, or **ZIP ≤500 MB** auto-extracted+flattened. **(gated: ZIP upload backend — Tier-C A1)**
 - [x] Delete files/shows (incl. bulk). **(bulk-delete proven)**
+- [ ] **FOLLOW-UP (pre-existing layout bug, found during the shell-parity lane):**
+  `spa/test/uat/light-shows.spec.ts:262` ("row checkbox sits in its own column, not over the
+  show name") FAILS at **mobile-375** — the select checkbox renders at x≈332 (right side) instead
+  of before the name (x≈43). Confirmed pre-existing (reproduces on baseline `Shell`, unrelated to
+  the health-dot change). Desktop-1280 passes. Needs a `light-shows.css` row-grid fix so the
+  checkbox column precedes the name at narrow widths.
 
 ### 4.9 Wraps & License Plates — `Requirements.md` §4.9
 

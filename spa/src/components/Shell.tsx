@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import type { ComponentChildren } from "preact";
 import { Icon } from "./Icon";
+import { api } from "../api/client";
 
 /** Which primary nav entry is active for the current screen. */
 export type NavKey = "map" | "analytics" | "media" | "cloud" | "settings";
@@ -48,13 +49,19 @@ const SEV_CLASS: Record<string, string> = {
   unknown: "health-dot-unknown",
 };
 
+/** System-health severity → user-facing status label. */
+const SEV_LABEL: Record<string, string> = {
+  ok: "All systems normal",
+  warn: "System degraded",
+  error: "System error",
+  unknown: "System status",
+};
+
 /**
  * The app chrome: top bar, desktop sidebar rail, mobile bottom tabs, theme
  * toggle, and the system-health status dot — a faithful port of the legacy
- * `base.html`. The health dot polls `/api/system/health`; webd's read-only
- * catalog API does not expose that endpoint, so the dot simply stays hidden
- * (its default), which is the graceful-degradation behaviour base.html already
- * specifies ("hidden until the first poll arrives").
+ * `base.html`. The health dot polls `/api/system/health` for live v1 parity and
+ * stays hidden until the first successful poll arrives.
  */
 export function Shell({
   active,
@@ -68,26 +75,25 @@ export function Shell({
   const linkRef = useRef<HTMLAnchorElement>(null);
 
   useEffect(() => {
-    // webd's read-only catalog API does not expose /api/system/health, so the
-    // poll is OFF by default — requesting an absent endpoint would add a 404 to
-    // every run and muddy the "no unexpected non-2xx" UAT gate. The markup is
-    // kept for structural parity with base.html; the dot stays hidden (exactly
-    // base.html's "hidden until first poll" behaviour). A deployment that DOES
-    // provide the endpoint can opt in via VITE_ENABLE_HEALTH_POLL=true.
-    if (import.meta.env.VITE_ENABLE_HEALTH_POLL !== "true") return;
     let timer: number | undefined;
-    let cancelled = false;
+    let mounted = true;
+    let inFlight: AbortController | undefined;
     async function poll() {
+      const ctrl = new AbortController();
+      inFlight?.abort();
+      inFlight = ctrl;
+      // Guard against an out-of-order resolve: once a newer tick (or unmount)
+      // supersedes this poll, its result must not overwrite the dot with stale
+      // data. (Aborts are swallowed below — V1 keeps the last known colour.)
+      const superseded = () => !mounted || inFlight !== ctrl;
       try {
-        const r = await fetch("/api/system/health", {
-          credentials: "same-origin",
-        });
-        if (!r.ok || cancelled) return;
-        const data = (await r.json()) as {
-          overall?: { severity?: string; message?: string };
-        };
-        const sev = data.overall?.severity ?? "unknown";
-        const msg = data.overall?.message ?? "System status";
+        const data = await api.systemHealth(ctrl.signal);
+        if (superseded()) return;
+        const raw = typeof data.overall === "string" ? data.overall : "unknown";
+        const sev = Object.prototype.hasOwnProperty.call(SEV_CLASS, raw)
+          ? raw
+          : "unknown";
+        const msg = SEV_LABEL[sev] ?? SEV_LABEL.unknown;
         const dot = dotRef.current;
         const link = linkRef.current;
         if (!dot || !link) return;
@@ -96,13 +102,18 @@ export function Shell({
         link.setAttribute("aria-label", msg);
         link.hidden = false;
       } catch {
-        /* network blip or endpoint absent — keep the dot hidden */
+        // Network blip or abort (supersede/unmount included) — keep the last
+        // known dot colour and never hide an already-revealed dot. Exact V1
+        // parity: base.html's poll() does nothing on !r.ok / catch
+        // ("network blip — keep last known colour"); the dot's only hidden
+        // state is its pre-first-success default.
       }
     }
-    poll();
-    timer = window.setInterval(poll, 30000);
+    void poll().catch(() => {});
+    timer = window.setInterval(() => void poll().catch(() => {}), 30000);
     return () => {
-      cancelled = true;
+      mounted = false;
+      inFlight?.abort();
       if (timer) window.clearInterval(timer);
     };
   }, []);

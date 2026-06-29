@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks"
 import { Icon } from "../components/Icon";
 import { api, ApiError } from "../api/client";
 import type { Clip, DaySummary, EventItem, Trip, TripDetail } from "../api/types";
+import { classifyDeleteFailure } from "../player/deleteClip";
+import { MapVideoOverlay } from "./map/MapVideoOverlay";
 import {
   type ClockPref,
   TripMapController,
@@ -18,7 +20,10 @@ type PanelTab = "events" | "trips" | "clips";
 type ClipsFolder = "RecentClips" | "SavedClips" | "SentryClips" | "ArchivedClips";
 const PANEL_PAGE_SIZE = 25;
 // B-1 has no cloud backend yet; keep the V1 cloud-provider gate false.
-const cloudConnected = false;
+const cloudConnected =
+  (typeof window !== "undefined" &&
+    (window as { __TESLAUSB_CLOUD_CONNECTED__?: boolean }).__TESLAUSB_CLOUD_CONNECTED__) ??
+  false;
 
 interface PanelTabState<T> {
   items: T[] | null;
@@ -32,6 +37,12 @@ interface PanelState {
   events: PanelTabState<EventItem>;
   trips: PanelTabState<Trip>;
   clips: PanelTabState<Clip>;
+}
+
+interface MapOverlayState {
+  clips: Clip[];
+  index: number;
+  camera: string;
 }
 
 function newPanelTabState<T>(): PanelTabState<T> {
@@ -185,6 +196,7 @@ export function TripMap() {
     trips: newPanelTabState<Trip>(),
     clips: newPanelTabState<Clip>(),
   });
+  const [overlayState, setOverlayState] = useState<MapOverlayState | null>(null);
   const panelStateRef = useRef(panelState);
   const panelListRef = useRef<HTMLDivElement>(null);
   const panelSentinelRef = useRef<HTMLDivElement | null>(null);
@@ -204,6 +216,7 @@ export function TripMap() {
     trips: false,
     clips: false,
   });
+  const overlayDeleteAbortRef = useRef<AbortController | null>(null);
 
   const currentDay = days && days.length ? days[dayIndex] : null;
   const presentEventTypes = useMemo(
@@ -570,6 +583,7 @@ export function TripMap() {
       abortTabRequest("events");
       abortTabRequest("trips");
       abortTabRequest("clips");
+      overlayDeleteAbortRef.current?.abort();
     },
     [abortTabRequest],
   );
@@ -629,19 +643,84 @@ export function TripMap() {
     );
   };
 
-  const navigateTo = useCallback((to: string) => {
-    const current = window.location.pathname + window.location.search + window.location.hash;
-    if (to !== current) {
-      window.history.pushState({}, "", to);
-      window.dispatchEvent(new PopStateEvent("popstate"));
-    }
-    window.scrollTo(0, 0);
-  }, []);
-
   const onClipPlay = useCallback((clip: Clip) => {
     setClipActionNotice(null);
-    navigateTo(`/events?clip=${clip.id}`);
-  }, [navigateTo]);
+    const list = panelStateRef.current.clips.items ?? [];
+    const snapshot = list.length ? [...list] : [clip];
+    const index = Math.max(
+      0,
+      snapshot.findIndex((item) => item.id === clip.id),
+    );
+    setOverlayState({
+      clips: snapshot,
+      index,
+      camera: "front",
+    });
+  }, []);
+
+  const onOverlayClose = useCallback(() => {
+    setOverlayState(null);
+  }, []);
+
+  const onOverlayNavigate = useCallback((direction: -1 | 1) => {
+    setOverlayState((prev) => {
+      if (!prev) return prev;
+      const nextIndex = Math.max(0, Math.min(prev.clips.length - 1, prev.index + direction));
+      if (nextIndex === prev.index) return prev;
+      return { ...prev, index: nextIndex, camera: "front" };
+    });
+  }, []);
+
+  const onOverlayCameraChange = useCallback((nextCamera: string) => {
+    setOverlayState((prev) => (prev ? { ...prev, camera: nextCamera } : prev));
+  }, []);
+
+  const onOverlayDelete = useCallback(async (clipId: number) => {
+    setClipActionNotice(null);
+    const removeClip = () => {
+      setPanelState((prev) => {
+        if (!prev.clips.items) return prev;
+        return {
+          ...prev,
+          clips: {
+            ...prev.clips,
+            items: prev.clips.items.filter((item) => item.id !== clipId),
+          },
+        };
+      });
+      setOverlayState((prev) => {
+        if (!prev) return prev;
+        const clips = prev.clips.filter((item) => item.id !== clipId);
+        if (!clips.length) return null;
+        return {
+          ...prev,
+          clips,
+          index: Math.min(prev.index, clips.length - 1),
+        };
+      });
+    };
+    overlayDeleteAbortRef.current?.abort();
+    const ac = new AbortController();
+    overlayDeleteAbortRef.current = ac;
+    try {
+      await api.deleteClip(clipId, ac.signal);
+      if (ac.signal.aborted) return;
+      removeClip();
+    } catch (err) {
+      if (ac.signal.aborted) return;
+      const failure = classifyDeleteFailure(err);
+      if (failure.softGone) {
+        removeClip();
+        setClipActionNotice(failure.message);
+        return;
+      }
+      const suffix = failure.retryable ? " Retry in a moment." : "";
+      setClipActionNotice(`Couldn't delete clip. ${failure.message}${suffix}`);
+      throw err;
+    } finally {
+      if (overlayDeleteAbortRef.current === ac) overlayDeleteAbortRef.current = null;
+    }
+  }, []);
 
   const onClipShowOnMap = useCallback((clip: Clip) => {
     if (clip.lat == null || clip.lon == null) return;
@@ -763,6 +842,12 @@ export function TripMap() {
     : error
       ? "Unavailable"
       : "Loading\u2026";
+  const overlayClip =
+    overlayState &&
+    overlayState.index >= 0 &&
+    overlayState.index < overlayState.clips.length
+      ? overlayState.clips[overlayState.index]
+      : null;
 
   return (
     <div
@@ -1131,6 +1216,19 @@ export function TripMap() {
           )}
         </div>
       </div>
+      {overlayState && overlayClip && (
+        <MapVideoOverlay
+          clip={overlayClip}
+          clips={overlayState.clips}
+          camera={overlayState.camera}
+          cloudConnected={cloudConnected}
+          clock={clock}
+          onClose={onOverlayClose}
+          onNavigate={onOverlayNavigate}
+          onCameraChange={onOverlayCameraChange}
+          onDeleteClip={onOverlayDelete}
+        />
+      )}
     </div>
   );
 }
@@ -1380,23 +1478,26 @@ function ClipsTab({
         );
         return (
           <div class="vp-clip" key={c.id} aria-busy={rowBusy ? "true" : "false"}>
-            <a
+            <button
+              type="button"
               class="vp-clip-info vp-clip-link"
-              href={`/events?clip=${c.id}`}
               data-testid={`vp-clip-link-${c.id}`}
-              aria-label={`Open clip ${fmtClock(c.started_at, clock)}`}
+              aria-label={`Play clip ${fmtClock(c.started_at, clock)}`}
+              disabled={rowBusy}
+              onClick={() => onPlay(c)}
             >
               <div class="vp-clip-date">{fmtClock(c.started_at, clock)}</div>
               <div class="vp-clip-meta">
                 {c.angles.length} cam · {mb} MB
               </div>
               {c.is_sentry && <div class="vp-clip-reason">sentry</div>}
-            </a>
+            </button>
             <div class="vp-actions">
               <button
                 type="button"
                 class="vp-btn vp-btn-play"
                 title="Play"
+                aria-label="Play clip"
                 data-testid={`vp-clip-play-${c.id}`}
                 disabled={rowBusy}
                 onClick={(e) => {
@@ -1412,6 +1513,7 @@ function ClipsTab({
                   type="button"
                   class="vp-btn vp-btn-map"
                   title="Show on Map"
+                  aria-label="Show on map"
                   data-testid={`vp-clip-map-${c.id}`}
                   disabled={rowBusy}
                   onClick={(e) => {
@@ -1427,6 +1529,7 @@ function ClipsTab({
                 type="button"
                 class="vp-btn vp-btn-dl"
                 title="Download ZIP"
+                aria-label="Download ZIP"
                 data-testid={`vp-clip-dl-${c.id}`}
                 disabled={rowBusy}
                 onClick={(e) => {
@@ -1456,6 +1559,7 @@ function ClipsTab({
                 type="button"
                 class="vp-btn vp-btn-danger vp-btn-del"
                 title="Delete"
+                aria-label="Delete clip"
                 data-testid={`vp-clip-del-${c.id}`}
                 disabled={rowBusy}
                 onClick={(e) => {

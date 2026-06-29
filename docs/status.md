@@ -938,6 +938,16 @@ LUNs) is the single make-or-break that still needs the car.**
     (representative GPS fix; omitted for stationary non-event sentry per operator
     rule). Shipped 2026-06-25 (`2e0db7c`); UAT trip-map 66/66 (`spa/test/uat/
     trip-map.spec.ts` "map panel — clips action buttons mirror v1 row controls").
+  - [x] **Inline map video-overlay player — Slice 1 (V1 mirror)** — clicking a clip
+    row on the map now opens V1's draggable floating overlay player (6-camera
+    switcher, HUD shell, prev/next, download, fullscreen, maximize, delete; cloud
+    archive hidden), instead of navigating to the full-page EventPlayer. Esc=unmaximize-
+    only; outside-click/✕ close; ro_usb HEAD-probe gating; no-playable empty state;
+    shared delete classifier (`player/deleteClip.ts`); pure angle predicates extracted
+    (`player/angles.ts`). gpt-5.5 design + code review reconciled (3 BLOCKING + 2 SHOULD-FIX).
+    UAT 86/86 both viewports; **live-verified on device** (overlay opens both viewports,
+    interactive ~1.6s, zero console errors / non-2xx — see `files/hw-results.md`).
+    Slices 2 (marker-open) + 3 (live telemetry HUD) pending.
 - [x] Units & timezone preferences re-render speeds/times. **(server-persisted: speed unit (mph/kph) + display clock (local/UTC) re-render trip-map speeds & times and survive reload; optimistic write with per-key serialized PUT /api/settings→indexd and rollback to the last server-confirmed value. Playwright: `spa/test/uat/trip-map.spec.ts` "display preferences (server-persisted)" — 20/20 green desktop+mobile, console clean. Follow-up: full IANA-zone picker + cross-screen time propagation.)**
 
 ### 4.2 Event / Video Player — `Requirements.md` §4.2

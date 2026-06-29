@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { Icon } from "../components/Icon";
 import { api, ApiError } from "../api/client";
-import type { Angle, Clip, EventItem } from "../api/types";
+import type { Clip, EventItem } from "../api/types";
 import { HudController, type HudElements } from "../player/hud-controller";
+import { isDownloadableAngle, isStreamableAngle } from "../player/angles";
+import { classifyDeleteFailure, type DeleteFailure } from "../player/deleteClip";
 import "../styles/player.css";
 
 /**
@@ -95,23 +97,9 @@ function clipSize(clip: Clip | null): string {
   return `${(bytes / 1_000_000).toFixed(2)} MB`;
 }
 
-/** The `view_kind` that guarantees archive-export/download support. */
-const VIEW_ARCHIVE = "archive";
 const DL_DOWNLOADING_MS = 1000;
 const DL_RESET_MS = 8000;
 type DlPhase = "idle" | "preparing" | "downloading";
-
-/** Only explicitly unavailable angles are blocked from playback. */
-function isStreamableAngle(angle: Angle | undefined): boolean {
-  if (!angle) return false;
-  const kind = angle.view_kind.trim().toLowerCase();
-  return kind !== "unavailable";
-}
-
-/** Download endpoints remain archive-only. */
-function isDownloadableAngle(angle: Angle | undefined): boolean {
-  return angle?.view_kind === VIEW_ARCHIVE;
-}
 
 function errMessage(err: unknown): string {
   return err instanceof ApiError
@@ -120,94 +108,6 @@ function errMessage(err: unknown): string {
 }
 
 /** How the delete UI should react to a failed `deleteClip` call. */
-interface DeleteFailure {
-  message: string;
-  /** Transient — keep the dialog open and offer a Retry button. */
-  retryable: boolean;
-  /** The clip is already gone from the car — treat as a soft success (remove it). */
-  softGone: boolean;
-}
-
-/**
- * Map a `deleteClip` rejection to operator-facing UI state, keyed on the HTTP
- * `status` (and `code` where it changes the meaning). The contract's terminal
- * outcomes:
- *  - `409 handoff_busy` / network → transient, retryable.
- *  - `409 not_present` / `404`    → already gone from the car → soft success.
- *  - `503` (gadgetd unreachable)  → distinct message, retryable (may come back).
- *  - `400` / `422`                → validation, terminal (no retry).
- *  - `502` / `500` / `501`        → failed / fault / unsupported, terminal.
- */
-function classifyDeleteFailure(err: unknown): DeleteFailure {
-  if (err instanceof ApiError) {
-    if (err.status === 0 || err.code === "network") {
-      return {
-        message: "Couldn't reach the device. Check the connection and retry.",
-        retryable: true,
-        softGone: false,
-      };
-    }
-    if (err.status === 409) {
-      if (err.code === "not_present") {
-        return {
-          message: "This clip is already gone from the car — removing it.",
-          retryable: false,
-          softGone: true,
-        };
-      }
-      return {
-        message: `${err.message} You can retry in a moment.`,
-        retryable: true,
-        softGone: false,
-      };
-    }
-    if (err.status === 404) {
-      return {
-        message: "That clip no longer exists — removing it.",
-        retryable: false,
-        softGone: true,
-      };
-    }
-    if (err.status === 503) {
-      return {
-        message: "The device is unreachable right now. Try again once it's back.",
-        retryable: true,
-        softGone: false,
-      };
-    }
-    if (err.status === 400 || err.status === 422) {
-      return { message: err.message, retryable: false, softGone: false };
-    }
-    if (err.status === 502) {
-      return {
-        message: `The delete couldn't be completed on the car: ${err.message}`,
-        retryable: false,
-        softGone: false,
-      };
-    }
-    if (err.status === 500) {
-      return {
-        message: `The device reported a fault during delete: ${err.message}`,
-        retryable: false,
-        softGone: false,
-      };
-    }
-    if (err.status === 501) {
-      return {
-        message: "Only car-side delete is available.",
-        retryable: false,
-        softGone: false,
-      };
-    }
-    return { message: err.message, retryable: false, softGone: false };
-  }
-  return {
-    message: (err as Error).message || "Unexpected error.",
-    retryable: true,
-    softGone: false,
-  };
-}
-
 /** Seconds into the *currently selected camera's* video where the event moment
  *  falls. The event's `front_frame_offset_ms` is relative to the FRONT cam's
  *  own start; each angle starts at its `offset_ms` within the clip, so the

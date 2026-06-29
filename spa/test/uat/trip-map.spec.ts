@@ -1,7 +1,7 @@
 import { test, expect, loadState, ARTIFACTS, type Probe } from "./helpers";
 import { SHELL_POLL_ALLOWLIST } from "./screen-helpers";
 import type { Page } from "@playwright/test";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 // ── Task 5.3 UAT gate (spa.md §5/§6) ──────────────────────────────────────
@@ -23,6 +23,7 @@ import { resolve } from "node:path";
 
 const SHARED_SEG_LAT = 37.8035; // midpoint of the trip1∩trip2 overlap …
 const SHARED_SEG_LON = -122.4025; // … (37.802,-122.404 → 37.805,-122.401).
+const CLIP_MP4 = readFileSync(resolve(process.cwd(), "test", "fixtures", "clip.mp4"));
 
 /** Float tolerance for comparing decoded lat/lon against seed coordinates. */
 function near(a: number, b: number, eps = 1e-4): boolean {
@@ -334,14 +335,15 @@ test.describe("trip map UAT", () => {
     // Clips tab defaults to V1's RecentClips folder (single-folder, not merged).
     await page.locator("#vpTabClips").click();
     await expect(page.locator("[data-testid=vp-clips] .vp-clip")).toHaveCount(10);
-    const clipLinks = page.locator("[data-testid=vp-clips] a[data-testid^=vp-clip-link-]");
+    const clipLinks = page.locator("[data-testid=vp-clips] [data-testid^=vp-clip-link-]");
     await expect(clipLinks).toHaveCount(10);
-    for (const id of [1, 5]) {
-      await expect(page.locator(`[data-testid=vp-clip-link-${id}]`)).toHaveAttribute(
-        "href",
-        `/events?clip=${id}`,
-      );
-    }
+    await page.locator("[data-testid=vp-clip-link-1]").click();
+    await expect(page.locator("[data-testid=video-overlay]")).toBeVisible();
+    await expect(page.locator("[data-testid=vp-overlay-video]")).toHaveAttribute(
+      "src",
+      /\/api\/clips\/1\/stream/,
+    );
+    await page.locator("[data-testid=vp-overlay-close]").click();
     await expect(page.locator("[data-testid=vp-clip-link-2]")).toHaveCount(0);
 
     // (g) Marker clustering active (done LAST — it zooms the map out): the 2
@@ -513,7 +515,7 @@ test.describe("trip map UAT", () => {
     await expect(clipRows).toHaveCount(30);
 
     const clipIds = await page
-      .locator("[data-testid=vp-clips] a[data-testid^=vp-clip-link-]")
+      .locator("[data-testid=vp-clips] [data-testid^=vp-clip-link-]")
       .evaluateAll((links) =>
         links.map((link) =>
           Number((link.getAttribute("data-testid") ?? "").replace("vp-clip-link-", "")),
@@ -1317,7 +1319,7 @@ test.describe("trip map UAT", () => {
     );
   });
 
-  test("map→video — all clips rows deep-link into the player", async ({
+  test("map→video — clip rows open the inline overlay player", async ({
     page,
   }) => {
     await gotoMap(page);
@@ -1326,12 +1328,14 @@ test.describe("trip map UAT", () => {
     await page.locator("#vpTabClips").click();
 
     const clipOne = page.locator("[data-testid=vp-clip-link-1]");
-    await expect(clipOne).toHaveAttribute("href", "/events?clip=1");
     await clipOne.click();
 
-    await expect(page).toHaveURL(/\/events\?clip=1$/);
-    await expect(page.locator("[data-screen=event-player]")).toBeVisible();
-    await expect(page.locator("#mainVideo")).toHaveAttribute("src", /\/api\/clips\/1\/stream/);
+    await expect(page).toHaveURL(/\/$/);
+    await expect(page.locator("[data-testid=video-overlay]")).toBeVisible();
+    await expect(page.locator("[data-testid=vp-overlay-video]")).toHaveAttribute(
+      "src",
+      /\/api\/clips\/1\/stream/,
+    );
   });
 
   test("map panel — clips action buttons mirror v1 row controls", async ({
@@ -1453,5 +1457,306 @@ test.describe("trip map UAT", () => {
     expect(deleteCount).toBe(1);
     expect(new URL(page.url()).pathname).toBe("/");
     assertCleanConsole(probe);
+  });
+
+  test("map overlay — slice 1 player shell and controls parity", async ({ page, probe }) => {
+    await page.route("**/api/clips**", async (route) => {
+      const req = route.request();
+      const url = new URL(req.url());
+      if (req.method() === "GET" && url.pathname === "/api/clips") {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            items: [
+              {
+                id: 701,
+                canonical_key: "RecentClips/2024-06-01_10-00-00",
+                started_at: 1717243200,
+                ended_at: 1717243260,
+                lat: 37.3951,
+                lon: -122.0747,
+                partition: "archive",
+                folder_class: "RecentClips",
+                is_sentry: false,
+                duration_s: 60,
+                availability: "ready",
+                angles: [
+                  { camera: "front", view_kind: "archive", offset_ms: 0, duration_s: 60, size_bytes: 4096 },
+                  { camera: "back", view_kind: "archive", offset_ms: 0, duration_s: 60, size_bytes: 4096 },
+                  { camera: "left_repeater", view_kind: "ro_usb", offset_ms: 0, duration_s: 60, size_bytes: 4096 },
+                  { camera: "right_repeater", view_kind: "ro_usb", offset_ms: 0, duration_s: 60, size_bytes: 4096 },
+                ],
+              },
+              {
+                id: 702,
+                canonical_key: "RecentClips/2024-06-01_10-05-00",
+                started_at: 1717243500,
+                ended_at: 1717243560,
+                lat: null,
+                lon: null,
+                partition: "archive",
+                folder_class: "RecentClips",
+                is_sentry: false,
+                duration_s: 60,
+                availability: "ready",
+                angles: [
+                  { camera: "front", view_kind: "archive", offset_ms: 0, duration_s: 60, size_bytes: 4096 },
+                ],
+              },
+              {
+                id: 703,
+                canonical_key: "RecentClips/2024-06-01_10-10-00",
+                started_at: 1717243800,
+                ended_at: 1717243860,
+                lat: 37.396,
+                lon: -122.075,
+                partition: "archive",
+                folder_class: "RecentClips",
+                is_sentry: false,
+                duration_s: 60,
+                availability: "ready",
+                angles: [
+                  { camera: "front", view_kind: "archive", offset_ms: 0, duration_s: 60, size_bytes: 4096 },
+                ],
+              },
+            ],
+            next_cursor: null,
+            limit: 25,
+          }),
+        });
+        return;
+      }
+      await route.continue();
+    });
+
+    const streamRequests: Array<{ method: string; camera: string; status: number }> = [];
+    await page.route("**/api/clips/*/stream?camera=**", async (route) => {
+      const req = route.request();
+      const url = new URL(req.url());
+      const camera = url.searchParams.get("camera") ?? "front";
+      if (req.method() === "HEAD") {
+        if (camera === "left_repeater") {
+          await page.waitForTimeout(120);
+          streamRequests.push({ method: "HEAD", camera, status: 200 });
+          await route.fulfill({ status: 200, headers: { "accept-ranges": "bytes" } });
+          return;
+        }
+        if (camera === "right_repeater") {
+          streamRequests.push({ method: "HEAD", camera, status: 404 });
+          await route.fulfill({ status: 404 });
+          return;
+        }
+        streamRequests.push({ method: "HEAD", camera, status: 200 });
+        await route.fulfill({ status: 200, headers: { "accept-ranges": "bytes" } });
+        return;
+      }
+      streamRequests.push({ method: req.method(), camera, status: 206 });
+      await route.fulfill({
+        status: 206,
+        headers: {
+          "content-type": "video/mp4",
+          "accept-ranges": "bytes",
+          "content-range": `bytes 0-${CLIP_MP4.length - 1}/${CLIP_MP4.length}`,
+        },
+        body: CLIP_MP4,
+      });
+    });
+
+    let deleteCount = 0;
+    await page.route("**/api/clips/*?target=car", async (route) => {
+      const req = route.request();
+      if (req.method() !== "DELETE") {
+        await route.continue();
+        return;
+      }
+      deleteCount += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ handoff_id: "h-1", state: "done" }),
+      });
+    });
+
+    await gotoMap(page);
+    await page.locator("#btnVideos").click();
+    await page.locator("#vpTabClips").click();
+    await page.locator("[data-testid=vp-clip-play-701]").click();
+
+    await expect(page.locator("[data-testid=video-overlay]")).toBeVisible();
+    await expect(page.locator("#map")).toBeVisible();
+    expect(new URL(page.url()).pathname).toBe("/");
+    await expect(page.locator("[data-testid=vp-overlay-video]")).toHaveAttribute(
+      "src",
+      /\/api\/clips\/701\/stream\?camera=front/,
+    );
+
+    const cameraButtons = page.locator("#camSwitcher .cam-btn");
+    await expect(cameraButtons).toHaveCount(6);
+    const angleOrder = await cameraButtons.evaluateAll((buttons) =>
+      buttons.map((btn) => btn.getAttribute("data-angle")),
+    );
+    expect(angleOrder).toEqual([
+      "front",
+      "back",
+      "left_repeater",
+      "right_repeater",
+      "left_pillar",
+      "right_pillar",
+    ]);
+
+    await page.locator("[data-testid=vp-overlay-cam-back]").click();
+    await expect(page.locator("[data-testid=vp-overlay-video]")).toHaveAttribute(
+      "src",
+      /camera=back/,
+    );
+
+    await page.locator("[data-testid=vp-overlay-cam-left_repeater]").click();
+    await expect
+      .poll(
+        () =>
+          streamRequests.filter(
+            (req) => req.method === "HEAD" && req.camera === "left_repeater",
+          ).length,
+      )
+      .toBeGreaterThan(0);
+    await expect(page.locator("[data-testid=vp-overlay-video]")).toHaveAttribute(
+      "src",
+      /camera=left_repeater/,
+    );
+
+    await page.locator("[data-testid=vp-overlay-cam-right_repeater]").click();
+    await expect
+      .poll(
+        () =>
+          streamRequests.filter(
+            (req) => req.method === "HEAD" && req.camera === "right_repeater",
+          ).length,
+      )
+      .toBeGreaterThan(0);
+    await expect(page.locator("[data-testid=vp-overlay-video]")).not.toHaveAttribute(
+      "src",
+      /camera=right_repeater/,
+    );
+    expect(
+      streamRequests.some(
+        (req) => req.method !== "HEAD" && req.camera === "right_repeater",
+      ),
+    ).toBe(false);
+    await expect(page.locator("[data-testid=video-stream-unavailable]")).toBeVisible();
+
+    await page.locator("[data-testid=vp-overlay-cam-left_repeater]").click();
+    await page.locator("[data-testid=vp-overlay-cam-front]").click();
+    await expect(page.locator("[data-testid=vp-overlay-video]")).toHaveAttribute(
+      "src",
+      /camera=front/,
+    );
+
+    const leftRepeaterGetsBeforeClose = streamRequests.filter(
+      (req) => req.method !== "HEAD" && req.camera === "left_repeater",
+    ).length;
+    await page.locator("[data-testid=vp-overlay-cam-left_repeater]").click();
+    await page.locator("[data-testid=vp-overlay-close]").click();
+    await expect(page.locator("[data-testid=video-overlay]")).toHaveCount(0);
+    await page.waitForTimeout(180);
+    const leftRepeaterGetsAfterClose = streamRequests.filter(
+      (req) => req.method !== "HEAD" && req.camera === "left_repeater",
+    ).length;
+    expect(leftRepeaterGetsAfterClose).toBe(leftRepeaterGetsBeforeClose);
+
+    await page.locator("[data-testid=vp-clip-play-701]").click();
+    await expect(page.locator("[data-testid=video-overlay]")).toBeVisible();
+
+    const overlay = page.locator("[data-testid=video-overlay]");
+    const header = overlay.locator(".video-overlay-header");
+    const start = await overlay.boundingBox();
+    const headerBox = await header.boundingBox();
+    if (!start) throw new Error("overlay bounding box missing");
+    if (!headerBox) throw new Error("overlay header bounding box missing");
+    await page.mouse.move(headerBox.x + 20, headerBox.y + 12);
+    await page.mouse.down();
+    await page.mouse.move(-500, -500, { steps: 8 });
+    await page.mouse.up();
+    await page.waitForTimeout(50);
+    const moved = await overlay.boundingBox();
+    if (!moved) throw new Error("overlay moved bounding box missing");
+    expect(moved.x).toBeGreaterThanOrEqual(0);
+    expect(moved.y).toBeGreaterThanOrEqual(0);
+    if (test.info().project.name.includes("375")) {
+      expect(Math.abs(moved.x - start.x) + Math.abs(moved.y - start.y)).toBeGreaterThan(0);
+    }
+
+    await page.locator("[data-testid=vp-overlay-maximize]").click();
+    await expect(overlay).toHaveClass(/maximized/);
+    await page.evaluate(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    await expect(overlay).not.toHaveClass(/maximized/);
+    await expect(overlay).toBeVisible();
+
+    await expect(page.locator("[data-testid=vp-overlay-coords]")).toHaveText(
+      "Location 37.3951, -122.0747",
+    );
+    await expect(page.locator("[data-testid=vp-overlay-prev]")).toBeDisabled();
+    await expect(page.locator("[data-testid=vp-overlay-next]")).toBeEnabled();
+    await expect(page.locator("[data-testid=vp-overlay-download]")).toHaveAttribute(
+      "href",
+      "/api/clips/701/export",
+    );
+    await expect(page.locator("[data-testid=vp-overlay-archive]")).toHaveCount(0);
+
+    await page.locator("[data-testid=vp-overlay-next]").click();
+    await expect(page.locator("[data-testid=vp-overlay-coords]")).toHaveCount(0);
+    await expect(page.locator("[data-testid=vp-overlay-prev]")).toBeEnabled();
+
+    page.once("dialog", async (dialog) => {
+      expect(dialog.type()).toBe("confirm");
+      await dialog.accept();
+    });
+    await page.locator("[data-testid=vp-overlay-delete]").click();
+    await expect.poll(() => deleteCount).toBe(1);
+
+    await page.locator("[data-testid=vp-overlay-close]").click();
+    await expect(page.locator("[data-testid=video-overlay]")).toHaveCount(0);
+
+    const non2xx = probe.responses.filter((resp) => {
+      if (new URL(resp.url).pathname === "/api/clips/701/stream" && resp.status === 404) {
+        return false;
+      }
+      return resp.status < 200 || resp.status >= 300;
+    });
+    expect(non2xx, `unexpected non-2xx: ${JSON.stringify(non2xx)}`).toEqual([]);
+    const unexpectedConsoleErrors = probe.consoleErrors.filter(
+      (entry) =>
+        !entry.location.includes("/api/clips/701/stream?camera=right_repeater") &&
+        !entry.text.includes("status of 404"),
+    );
+    expect(
+      unexpectedConsoleErrors,
+      `console error(s): ${JSON.stringify(unexpectedConsoleErrors)}`,
+    ).toEqual([]);
+    expect(probe.consoleWarnings, `console warning(s): ${JSON.stringify(probe.consoleWarnings)}`).toEqual(
+      [],
+    );
+    expect(probe.pageErrors, `pageerror(s): ${JSON.stringify(probe.pageErrors)}`).toEqual([]);
+  });
+
+  test("map overlay — cloud archive button gate", async ({ page }) => {
+    await gotoMap(page);
+    await page.locator("#btnVideos").click();
+    await page.locator("#vpTabClips").click();
+    await page.locator("[data-testid=vp-clip-play-1]").click();
+    await expect(page.locator("[data-testid=vp-overlay-archive]")).toHaveCount(0);
+    await page.locator("[data-testid=vp-overlay-close]").click();
+
+    await page.addInitScript(() => {
+      (window as unknown as { __TESLAUSB_CLOUD_CONNECTED__?: boolean }).__TESLAUSB_CLOUD_CONNECTED__ =
+        true;
+    });
+    await gotoMap(page);
+    await page.locator("#btnVideos").click();
+    await page.locator("#vpTabClips").click();
+    await page.locator("[data-testid=vp-clip-play-1]").click();
+    await expect(page.locator("[data-testid=vp-overlay-archive]")).toBeVisible();
   });
 });

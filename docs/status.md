@@ -780,9 +780,15 @@ LUNs) is the single make-or-break that still needs the car.**
   live `teslacam.img` was provisioned at the old 3 GiB placeholder default, far
   below what the car needs (~64 GB min / 128 GB factory) → the car's exFAT
   partition filled in ~minutes and stayed red-X; in-car deletes can't recover
-  because the LUN itself is too small. Re-provisioning the live device to 128 GiB
-  is a separate destructive Tier-3 task (needs operator GO + `exfatprogs` install
-  + v1 `/srv` cleanup; eject `lun.0` first). **(see §4.11 resize) (gated:C1)**
+  because the LUN itself is too small. **RESOLVED ON LIVE DEVICE 2026-06-29:** the
+  live `teslacam.img` was re-provisioned 3 GiB → 128 GiB under hardware-test rails
+  (GPT-5.5-reviewed plan: patch the boot provision unit first, `mv`-not-`rm`
+  rollback, stop reader daemons, verify exFAT before rebind). New 128 GiB
+  `TESLACAM` exFAT bound + `udc configured`; 294 GiB free after; 18 GiB Pi-side
+  archive preserved (recent un-archived car clips on the old image were lost — an
+  accepted one-time cost of the fix). See `files/hw-results.md` "Live re-provision".
+  Car should re-enumerate and clear the "drive full" warning on next drive. **(see
+  §4.11 resize) (gated:C1)**
 
 ### 1.1 Change propagation to the car
 

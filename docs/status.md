@@ -55,10 +55,16 @@
 >   `lat/lon = None` (`derive.rs::materialize_sentry_clip`) and no map pin where v1 may
 >   show one. **ASK-FIRST** (parity-critical `derive.rs`, `indexd.md §7`) — verify v1's
 >   actual map/event-pin behavior before any change.
-> - [ ] **HUD client parser timing fallback parity** — B-1 `spa/src/player/dashcam-mp4.ts`
->   requires the full `moov/trak/mdia/minf/stbl/stts` chain and returns `[]` on any miss;
->   v1 `dashcam-mp4.js` falls back to 33 ms/frame (`config.durations[i] || 33`). Narrow
->   edge (malformed `stts` in real footage is rare) but a HUD-parity gap — verify vs v1.
+> - [x] **HUD client parser timing fallback parity** — B-1 `spa/src/player/dashcam-mp4.ts`
+>   required the full `moov/trak/mdia/minf/stbl/stts` chain and returned `[]` on any miss;
+>   v1 `dashcam-mp4.js` falls back to 33 ms/frame (`config.durations[i] || 33`).
+>   **DONE 2026-06-29 (`fu-hud-stts-fallback`):** `frameDurations()` failure is now
+>   non-fatal (caught → empty durations), so the existing per-frame fallback supplies
+>   timing; fallback constant matched to v1's literal `FRAME_FALLBACK_MS = 33`. SMPTE-
+>   fixture / normal-stts paths unchanged. Verified by a crafted-MP4 (mdat + Tesla SEI,
+>   no moov/stts) smoke test: pre-fix 0 samples → post-fix 2 samples at t=0 / t=0.033s.
+>   `tsc --noEmit` + vite build clean. (Not on-device-exercisable: parked Sentry footage
+>   has no SEI.)
 >
 > **NEXT (operator-queued):** systematic V1-parity audit across all parity screens
 > (exact-mirror UX). **Phase-2 (the deleter) stays deferred + GATED — do NOT start

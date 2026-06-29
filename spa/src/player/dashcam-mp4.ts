@@ -25,6 +25,13 @@
  */
 import type { TelemetrySample } from "./telemetry";
 
+/**
+ * Per-frame duration (ms) used when the `stts` timing chain is absent or
+ * truncated. Mirrors legacy v1 `dashcam-mp4.js` (`config.durations[i] || 33`),
+ * which never aborts telemetry on a missing `stts` — it assumes ~30 fps.
+ */
+const FRAME_FALLBACK_MS = 33;
+
 interface DecodedSei {
   gear: number;
   speedMps: number;
@@ -206,7 +213,16 @@ class DashcamMp4 {
 
   /** Walk mdat NAL units, attaching each SEI to the following frame's start time. */
   parseSamples(): TelemetrySample[] {
-    const durations = this.frameDurations();
+    // v1 parity: a missing or truncated stts/box chain must NOT abort telemetry.
+    // Legacy v1 falls back to a fixed per-frame duration (`config.durations[i]
+    // || 33`); we mirror that by treating an unreadable timing chain as empty
+    // durations, so the per-frame fallback below supplies the timing.
+    let durations: number[];
+    try {
+      durations = this.frameDurations();
+    } catch {
+      durations = [];
+    }
     const mdat = this.findBox(0, this.view.byteLength, "mdat");
     const samples: TelemetrySample[] = [];
     let cursor = mdat.start;
@@ -228,7 +244,7 @@ class DashcamMp4 {
           samples.push({ time, ...pendingSei });
         }
         pendingSei = null;
-        tMs += durations[frameIndex] ?? durations[durations.length - 1] ?? 1000 / 30;
+        tMs += durations[frameIndex] ?? durations[durations.length - 1] ?? FRAME_FALLBACK_MS;
         frameIndex++;
       }
       cursor += len;

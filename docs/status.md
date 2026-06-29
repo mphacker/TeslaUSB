@@ -656,6 +656,16 @@ LightShows}.tsx`, `spa/src/styles/{music,boombox,light-shows}.css`,
    the images — never shadow-copied to SD.
 5. Reads: media via gadgetd's **RO loop-mount of `media.img`**; live clips via
    raw `pread` (no mount of the car-written volume) — [`ADR-0003`](./adr/0003-media-read-path.md).
+6. **The Pi-side archive (and any unbounded growth: thumbnails, SQLite/WAL,
+   upload staging, logs/journald) must NEVER starve the OS partition.** The card,
+   `/`, and `/data` share one ext4 filesystem (`mmcblk0p2`), so archive growth can
+   directly consume the bytes the OS needs to boot/run — left unchecked it can make
+   the device **fail to boot or crash**. The storage governor MUST enforce a
+   **hard, sacrosanct OS/app reserve** (`storage.md §2` tier-1, floor `max(5%, 2 GiB)`
+   on shared-fs) that the archive can **never** consume: when free space approaches
+   that reserve the governor evicts archive (oldest/lowest-value first) and denies
+   new write budget *before* the OS is endangered — even if archive usage alone
+   looks fine. This protection is not optional and is independent of the LUN sizes.
 
 ---
 
@@ -753,8 +763,26 @@ LUNs) is the single make-or-break that still needs the car.**
   proven on a live `media.img` LUN, and `Chimes/`-in-image is still pending —
   see next item. gated:F1+F3)**
 - [x] **Chime library `Chimes/` lives IN `media.img`** (moved off `/data/teslausb/chimes`). **(DONE 2026-06-15 — webd `list_chime_library` reads the media catalog `Chimes/*.wav`; `/api/chimes/library/*` + legacy `/api/chime-scheduler/library/*` share one media-backed impl; scheduler snapshot `library` sourced from media. LIVE-PROVEN: upload landed at `Chimes/testchime.wav` on the RO media mount, listed via `/api/chimes/library` + snapshot after a scan cycle. See `files/hw-results.md` "Phase 2".)**
-- [ ] Configurable advertised capacity per drive (TeslaCam 64 GB / Media 32 GB
-  defaults, 4–2048 GB), fully pre-allocated. **(see §4.11 resize) (gated:C1)**
+- [ ] Configurable advertised capacity per drive, fully pre-allocated.
+  **Setup defaults (operator decision 2026-06-29): TeslaCam `lun.0` = 128 GiB
+  (`--teslacam-mib 131072`, matches the factory Tesla USB-drive capacity), Media
+  `lun.1` = 1 GiB (`--media-mib 1024`); the remainder of the card is left for the
+  ext4 archive + OS/app files.** Defaults now applied in code (`gadgetd`
+  `DEFAULT_TESLACAM_MIB`/`DEFAULT_MEDIA_MIB`) and the bootstrap unit
+  (`deploy/systemd/gadgetd-provision.service` ExecStart). Provisioning is
+  create-only-if-absent, so this changes **fresh installs / future provisioning
+  only** — it does NOT resize an already-provisioned image. **Still TODO:**
+  user-configurable at setup time (V1-style: recommend sizes from the card's total
+  capacity, provision only if absent) surfacing `--teslacam-mib`/`--media-mib`;
+  online resize lives in §4.11. **`exfatprogs` (`mkfs.exfat`) must be installed on
+  the device** or `gadgetd provision` fails at the mkfs step.
+  **LIVE-DEVICE ROOT CAUSE (2026-06-28 incident — "TeslaCam drive full"):** the
+  live `teslacam.img` was provisioned at the old 3 GiB placeholder default, far
+  below what the car needs (~64 GB min / 128 GB factory) → the car's exFAT
+  partition filled in ~minutes and stayed red-X; in-car deletes can't recover
+  because the LUN itself is too small. Re-provisioning the live device to 128 GiB
+  is a separate destructive Tier-3 task (needs operator GO + `exfatprogs` install
+  + v1 `/srv` cleanup; eject `lun.0` first). **(see §4.11 resize) (gated:C1)**
 
 ### 1.1 Change propagation to the car
 
@@ -1445,7 +1473,14 @@ LUNs) is the single make-or-break that still needs the car.**
 
 - [ ] Set TeslaCam + Media drive sizes (GB 4–2048) → resize backing image +
   brief re-advertise (~30–60 s); reject shrink below usage. **(gated:B5 + C1)**
-- [ ] Safety buffer (≥5 GB) protecting OS partition. **(gated:B5)**
+- [ ] **OS-starvation guard (binding — see invariant 6): hard, always-enforced
+  OS/app reserve the archive can NEVER consume.** The card's `/`, `/data`, and the
+  ext4 archive share one filesystem, so unbounded archive/thumbnail/SQLite/upload-
+  staging/log growth can make the device fail to boot or crash. The storage
+  governor MUST keep free space above a sacrosanct floor (`storage.md §2` tier-1,
+  `max(5%, 2 GiB)` on shared-fs) — evicting archive oldest/lowest-value first and
+  denying new write budget *before* the OS is endangered, even when archive usage
+  alone looks fine. Not optional; independent of LUN sizes. **(gated:B5)**
 - [ ] Cleanup tuning: target free %, Sentry max-age, preserve-GPS-clips. **(gated:B1/B2)**
 
 ### 4.12 Storage Health — `Requirements.md` §4.12

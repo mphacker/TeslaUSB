@@ -52,9 +52,11 @@ use provision::ImagePlan;
 const DEFAULT_IMAGE: &str = "/data/teslausb/teslacam.img";
 /// Default media (`lun.1`) backing image location on the Pi's data area.
 const DEFAULT_MEDIA_IMAGE: &str = "/data/teslausb/media.img";
-/// Default TeslaCam-image size (MiB) when provisioning.
-const DEFAULT_TESLACAM_MIB: u64 = 3072;
-/// Default media-image size (MiB) when provisioning.
+/// Default TeslaCam-image size (MiB) when provisioning. 128 GiB (131072 MiB) =
+/// the capacity Tesla ships on factory USB drives; the remainder of the card is
+/// left for the ext4 archive + OS/app files (see status.md §1 + invariant 6).
+const DEFAULT_TESLACAM_MIB: u64 = 131072;
+/// Default media-image size (MiB) when provisioning. 1 GiB.
 const DEFAULT_MEDIA_MIB: u64 = 1024;
 /// Control socket path served by `gadgetd serve`.
 #[cfg(unix)]

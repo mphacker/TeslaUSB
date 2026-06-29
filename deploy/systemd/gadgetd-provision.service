@@ -27,7 +27,7 @@ Type=oneshot
 RemainAfterExit=yes
 # Delegate ALL image creation/layout to the gadgetd binary (the sole write-path
 # owner). create-only-if-absent: existing data is never disturbed.
-ExecStart=/usr/local/bin/gadgetd provision --image /data/teslausb/teslacam.img --media-image /data/teslausb/media.img --teslacam-mib 3072 --media-mib 1024
+ExecStart=/usr/local/bin/gadgetd provision --image /data/teslausb/teslacam.img --media-image /data/teslausb/media.img --teslacam-mib 131072 --media-mib 1024
 
 [Install]
 WantedBy=multi-user.target

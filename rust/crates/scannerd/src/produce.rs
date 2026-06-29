@@ -64,6 +64,17 @@ pub const DEFAULT_SEI_SAMPLE_RATE: u32 = 30;
 /// generous ceiling.
 const MAX_CLIP_BYTES: u64 = 256 * 1024 * 1024;
 
+/// Maximum expensive front-clip SEI walks performed in a single produce
+/// pass. Front clips are the only records that read+parse clip bytes (tens
+/// of MiB each); capping them per batch bounds the per-request work so a
+/// single response always returns well under the consumer's read timeout,
+/// even when a large backlog (e.g. a long drive just recorded) becomes
+/// eligible all at once. The remaining eligible clips are deferred to the
+/// next pass (`complete=false`), and the consumer drains the backlog over
+/// several fast batches. Non-front angles are cheap (filename only) and are
+/// not capped.
+const MAX_FRONT_SHAPES_PER_BATCH: usize = 8;
+
 /// Tesla event sidecar filename.
 const EVENT_JSON_NAME: &str = "event.json";
 
@@ -570,6 +581,8 @@ pub fn produce<R: BlockReader + ?Sized>(
     }
 
     let mut records: Vec<ClipAngleRecord> = Vec::new();
+    let mut front_shaped: usize = 0;
+    let mut deferred = false;
     for &idx in &eligible {
         let Some(record) = all_records.get(idx) else {
             continue;
@@ -578,6 +591,18 @@ pub fn produce<R: BlockReader + ?Sized>(
             continue;
         };
         if ident.is_front() {
+            // Front clips are the only expensive records (they read + parse
+            // tens of MiB of clip bytes). Once the per-pass front budget is
+            // spent, defer the remaining front clips to the next pass so this
+            // response stays small and returns well under the consumer's read
+            // timeout; unmark_emitted re-offers them. Cheap non-front angles
+            // and non-clip sidecars are never deferred, so `complete=false`
+            // strictly means expensive front work still remains.
+            if front_shaped >= MAX_FRONT_SHAPES_PER_BATCH {
+                tracker.unmark_emitted(record);
+                deferred = true;
+                continue;
+            }
             let Some(volume) = volumes
                 .iter()
                 .find(|(slot, _)| *slot == record.partition_slot)
@@ -585,6 +610,7 @@ pub fn produce<R: BlockReader + ?Sized>(
             else {
                 continue;
             };
+            front_shaped += 1;
             match shape_front(volume, record, &ident, sample_rate) {
                 Ok(Some(rec)) => records.push(rec),
                 Ok(None) => {
@@ -610,9 +636,9 @@ pub fn produce<R: BlockReader + ?Sized>(
         generation: 0,
         // A structural failure already returned `Err` above, so a returned
         // batch always has a trustworthy present set. The flag is the
-        // consumer's prune-safety gate (and the hook for a future
-        // partial-walk mode).
-        complete: true,
+        // consumer's prune-safety gate; `complete=false` means this pass
+        // deferred additional eligible clips to keep per-request work bounded.
+        complete: !deferred,
         stats,
         present_keys: present.into_iter().collect(),
         records,
@@ -631,6 +657,8 @@ pub fn produce<R: BlockReader + ?Sized>(
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+
+    use std::collections::BTreeSet;
 
     use super::{
         clip_identity, collect_media, decode_exfat_timestamp, is_toybox_path, partition_label,
@@ -885,7 +913,7 @@ mod tests {
 
     // ---- two-image / two-LUN produce path -------------------------------
 
-    use super::{produce, ImageSource, DEFAULT_SEI_SAMPLE_RATE};
+    use super::{produce, ImageSource, DEFAULT_SEI_SAMPLE_RATE, MAX_FRONT_SHAPES_PER_BATCH};
     use crate::reader::SliceReader;
     use crate::stability::{StabilityConfig, StabilityTracker};
 
@@ -1128,6 +1156,22 @@ mod tests {
         produce(&sources, &mut tracker, 1_060, DEFAULT_SEI_SAMPLE_RATE).expect("second pass")
     }
 
+    fn sources_with_slot_overrides(readers: &[SliceReader]) -> Vec<ImageSource<'_, SliceReader>> {
+        readers
+            .iter()
+            .enumerate()
+            .map(|(slot, reader)| {
+                ImageSource::with_slot(reader, u8::try_from(slot).expect("slot fits into u8"))
+            })
+            .collect()
+    }
+
+    fn expected_savedclip_keys(source_count: usize) -> BTreeSet<String> {
+        (0..source_count)
+            .map(|slot| format!("{slot}:TeslaCam/SavedClips/{EVENT_TIMESTAMP}/{EVENT_TIMESTAMP}"))
+            .collect()
+    }
+
     #[test]
     fn image_source_constructors_carry_slot() {
         let img = empty_single_partition_image();
@@ -1168,6 +1212,138 @@ mod tests {
         let batch = produce(&sources, &mut tracker, 1_000, 30).expect("single-image produce");
         assert_eq!(batch.stats.partitions, 1);
         assert!(batch.complete);
+    }
+
+    #[test]
+    fn produce_chunks_front_backlog_across_batches() {
+        let source_count = MAX_FRONT_SHAPES_PER_BATCH + 1;
+        let event_json = br#"{"timestamp":"2026-06-01T20:10:35-07:00","est_lat":"37.7749","est_lon":"-122.4194"}"#;
+        let readers: Vec<SliceReader> = (0..source_count)
+            .map(|_| SliceReader::new(event_fixture_image("SavedClips", event_json)))
+            .collect();
+        let sources = sources_with_slot_overrides(&readers);
+        let expected_keys = expected_savedclip_keys(source_count);
+        let mut tracker = StabilityTracker::new(StabilityConfig::default());
+
+        let warmup =
+            produce(&sources, &mut tracker, 1_000, DEFAULT_SEI_SAMPLE_RATE).expect("warmup pass");
+        assert!(warmup.records.is_empty());
+
+        let first_backlog = produce(&sources, &mut tracker, 1_060, DEFAULT_SEI_SAMPLE_RATE)
+            .expect("first eligible pass");
+        assert!(!first_backlog.complete);
+        assert!(first_backlog
+            .records
+            .iter()
+            .filter(|record| record.is_front())
+            .count()
+            <= MAX_FRONT_SHAPES_PER_BATCH);
+
+        let mut emitted_front = first_backlog
+            .records
+            .iter()
+            .filter(|record| record.is_front())
+            .count();
+        let mut seen_record_keys: BTreeSet<String> = first_backlog
+            .records
+            .iter()
+            .map(|record| record.canonical_key.clone())
+            .collect();
+        let mut seen_present_keys: BTreeSet<String> =
+            first_backlog.present_keys.iter().cloned().collect();
+
+        let mut now_secs = 1_120;
+        let mut passes = 0_u8;
+        loop {
+            let batch =
+                produce(&sources, &mut tracker, now_secs, DEFAULT_SEI_SAMPLE_RATE).expect("pass");
+            emitted_front += batch
+                .records
+                .iter()
+                .filter(|record| record.is_front())
+                .count();
+            seen_record_keys.extend(batch.records.iter().map(|record| record.canonical_key.clone()));
+            seen_present_keys.extend(batch.present_keys.iter().cloned());
+            if batch.complete {
+                break;
+            }
+            assert!(batch
+                .records
+                .iter()
+                .filter(|record| record.is_front())
+                .count()
+                <= MAX_FRONT_SHAPES_PER_BATCH);
+            now_secs += 60;
+            passes = passes.saturating_add(1);
+            assert!(passes < 8, "backlog did not drain in expected passes");
+        }
+
+        assert_eq!(emitted_front, source_count);
+        assert_eq!(seen_record_keys, expected_keys);
+        assert_eq!(seen_present_keys, expected_keys);
+    }
+
+    #[test]
+    fn produce_keeps_complete_true_when_front_backlog_is_within_cap() {
+        let source_count = MAX_FRONT_SHAPES_PER_BATCH - 1;
+        let event_json = br#"{"timestamp":"2026-06-01T20:10:35-07:00","est_lat":"37.7749","est_lon":"-122.4194"}"#;
+        let readers: Vec<SliceReader> = (0..source_count)
+            .map(|_| SliceReader::new(event_fixture_image("SavedClips", event_json)))
+            .collect();
+        let sources = sources_with_slot_overrides(&readers);
+        let mut tracker = StabilityTracker::new(StabilityConfig::default());
+
+        let _ = produce(&sources, &mut tracker, 1_000, DEFAULT_SEI_SAMPLE_RATE)
+            .expect("warmup pass");
+        let steady = produce(&sources, &mut tracker, 1_060, DEFAULT_SEI_SAMPLE_RATE)
+            .expect("eligible pass");
+
+        assert!(steady.complete);
+        assert_eq!(
+            steady
+                .records
+                .iter()
+                .filter(|record| record.is_front())
+                .count(),
+            source_count
+        );
+        let drained = produce(&sources, &mut tracker, 1_120, DEFAULT_SEI_SAMPLE_RATE)
+            .expect("post-drain pass");
+        assert!(drained.complete);
+        assert!(drained.records.is_empty());
+    }
+
+    #[test]
+    fn produce_completes_in_one_pass_at_exactly_the_front_cap() {
+        // Exactly the cap's worth of front clips (each carrying an event.json
+        // sidecar). The cheap sidecars trailing the final shaped front must NOT
+        // force a spurious `complete=false`: with exactly `cap` fronts none is
+        // deferred, so the batch is complete in a single eligible pass.
+        let source_count = MAX_FRONT_SHAPES_PER_BATCH;
+        let event_json = br#"{"timestamp":"2026-06-01T20:10:35-07:00","est_lat":"37.7749","est_lon":"-122.4194"}"#;
+        let readers: Vec<SliceReader> = (0..source_count)
+            .map(|_| SliceReader::new(event_fixture_image("SavedClips", event_json)))
+            .collect();
+        let sources = sources_with_slot_overrides(&readers);
+        let mut tracker = StabilityTracker::new(StabilityConfig::default());
+
+        let _ = produce(&sources, &mut tracker, 1_000, DEFAULT_SEI_SAMPLE_RATE)
+            .expect("warmup pass");
+        let batch = produce(&sources, &mut tracker, 1_060, DEFAULT_SEI_SAMPLE_RATE)
+            .expect("eligible pass");
+
+        assert!(
+            batch.complete,
+            "exactly the front cap must not defer (no spurious partial batch)"
+        );
+        assert_eq!(
+            batch
+                .records
+                .iter()
+                .filter(|record| record.is_front())
+                .count(),
+            source_count
+        );
     }
 
     #[test]

@@ -1,5 +1,44 @@
 # TeslaUSB B-1 — Build Status (vs. `Requirements.md`)
 
+> ## ⏯️ RESUME HERE (2026-06-29) — indexd parse-livelock FIXED + deployed; clip GPS-parse robustness is the next item
+>
+> **Symptom (operator):** a real home→McDonald's→home drive showed only *part* of
+> the route on the Trip Map. **Root cause (Tier-3, root-caused live + GPT-5.5
+> concurrence):** `scannerd produce.rs` answered each `indexd` resync by
+> SEI-walking the **entire** stable backlog (~340 clips) in one batch, blowing past
+> indexd's 60 s `read_batch` timeout → EAGAIN (`os error 11`) → indexd drops +
+> reconnects → re-arms resync → scannerd re-parses from scratch → permanent
+> livelock; the catalog never finished, so most clips never got `ended_at`/trips.
+>
+> - [x] **`fu-parse-livelock` — chunked-produce cap (DONE + deployed + live-proven 2026-06-29).**
+>   Cap expensive front SEI-walks at `MAX_FRONT_SHAPES_PER_BATCH=8`/pass, defer the
+>   rest via new `stability.rs::unmark_emitted`, set the produce batch `complete=false`
+>   while a front backlog remains (indexd consumer unchanged — already chunk-safe).
+>   scannerd 104 lib + 9 main tests pass, clippy clean; GPT-5.5 adversarial review
+>   (APPROVE-WITH-NITS, nit fixed: defer fronts only). Cross-built aarch64 (sha
+>   `6c3cff4e…`), deployed under the hardware-test skill (dead-man rail, atomic swap,
+>   catalog backup, rollback script). **Live result:** EAGAIN loop GONE, backlog of
+>   ~343 clips drained, pruning runs (`complete=true`), load avg 2.1→0.75, device
+>   healthy, recording undisturbed. Evidence: `files/hw-results.md`.
+>
+> - [ ] **`fu-clip-parse-state` — honest front parse-state + prompt-read robustness (NEXT, Tier-3).**
+>   Removing the livelock exposed a **pre-existing** issue: the drive's RecentClips
+>   yielded **0 GPS waypoints**, so they never formed trips. Decisive evidence: the
+>   SavedClips segment at the stop (12:17–12:26) parsed with full GPS, but the pure
+>   ephemeral RecentClips of the same drive (normal recorded sizes ~52 MB) yielded 0
+>   waypoints. Because the livelock delayed parsing by *hours* and RecentClips is a
+>   rolling buffer the car recycles, scannerd read those clips **after the car
+>   overwrote the clusters** → no SEI/GPS → `duration_s=0`, `ended_at=NULL`. This
+>   drive's GPS is unrecoverable; the fix prevents recurrence. GPT-5.5's structural
+>   finding (adopt): `ended_at IS NOT NULL` conflates "not-parsed" with "parsed,
+>   no-GPS," and `walk_clip_waypoints(...).ok()` swallows read/parse errors → no
+>   visibility, infinite silent retry. **Design:** add a per-front parse-state
+>   (`not_attempted` / `parsed_with_waypoints` / `no_waypoints` / `parse_error` /
+>   `unplaceable`) keyed by stable fingerprint + parser version; prioritize
+>   `not_attempted`; never re-walk `no_waypoints` unless fingerprint/version changes;
+>   stop swallowing errors. **Validation:** confirm a fresh post-fix drive parses
+>   promptly (the livelock masked the baseline — needs an operator test drive).
+>
 > ## ⏯️ RESUME HERE (2026-06-25) — Live-clip playback COMPLETE end-to-end; Map V1-parity shipped; Phase-2 deleter still deferred
 >
 > **§4.2 "live-clip map playback" is now fully closed — both paths proven on real

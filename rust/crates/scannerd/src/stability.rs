@@ -147,6 +147,19 @@ impl StabilityTracker {
             state.emitted = false;
         }
     }
+
+    /// Re-arm a single already-emitted file so the next [`Self::observe`]
+    /// re-offers it if it is still eligible. Used by the producer to defer
+    /// clips it chose not to shape this pass (per-batch work cap), so they
+    /// are retried next pass instead of being lost until the next resync.
+    /// Only clears the `emitted` flag; the fingerprint / settle window are
+    /// left intact, so a clip the car is still writing is unaffected.
+    pub fn unmark_emitted(&mut self, record: &FileRecord) {
+        let key = Self::identity_key(record);
+        if let Some(state) = self.states.get_mut(&key) {
+            state.emitted = false;
+        }
+    }
 }
 
 /// Decide eligibility for a single observed record.
@@ -286,6 +299,18 @@ mod tests {
         t.arm_resync();
         assert_eq!(t.observe(&recs, 40), vec![0]);
         // And only once more — the flag is set again after the replay.
+        assert!(t.observe(&recs, 50).is_empty());
+    }
+
+    #[test]
+    fn unmark_emitted_reoffers_currently_stable_clip() {
+        let mut t = StabilityTracker::new(config());
+        let recs = vec![record("2026-06-01_20-10-04-front.mp4", 1000, 1000)];
+        assert!(t.observe(&recs, 0).is_empty());
+        assert_eq!(t.observe(&recs, 20), vec![0]); // emitted once
+        assert!(t.observe(&recs, 30).is_empty()); // not re-emitted
+        t.unmark_emitted(&recs[0]);
+        assert_eq!(t.observe(&recs, 40), vec![0]); // re-offered after unmark
         assert!(t.observe(&recs, 50).is_empty());
     }
 

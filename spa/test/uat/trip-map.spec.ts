@@ -24,6 +24,156 @@ import { resolve } from "node:path";
 const SHARED_SEG_LAT = 37.8035; // midpoint of the trip1∩trip2 overlap …
 const SHARED_SEG_LON = -122.4025; // … (37.802,-122.404 → 37.805,-122.401).
 const CLIP_MP4 = readFileSync(resolve(process.cwd(), "test", "fixtures", "clip.mp4"));
+const MPS_TO_MPH = 2.23694;
+
+const HUD_FIXTURE_A = [
+  { time: 0, speedMps: 0, gear: 0, steeringAngle: 0, blinkerLeft: false, blinkerRight: false, brakeApplied: true, acceleratorPedalPosition: 0, autopilotState: 0 },
+  { time: 0.5, speedMps: 13.4, gear: 1, steeringAngle: -30, blinkerLeft: true, blinkerRight: false, brakeApplied: false, acceleratorPedalPosition: 0.35, autopilotState: 1 },
+  { time: 1.5, speedMps: 22.4, gear: 1, steeringAngle: 45, blinkerLeft: false, blinkerRight: true, brakeApplied: false, acceleratorPedalPosition: 0.6, autopilotState: 1 },
+  { time: 2.5, speedMps: 8.9, gear: 1, steeringAngle: 10, blinkerLeft: false, blinkerRight: false, brakeApplied: true, acceleratorPedalPosition: 0, autopilotState: 0 },
+];
+
+const HUD_FIXTURE_B = [
+  { time: 0, speedMps: 0, gear: 0, steeringAngle: 0, blinkerLeft: false, blinkerRight: false, brakeApplied: true, acceleratorPedalPosition: 0, autopilotState: 0 },
+  { time: 1, speedMps: 31.3, gear: 2, steeringAngle: -12, blinkerLeft: true, blinkerRight: false, brakeApplied: false, acceleratorPedalPosition: 0.2, autopilotState: 2 },
+];
+
+interface HudFixtureSample {
+  time: number;
+  speedMps: number;
+  gear: number;
+  steeringAngle: number;
+  blinkerLeft: boolean;
+  blinkerRight: boolean;
+  brakeApplied: boolean;
+  acceleratorPedalPosition: number;
+  autopilotState: number;
+}
+
+interface ExpectedOverlayHud {
+  speed: number;
+  gear: string;
+  steering: number;
+  brakeFill: number;
+  throttleFill: number;
+  blinkerLeft: boolean;
+  blinkerRight: boolean;
+  autopilot: string;
+  autopilotActive: boolean;
+}
+
+function expectedOverlayHud(samples: HudFixtureSample[], t: number): ExpectedOverlayHud {
+  let s: HudFixtureSample | null = null;
+  for (const x of samples) {
+    if (x.time <= t) s = x;
+    else break;
+  }
+  if (!s) {
+    return {
+      speed: 0,
+      gear: "P",
+      steering: 0,
+      brakeFill: 0,
+      throttleFill: 0,
+      blinkerLeft: false,
+      blinkerRight: false,
+      autopilot: "",
+      autopilotActive: false,
+    };
+  }
+  const apActive = s.autopilotState !== 0;
+  const labels: Record<number, string> = { 1: "Self-Driving", 2: "Autosteer", 3: "TACC" };
+  let throttle = s.acceleratorPedalPosition || 0;
+  if (throttle <= 1.2) throttle *= 100;
+  throttle = Math.min(100, Math.max(0, throttle));
+  return {
+    speed: Math.round(Math.abs(s.speedMps || 0) * MPS_TO_MPH),
+    gear: ["P", "D", "R", "N"][s.gear] ?? "P",
+    steering: s.steeringAngle || 0,
+    brakeFill: s.brakeApplied ? 100 : 0,
+    throttleFill: throttle,
+    blinkerLeft: s.blinkerLeft === true,
+    blinkerRight: s.blinkerRight === true,
+    autopilot: apActive ? (labels[s.autopilotState] ?? "") : "",
+    autopilotActive: apActive,
+  };
+}
+
+async function seekAndAssertOverlayHud(
+  page: Page,
+  t: number,
+  samples: HudFixtureSample[],
+): Promise<void> {
+  const video = page.locator("[data-testid=vp-overlay-video]");
+  await video.evaluate((el: HTMLVideoElement, target: number) => {
+    el.pause();
+    el.currentTime = target;
+  }, t);
+  await page.waitForFunction(
+    (target) => {
+      const el = document.getElementById("overlayVideo") as HTMLVideoElement | null;
+      return !!el && el.paused && !el.seeking && Math.abs(el.currentTime - (target as number)) < 0.4;
+    },
+    t,
+    { timeout: 10_000 },
+  );
+  const ct = await video.evaluate((el: HTMLVideoElement) => el.currentTime);
+  const exp = expectedOverlayHud(samples, ct);
+
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => {
+          const h = (window as unknown as { __TESLAUSB_HUD__?: { getState(): { speed: number } } })
+            .__TESLAUSB_HUD__;
+          return h ? h.getState().speed : -1;
+        }),
+      { timeout: 5000, message: `overlay HUD speed should converge to ${exp.speed} at t=${ct}` },
+    )
+    .toBe(exp.speed);
+
+  const state = await page.evaluate(() => {
+    const h = (
+      window as unknown as {
+        __TESLAUSB_HUD__?: { source: string; sampleCount: number; frames: number; getState(): Record<string, unknown> };
+      }
+    ).__TESLAUSB_HUD__;
+    return h ? { source: h.source, sampleCount: h.sampleCount, frames: h.frames, state: h.getState() } : null;
+  });
+  expect(state, "overlay HUD controller handle must exist").not.toBeNull();
+  expect(state!.source).toBe("fixture");
+  expect(state!.sampleCount).toBe(samples.length);
+  expect(state!.frames).toBeGreaterThan(0);
+  expect(state!.state.gear, `t=${ct} gear`).toBe(exp.gear);
+  expect(state!.state.steering, `t=${ct} steering`).toBe(exp.steering);
+  expect(state!.state.brakeFill, `t=${ct} brakeFill`).toBe(exp.brakeFill);
+  expect(state!.state.throttleFill, `t=${ct} throttleFill`).toBe(exp.throttleFill);
+  expect(state!.state.blinkerLeft, `t=${ct} blinkerLeft`).toBe(exp.blinkerLeft);
+  expect(state!.state.blinkerRight, `t=${ct} blinkerRight`).toBe(exp.blinkerRight);
+  expect(state!.state.autopilot, `t=${ct} autopilot`).toBe(exp.autopilot);
+  expect(state!.state.autopilotActive, `t=${ct} autopilotActive`).toBe(exp.autopilotActive);
+
+  await expect(page.locator("#olGear")).toHaveText(exp.gear);
+  await expect(page.locator("#olSpeedVal")).toHaveText(String(exp.speed));
+  await expect(page.locator("#olSpeedUnit")).toHaveText("mph");
+  await expect.poll(() =>
+    page.locator("#olWheel").evaluate((el) => (el as HTMLElement).style.getPropertyValue("--wheel-rotation").trim()),
+  ).toBe(`${exp.steering}deg`);
+  await expect.poll(() =>
+    page.locator("#olBrake").evaluate((el) => (el as HTMLElement).style.getPropertyValue("--pedal-fill").trim()),
+  ).toBe(`${exp.brakeFill}%`);
+  await expect.poll(() =>
+    page.locator("#olThrottle").evaluate((el) => (el as HTMLElement).style.getPropertyValue("--pedal-fill").trim()),
+  ).toBe(`${exp.throttleFill}%`);
+  await expect(page.locator("#olBlinkerL")).toHaveClass(exp.blinkerLeft ? /active/ : /^((?!active).)*$/);
+  await expect(page.locator("#olBlinkerR")).toHaveClass(exp.blinkerRight ? /active/ : /^((?!active).)*$/);
+  if (exp.autopilotActive) {
+    await expect(page.locator("#olAP2")).toHaveClass(/active/);
+  } else {
+    await expect(page.locator("#olAP2")).not.toHaveClass(/active/);
+  }
+  await expect(page.locator("#olAP2")).toHaveText(exp.autopilot);
+}
 
 /** Float tolerance for comparing decoded lat/lon against seed coordinates. */
 function near(a: number, b: number, eps = 1e-4): boolean {
@@ -1905,6 +2055,87 @@ test.describe("trip map UAT", () => {
       [],
     );
     expect(probe.pageErrors, `pageerror(s): ${JSON.stringify(probe.pageErrors)}`).toEqual([]);
+  });
+
+  test("map overlay — slice 3 HUD telemetry parity", async ({ page, probe }) => {
+    await page.addInitScript((fixture) => {
+      (window as unknown as { __TESLAUSB_HUD_FIXTURE__?: unknown }).__TESLAUSB_HUD_FIXTURE__ = fixture;
+    }, HUD_FIXTURE_A);
+    await page.route("**/api/clips**", async (route) => {
+      const req = route.request();
+      const url = new URL(req.url());
+      if (req.method() === "GET" && url.pathname === "/api/clips") {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            items: [
+              {
+                id: 811,
+                canonical_key: "RecentClips/2024-06-01_12-00-00",
+                started_at: 1717252800,
+                ended_at: 1717252860,
+                lat: 37.3951,
+                lon: -122.0747,
+                partition: "archive",
+                folder_class: "RecentClips",
+                is_sentry: false,
+                duration_s: 60,
+                availability: "ready",
+                angles: [
+                  { camera: "front", view_kind: "archive", offset_ms: 0, duration_s: 60, size_bytes: 4096 },
+                  { camera: "back", view_kind: "archive", offset_ms: 0, duration_s: 60, size_bytes: 4096 },
+                ],
+              },
+            ],
+            next_cursor: null,
+            limit: 25,
+          }),
+        });
+        return;
+      }
+      await route.continue();
+    });
+    await page.route("**/api/clips/*/stream?camera=**", async (route) => {
+      const req = route.request();
+      if (req.method() === "HEAD") {
+        await route.fulfill({ status: 200, headers: { "accept-ranges": "bytes" } });
+        return;
+      }
+      await route.fulfill({
+        status: 206,
+        headers: {
+          "content-type": "video/mp4",
+          "accept-ranges": "bytes",
+          "content-range": `bytes 0-${CLIP_MP4.length - 1}/${CLIP_MP4.length}`,
+        },
+        body: CLIP_MP4,
+      });
+    });
+
+    await gotoMap(page);
+    await page.locator("#btnVideos").click();
+    await page.locator("#vpTabClips").click();
+    await page.locator("[data-testid=vp-clip-play-811]").click();
+
+    await expect(page.locator("[data-testid=video-overlay]")).toBeVisible();
+    await expect(page.locator("[data-testid=vp-overlay-video]")).toHaveAttribute(
+      "src",
+      /\/api\/clips\/811\/stream\?camera=front/,
+    );
+    await seekAndAssertOverlayHud(page, 1.6, HUD_FIXTURE_A);
+
+    await page.evaluate((fixture) => {
+      (window as unknown as { __TESLAUSB_HUD_FIXTURE__?: unknown }).__TESLAUSB_HUD_FIXTURE__ = fixture;
+    }, HUD_FIXTURE_B);
+    await page.locator("[data-testid=vp-overlay-cam-back]").click();
+    await expect(page.locator("[data-testid=vp-overlay-video]")).toHaveAttribute(
+      "src",
+      /\/api\/clips\/811\/stream\?camera=back/,
+    );
+    await seekAndAssertOverlayHud(page, 1.6, HUD_FIXTURE_B);
+
+    assertCleanConsole(probe);
   });
 
   test("map overlay — cloud archive button gate", async ({ page }) => {

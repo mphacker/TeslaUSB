@@ -4,6 +4,7 @@ import type { Clip } from "../../api/types";
 import { Icon } from "../../components/Icon";
 import { isDownloadableAngle, isStreamableAngle } from "../../player/angles";
 import { classifyDeleteFailure } from "../../player/deleteClip";
+import { HudController, type HudElements } from "../../player/hud-controller";
 
 interface MapVideoOverlayProps {
   clip: Clip;
@@ -76,6 +77,7 @@ export function MapVideoOverlay({
   const headerRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const hudCtrlRef = useRef<HudController | null>(null);
   const probeSeqRef = useRef(0);
   const [maximized, setMaximized] = useState(false);
   const [position, setPosition] = useState(() => ({
@@ -169,6 +171,8 @@ export function MapVideoOverlay({
   useEffect(
     () => () => {
       probeSeqRef.current += 1;
+      hudCtrlRef.current?.destroy();
+      hudCtrlRef.current = null;
       dragCleanupRef.current?.();
       const video = videoRef.current;
       if (!video) return;
@@ -178,6 +182,35 @@ export function MapVideoOverlay({
     },
     [],
   );
+
+  useEffect(() => {
+    const video = videoRef.current;
+    const stage = stageRef.current;
+    if (!video || !stage) return;
+    const q = (sel: string) => stage.querySelector(sel) as HTMLElement;
+    const hud: HudElements = {
+      gear: q("#olGear"),
+      speed: q("#olSpeedVal"),
+      steering: q("#olWheel"),
+      brakePedal: q("#olBrake"),
+      throttlePedal: q("#olThrottle"),
+      blinkerLeft: q("#olBlinkerL"),
+      blinkerRight: q("#olBlinkerR"),
+      autopilot: q("#olAP2"),
+    };
+    const ctrl = new HudController(video, hud);
+    hudCtrlRef.current = ctrl;
+    return () => {
+      ctrl.destroy();
+      if (hudCtrlRef.current === ctrl) hudCtrlRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const ctrl = hudCtrlRef.current;
+    if (!ctrl || !streamUrl) return;
+    void ctrl.loadTelemetry(streamUrl);
+  }, [streamUrl]);
 
   useEffect(() => {
     const onResize = () => {
@@ -353,7 +386,7 @@ export function MapVideoOverlay({
         )}
         <div class="overlay-hud" id="overlayHud">
           <div class="oh-gear" id="olGear">P</div>
-          <div class="oh-pedal oh-brake" id="olBrake" style="--oh-fill: 0%;">
+          <div class="oh-pedal oh-brake" id="olBrake" style="--pedal-fill: 0%;">
             <span class="oh-fill"><i /></span>
             <span class="oh-lbl">B</span>
           </div>
@@ -363,7 +396,7 @@ export function MapVideoOverlay({
             <span class="oh-speed-unit" id="olSpeedUnit">mph</span>
           </div>
           <span class="oh-blinker right" id="olBlinkerR">▶</span>
-          <div class="oh-wheel" id="olWheel" style="--oh-wheel: 0deg;">
+          <div class="oh-wheel" id="olWheel" style="--wheel-rotation: 0deg;">
             <svg viewBox="0 0 24 24" fill="none">
               <circle cx="12" cy="12" r="8" stroke="#fff" strokeWidth="1.4" />
               <path d="M6.8 9.8H17.2" stroke="#fff" strokeWidth="2" strokeLinecap="round" />
@@ -371,7 +404,7 @@ export function MapVideoOverlay({
               <circle cx="12" cy="12" r="1.8" stroke="#fff" strokeWidth="1.4" />
             </svg>
           </div>
-          <div class="oh-pedal oh-throttle" id="olThrottle" style="--oh-fill: 0%;">
+          <div class="oh-pedal oh-throttle" id="olThrottle" style="--pedal-fill: 0%;">
             <span class="oh-fill"><i /></span>
             <span class="oh-lbl">A</span>
           </div>

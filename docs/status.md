@@ -960,6 +960,21 @@ LUNs) is the single make-or-break that still needs the car.**
     pre-existing pagination SHOULD-FIX deferred). UAT 90/90 both viewports;
     **live-verified on device** (marker→overlay both viewports, zero console
     errors / non-2xx — see `files/hw-results.md`). Slice 3 (live telemetry HUD) pending.
+  - [x] **Inline map video-overlay player — Slice 3 (live telemetry HUD)** — the
+    overlay player's on-video HUD (gear, speed, steering wheel, brake/throttle pedals,
+    L/R blinkers, autopilot) is now live, driven by the **reused `HudController`
+    (unchanged)** + `telemetry.ts` — an exact mirror of EventPlayer's HUD. MapVideoOverlay
+    constructs the controller once on mount (querying `#olGear`/`olSpeedVal`/`olWheel`/
+    `olBrake`/`olThrottle`/`olBlinkerL`/`olBlinkerR`/`olAP2` within the stage) and reloads
+    telemetry on `streamUrl` change (camera switch / ro_usb resolve); overlay-only CSS vars
+    aligned to the controller's contract (`--wheel-rotation`, `--pedal-fill`) + `.oh-blinker.active`/
+    `.oh-ap.active` styles. **Parity correction:** speed is always **mph** (V1 overlay HUD
+    is hardcoded mph; the mph/kph pref scopes only to the map legend) — no kph in the overlay.
+    No change to `HudController`/`telemetry.ts`/`EventPlayer.tsx`. UAT 92 both viewports
+    (incl. "slice 3 HUD telemetry parity"); **live-verified on device** — fixture-driven HUD
+    renders identically both viewports (gear R, 70 mph, wheel -18deg, throttle 42%, blinkerL
+    active, "Autosteer" active), `mph` static, zero console errors / non-2xx (see
+    `files/hw-results.md`). **Inline map overlay player feature complete (Slices 1-3).**
 - [x] Units & timezone preferences re-render speeds/times. **(server-persisted: speed unit (mph/kph) + display clock (local/UTC) re-render trip-map speeds & times and survive reload; optimistic write with per-key serialized PUT /api/settings→indexd and rollback to the last server-confirmed value. Playwright: `spa/test/uat/trip-map.spec.ts` "display preferences (server-persisted)" — 20/20 green desktop+mobile, console clean. Follow-up: full IANA-zone picker + cross-screen time propagation.)**
 
 ### 4.2 Event / Video Player — `Requirements.md` §4.2

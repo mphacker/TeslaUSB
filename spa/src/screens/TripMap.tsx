@@ -172,6 +172,9 @@ export function TripMap() {
   const mapRef = useRef<HTMLDivElement>(null);
   const ctrlRef = useRef<TripMapController | null>(null);
   const seqRef = useRef(0);
+  const watchSeqRef = useRef(0);
+  const watchAbortRef = useRef<AbortController | null>(null);
+  const routeEventsByTripIdRef = useRef<Map<number, number[]>>(new Map());
 
   const [days, setDays] = useState<DaySummary[] | null>(null);
   const [dayIndex, setDayIndex] = useState(0);
@@ -238,6 +241,46 @@ export function TripMap() {
     limitToView: false,
   });
 
+  const onWatchEvent = useCallback((ev: MapEvent) => {
+    const fallbackHref = `/events?event=${ev.id}`;
+    if (ev.tripId == null || ev.clipId == null) {
+      window.location.assign(fallbackHref);
+      return;
+    }
+    const clipIds = routeEventsByTripIdRef.current.get(ev.tripId) ?? [];
+    if (!clipIds.length || !clipIds.includes(ev.clipId)) {
+      window.location.assign(fallbackHref);
+      return;
+    }
+    const seq = ++watchSeqRef.current;
+    const daySeq = seqRef.current;
+    watchAbortRef.current?.abort();
+    const ac = new AbortController();
+    watchAbortRef.current = ac;
+    setClipActionNotice(null);
+    void (async () => {
+      try {
+        const clips = await Promise.all(clipIds.map((clipId) => api.clip(clipId, ac.signal)));
+        if (ac.signal.aborted || seq !== watchSeqRef.current || daySeq !== seqRef.current) {
+          return;
+        }
+        const index = clips.findIndex((clip) => clip.id === ev.clipId);
+        if (index < 0) {
+          window.location.assign(fallbackHref);
+          return;
+        }
+        setOverlayState({ clips, index, camera: "front" });
+      } catch {
+        if (ac.signal.aborted || seq !== watchSeqRef.current || daySeq !== seqRef.current) {
+          return;
+        }
+        window.location.assign(fallbackHref);
+      } finally {
+        if (watchAbortRef.current === ac) watchAbortRef.current = null;
+      }
+    })();
+  }, []);
+
   useEffect(() => {
     setFilters((prev) => ({
       ...prev,
@@ -269,7 +312,7 @@ export function TripMap() {
   //    seed the display unit from prefs, and load the day list. ──
   useEffect(() => {
     if (!mapRef.current) return;
-    const ctrl = new TripMapController(mapRef.current);
+    const ctrl = new TripMapController(mapRef.current, { onWatchEvent });
     ctrlRef.current = ctrl;
     // map.css carries three global overrides (full-height, no page scroll); we
     // scope them to .mapping-active so they apply ONLY while the map is mounted.
@@ -305,13 +348,16 @@ export function TripMap() {
       ctrl.destroy();
       ctrlRef.current = null;
     };
-  }, []);
+  }, [onWatchEvent]);
 
   // ── Load the selected day whenever it changes. ──
   useEffect(() => {
     if (!currentDay) return;
     const seq = ++seqRef.current;
     const ac = new AbortController();
+    watchAbortRef.current?.abort();
+    watchAbortRef.current = null;
+    routeEventsByTripIdRef.current = new Map();
     setLoading(true);
 
     (async () => {
@@ -333,10 +379,16 @@ export function TripMap() {
         );
         if (seq !== seqRef.current) return;
 
+        const routeClipCandidatesByTripId = new Map<number, { clipId: number; t: number; id: number }[]>();
         const mapTrips: MapTrip[] = trips.map((t, i) => toMapTrip(t, details[i]));
         const mapEvents: MapEvent[] = [];
         for (const items of eventPages) {
           for (const ev of items) {
+            if (ev.trip_id != null && ev.clip_id != null) {
+              const candidates = routeClipCandidatesByTripId.get(ev.trip_id) ?? [];
+              candidates.push({ clipId: ev.clip_id, t: ev.t, id: ev.id });
+              routeClipCandidatesByTripId.set(ev.trip_id, candidates);
+            }
             if (ev.lat == null || ev.lon == null) continue;
             mapEvents.push({
               id: ev.id,
@@ -351,7 +403,20 @@ export function TripMap() {
             });
           }
         }
+        const routeEventsByTripId = new Map<number, number[]>();
+        for (const [tripId, candidates] of routeClipCandidatesByTripId) {
+          candidates.sort((a, b) => (a.t !== b.t ? a.t - b.t : a.id - b.id));
+          const deduped: number[] = [];
+          const seenClipIds = new Set<number>();
+          for (const candidate of candidates) {
+            if (seenClipIds.has(candidate.clipId)) continue;
+            seenClipIds.add(candidate.clipId);
+            deduped.push(candidate.clipId);
+          }
+          routeEventsByTripId.set(tripId, deduped);
+        }
         const enabledTypes = new Set(mapEvents.map((ev) => ev.type));
+        routeEventsByTripIdRef.current = routeEventsByTripId;
         setFilters((prev) => ({ ...prev, enabledTypes }));
         setMapTrips(mapTrips);
         setMapEvents(mapEvents);
@@ -584,6 +649,7 @@ export function TripMap() {
       abortTabRequest("trips");
       abortTabRequest("clips");
       overlayDeleteAbortRef.current?.abort();
+      watchAbortRef.current?.abort();
     },
     [abortTabRequest],
   );

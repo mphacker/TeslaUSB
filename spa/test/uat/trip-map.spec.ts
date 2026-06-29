@@ -95,6 +95,20 @@ async function gotoMap(page: Page) {
   });
 }
 
+async function openEventMarkerPopup(page: Page, expectedText?: RegExp) {
+  const markers = page.locator(".event-svg-icon");
+  const markerCount = await markers.count();
+  for (let i = 0; i < markerCount; i += 1) {
+    await markers.nth(i).click();
+    const popup = page.locator(".leaflet-popup-content").last();
+    await expect(popup).toBeVisible();
+    if (!expectedText) return;
+    const text = await popup.textContent();
+    if (text && expectedText.test(text)) return;
+  }
+  throw new Error(`unable to open marker popup matching ${expectedText?.source ?? "any"}`);
+}
+
 function assertCleanConsole(probe: Probe) {
   expect(probe.pageErrors, `pageerror(s): ${JSON.stringify(probe.pageErrors)}`).toEqual([]);
   expect(
@@ -1317,6 +1331,158 @@ test.describe("trip map UAT", () => {
       "src",
       /\/api\/clips\/2\/stream/,
     );
+  });
+
+  test("map→video — marker watch-link opens overlay sequence and keeps fallback href", async ({
+    page,
+  }) => {
+    await page.route("**/api/events**", async (route) => {
+      const req = route.request();
+      const url = new URL(req.url());
+      if (req.method() === "GET" && url.pathname === "/api/events" && url.searchParams.get("trip") === "1") {
+        const items = [
+          {
+            id: 101,
+            trip_id: 1,
+            clip_id: 1,
+            type: "honk",
+            severity: 1,
+            t: 1717225360,
+            lat: null,
+            lon: null,
+            description: "Trip sequence head",
+          },
+          {
+            id: 1,
+            trip_id: 1,
+            clip_id: 2,
+            type: "harsh_braking",
+            severity: 3,
+            t: 1717225380,
+            lat: 37.79,
+            lon: -122.42,
+            description: "Harsh braking",
+          },
+          {
+            id: 102,
+            trip_id: 1,
+            clip_id: 5,
+            type: "saved",
+            severity: 1,
+            t: 1717225420,
+            lat: null,
+            lon: null,
+            description: "Trip sequence tail",
+          },
+          {
+            id: 103,
+            trip_id: 1,
+            clip_id: 2,
+            type: "hard_acceleration",
+            severity: 2,
+            t: 1717225480,
+            lat: null,
+            lon: null,
+            description: "Dedup clip",
+          },
+        ];
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ items, next_cursor: null, limit: 500 }),
+        });
+        return;
+      }
+      await route.continue();
+    });
+
+    await gotoMap(page);
+    await openEventMarkerPopup(page, /Harsh braking/i);
+
+    const watchLink = page.locator(".leaflet-popup:visible .map-watch-link").last();
+    await expect(watchLink).toHaveAttribute("href", "/events?event=1");
+    await watchLink.click();
+
+    await expect(page).toHaveURL(/\/$/);
+    await expect(page.locator("[data-testid=video-overlay]")).toBeVisible();
+    await expect(page.locator("[data-testid=vp-overlay-video]")).toHaveAttribute(
+      "src",
+      /\/api\/clips\/2\/stream\?camera=front/,
+    );
+    await expect(page.locator("[data-testid=vp-overlay-prev]")).toBeEnabled();
+    await expect(page.locator("[data-testid=vp-overlay-next]")).toBeEnabled();
+
+    await page.locator("[data-testid=vp-overlay-next]").click();
+    await expect(page.locator("[data-testid=vp-overlay-video]")).toHaveAttribute(
+      "src",
+      /\/api\/clips\/5\/stream\?camera=front/,
+    );
+    await expect(page.locator("[data-testid=vp-overlay-next]")).toBeDisabled();
+    await expect(page.locator("[data-testid=vp-overlay-prev]")).toBeEnabled();
+
+    await page.locator("[data-testid=vp-overlay-prev]").click();
+    await expect(page.locator("[data-testid=vp-overlay-video]")).toHaveAttribute(
+      "src",
+      /\/api\/clips\/2\/stream\?camera=front/,
+    );
+    await page.locator("[data-testid=vp-overlay-prev]").click();
+    await expect(page.locator("[data-testid=vp-overlay-video]")).toHaveAttribute(
+      "src",
+      /\/api\/clips\/1\/stream\?camera=front/,
+    );
+    await expect(page.locator("[data-testid=vp-overlay-prev]")).toBeDisabled();
+  });
+
+  test("map→video — marker watch-link ignores stale opens from rapid click and day change", async ({
+    page,
+  }) => {
+    await page.route("**/api/days", async (route) => {
+      const req = route.request();
+      if (req.method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify([
+          { day: "2024-06-01", trip_count: 3, event_count: 3, distance_m: 30556.3 },
+          { day: "2024-05-31", trip_count: 0, event_count: 0, distance_m: 0 },
+        ]),
+      });
+    });
+    await page.route("**/api/trips?day=2024-05-31", async (route) => {
+      const req = route.request();
+      if (req.method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify([]),
+      });
+    });
+    await page.route("**/api/clips/2", async (route) => {
+      const req = route.request();
+      if (req.method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await page.waitForTimeout(700);
+      await route.continue();
+    });
+
+    await gotoMap(page);
+    await expect(page.locator("#dayPrev")).toBeEnabled();
+    await openEventMarkerPopup(page, /Harsh braking/i);
+
+    await page.locator(".leaflet-popup:visible .map-watch-link").last().click();
+    await page.locator("#dayPrev").click();
+    await expect(page.locator("#dayCardDate")).toContainText("2024");
+    await page.waitForTimeout(900);
+    await expect(page.locator("[data-testid=video-overlay]")).toHaveCount(0);
+    await expect(page).toHaveURL(/\/$/);
   });
 
   test("map→video — clip rows open the inline overlay player", async ({

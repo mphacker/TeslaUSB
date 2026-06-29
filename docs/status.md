@@ -948,6 +948,18 @@ LUNs) is the single make-or-break that still needs the car.**
     UAT 86/86 both viewports; **live-verified on device** (overlay opens both viewports,
     interactive ~1.6s, zero console errors / non-2xx — see `files/hw-results.md`).
     Slices 2 (marker-open) + 3 (live telemetry HUD) pending.
+  - [x] **Inline map video-overlay player — Slice 2 (V1 marker-open)** — clicking a
+    map event marker's "▶ Watch video" popup link opens the inline overlay (V1
+    parity) instead of navigating to `/events?event=N`; prev/next walks that trip's
+    route clip sequence (per-trip events ordered by (t,id), deduped by clipId, no
+    wrap). Typed controller `onWatchEvent` callback (leak-safe popup binding,
+    fallback href preserved); TripMap owns the async `api.clip` fetch with
+    AbortController + watch-seq/day-seq stale guards (rapid-click/day-change safe);
+    markercluster/filtering/disambig untouched; EventsTab + EventPlayer routes
+    untouched. gpt-5.5 design second-opinion (GO) + code review (no blockers; one
+    pre-existing pagination SHOULD-FIX deferred). UAT 90/90 both viewports;
+    **live-verified on device** (marker→overlay both viewports, zero console
+    errors / non-2xx — see `files/hw-results.md`). Slice 3 (live telemetry HUD) pending.
 - [x] Units & timezone preferences re-render speeds/times. **(server-persisted: speed unit (mph/kph) + display clock (local/UTC) re-render trip-map speeds & times and survive reload; optimistic write with per-key serialized PUT /api/settings→indexd and rollback to the last server-confirmed value. Playwright: `spa/test/uat/trip-map.spec.ts` "display preferences (server-persisted)" — 20/20 green desktop+mobile, console clean. Follow-up: full IANA-zone picker + cross-screen time propagation.)**
 
 ### 4.2 Event / Video Player — `Requirements.md` §4.2

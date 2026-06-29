@@ -80,6 +80,10 @@ interface RenderInput {
   filters: MapFilters;
 }
 
+interface TripMapControllerOptions {
+  onWatchEvent?: (ev: MapEvent) => void;
+}
+
 interface Candidate {
   trip: MapTrip;
   distance: number;
@@ -176,8 +180,11 @@ export class TripMapController {
   private flashPinTimer: number | null = null;
   private disambigPopup: L.Popup | null = null;
   private hooks: MapHooks;
+  private readonly onWatchEvent?: (ev: MapEvent) => void;
+  private readonly watchableEventsById = new Map<number, MapEvent>();
 
-  constructor(container: HTMLElement) {
+  constructor(container: HTMLElement, options: TripMapControllerOptions = {}) {
+    this.onWatchEvent = options.onWatchEvent;
     const tileUrl = (window as unknown as { __TESLAUSB_TILE_URL__?: string })
       .__TESLAUSB_TILE_URL__;
 
@@ -271,6 +278,7 @@ export class TripMapController {
     this.map.on("popupclose", () => {
       this.disambigHighlightLayer.clearLayers();
     });
+    this.map.on("popupopen", this.onPopupOpen);
     this.map.on("moveend", this.onMoveEnd);
   }
 
@@ -338,6 +346,23 @@ export class TripMapController {
     }, 80);
   };
 
+  private onPopupOpen = (event: L.PopupEvent) => {
+    if (!this.onWatchEvent) return;
+    const root = event.popup?.getElement();
+    if (!root) return;
+    const link = root.querySelector<HTMLAnchorElement>("a.map-watch-link");
+    if (!link || link.dataset.watchBound === "1") return;
+    const eventId = Number(link.dataset.mapEventId ?? "");
+    if (!Number.isFinite(eventId)) return;
+    const mapEvent = this.watchableEventsById.get(eventId);
+    if (!mapEvent || mapEvent.clipId == null) return;
+    link.dataset.watchBound = "1";
+    link.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      this.onWatchEvent?.(mapEvent);
+    });
+  };
+
   private renderCurrent(allowFitBounds: boolean) {
     const input = this.last;
     if (!input) return;
@@ -351,6 +376,7 @@ export class TripMapController {
     this.tripLayer.clearLayers();
     this.eventCluster.clearLayers();
     this.disambigHighlightLayer.clearLayers();
+    this.watchableEventsById.clear();
 
     let polylineCount = 0;
     const bounds: L.LatLngTuple[] = [];
@@ -379,12 +405,15 @@ export class TripMapController {
       const safeDesc = escapeHtml(ev.description || "");
       const watchLink =
         ev.clipId != null
-          ? `<br><a class="map-watch-link" href="/events?event=${ev.id}">▶ Watch video</a>`
+          ? `<br><a class="map-watch-link" data-map-event-id="${ev.id}" href="/events?event=${ev.id}">▶ Watch video</a>`
           : "";
       const clock = this.last?.clock ?? "local";
       marker.bindPopup(
         `<strong>${safeType}</strong><br>${fmtLocalTime(ev.t, clock)}<br>${safeDesc}${watchLink}`,
       );
+      if (ev.clipId != null) {
+        this.watchableEventsById.set(ev.id, ev);
+      }
       this.eventCluster.addLayer(marker);
       bounds.push([ev.lat, ev.lon]);
       eventMarkerCount++;
@@ -746,6 +775,7 @@ export class TripMapController {
   /** Tear down the map + null the global test hooks. Idempotent. */
   destroy() {
     this.map.off("moveend", this.onMoveEnd);
+    this.map.off("popupopen", this.onPopupOpen);
     if (this.moveendTimer != null) {
       window.clearTimeout(this.moveendTimer);
       this.moveendTimer = null;
@@ -765,6 +795,7 @@ export class TripMapController {
     this.last = null;
     this.visibleTrips = [];
     this.disambigPopup = null;
+    this.watchableEventsById.clear();
   }
 }
 

@@ -128,6 +128,8 @@ pub enum EventType {
     AutopilotDisengaged,
     /// Sentry-mode recording (`sentry`).
     Sentry,
+    /// User-saved recording (`saved`).
+    Saved,
 }
 
 impl EventType {
@@ -143,6 +145,7 @@ impl EventType {
             Self::AutopilotEngaged => "autopilot_engaged",
             Self::AutopilotDisengaged => "autopilot_disengaged",
             Self::Sentry => "sentry",
+            Self::Saved => "saved",
         }
     }
 
@@ -155,9 +158,44 @@ impl EventType {
             | Self::HardAcceleration
             | Self::HarshBraking
             | Self::SharpTurn => Severity::Warning,
-            Self::AutopilotEngaged | Self::AutopilotDisengaged | Self::Sentry => Severity::Info,
+            Self::AutopilotEngaged | Self::AutopilotDisengaged | Self::Sentry | Self::Saved => {
+                Severity::Info
+            }
         }
     }
+}
+
+/// One event.json record resolved against the clip catalog, ready for
+/// derivation into a pinned event (Slice 4).
+#[derive(Debug, Clone)]
+pub struct ClipEventInput {
+    /// Sidecar primary key: `{slot}:{event-folder-rel-path}`.
+    pub event_dir_key: String,
+    /// Source bucket (`SavedClips` / `SentryClips`).
+    pub bucket: FolderClass,
+    /// Primary clip id resolved from `primary_canonical_key`, when present.
+    pub primary_clip_id: Option<i64>,
+    /// Primary clip start epoch seconds, when the clip row exists.
+    pub primary_started_utc: Option<i64>,
+    /// True only when `primary_started_utc` is a real UTC instant (the primary
+    /// clip has SEI waypoints), so it is safe to use as a tz anchor.
+    pub primary_started_trusted: bool,
+    /// Estimated latitude from event.json.
+    pub est_lat: Option<f64>,
+    /// Estimated longitude from event.json.
+    pub est_lon: Option<f64>,
+    /// Tesla reason code (for example `user_interaction_honk`).
+    pub reason: Option<String>,
+    /// Tesla city label.
+    pub city: Option<String>,
+    /// Tesla camera label.
+    pub camera: Option<String>,
+    /// Parsed UTC timestamp from event.json.
+    pub timestamp_utc: i64,
+    /// Parsed local wall-clock timestamp interpreted as naive seconds.
+    pub timestamp_local_naive: i64,
+    /// Whether the source timestamp had an explicit timezone offset.
+    pub timestamp_has_offset: bool,
 }
 
 /// One sampled waypoint normalized for derivation. Built from a
@@ -210,6 +248,8 @@ impl DeriveWaypoint {
 pub struct DeriveClip {
     /// DB id of the clip row.
     pub clip_id: i64,
+    /// Stable clip identity key (`{slot}:{parent}/{segment}`).
+    pub canonical_key: String,
     /// Resolved start instant, UTC epoch seconds (mvhd-first).
     pub clip_started_utc: i64,
     /// Source-folder classification.
@@ -301,6 +341,6 @@ pub struct DerivedTrip {
 pub struct Derivation {
     /// Materialized driving trips (passed the min-distance gate).
     pub trips: Vec<DerivedTrip>,
-    /// Sentry singleton events (`trip_id` NULL at ingest).
+    /// `trip_id`-NULL singleton events (legacy sentry + event.json pins).
     pub sentry_events: Vec<DerivedEvent>,
 }

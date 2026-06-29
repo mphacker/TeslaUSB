@@ -2156,4 +2156,118 @@ test.describe("trip map UAT", () => {
     await page.locator("[data-testid=vp-clip-play-1]").click();
     await expect(page.locator("[data-testid=vp-overlay-archive]")).toBeVisible();
   });
+
+  // ── fu-eventjson-pin Slice 5: a purely-parked day (no trips, no route) that
+  //    appears ONLY because it carries a standalone (trip-less) event with an
+  //    estimated GPS pin derived from a Tesla event.json must render that pin on
+  //    the map — even when the event has no clip (a clipless parked pin). The
+  //    real UAT seed deliberately has no standalone pin (so the busy driving day
+  //    stays at exactly 2 trip-linked markers and the parity/filters gates are
+  //    untouched); the webd trip-days ∪ standalone-pinned-days union itself is
+  //    covered by webd's Rust unit tests. Here we drive the REAL SPA bundle with
+  //    a mocked day-list + standalone-events response to prove the render path. ─
+  test("event.json pin — purely-parked day surfaces a clipless standalone pin", async ({
+    page,
+    probe,
+  }) => {
+    const PARKED_DAY = "2024-05-26";
+    const PIN_LAT = 37.806;
+    const PIN_LON = -122.414;
+
+    // /api/days: newest driving day (real seed) + an older purely-parked day.
+    await page.route("**/api/days", async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify([
+          { day: "2024-06-01", trip_count: 3, event_count: 2, distance_m: 30556.3 },
+          { day: PARKED_DAY, trip_count: 0, event_count: 1, distance_m: 0 },
+        ]),
+      });
+    });
+    // The parked day has zero trips → empty route set.
+    await page.route(`**/api/trips?day=${PARKED_DAY}`, async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify([]),
+      });
+    });
+    // Standalone-pinned events for the parked day: one clipless Saved-clip event
+    // carrying an estimated event.json pin (clip_id null, lat/lon present).
+    await page.route("**/api/events**", async (route) => {
+      const url = new URL(route.request().url());
+      if (
+        route.request().method() === "GET" &&
+        url.pathname === "/api/events" &&
+        url.searchParams.get("day") === PARKED_DAY
+      ) {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            items: [
+              {
+                id: 9001,
+                trip_id: null,
+                clip_id: null,
+                type: "saved",
+                severity: 1,
+                t: 1716690600,
+                lat: PIN_LAT,
+                lon: PIN_LON,
+                description: "Parked sentry event",
+              },
+            ],
+            next_cursor: null,
+            limit: 5000,
+          }),
+        });
+        return;
+      }
+      await route.continue();
+    });
+
+    await gotoMap(page);
+    // Two days now exist → the older-day control is enabled; step back to the
+    // purely-parked day.
+    await expect(page.locator("#dayPrev")).toBeEnabled();
+    await page.locator("#dayPrev").click();
+
+    // The parked day renders exactly one event marker and zero routes.
+    await page.waitForFunction(() => {
+      const h = (window as unknown as { __TESLAUSB_MAP_HOOKS__?: { tripCount: number; eventMarkerCount: number } })
+        .__TESLAUSB_MAP_HOOKS__;
+      return !!h && h.tripCount === 0 && h.eventMarkerCount === 1;
+    });
+
+    await expect(page.locator("#dayCardDate")).toContainText("2024");
+    await expect(page.locator("#dayCardStats")).toContainText("0 trips");
+    await expect(page.locator("#dayCardStats")).toContainText("0.0 mi");
+
+    const snap = await hooks(page);
+    expect(snap.tripCount).toBe(0);
+    expect(snap.tripPolylineCount).toBe(0);
+    expect(snap.eventMarkerCount).toBe(1);
+
+    const coords = await eventLatLngs(page);
+    expect(coords.length).toBe(1);
+    expect(
+      near(coords[0][0], PIN_LAT) && near(coords[0][1], PIN_LON),
+      "clipless standalone pin renders at its estimated event.json coord",
+    ).toBe(true);
+
+    // The clipless parked pin's marker opens a popup (no clip → no watch link).
+    await openEventMarkerPopup(page, /Parked sentry event/i);
+
+    assertCleanConsole(probe);
+  });
 });

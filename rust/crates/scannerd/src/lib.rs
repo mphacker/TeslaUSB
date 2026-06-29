@@ -28,6 +28,7 @@
 
 pub mod boot;
 pub mod clip;
+pub mod clip_event;
 pub mod error;
 pub mod mbr;
 pub mod mp4probe;

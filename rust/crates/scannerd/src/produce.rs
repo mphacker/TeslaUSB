@@ -35,18 +35,20 @@ use std::time::SystemTime;
 
 use crate::boot::parse_boot_sector;
 use crate::clip::parse_clip_name;
+use crate::clip_event::parse_event_json;
 use crate::error::ScannerError;
 use crate::mbr::parse_mbr;
 use crate::reader::BlockReader;
 use crate::record::{
-    AngleRecord, Bucket, ClipAngleRecord, MAX_MEDIA_RECORDS, MediaFileRecord, PROTOCOL_VERSION,
-    ProducerStats, ScanBatch, WireWaypoint, autopilot_to_u32, gear_to_u32,
+    autopilot_to_u32, gear_to_u32, AngleRecord, Bucket, ClipAngleRecord, ClipEventRecord,
+    MediaFileRecord, ProducerStats, ScanBatch, WireWaypoint, MAX_CLIP_EVENT_RECORDS,
+    MAX_MEDIA_RECORDS, PROTOCOL_VERSION,
 };
-use crate::seiwalk::{Waypoint, walk_clip_waypoints};
+use crate::seiwalk::{walk_clip_waypoints, Waypoint};
 use crate::stability::StabilityTracker;
 use crate::timestamp::epoch_from_tesla_timestamp;
 use crate::volume::Volume;
-use crate::walk::{FileRecord, walk_volume};
+use crate::walk::{walk_volume, FileRecord};
 
 /// The Tesla front camera angle — the only one carrying the SEI telemetry
 /// that trips/events derive from.
@@ -61,6 +63,12 @@ pub const DEFAULT_SEI_SAMPLE_RATE: u32 = 30;
 /// corrupt `valid_data_length`. Tesla clips are tens of MiB; 256 MiB is a
 /// generous ceiling.
 const MAX_CLIP_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Tesla event sidecar filename.
+const EVENT_JSON_NAME: &str = "event.json";
+
+/// Hard cap on `event.json` bytes read per sidecar.
+const MAX_EVENT_JSON_BYTES: u64 = 64 * 1024;
 
 /// A clip angle's identity, parsed from its filename + path.
 struct ClipIdent {
@@ -233,6 +241,103 @@ fn read_full_file<R: BlockReader + ?Sized>(
         .min(MAX_CLIP_BYTES);
     let len = usize::try_from(want).unwrap_or(usize::MAX);
     volume.read_file_range(&clusters, 0, len)
+}
+
+/// Read a file's valid data region bounded by `max_bytes` — used for small
+/// sidecars like `event.json`, never the 256 MiB clip path.
+fn read_bounded_file<R: BlockReader + ?Sized>(
+    volume: &Volume<'_, R>,
+    record: &FileRecord,
+    max_bytes: u64,
+) -> Result<Vec<u8>, ScannerError> {
+    let bpc = volume.params().bytes_per_cluster();
+    let span = record.data_length.div_ceil(bpc.max(1)).max(1);
+    let clusters = volume.follow_chain(record.first_cluster, record.no_fat_chain, span)?;
+    let want = record
+        .valid_data_length
+        .min(record.data_length)
+        .min(max_bytes);
+    let len = usize::try_from(want).unwrap_or(usize::MAX);
+    volume.read_file_range(&clusters, 0, len)
+}
+
+/// Collect parsed clip-event sidecars (`event.json`) from SavedClips/SentryClips.
+fn collect_clip_events<R: BlockReader + ?Sized>(
+    all_records: &[FileRecord],
+    volumes: &[(u8, Volume<'_, R>)],
+) -> Vec<ClipEventRecord> {
+    let mut result: Vec<ClipEventRecord> = Vec::new();
+
+    for record in all_records {
+        if !record.name.eq_ignore_ascii_case(EVENT_JSON_NAME) {
+            continue;
+        }
+
+        let bucket = Bucket::from_path(&record.path);
+        if !matches!(bucket, Bucket::SavedClips | Bucket::SentryClips) {
+            continue;
+        }
+
+        let parent = record.path.rsplit_once('/').map_or("", |(p, _)| p);
+        let event_dir_key = format!("{}:{parent}", record.partition_slot);
+
+        let mut primary: Option<ClipIdent> = None;
+        for candidate in all_records {
+            if candidate.partition_slot != record.partition_slot {
+                continue;
+            }
+            let candidate_parent = candidate.path.rsplit_once('/').map_or("", |(p, _)| p);
+            if candidate_parent != parent {
+                continue;
+            }
+            let Some(ident) = clip_identity(candidate) else {
+                continue;
+            };
+            let should_replace = match primary.as_ref() {
+                Some(current) => ident.timestamp > current.timestamp,
+                None => true,
+            };
+            if should_replace {
+                primary = Some(ident);
+            }
+        }
+        let primary_canonical_key = primary.map_or_else(String::new, |ident| ident.key);
+
+        let Some(volume) = volumes
+            .iter()
+            .find(|(slot, _)| *slot == record.partition_slot)
+            .map(|(_, volume)| volume)
+        else {
+            continue;
+        };
+
+        let Ok(bytes) = read_bounded_file(volume, record, MAX_EVENT_JSON_BYTES) else {
+            continue;
+        };
+        let Ok(meta) = parse_event_json(&bytes) else {
+            continue;
+        };
+
+        result.push(ClipEventRecord {
+            event_dir_key,
+            bucket,
+            primary_canonical_key,
+            timestamp_utc: meta.timestamp_utc,
+            timestamp_local_naive: meta.timestamp_local_naive,
+            timestamp_has_offset: meta.timestamp_has_offset,
+            est_lat: meta.est_lat,
+            est_lon: meta.est_lon,
+            reason: meta.reason,
+            city: meta.city,
+            camera: meta.camera,
+        });
+
+        if result.len() >= MAX_CLIP_EVENT_RECORDS {
+            break;
+        }
+    }
+
+    result
 }
 
 /// Build a [`WireWaypoint`] from a `scannerd` walk waypoint and the clip's
@@ -498,6 +603,7 @@ pub fn produce<R: BlockReader + ?Sized>(
     }
 
     let media = collect_media(&all_records);
+    let clip_events = collect_clip_events(&all_records, &volumes);
 
     Ok(ScanBatch {
         version: PROTOCOL_VERSION,
@@ -515,6 +621,10 @@ pub fn produce<R: BlockReader + ?Sized>(
         media_present_paths: media.iter().map(|m| m.rel_path.clone()).collect(),
         media,
         media_inventory: true,
+        // This producer DID inventory `event.json`, so the consumer may prune
+        // stale sidecar rows against `clip_events` (gated on `complete`).
+        clip_events,
+        clip_events_inventory: true,
     })
 }
 
@@ -523,12 +633,15 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
     use super::{
-        ClipIdent, MEDIA_PARTITION_SLOT, clip_identity, collect_media, decode_exfat_timestamp,
-        is_toybox_path, partition_label,
+        clip_identity, collect_media, decode_exfat_timestamp, is_toybox_path, partition_label,
+        ClipIdent, MEDIA_PARTITION_SLOT,
     };
     use crate::record::Bucket;
     use crate::walk::FileRecord;
-    use teslausb_core::fs::exfat::directory::FileTimestamps;
+    use teslausb_core::fs::exfat::directory::{
+        encode_file_entry_set, FileAttributes, FileEntrySetParams, FileTimestamps,
+    };
+    use teslausb_core::fs::exfat::upcase_table::UpcaseTable;
 
     fn record(path: &str, name: &str, slot: u8) -> FileRecord {
         FileRecord {
@@ -772,9 +885,20 @@ mod tests {
 
     // ---- two-image / two-LUN produce path -------------------------------
 
-    use super::{ImageSource, produce};
+    use super::{produce, ImageSource, DEFAULT_SEI_SAMPLE_RATE};
     use crate::reader::SliceReader;
     use crate::stability::{StabilityConfig, StabilityTracker};
+
+    const START_LBA: u32 = 1;
+    const CLUSTER_SIZE: usize = 512;
+    const ROOT_CLUSTER: u32 = 2;
+    const TESLACAM_CLUSTER: u32 = 3;
+    const BUCKET_CLUSTER: u32 = 4;
+    const EVENT_DIR_CLUSTER: u32 = 5;
+    const FRONT_FILE_CLUSTER: u32 = 6;
+    const EVENT_JSON_CLUSTER: u32 = 7;
+    const EVENT_TIMESTAMP: &str = "2026-06-01_20-10-35";
+    const FRONT_FILE_NAME: &str = "2026-06-01_20-10-35-front.mp4";
 
     /// Build a minimal but structurally valid single-partition exFAT image
     /// whose root directory is empty (the walk yields zero files). This is
@@ -783,7 +907,6 @@ mod tests {
     /// valid boot sector + a one-cluster, end-of-directory root.
     fn empty_single_partition_image() -> Vec<u8> {
         // 512-byte sectors, 512-byte clusters, one FAT.
-        const START_LBA: u32 = 1;
         let mut img = vec![0_u8; 4096];
 
         // --- MBR (sector 0): one exFAT partition at START_LBA. ---
@@ -821,6 +944,188 @@ mod tests {
         // Heap cluster 2 (abs (cluster_heap_offset + partition_offset) * 512
         // = 1536) is left all-zero ⇒ immediate end-of-directory ⇒ no files.
         img
+    }
+
+    fn event_dir_name() -> String {
+        EVENT_TIMESTAMP.to_owned()
+    }
+
+    fn clip_canonical_key(bucket_dir: &str) -> String {
+        format!("0:TeslaCam/{bucket_dir}/{EVENT_TIMESTAMP}/{EVENT_TIMESTAMP}")
+    }
+
+    fn event_dir_key(bucket_dir: &str) -> String {
+        format!("0:TeslaCam/{bucket_dir}/{EVENT_TIMESTAMP}")
+    }
+
+    fn front_clip_path(bucket_dir: &str) -> String {
+        format!("TeslaCam/{bucket_dir}/{EVENT_TIMESTAMP}/{FRONT_FILE_NAME}")
+    }
+
+    fn encode_entry_set(
+        name: &str,
+        is_directory: bool,
+        first_cluster: u32,
+        valid_data_length: u64,
+        data_length: u64,
+        no_fat_chain: bool,
+        upcase: &UpcaseTable,
+    ) -> Vec<u8> {
+        let name_utf16: Vec<u16> = name.encode_utf16().collect();
+        let attributes = FileAttributes {
+            directory: is_directory,
+            archive: !is_directory,
+            ..FileAttributes::default()
+        };
+        encode_file_entry_set(
+            &FileEntrySetParams {
+                name: &name_utf16,
+                attributes,
+                timestamps: FileTimestamps::default(),
+                first_cluster,
+                valid_data_length,
+                data_length,
+                no_fat_chain,
+            },
+            upcase,
+        )
+        .expect("encode entry set")
+    }
+
+    fn directory_cluster(entries: &[Vec<u8>], cluster_size: usize) -> Vec<u8> {
+        let mut cluster = vec![0_u8; cluster_size];
+        let mut offset = 0;
+        for entry in entries {
+            cluster[offset..offset + entry.len()].copy_from_slice(entry);
+            offset += entry.len();
+        }
+        cluster
+    }
+
+    fn write_cluster(img: &mut [u8], start_lba: u32, cluster: u32, payload: &[u8]) {
+        let base =
+            usize::try_from(cluster_offset(start_lba, cluster)).expect("cluster offset usize");
+        img[base..base + payload.len()].copy_from_slice(payload);
+    }
+
+    fn cluster_offset(start_lba: u32, cluster: u32) -> u64 {
+        let cluster_index = u64::from(cluster.saturating_sub(2));
+        (u64::from(start_lba + 2) * CLUSTER_SIZE as u64) + (cluster_index * CLUSTER_SIZE as u64)
+    }
+
+    fn event_fixture_image(bucket_dir: &str, event_json: &[u8]) -> Vec<u8> {
+        let mut img = vec![0_u8; 8192];
+
+        let mbr = 446;
+        img[mbr + 4] = 0x07;
+        img[mbr + 8..mbr + 12].copy_from_slice(&START_LBA.to_le_bytes());
+        img[mbr + 12..mbr + 16].copy_from_slice(&31_u32.to_le_bytes());
+        img[510] = 0x55;
+        img[511] = 0xAA;
+
+        let bs = (START_LBA as usize) * CLUSTER_SIZE;
+        img[bs..bs + 3].copy_from_slice(&[0xEB, 0x76, 0x90]);
+        img[bs + 3..bs + 11].copy_from_slice(b"EXFAT   ");
+        img[bs + 64..bs + 72].copy_from_slice(&u64::from(START_LBA).to_le_bytes());
+        img[bs + 72..bs + 80].copy_from_slice(&32_u64.to_le_bytes());
+        img[bs + 80..bs + 84].copy_from_slice(&1_u32.to_le_bytes());
+        img[bs + 84..bs + 88].copy_from_slice(&1_u32.to_le_bytes());
+        img[bs + 88..bs + 92].copy_from_slice(&2_u32.to_le_bytes());
+        img[bs + 92..bs + 96].copy_from_slice(&16_u32.to_le_bytes());
+        img[bs + 96..bs + 100].copy_from_slice(&ROOT_CLUSTER.to_le_bytes());
+        img[bs + 100..bs + 104].copy_from_slice(&0xC0FF_EE11_u32.to_le_bytes());
+        img[bs + 108] = 9;
+        img[bs + 109] = 0;
+        img[bs + 110] = 1;
+        img[bs + 510] = 0x55;
+        img[bs + 511] = 0xAA;
+
+        let fat_base = (1 + START_LBA as usize) * CLUSTER_SIZE;
+        let root_entry = fat_base + (ROOT_CLUSTER as usize * 4);
+        img[root_entry..root_entry + 4].copy_from_slice(&0xFFFF_FFFF_u32.to_le_bytes());
+
+        let upcase = UpcaseTable::ascii_identity();
+        let teslacam_dir = encode_entry_set(
+            "TeslaCam",
+            true,
+            TESLACAM_CLUSTER,
+            CLUSTER_SIZE as u64,
+            CLUSTER_SIZE as u64,
+            true,
+            &upcase,
+        );
+        let bucket_entry = encode_entry_set(
+            bucket_dir,
+            true,
+            BUCKET_CLUSTER,
+            CLUSTER_SIZE as u64,
+            CLUSTER_SIZE as u64,
+            true,
+            &upcase,
+        );
+        let event_dir_entry = encode_entry_set(
+            &event_dir_name(),
+            true,
+            EVENT_DIR_CLUSTER,
+            CLUSTER_SIZE as u64,
+            CLUSTER_SIZE as u64,
+            true,
+            &upcase,
+        );
+        let front_entry = encode_entry_set(
+            FRONT_FILE_NAME,
+            false,
+            FRONT_FILE_CLUSTER,
+            8,
+            8,
+            true,
+            &upcase,
+        );
+        let event_entry = encode_entry_set(
+            "event.json",
+            false,
+            EVENT_JSON_CLUSTER,
+            event_json.len() as u64,
+            event_json.len() as u64,
+            true,
+            &upcase,
+        );
+
+        write_cluster(
+            &mut img,
+            START_LBA,
+            ROOT_CLUSTER,
+            &directory_cluster(&[teslacam_dir], CLUSTER_SIZE),
+        );
+        write_cluster(
+            &mut img,
+            START_LBA,
+            TESLACAM_CLUSTER,
+            &directory_cluster(&[bucket_entry], CLUSTER_SIZE),
+        );
+        write_cluster(
+            &mut img,
+            START_LBA,
+            BUCKET_CLUSTER,
+            &directory_cluster(&[event_dir_entry], CLUSTER_SIZE),
+        );
+        write_cluster(
+            &mut img,
+            START_LBA,
+            EVENT_DIR_CLUSTER,
+            &directory_cluster(&[front_entry, event_entry], CLUSTER_SIZE),
+        );
+        write_cluster(&mut img, START_LBA, FRONT_FILE_CLUSTER, b"not-anmp");
+        write_cluster(&mut img, START_LBA, EVENT_JSON_CLUSTER, event_json);
+        img
+    }
+
+    fn produce_stable_batch(reader: &SliceReader) -> crate::record::ScanBatch {
+        let sources = [ImageSource::with_slot(reader, 0)];
+        let mut tracker = StabilityTracker::new(StabilityConfig::default());
+        let _ =
+            produce(&sources, &mut tracker, 1_000, DEFAULT_SEI_SAMPLE_RATE).expect("first pass");
+        produce(&sources, &mut tracker, 1_060, DEFAULT_SEI_SAMPLE_RATE).expect("second pass")
     }
 
     #[test]
@@ -863,6 +1168,64 @@ mod tests {
         let batch = produce(&sources, &mut tracker, 1_000, 30).expect("single-image produce");
         assert_eq!(batch.stats.partitions, 1);
         assert!(batch.complete);
+    }
+
+    #[test]
+    fn produce_populates_savedclips_clip_event_inventory() {
+        let event_json = br#"{"timestamp":"2026-06-01T20:10:35-07:00","est_lat":"37.7749","est_lon":"-122.4194","reason":"sentry","city":"San Francisco","camera":"front"}"#;
+        let reader = SliceReader::new(event_fixture_image("SavedClips", event_json));
+        let batch = produce_stable_batch(&reader);
+        let canonical_key = clip_canonical_key("SavedClips");
+
+        assert!(batch.clip_events_inventory);
+        assert_eq!(batch.clip_events.len(), 1);
+        assert_eq!(batch.records.len(), 1);
+        assert!(batch.present_keys.iter().any(|k| k == &canonical_key));
+        let event = &batch.clip_events[0];
+        assert_eq!(event.event_dir_key, event_dir_key("SavedClips"));
+        assert_eq!(event.bucket, Bucket::SavedClips);
+        assert_eq!(event.primary_canonical_key, canonical_key);
+        assert_eq!(event.est_lat, Some(37.7749));
+        assert_eq!(event.est_lon, Some(-122.4194));
+    }
+
+    #[test]
+    fn produce_skips_malformed_event_json_without_dropping_clip() {
+        let reader = SliceReader::new(event_fixture_image(
+            "SavedClips",
+            br#"{"timestamp":"2026-06-01T20:10:35""#,
+        ));
+        let batch = produce_stable_batch(&reader);
+        let canonical_key = clip_canonical_key("SavedClips");
+
+        assert!(batch.clip_events_inventory);
+        assert!(batch.clip_events.is_empty());
+        assert!(batch
+            .records
+            .iter()
+            .any(|r| r.canonical_key == canonical_key));
+        assert!(batch.present_keys.iter().any(|k| k == &canonical_key));
+    }
+
+    #[test]
+    fn produce_ignores_recentclips_event_json() {
+        let event_json =
+            br#"{"timestamp":"2026-06-01T20:10:35Z","est_lat":"37.7749","est_lon":"-122.4194"}"#;
+        let reader = SliceReader::new(event_fixture_image("RecentClips", event_json));
+        let batch = produce_stable_batch(&reader);
+        let canonical_key = clip_canonical_key("RecentClips");
+
+        assert!(batch.clip_events_inventory);
+        assert!(batch.clip_events.is_empty());
+        assert!(batch
+            .records
+            .iter()
+            .any(|r| r.canonical_key == canonical_key));
+        assert!(batch.present_keys.iter().any(|k| k == &canonical_key));
+        assert!(batch
+            .records
+            .iter()
+            .any(|r| r.angle.file_ref == front_clip_path("RecentClips")));
     }
 
     #[test]

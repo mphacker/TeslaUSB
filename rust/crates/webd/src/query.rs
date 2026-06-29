@@ -53,16 +53,46 @@ impl SnapshotResource {
     }
 }
 
-/// `GET /api/days`: civil days with driving trips plus rolled-up counts.
+/// `GET /api/days`: civil days with driving trips and/or standalone parked
+/// pinned events (`trip_id IS NULL`), plus rolled-up counts.
 ///
-/// `event_count` is events linked to trips on that day (trip-less sentry events
-/// are not attributed to a day here — see [`DaySummary`]).
+/// Days that only have standalone parked pins are returned with `trip_count = 0`.
 pub(crate) fn list_days(conn: &Connection) -> Result<Vec<DaySummary>, rusqlite::Error> {
-    let sql = "SELECT t.day, COUNT(*) AS trip_count, \
-        COALESCE(SUM(t.distance_m), 0.0) AS distance_m, \
-        (SELECT COUNT(*) FROM events e JOIN trips t2 ON e.trip_id = t2.id \
-         WHERE t2.day = t.day) AS event_count \
-        FROM trips t GROUP BY t.day ORDER BY t.day DESC";
+    let sql = "WITH trip_days AS ( \
+            SELECT day FROM trips GROUP BY day \
+        ), standalone_days AS ( \
+            SELECT strftime('%Y-%m-%d', t, 'unixepoch') AS day \
+            FROM events \
+            WHERE trip_id IS NULL AND lat IS NOT NULL AND lon IS NOT NULL \
+            GROUP BY strftime('%Y-%m-%d', t, 'unixepoch') \
+        ), all_days AS ( \
+            SELECT day FROM trip_days \
+            UNION \
+            SELECT day FROM standalone_days \
+        ), trip_rollup AS ( \
+            SELECT day, COUNT(*) AS trip_count, COALESCE(SUM(distance_m), 0.0) AS distance_m \
+            FROM trips \
+            GROUP BY day \
+        ), trip_event_rollup AS ( \
+            SELECT t.day AS day, COUNT(*) AS event_count \
+            FROM events e \
+            JOIN trips t ON e.trip_id = t.id \
+            GROUP BY t.day \
+        ), standalone_event_rollup AS ( \
+            SELECT strftime('%Y-%m-%d', t, 'unixepoch') AS day, COUNT(*) AS event_count \
+            FROM events \
+            WHERE trip_id IS NULL AND lat IS NOT NULL AND lon IS NOT NULL \
+            GROUP BY strftime('%Y-%m-%d', t, 'unixepoch') \
+        ) \
+        SELECT d.day, \
+               COALESCE(tr.trip_count, 0) AS trip_count, \
+               COALESCE(tr.distance_m, 0.0) AS distance_m, \
+               COALESCE(te.event_count, 0) + COALESCE(se.event_count, 0) AS event_count \
+        FROM all_days d \
+        LEFT JOIN trip_rollup tr ON tr.day = d.day \
+        LEFT JOIN trip_event_rollup te ON te.day = d.day \
+        LEFT JOIN standalone_event_rollup se ON se.day = d.day \
+        ORDER BY d.day DESC";
     let mut stmt = conn.prepare(sql)?;
     let out = stmt
         .query_map([], |row| {
@@ -214,6 +244,23 @@ pub(crate) fn list_events(
         }
     };
     Ok(out)
+}
+
+/// `GET /api/events?day=YYYY-MM-DD`: standalone parked pinned events
+/// (`trip_id IS NULL`, with present lat/lon) for one civil day.
+pub(crate) fn list_standalone_day_events(
+    conn: &Connection,
+    day: &str,
+    limit: i64,
+) -> Result<Vec<EventDto>, rusqlite::Error> {
+    let sql = format!(
+        "{EVENT_COLS} WHERE trip_id IS NULL AND lat IS NOT NULL AND lon IS NOT NULL \
+         AND strftime('%Y-%m-%d', t, 'unixepoch') = ?1 \
+         ORDER BY t DESC, id DESC LIMIT ?2"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    stmt.query_map(params![day, limit], map_event)?
+        .collect::<Result<Vec<_>, _>>()
 }
 
 /// `GET /api/clips`: newest-first keyset page of clips, optionally
@@ -833,7 +880,8 @@ mod tests {
     use rusqlite::{Connection, params};
 
     use super::{
-        Keyset, SnapshotResource, get_clip, list_chime_library, list_clips, snapshot_max_id,
+        Keyset, SnapshotResource, get_clip, list_chime_library, list_clips, list_days,
+        list_standalone_day_events, snapshot_max_id,
     };
 
     fn seed_media_rows(conn: &Connection, rows: &[(&str, &str, &str, i64)]) {
@@ -879,6 +927,15 @@ mod tests {
              VALUES
                 (?1, ?2, ?3, ?4, NULL, ?5, ?6, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?7)",
             params![clip_id, seq, seq, seq as f64, lat, lon, i64::from(has_gps_fix)],
+        )
+        .unwrap();
+    }
+
+    fn insert_trip(conn: &Connection, id: i64, day: &str, started_at: i64, distance_m: f64) {
+        conn.execute(
+            "INSERT INTO trips (id, day, started_at, ended_at, distance_m, point_count, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, 0)",
+            params![id, day, started_at, started_at + 60, distance_m],
         )
         .unwrap();
     }
@@ -966,5 +1023,85 @@ mod tests {
         let clip = get_clip(&conn, 4).unwrap().unwrap();
         assert_eq!(clip.lat, None);
         assert_eq!(clip.lon, None);
+    }
+
+    #[test]
+    fn list_days_includes_purely_parked_day_with_zero_trips() {
+        let conn = test_conn();
+        conn.execute(
+            "INSERT INTO events \
+                (id, type, severity, t, lat, lon, clip_id, trip_id, front_frame_index, front_frame_offset, description, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, NULL, NULL, ?7, ?8)",
+            params![1, "saved", 1, 86_400, 47.0, -122.0, "parked pin", 86_400],
+        )
+        .unwrap();
+
+        let days = list_days(&conn).unwrap();
+        let day = days.iter().find(|item| item.day == "1970-01-02").unwrap();
+        assert_eq!(day.trip_count, 0);
+        assert_eq!(day.event_count, 1);
+    }
+
+    #[test]
+    fn list_days_sums_trip_linked_and_standalone_event_counts() {
+        let conn = test_conn();
+        insert_trip(&conn, 1, "1970-01-03", 172_800, 1234.5);
+        conn.execute(
+            "INSERT INTO events \
+                (id, type, severity, t, lat, lon, clip_id, trip_id, front_frame_index, front_frame_offset, description, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, NULL, NULL, ?8, ?9)",
+            params![2, "hard_brake", 2, 172_900, 47.1, -122.1, 1, "trip-linked", 172_900],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO events \
+                (id, type, severity, t, lat, lon, clip_id, trip_id, front_frame_index, front_frame_offset, description, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, NULL, NULL, ?7, ?8)",
+            params![3, "sentry", 1, 172_950, 47.2, -122.2, "standalone", 172_950],
+        )
+        .unwrap();
+
+        let days = list_days(&conn).unwrap();
+        let day = days.iter().find(|item| item.day == "1970-01-03").unwrap();
+        assert_eq!(day.trip_count, 1);
+        assert_eq!(day.event_count, 2);
+    }
+
+    #[test]
+    fn list_standalone_day_events_filters_to_standalone_pinned_rows() {
+        let conn = test_conn();
+        insert_trip(&conn, 2, "1970-01-04", 259_200, 10.0);
+        conn.execute(
+            "INSERT INTO events \
+                (id, type, severity, t, lat, lon, clip_id, trip_id, front_frame_index, front_frame_offset, description, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, NULL, NULL, ?7, ?8)",
+            params![10, "saved", 1, 259_210, 47.3, -122.3, "include", 259_210],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO events \
+                (id, type, severity, t, lat, lon, clip_id, trip_id, front_frame_index, front_frame_offset, description, created_at) \
+             VALUES (?1, ?2, ?3, ?4, NULL, ?5, NULL, NULL, NULL, NULL, ?6, ?7)",
+            params![11, "saved", 1, 259_220, -122.4, "missing lat", 259_220],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO events \
+                (id, type, severity, t, lat, lon, clip_id, trip_id, front_frame_index, front_frame_offset, description, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, NULL, NULL, ?8, ?9)",
+            params![12, "hard_accel", 2, 259_230, 47.4, -122.4, 2, "trip-linked", 259_230],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO events \
+                (id, type, severity, t, lat, lon, clip_id, trip_id, front_frame_index, front_frame_offset, description, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, NULL, NULL, ?7, ?8)",
+            params![13, "sentry", 1, 345_600, 47.5, -122.5, "other day", 345_600],
+        )
+        .unwrap();
+
+        let events = list_standalone_day_events(&conn, "1970-01-04", 5_000).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, 10);
     }
 }

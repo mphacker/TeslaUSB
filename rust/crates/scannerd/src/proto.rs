@@ -274,6 +274,8 @@ mod tests {
             media: Vec::new(),
             media_present_paths: Vec::new(),
             media_inventory: false,
+            clip_events: Vec::new(),
+            clip_events_inventory: false,
         };
         let mut buf = Vec::new();
         write_batch(&mut buf, &batch).unwrap();

@@ -20,8 +20,10 @@
 
 use crate::geo::{cap_indices_uniform, haversine_km, simplify_polyline_rdp};
 use crate::model::{
-    Derivation, DeriveClip, DeriveWaypoint, DerivedEvent, DerivedTrip, EventType, TripPoint,
+    ClipEventInput, Derivation, DeriveClip, DeriveWaypoint, DerivedEvent, DerivedTrip, EventType,
+    TripPoint,
 };
+use scannerd::clip_event::rounded_tz_offset;
 use teslausb_core::sei::tesla::AutopilotState;
 
 /// Trip-grouping gap (s): non-sentry clips whose `clip_started_utc` are
@@ -63,6 +65,9 @@ pub const POLYLINE_RDP_EPSILON_M: f64 = 8.0;
 
 /// Cap on rendered polyline points per trip. v1 production cap.
 pub const POLYLINE_MAX_POINTS: usize = 200;
+
+/// v1 frame-rate constant used for event.json front-frame mapping.
+const CLIP_EVENT_FRAME_RATE: f64 = 36.0;
 
 /// Tunable derivation parameters (defaults are the v1 production values).
 #[derive(Debug, Clone, Copy)]
@@ -116,7 +121,11 @@ pub fn is_autopilot_engaged(state: AutopilotState) -> bool {
 /// (ingest) guarantees this so clustering and waypoint flattening match
 /// the materializer's `ORDER BY`.
 #[must_use]
-pub fn derive(clips: &[DeriveClip], config: DeriveConfig) -> Derivation {
+pub fn derive(
+    clips: &[DeriveClip],
+    clip_events: &[ClipEventInput],
+    config: DeriveConfig,
+) -> Derivation {
     let mut result = Derivation::default();
 
     // Partition sentry from driving by folder class (materializer
@@ -136,10 +145,36 @@ pub fn derive(clips: &[DeriveClip], config: DeriveConfig) -> Derivation {
         }
     }
 
+    let sentry_event_prefixes: Vec<String> = clip_events
+        .iter()
+        .filter(|event| event.bucket.is_sentry())
+        .map(|event| format!("{}/", event.event_dir_key))
+        .collect();
     for clip in sentry {
+        if sentry_event_prefixes
+            .iter()
+            .any(|prefix| clip.canonical_key.starts_with(prefix))
+        {
+            continue;
+        }
         if let Some(event) = materialize_sentry_clip(clip) {
             result.sentry_events.push(event);
         }
+    }
+
+    let mut clip_event_rows: Vec<(i64, String, DerivedEvent)> = clip_events
+        .iter()
+        .map(|input| {
+            (
+                clip_event_timestamp(input),
+                input.event_dir_key.clone(),
+                materialize_clip_event(input),
+            )
+        })
+        .collect();
+    clip_event_rows.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    for (_, _, event) in clip_event_rows {
+        result.sentry_events.push(event);
     }
 
     result
@@ -485,6 +520,117 @@ fn materialize_sentry_clip(clip: &DeriveClip) -> Option<DerivedEvent> {
     })
 }
 
+fn clip_event_timestamp(input: &ClipEventInput) -> i64 {
+    if input.timestamp_has_offset {
+        return input.timestamp_utc;
+    }
+    if input.primary_started_trusted {
+        if let Some(start) = input.primary_started_utc {
+            let offset = rounded_tz_offset(input.timestamp_local_naive, start).unwrap_or(0);
+            return input.timestamp_local_naive - offset;
+        }
+    }
+    input.timestamp_local_naive
+}
+
+fn materialize_clip_event(input: &ClipEventInput) -> DerivedEvent {
+    let t = clip_event_timestamp(input);
+    let (front_frame_index, front_frame_offset_ms) = if input.primary_started_trusted {
+        if let Some(start) = input.primary_started_utc {
+            let delta = t - start;
+            #[allow(
+                clippy::cast_precision_loss,
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss
+            )]
+            let frame_index = ((delta as f64) * CLIP_EVENT_FRAME_RATE).round().max(0.0) as i64;
+            (Some(frame_index), Some(delta.max(0).saturating_mul(1000)))
+        } else {
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
+
+    let (lat, lon) = validated_clip_event_geo(input.est_lat, input.est_lon);
+    let event_type = if input.bucket.is_sentry() {
+        EventType::Sentry
+    } else {
+        EventType::Saved
+    };
+
+    DerivedEvent {
+        clip_id: input.primary_clip_id,
+        event_type,
+        t,
+        lat,
+        lon,
+        front_frame_index,
+        front_frame_offset_ms,
+        description: clip_event_description(input),
+    }
+}
+
+fn validated_clip_event_geo(lat: Option<f64>, lon: Option<f64>) -> (Option<f64>, Option<f64>) {
+    match (lat, lon) {
+        (Some(lat), Some(lon))
+            if lat.is_finite()
+                && lon.is_finite()
+                && (-90.0..=90.0).contains(&lat)
+                && (-180.0..=180.0).contains(&lon)
+                && !(lat == 0.0 && lon == 0.0) =>
+        {
+            (Some(lat), Some(lon))
+        }
+        _ => (None, None),
+    }
+}
+
+fn clip_event_description(input: &ClipEventInput) -> String {
+    let mut parts = Vec::new();
+    if let Some(reason) = trim_non_empty(input.reason.as_deref()) {
+        parts.push(humanize(reason));
+    } else {
+        parts.push("Event clip".to_owned());
+    }
+    if let Some(city) = trim_non_empty(input.city.as_deref()) {
+        parts.push(humanize(city));
+    }
+    if let Some(camera) = trim_non_empty(input.camera.as_deref()) {
+        parts.push(humanize(camera));
+    }
+    parts.join(" | ")
+}
+
+fn trim_non_empty(value: Option<&str>) -> Option<&str> {
+    value.and_then(|v| {
+        let trimmed = v.trim();
+        (!trimmed.is_empty()).then_some(trimmed)
+    })
+}
+
+fn humanize(source: &str) -> String {
+    source
+        .replace(['_', '-'], " ")
+        .split_whitespace()
+        .map(title_case_word)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn title_case_word(word: &str) -> String {
+    let mut chars = word.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    let mut out = String::new();
+    out.extend(first.to_uppercase());
+    for ch in chars {
+        out.extend(ch.to_lowercase());
+    }
+    out
+}
+
 /// Build a `DeriveWaypoint` from a scannerd walk waypoint and the clip's
 /// resolved start instant. `absolute_utc = clip_started_utc +
 /// trunc(offset_ms/1000)` (truncation, matching the materializer).
@@ -570,7 +716,8 @@ mod tests {
     )]
 
     use super::{DeriveConfig, derive, encode_polyline, is_autopilot_engaged, utc_civil_date};
-    use crate::model::{DeriveClip, DeriveWaypoint, EventType, FolderClass};
+    use crate::model::{ClipEventInput, DeriveClip, DeriveWaypoint, EventType, FolderClass};
+    use scannerd::clip_event::rounded_tz_offset;
     use teslausb_core::sei::tesla::{AutopilotState, Gear};
 
     fn wp(frame: i64, offset_ms: f64, lat: f64, lon: f64, speed: f64) -> DeriveWaypoint {
@@ -605,10 +752,34 @@ mod tests {
             .collect();
         DeriveClip {
             clip_id: id,
+            canonical_key: format!("0:TeslaCam/{}/{started}/{started}", folder.as_db_str()),
             clip_started_utc: started,
             folder_class: folder,
             gps_waypoint_count: i64::try_from(gps).unwrap_or(0),
             waypoints: wps,
+        }
+    }
+
+    fn clip_event(
+        event_dir_key: &str,
+        bucket: FolderClass,
+        timestamp_utc: i64,
+        timestamp_local_naive: i64,
+    ) -> ClipEventInput {
+        ClipEventInput {
+            event_dir_key: event_dir_key.to_owned(),
+            bucket,
+            primary_clip_id: Some(1),
+            primary_started_utc: Some(1_700_000_000),
+            primary_started_trusted: true,
+            est_lat: Some(42.0),
+            est_lon: Some(-83.0),
+            reason: Some("user_interaction_honk".to_owned()),
+            city: Some("grand_blanc".to_owned()),
+            camera: Some("front".to_owned()),
+            timestamp_utc,
+            timestamp_local_naive,
+            timestamp_has_offset: true,
         }
     }
 
@@ -690,7 +861,7 @@ mod tests {
                 wp(1, 1000.0, 41.010, -75.000, 20.0),
             ],
         );
-        let d = derive(&[a, b], DeriveConfig::default());
+        let d = derive(&[a, b], &[], DeriveConfig::default());
         assert_eq!(d.trips.len(), 2);
     }
 
@@ -714,7 +885,7 @@ mod tests {
                 wp(1, 1000.0, 40.030, -75.000, 20.0),
             ],
         );
-        let d = derive(&[a, b], DeriveConfig::default());
+        let d = derive(&[a, b], &[], DeriveConfig::default());
         assert_eq!(d.trips.len(), 1);
         assert_eq!(d.trips[0].clip_ids, vec![1, 2]);
     }
@@ -731,7 +902,7 @@ mod tests {
                 wp(1, 1000.0, 40.000_05, -75.0, 1.0),
             ],
         );
-        let d = derive(&[a], DeriveConfig::default());
+        let d = derive(&[a], &[], DeriveConfig::default());
         assert!(d.trips.is_empty());
     }
 
@@ -740,7 +911,7 @@ mod tests {
         let mut w = wp(0, 0.0, 0.0, 0.0, 0.0);
         w.has_gps_fix = false;
         let s = clip(9, 5_000, FolderClass::SentryClips, vec![w]);
-        let d = derive(&[s], DeriveConfig::default());
+        let d = derive(&[s], &[], DeriveConfig::default());
         assert!(d.trips.is_empty());
         assert_eq!(d.sentry_events.len(), 1);
         assert_eq!(d.sentry_events[0].event_type, EventType::Sentry);
@@ -766,7 +937,7 @@ mod tests {
             FolderClass::RecentClips,
             vec![hard_brake, emerg, accel, turn, fast],
         );
-        let d = derive(&[c], DeriveConfig::default());
+        let d = derive(&[c], &[], DeriveConfig::default());
         assert_eq!(d.trips.len(), 1);
         let types: Vec<EventType> = d.trips[0].events.iter().map(|e| e.event_type).collect();
         assert!(types.contains(&EventType::HarshBraking));
@@ -795,7 +966,7 @@ mod tests {
         let mut off2 = wp(2, 200.0, 40.02, -75.0, 20.0);
         off2.autopilot_state = AutopilotState::None;
         let c = clip(1, 1_000, FolderClass::RecentClips, vec![off1, on, off2]);
-        let d = derive(&[c], DeriveConfig::default());
+        let d = derive(&[c], &[], DeriveConfig::default());
         let ap: Vec<EventType> = d.trips[0]
             .events
             .iter()
@@ -828,7 +999,7 @@ mod tests {
             speed_limit_mps: 0.0,
             ..DeriveConfig::default()
         };
-        let d = derive(&[c], cfg);
+        let d = derive(&[c], &[], cfg);
         assert!(
             d.trips[0]
                 .events
@@ -849,10 +1020,249 @@ mod tests {
                 wp(2, 2000.0, 40.010, -75.0, 20.0),
             ],
         );
-        let d = derive(&[c], DeriveConfig::default());
+        let d = derive(&[c], &[], DeriveConfig::default());
         assert!(!d.trips[0].polyline.is_empty());
         // 1 segment, ≥2 points → header (4) + seg-count (4) + ≥2×16.
         assert!(d.trips[0].polyline.len() >= 4 + 4 + 32);
+    }
+
+    #[test]
+    fn clip_event_saved_pin_and_description_humanized() {
+        let event = clip_event(
+            "0:TeslaCam/SavedClips/2026-06-01_20-10-04",
+            FolderClass::SavedClips,
+            1_780_344_604,
+            1_780_344_604,
+        );
+        let d = derive(&[], &[event], DeriveConfig::default());
+        assert_eq!(d.sentry_events.len(), 1);
+        let got = &d.sentry_events[0];
+        assert_eq!(got.event_type, EventType::Saved);
+        assert_eq!(got.lat, Some(42.0));
+        assert_eq!(got.lon, Some(-83.0));
+        assert_eq!(
+            got.description,
+            "User Interaction Honk | Grand Blanc | Front"
+        );
+    }
+
+    #[test]
+    fn clip_event_description_defaults_event_clip_for_missing_or_blank_reason() {
+        let mut missing_reason = clip_event(
+            "0:TeslaCam/SavedClips/2026-06-01_20-10-04",
+            FolderClass::SavedClips,
+            2_000,
+            2_000,
+        );
+        missing_reason.reason = None;
+        missing_reason.city = None;
+        missing_reason.camera = None;
+
+        let mut blank_reason = clip_event(
+            "0:TeslaCam/SentryClips/2026-06-01_20-11-04",
+            FolderClass::SentryClips,
+            2_100,
+            2_100,
+        );
+        blank_reason.reason = Some("   ".to_owned());
+        blank_reason.city = None;
+        blank_reason.camera = None;
+
+        let d = derive(
+            &[],
+            &[missing_reason, blank_reason],
+            DeriveConfig::default(),
+        );
+        assert_eq!(d.sentry_events.len(), 2);
+        assert!(
+            d.sentry_events
+                .iter()
+                .all(|e| e.description == "Event clip")
+        );
+    }
+
+    #[test]
+    fn clip_event_timestamp_anchoring_and_frame_rules() {
+        let mut has_offset = clip_event(
+            "0:TeslaCam/SavedClips/has-offset",
+            FolderClass::SavedClips,
+            5_000,
+            4_000,
+        );
+        has_offset.timestamp_has_offset = true;
+        has_offset.primary_started_utc = Some(4_000);
+
+        let mut trusted_anchor = clip_event(
+            "0:TeslaCam/SavedClips/trusted-anchor",
+            FolderClass::SavedClips,
+            0,
+            1_700_012_345,
+        );
+        trusted_anchor.timestamp_has_offset = false;
+        trusted_anchor.primary_started_utc = Some(1_700_000_000);
+        trusted_anchor.primary_started_trusted = true;
+
+        let mut untrusted_anchor = clip_event(
+            "0:TeslaCam/SentryClips/untrusted-anchor",
+            FolderClass::SentryClips,
+            9_999,
+            8_888,
+        );
+        untrusted_anchor.timestamp_has_offset = false;
+        untrusted_anchor.primary_started_trusted = false;
+
+        let d = derive(
+            &[],
+            &[has_offset, trusted_anchor.clone(), untrusted_anchor.clone()],
+            DeriveConfig::default(),
+        );
+        assert_eq!(d.sentry_events.len(), 3);
+
+        let has_offset_event = d
+            .sentry_events
+            .iter()
+            .find(|e| e.clip_id == Some(1) && e.t == 5_000)
+            .unwrap();
+        assert_eq!(has_offset_event.t, 5_000);
+
+        let expected_offset =
+            rounded_tz_offset(trusted_anchor.timestamp_local_naive, 1_700_000_000).unwrap_or(0);
+        let expected_t = trusted_anchor.timestamp_local_naive - expected_offset;
+        let trusted_event = d.sentry_events.iter().find(|e| e.t == expected_t).unwrap();
+        assert_eq!(trusted_event.t, expected_t);
+
+        let untrusted_event = d
+            .sentry_events
+            .iter()
+            .find(|e| e.t == untrusted_anchor.timestamp_local_naive)
+            .unwrap();
+        assert_eq!(untrusted_event.t, untrusted_anchor.timestamp_local_naive);
+        assert_eq!(untrusted_event.front_frame_index, None);
+        assert_eq!(untrusted_event.front_frame_offset_ms, None);
+    }
+
+    #[test]
+    fn clip_event_frame_fields_and_clipless_pin_behavior() {
+        let mut with_frame = clip_event(
+            "0:TeslaCam/SavedClips/frame",
+            FolderClass::SavedClips,
+            1_002,
+            1_002,
+        );
+        with_frame.primary_started_utc = Some(1_000);
+        with_frame.timestamp_has_offset = true;
+        with_frame.primary_started_trusted = true;
+
+        let mut clipless = clip_event(
+            "0:TeslaCam/SavedClips/clipless",
+            FolderClass::SavedClips,
+            2_000,
+            2_000,
+        );
+        clipless.primary_clip_id = None;
+        clipless.primary_started_utc = None;
+        clipless.primary_started_trusted = false;
+
+        let d = derive(&[], &[with_frame, clipless], DeriveConfig::default());
+        assert_eq!(d.sentry_events.len(), 2);
+        let framed = d.sentry_events.iter().find(|e| e.t == 1_002).unwrap();
+        assert_eq!(framed.front_frame_index, Some(72));
+        assert_eq!(framed.front_frame_offset_ms, Some(2_000));
+
+        let clipless_event = d.sentry_events.iter().find(|e| e.t == 2_000).unwrap();
+        assert_eq!(clipless_event.clip_id, None);
+        assert_eq!(clipless_event.lat, Some(42.0));
+        assert_eq!(clipless_event.lon, Some(-83.0));
+        assert_eq!(clipless_event.front_frame_index, None);
+        assert_eq!(clipless_event.front_frame_offset_ms, None);
+    }
+
+    #[test]
+    fn clip_event_sentry_folder_collapse_suppresses_segment_events() {
+        let sentry_clips = [
+            DeriveClip {
+                clip_id: 10,
+                canonical_key: "0:TeslaCam/SentryClips/2026-06-01_20-10-04/2026-06-01_20-10-04"
+                    .to_owned(),
+                clip_started_utc: 10_000,
+                folder_class: FolderClass::SentryClips,
+                gps_waypoint_count: 0,
+                waypoints: Vec::new(),
+            },
+            DeriveClip {
+                clip_id: 11,
+                canonical_key: "0:TeslaCam/SentryClips/2026-06-01_20-10-04/2026-06-01_20-10-34"
+                    .to_owned(),
+                clip_started_utc: 10_030,
+                folder_class: FolderClass::SentryClips,
+                gps_waypoint_count: 0,
+                waypoints: Vec::new(),
+            },
+            DeriveClip {
+                clip_id: 12,
+                canonical_key: "0:TeslaCam/SentryClips/2026-06-01_20-10-04/2026-06-01_20-11-04"
+                    .to_owned(),
+                clip_started_utc: 10_060,
+                folder_class: FolderClass::SentryClips,
+                gps_waypoint_count: 0,
+                waypoints: Vec::new(),
+            },
+        ];
+        let event = clip_event(
+            "0:TeslaCam/SentryClips/2026-06-01_20-10-04",
+            FolderClass::SentryClips,
+            10_010,
+            10_010,
+        );
+        let d = derive(&sentry_clips, &[event], DeriveConfig::default());
+        assert_eq!(d.sentry_events.len(), 1);
+        assert_eq!(d.sentry_events[0].event_type, EventType::Sentry);
+        assert_eq!(
+            d.sentry_events[0].description,
+            "User Interaction Honk | Grand Blanc | Front"
+        );
+    }
+
+    #[test]
+    fn clip_event_invalid_geo_becomes_none_but_event_is_kept() {
+        let mut zero_geo = clip_event(
+            "0:TeslaCam/SavedClips/zero-geo",
+            FolderClass::SavedClips,
+            2_500,
+            2_500,
+        );
+        zero_geo.est_lat = Some(0.0);
+        zero_geo.est_lon = Some(0.0);
+
+        let mut out_of_range_geo = clip_event(
+            "0:TeslaCam/SentryClips/out-of-range",
+            FolderClass::SentryClips,
+            2_600,
+            2_600,
+        );
+        out_of_range_geo.est_lat = Some(123.0);
+        out_of_range_geo.est_lon = Some(-181.0);
+
+        let mut none_geo = clip_event(
+            "0:TeslaCam/SavedClips/none-geo",
+            FolderClass::SavedClips,
+            2_700,
+            2_700,
+        );
+        none_geo.est_lat = None;
+        none_geo.est_lon = Some(-83.0);
+
+        let d = derive(
+            &[],
+            &[zero_geo, out_of_range_geo, none_geo],
+            DeriveConfig::default(),
+        );
+        assert_eq!(d.sentry_events.len(), 3);
+        assert!(
+            d.sentry_events
+                .iter()
+                .all(|event| event.lat.is_none() && event.lon.is_none())
+        );
     }
 
     #[test]

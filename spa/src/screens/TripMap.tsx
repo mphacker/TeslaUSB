@@ -377,6 +377,10 @@ export function TripMap() {
               .catch(() => [] as EventItem[]),
           ),
         );
+        const standaloneEvents = await api
+          .events({ day: currentDay.day, limit: 5000 }, ac.signal)
+          .then((p) => p.items)
+          .catch(() => [] as EventItem[]);
         if (seq !== seqRef.current) return;
 
         const routeClipCandidatesByTripId = new Map<number, { clipId: number; t: number; id: number }[]>();
@@ -402,6 +406,20 @@ export function TripMap() {
               clipId: ev.clip_id ?? null,
             });
           }
+        }
+        for (const ev of standaloneEvents) {
+          if (ev.lat == null || ev.lon == null) continue;
+          mapEvents.push({
+            id: ev.id,
+            type: ev.type,
+            severity: ev.severity ?? null,
+            tripId: ev.trip_id ?? null,
+            lat: ev.lat,
+            lon: ev.lon,
+            description: ev.description ?? "",
+            t: ev.t,
+            clipId: ev.clip_id ?? null,
+          });
         }
         const routeEventsByTripId = new Map<number, number[]>();
         for (const [tripId, candidates] of routeClipCandidatesByTripId) {

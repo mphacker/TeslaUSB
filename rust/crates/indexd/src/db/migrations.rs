@@ -29,7 +29,7 @@ pub const SCHEMA_VERSION_NOTE: &str = "v1 (PROVISIONAL — pre-OP-3 freeze)";
 /// The highest schema version this binary knows how to produce. A DB
 /// reporting a higher version was written by a newer `indexd` and must
 /// not be opened read-write.
-pub const LATEST_VERSION: i64 = 2;
+pub const LATEST_VERSION: i64 = 3;
 
 /// The ordered migration ladder. Index order MUST match ascending
 /// `version`; [`MIGRATIONS`] is validated by a test.
@@ -43,6 +43,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 2,
         note: "v2 — media_entries (p2 read-only inventory)",
         sql: V2_SQL,
+    },
+    Migration {
+        version: 3,
+        note: "v3 — clip_events (event.json sidecar)",
+        sql: V3_SQL,
     },
 ];
 
@@ -61,6 +66,28 @@ CREATE TABLE media_entries (
     modified    TEXT,
     updated_at  INTEGER NOT NULL,
     UNIQUE (partition, rel_path)
+);
+";
+
+/// v3 DDL: raw `event.json` metadata sidecar keyed by event directory.
+/// This is NOT derived state: unlike trips/events (which are dropped and
+/// rebuilt), these facts are scanner-sourced and survive derive rebuilds.
+/// `indexd` writes the rows directly from `scannerd`'s clip-event facts and
+/// reads them later at derive time.
+const V3_SQL: &str = "
+CREATE TABLE clip_events (
+    event_dir_key         TEXT    PRIMARY KEY,
+    bucket                TEXT    NOT NULL,
+    primary_canonical_key TEXT    NOT NULL,
+    timestamp_utc         INTEGER NOT NULL,
+    timestamp_local_naive INTEGER NOT NULL,
+    timestamp_has_offset  INTEGER NOT NULL,
+    est_lat               REAL,
+    est_lon               REAL,
+    reason                TEXT,
+    city                  TEXT,
+    camera                TEXT,
+    updated_at            INTEGER NOT NULL
 );
 ";
 

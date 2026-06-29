@@ -48,6 +48,10 @@ pub const MAX_STRING_LEN: usize = 4096;
 /// headroom for future media listings while bounding a forged peer.
 pub const MAX_MEDIA_RECORDS: usize = 10_000;
 
+/// Hard cap on clip-event sidecar records (`event.json`) a single batch may
+/// carry. One event directory contributes at most one row.
+pub const MAX_CLIP_EVENT_RECORDS: usize = 100_000;
+
 /// Tesla source-folder classification for a clip. Mirrors contract D1
 /// `clips.folder_class`; the producer derives it from the directory path,
 /// the consumer maps it straight onto its own `FolderClass` via
@@ -243,6 +247,34 @@ pub struct ProducerStats {
     pub unplaceable_front: usize,
 }
 
+/// One parsed `event.json` row keyed to an event directory and linked to the
+/// event's primary front clip (`canonical_key`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClipEventRecord {
+    /// Sidecar primary key: `slot:<event-folder-rel-path>`.
+    pub event_dir_key: String,
+    /// Source-folder classification.
+    pub bucket: Bucket,
+    /// Front clip `canonical_key` used as FK link target.
+    pub primary_canonical_key: String,
+    /// Best-effort UTC from `event.json`.
+    pub timestamp_utc: i64,
+    /// Raw local wall-clock interpreted as naive seconds.
+    pub timestamp_local_naive: i64,
+    /// Whether the source timestamp carried an explicit offset.
+    pub timestamp_has_offset: bool,
+    /// Estimated latitude, or `None`.
+    pub est_lat: Option<f64>,
+    /// Estimated longitude, or `None`.
+    pub est_lon: Option<f64>,
+    /// Tesla event reason, if any.
+    pub reason: Option<String>,
+    /// Tesla city label, if any.
+    pub city: Option<String>,
+    /// Tesla camera label, if any.
+    pub camera: Option<String>,
+}
+
 /// A single scan pass's worth of facts: the full present-key set (for the
 /// consumer's prune step) plus the eligible records. `complete` is the
 /// prune-safety gate — it is `true` only when the volume walk fully
@@ -277,6 +309,16 @@ pub struct ScanBatch {
     /// from a media-unaware scannerd can't wipe the `media_entries` table.
     #[serde(default)]
     pub media_inventory: bool,
+    /// Parsed `event.json` sidecar facts (SavedClips/SentryClips). Empty on
+    /// an older producer that predates clip-event inventory
+    /// (`#[serde(default)]`).
+    #[serde(default)]
+    pub clip_events: Vec<ClipEventRecord>,
+    /// Whether this producer populated clip-event inventory at all. `false`
+    /// on an older producer (via `#[serde(default)]`): the consumer then
+    /// leaves clip-event sidecar rows untouched and NEVER prunes them.
+    #[serde(default)]
+    pub clip_events_inventory: bool,
 }
 
 /// One file inventoried on the MEDIA (p2) partition — the read-only "what is
@@ -378,6 +420,11 @@ impl ScanBatch {
         cap("records", self.records.len(), MAX_RECORDS_PER_BATCH)?;
         cap("media", self.media.len(), MAX_MEDIA_RECORDS)?;
         cap(
+            "clip_events",
+            self.clip_events.len(),
+            MAX_CLIP_EVENT_RECORDS,
+        )?;
+        cap(
             "media_present_paths",
             self.media_present_paths.len(),
             MAX_MEDIA_RECORDS,
@@ -387,6 +434,22 @@ impl ScanBatch {
         }
         for path in &self.media_present_paths {
             string_len("media_present_path", path)?;
+        }
+        for event in &self.clip_events {
+            string_len("clip_event.event_dir_key", &event.event_dir_key)?;
+            string_len(
+                "clip_event.primary_canonical_key",
+                &event.primary_canonical_key,
+            )?;
+            if let Some(reason) = &event.reason {
+                string_len("clip_event.reason", reason)?;
+            }
+            if let Some(city) = &event.city {
+                string_len("clip_event.city", city)?;
+            }
+            if let Some(camera) = &event.camera {
+                string_len("clip_event.camera", camera)?;
+            }
         }
         Ok(())
     }
@@ -414,6 +477,42 @@ impl MediaFileRecord {
                 reason: "negative size_bytes",
             });
         }
+        Ok(())
+    }
+}
+
+impl ClipEventRecord {
+    /// Validate one clip-event sidecar record's string caps (anti-OOM). Numeric
+    /// values are deliberately not range-checked here — the geo guard lives in
+    /// derivation, shared by both paths (see `clip_event_validate_accepts_non_finite_geo_for_parity`).
+    /// The consumer calls this **per record** inside its apply loop and skips
+    /// (counting) on failure, so a single malformed sidecar row never aborts
+    /// the batch.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first [`BatchError`] encountered.
+    pub fn validate(&self) -> Result<(), BatchError> {
+        string_len("clip_event.event_dir_key", &self.event_dir_key)?;
+        string_len(
+            "clip_event.primary_canonical_key",
+            &self.primary_canonical_key,
+        )?;
+        if let Some(reason) = &self.reason {
+            string_len("clip_event.reason", reason)?;
+        }
+        if let Some(city) = &self.city {
+            string_len("clip_event.city", city)?;
+        }
+        if let Some(camera) = &self.camera {
+            string_len("clip_event.camera", camera)?;
+        }
+        // Numeric *values* (non-finite est_lat/est_lon) are deliberately NOT
+        // range-checked here: like the sibling `ClipAngleRecord` parity rule,
+        // value-level geo guards live in derivation (`validated_clip_event_geo`),
+        // shared by both paths. Rejecting here would also desync prune (the key
+        // stays in the present-set) and leave a stale pin instead of a
+        // pin-less event.
         Ok(())
     }
 }
@@ -477,8 +576,9 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::float_cmp, clippy::indexing_slicing)]
 
     use super::{
-        AngleRecord, Bucket, ClipAngleRecord, MAX_MEDIA_RECORDS, MAX_STRING_LEN, MediaFileRecord,
-        PROTOCOL_VERSION, ProducerStats, ScanBatch, WireWaypoint, autopilot_to_u32, gear_to_u32,
+        AngleRecord, Bucket, ClipAngleRecord, ClipEventRecord, MAX_CLIP_EVENT_RECORDS,
+        MAX_MEDIA_RECORDS, MAX_STRING_LEN, MediaFileRecord, PROTOCOL_VERSION, ProducerStats,
+        ScanBatch, WireWaypoint, autopilot_to_u32, gear_to_u32,
     };
     use teslausb_core::sei::tesla::{AutopilotState, Gear};
 
@@ -533,6 +633,8 @@ mod tests {
             media: Vec::new(),
             media_present_paths: Vec::new(),
             media_inventory: false,
+            clip_events: Vec::new(),
+            clip_events_inventory: false,
         }
     }
 
@@ -580,6 +682,8 @@ mod tests {
         assert!(batch.media.is_empty());
         assert!(batch.media_present_paths.is_empty());
         assert!(!batch.media_inventory);
+        assert!(batch.clip_events.is_empty());
+        assert!(!batch.clip_events_inventory);
         batch.validate().unwrap();
     }
 
@@ -603,6 +707,71 @@ mod tests {
         let mut batch = sample_batch();
         batch.media_present_paths = (0..=MAX_MEDIA_RECORDS).map(|i| i.to_string()).collect();
         assert!(batch.validate().is_err());
+    }
+
+    #[test]
+    fn batch_rejects_clip_events_over_cap() {
+        let mut batch = sample_batch();
+        batch.clip_events = (0..=MAX_CLIP_EVENT_RECORDS)
+            .map(|i| ClipEventRecord {
+                event_dir_key: format!("slot:TeslaCam/SavedClips/event-{i}"),
+                bucket: Bucket::SavedClips,
+                primary_canonical_key: format!("slot:TeslaCam/SavedClips/clip-{i}"),
+                timestamp_utc: 1_700_000_000,
+                timestamp_local_naive: 1_700_000_000,
+                timestamp_has_offset: false,
+                est_lat: None,
+                est_lon: None,
+                reason: None,
+                city: None,
+                camera: None,
+            })
+            .collect();
+        assert!(batch.validate().is_err());
+    }
+
+    #[test]
+    fn batch_rejects_clip_event_overlong_string() {
+        let mut batch = sample_batch();
+        batch.clip_events.push(ClipEventRecord {
+            event_dir_key: "x".repeat(MAX_STRING_LEN + 1),
+            bucket: Bucket::SavedClips,
+            primary_canonical_key: "slot:TeslaCam/SavedClips/clip".to_owned(),
+            timestamp_utc: 1_700_000_000,
+            timestamp_local_naive: 1_700_000_000,
+            timestamp_has_offset: false,
+            est_lat: None,
+            est_lon: None,
+            reason: None,
+            city: None,
+            camera: None,
+        });
+        assert!(batch.validate().is_err());
+    }
+
+    #[test]
+    fn clip_event_validate_accepts_non_finite_geo_for_parity() {
+        // Non-finite est_lat/est_lon must NOT abort the record: the geo guard
+        // lives in derivation (which nulls it into a pin-less event), and
+        // rejecting here would desync prune and strand a stale pin. Only the
+        // string caps are enforced at this layer.
+        let mut rec = ClipEventRecord {
+            event_dir_key: "slot0:TeslaCam/SavedClips/2026-06-01_20-10-04".to_owned(),
+            bucket: Bucket::SavedClips,
+            primary_canonical_key: "slot0:TeslaCam/SavedClips/clip".to_owned(),
+            timestamp_utc: 1_700_000_000,
+            timestamp_local_naive: 1_700_000_000,
+            timestamp_has_offset: false,
+            est_lat: Some(f64::NAN),
+            est_lon: Some(f64::INFINITY),
+            reason: Some("sentry".to_owned()),
+            city: Some("Seattle".to_owned()),
+            camera: Some("front".to_owned()),
+        };
+        assert!(rec.validate().is_ok());
+        rec.est_lat = Some(47.6);
+        rec.est_lon = Some(-122.3);
+        assert!(rec.validate().is_ok());
     }
 
     #[test]

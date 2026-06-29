@@ -262,7 +262,10 @@ mod tests {
             value: "kph".to_owned(),
         };
         let encoded = serde_json::to_value(&request).unwrap();
-        assert_eq!(encoded.get("cmd").and_then(serde_json::Value::as_str), Some("set_pref"));
+        assert_eq!(
+            encoded.get("cmd").and_then(serde_json::Value::as_str),
+            Some("set_pref")
+        );
         let decoded: Request = serde_json::from_value(encoded).unwrap();
         assert_eq!(decoded, request);
     }

@@ -28,7 +28,9 @@ use teslausb_core::sei::tesla::{AutopilotState, Gear};
 
 use crate::db::{DbError, now_epoch_s};
 use crate::derive::{DeriveConfig, derive};
-use crate::model::{Derivation, DeriveClip, DeriveWaypoint, DerivedTrip, FolderClass};
+use crate::model::{
+    ClipEventInput, Derivation, DeriveClip, DeriveWaypoint, DerivedTrip, FolderClass,
+};
 
 /// Identity + classification facts for one clip (a group of camera
 /// angles). `started_at` is the resolved recording instant (mvhd-first,
@@ -342,7 +344,7 @@ fn register_clip_with_disposition(
              updated_at  = excluded.updated_at
          RETURNING id",
         params![
-           registration.folder_class.as_db_str(),
+            registration.folder_class.as_db_str(),
             registration.archive.path,
             clip_id,
             registration.archive.size_bytes,
@@ -566,6 +568,111 @@ pub fn prune_missing_media<S: std::hash::BuildHasher>(
     Ok(stale.len())
 }
 
+/// One Saved/Sentry event-directory sidecar fact parsed from `event.json`.
+/// Identity is the event directory key (`slot:<event-folder-rel-path>`).
+#[derive(Debug, Clone)]
+pub struct ClipEventFacts {
+    /// Sidecar primary key: `slot:<event-folder-rel-path>`.
+    pub event_dir_key: String,
+    /// Source-folder classification (`SavedClips` / `SentryClips`).
+    pub bucket: String,
+    /// Front clip `canonical_key` used as FK link target.
+    pub primary_canonical_key: String,
+    /// Best-effort UTC from `event.json`.
+    pub timestamp_utc: i64,
+    /// Raw local wall-clock interpreted as naive seconds.
+    pub timestamp_local_naive: i64,
+    /// Whether the source timestamp carried an explicit offset.
+    pub timestamp_has_offset: bool,
+    /// Estimated latitude, when present.
+    pub est_lat: Option<f64>,
+    /// Estimated longitude, when present.
+    pub est_lon: Option<f64>,
+    /// Tesla event reason, when present.
+    pub reason: Option<String>,
+    /// Tesla city label, when present.
+    pub city: Option<String>,
+    /// Tesla camera label, when present.
+    pub camera: Option<String>,
+}
+
+/// Upsert one clip-event sidecar row by `event_dir_key`. Raw scanner metadata
+/// (not derived state) — `updated_at` is refreshed every pass.
+///
+/// # Errors
+///
+/// Returns [`DbError`] if the statement fails.
+pub fn upsert_clip_event(conn: &Connection, facts: &ClipEventFacts) -> Result<(), DbError> {
+    let now = now_epoch_s();
+    conn.execute(
+        "INSERT INTO clip_events
+            (event_dir_key, bucket, primary_canonical_key, timestamp_utc,
+             timestamp_local_naive, timestamp_has_offset, est_lat, est_lon,
+             reason, city, camera, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+         ON CONFLICT(event_dir_key) DO UPDATE SET
+            bucket                = excluded.bucket,
+            primary_canonical_key = excluded.primary_canonical_key,
+            timestamp_utc         = excluded.timestamp_utc,
+            timestamp_local_naive = excluded.timestamp_local_naive,
+            timestamp_has_offset  = excluded.timestamp_has_offset,
+            est_lat               = excluded.est_lat,
+            est_lon               = excluded.est_lon,
+            reason                = excluded.reason,
+            city                  = excluded.city,
+            camera                = excluded.camera,
+            updated_at            = excluded.updated_at",
+        params![
+            facts.event_dir_key,
+            facts.bucket,
+            facts.primary_canonical_key,
+            facts.timestamp_utc,
+            facts.timestamp_local_naive,
+            i64::from(facts.timestamp_has_offset),
+            facts.est_lat,
+            facts.est_lon,
+            facts.reason,
+            facts.city,
+            facts.camera,
+            now,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Delete clip-event rows whose `event_dir_key` is not in `present_keys`. The
+/// caller MUST gate this on the producer's `clip_events_inventory` capability
+/// AND a `complete` batch, so a clip-event-unaware or torn scan never wipes
+/// the sidecar table.
+///
+/// # Errors
+///
+/// Returns [`DbError`] if a query fails.
+pub fn prune_missing_clip_events<S: std::hash::BuildHasher>(
+    conn: &Connection,
+    present_keys: &HashSet<String, S>,
+) -> Result<usize, DbError> {
+    let stale: Vec<String> = {
+        let mut stmt = conn.prepare("SELECT event_dir_key FROM clip_events")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut stale = Vec::new();
+        for row in rows {
+            let event_dir_key = row?;
+            if !present_keys.contains(&event_dir_key) {
+                stale.push(event_dir_key);
+            }
+        }
+        stale
+    };
+    for event_dir_key in &stale {
+        conn.execute(
+            "DELETE FROM clip_events WHERE event_dir_key = ?1",
+            params![event_dir_key],
+        )?;
+    }
+    Ok(stale.len())
+}
+
 /// Load the front-camera clips with cached waypoints, ready for
 /// derivation. A clip qualifies iff it has `clip_waypoints` rows (only
 /// front clips are walked). Ordered `(started_at, id)` to match the
@@ -575,9 +682,9 @@ pub fn prune_missing_media<S: std::hash::BuildHasher>(
 ///
 /// Returns [`DbError`] if a query fails.
 pub fn load_derive_clips(conn: &Connection) -> Result<Vec<DeriveClip>, DbError> {
-    let clip_rows: Vec<(i64, i64, String)> = {
+    let clip_rows: Vec<(i64, i64, String, String)> = {
         let mut stmt = conn.prepare(
-            "SELECT c.id, c.started_at, c.folder_class
+            "SELECT c.id, c.started_at, c.folder_class, c.canonical_key
                FROM clips c
               WHERE EXISTS (SELECT 1 FROM clip_waypoints w WHERE w.clip_id = c.id)
               ORDER BY c.started_at ASC, c.id ASC",
@@ -587,6 +694,7 @@ pub fn load_derive_clips(conn: &Connection) -> Result<Vec<DeriveClip>, DbError> 
                 r.get::<_, i64>(0)?,
                 r.get::<_, i64>(1)?,
                 r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
             ))
         })?;
         let mut out = Vec::new();
@@ -597,11 +705,12 @@ pub fn load_derive_clips(conn: &Connection) -> Result<Vec<DeriveClip>, DbError> 
     };
 
     let mut clips = Vec::with_capacity(clip_rows.len());
-    for (clip_id, started_at, folder_class) in clip_rows {
+    for (clip_id, started_at, folder_class, canonical_key) in clip_rows {
         let waypoints = load_waypoints(conn, clip_id)?;
         let gps_waypoint_count = waypoints.iter().filter(|w| w.has_gps_fix).count();
         clips.push(DeriveClip {
             clip_id,
+            canonical_key,
             clip_started_utc: started_at,
             folder_class: FolderClass::from_db_str(&folder_class),
             gps_waypoint_count: i64::try_from(gps_waypoint_count).unwrap_or(i64::MAX),
@@ -609,6 +718,46 @@ pub fn load_derive_clips(conn: &Connection) -> Result<Vec<DeriveClip>, DbError> 
         });
     }
     Ok(clips)
+}
+
+/// Load event.json sidecar rows, resolved against clips for derivation.
+///
+/// # Errors
+///
+/// Returns [`DbError`] if a query fails.
+pub fn load_clip_events(conn: &Connection) -> Result<Vec<ClipEventInput>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT ce.event_dir_key, ce.bucket, ce.timestamp_utc, ce.timestamp_local_naive,
+                ce.timestamp_has_offset, ce.est_lat, ce.est_lon, ce.reason, ce.city, ce.camera,
+                c.id, c.started_at,
+                (c.id IS NOT NULL AND EXISTS(SELECT 1 FROM clip_waypoints w WHERE w.clip_id = c.id)) AS trusted
+           FROM clip_events ce
+           LEFT JOIN clips c ON c.canonical_key = ce.primary_canonical_key
+          ORDER BY ce.timestamp_utc ASC, ce.event_dir_key ASC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        let bucket_str: String = r.get(1)?;
+        Ok(ClipEventInput {
+            event_dir_key: r.get(0)?,
+            bucket: FolderClass::from_db_str(&bucket_str),
+            primary_clip_id: r.get(10)?,
+            primary_started_utc: r.get(11)?,
+            primary_started_trusted: r.get::<_, i64>(12)? != 0,
+            est_lat: r.get(5)?,
+            est_lon: r.get(6)?,
+            reason: r.get(7)?,
+            city: r.get(8)?,
+            camera: r.get(9)?,
+            timestamp_utc: r.get(2)?,
+            timestamp_local_naive: r.get(3)?,
+            timestamp_has_offset: r.get::<_, i64>(4)? != 0,
+        })
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
 }
 
 /// Load one clip's cached waypoints in `seq` order.
@@ -774,7 +923,8 @@ pub fn rebuild_all_from_db(
     config: DeriveConfig,
 ) -> Result<Derivation, DbError> {
     let clips = load_derive_clips(conn)?;
-    let derivation = derive(&clips, config);
+    let clip_events = load_clip_events(conn)?;
+    let derivation = derive(&clips, &clip_events, config);
     let tx = conn.transaction()?;
     rebuild_derived(&tx, &derivation)?;
     tx.commit()?;
@@ -797,9 +947,10 @@ mod tests {
 
     use super::{
         AngleFacts, ArchiveAngleRegistration, ArchiveRegistration, ArchiveUnitRegistration,
-        ClipFacts, load_derive_clips, prune_missing_clips, rebuild_all_from_db,
-        register_archived_clip, register_quarantined_clip, replace_clip_waypoints,
-        upsert_angle_force_archive, upsert_angle_scan_preserving, upsert_clip,
+        ClipEventFacts, ClipFacts, load_clip_events, load_derive_clips, prune_missing_clips,
+        rebuild_all_from_db, register_archived_clip, register_quarantined_clip,
+        replace_clip_waypoints, upsert_angle_force_archive, upsert_angle_scan_preserving,
+        upsert_clip, upsert_clip_event,
     };
     use crate::db::open_in_memory;
     use crate::derive::DeriveConfig;
@@ -924,6 +1075,86 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn load_derive_clips_includes_canonical_key() {
+        let conn = open_in_memory().unwrap();
+        let key = "slot0:TeslaCam/SavedClips/2026-06-01_20-10-04/2026-06-01_20-10-04";
+        let id = upsert_clip(&conn, &clip_facts(key, 1000, FolderClass::SavedClips)).unwrap();
+        replace_clip_waypoints(&conn, id, &[wp(0, 0.0, 1.0, 2.0, 5.0)]).unwrap();
+
+        let clips = load_derive_clips(&conn).unwrap();
+        assert_eq!(clips.len(), 1);
+        assert_eq!(clips[0].canonical_key, key);
+    }
+
+    #[test]
+    fn load_clip_events_resolves_primary_clip_and_trust_flag() {
+        let conn = open_in_memory().unwrap();
+        let trusted_key = "slot0:TeslaCam/SentryClips/2026-06-01_20-10-04/2026-06-01_20-10-04";
+        let trusted_id = upsert_clip(
+            &conn,
+            &clip_facts(trusted_key, 1_700_000_000, FolderClass::SentryClips),
+        )
+        .unwrap();
+        replace_clip_waypoints(&conn, trusted_id, &[wp(0, 0.0, 1.0, 2.0, 5.0)]).unwrap();
+        upsert_clip_event(
+            &conn,
+            &ClipEventFacts {
+                event_dir_key: "slot0:TeslaCam/SentryClips/2026-06-01_20-10-04".to_owned(),
+                bucket: FolderClass::SentryClips.as_db_str().to_owned(),
+                primary_canonical_key: trusted_key.to_owned(),
+                timestamp_utc: 1_700_000_100,
+                timestamp_local_naive: 1_700_010_900,
+                timestamp_has_offset: true,
+                est_lat: Some(42.1),
+                est_lon: Some(-83.1),
+                reason: Some("sentry".to_owned()),
+                city: Some("Detroit".to_owned()),
+                camera: Some("front".to_owned()),
+            },
+        )
+        .unwrap();
+
+        upsert_clip_event(
+            &conn,
+            &ClipEventFacts {
+                event_dir_key: "slot0:TeslaCam/SavedClips/2026-06-02_00-00-00".to_owned(),
+                bucket: FolderClass::SavedClips.as_db_str().to_owned(),
+                primary_canonical_key:
+                    "slot0:TeslaCam/SavedClips/2026-06-02_00-00-00/2026-06-02_00-00-00".to_owned(),
+                timestamp_utc: 1_700_000_200,
+                timestamp_local_naive: 1_700_010_200,
+                timestamp_has_offset: false,
+                est_lat: None,
+                est_lon: None,
+                reason: None,
+                city: None,
+                camera: None,
+            },
+        )
+        .unwrap();
+
+        let events = load_clip_events(&conn).unwrap();
+        assert_eq!(events.len(), 2);
+        let trusted = events
+            .iter()
+            .find(|e| e.event_dir_key == "slot0:TeslaCam/SentryClips/2026-06-01_20-10-04")
+            .unwrap();
+        assert_eq!(trusted.primary_clip_id, Some(trusted_id));
+        assert_eq!(trusted.primary_started_utc, Some(1_700_000_000));
+        assert!(trusted.primary_started_trusted);
+        assert!(trusted.timestamp_has_offset);
+
+        let unresolved = events
+            .iter()
+            .find(|e| e.event_dir_key == "slot0:TeslaCam/SavedClips/2026-06-02_00-00-00")
+            .unwrap();
+        assert_eq!(unresolved.primary_clip_id, None);
+        assert_eq!(unresolved.primary_started_utc, None);
+        assert!(!unresolved.primary_started_trusted);
+        assert!(!unresolved.timestamp_has_offset);
     }
 
     #[test]
@@ -1261,7 +1492,8 @@ mod tests {
         );
 
         let (clip_id, archive_item_id) = register_archived_clip(&mut conn, &registration).unwrap();
-        let (_, same_archive_item_id) = register_quarantined_clip(&mut conn, &registration).unwrap();
+        let (_, same_archive_item_id) =
+            register_quarantined_clip(&mut conn, &registration).unwrap();
         assert_eq!(same_archive_item_id, archive_item_id);
 
         let delete_state: String = conn

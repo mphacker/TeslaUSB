@@ -941,7 +941,11 @@ mod tests {
         let conn = open_in_memory().unwrap();
         assert!(set_pref(&conn, "Bad Key", "mph").is_err());
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM prefs WHERE key = 'Bad Key'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM prefs WHERE key = 'Bad Key'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(count, 0);
     }
@@ -952,9 +956,11 @@ mod tests {
         let value = "x".repeat(8193);
         assert!(set_pref(&conn, "speed_unit", &value).is_err());
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM prefs WHERE key = 'speed_unit'", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM prefs WHERE key = 'speed_unit'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(count, 0);
     }

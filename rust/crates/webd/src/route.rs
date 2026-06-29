@@ -38,6 +38,9 @@ const DEFAULT_LIMIT: i64 = 100;
 /// Maximum page size; larger `limit` values are clamped to this.
 const MAX_LIMIT: i64 = 500;
 
+/// Maximum standalone day-events fetch size for map hydration.
+const DAY_EVENTS_LIMIT: i64 = 5_000;
+
 /// Maximum paths per single `delete_paths` enqueue: gadgetd's `enqueue_mutation`
 /// validates each mutation at enqueue time and rejects a `DeletePaths` whose set
 /// exceeds `MAX_DELETE_PATHS=16` (gadgetd `handoff.rs`). [`run_remove_many`]
@@ -183,6 +186,9 @@ struct EventsQuery {
     limit: Option<i64>,
     /// Optional filter to a single trip.
     trip: Option<i64>,
+    /// Optional civil-day (YYYY-MM-DD) filter that returns standalone pinned
+    /// events (`trip_id` NULL) for that day, unpaginated.
+    day: Option<String>,
 }
 
 /// Query parameters for cursor-paginated `GET /api/clips`.
@@ -270,8 +276,35 @@ async fn events(
     State(state): State<AppState>,
     Query(q): Query<EventsQuery>,
 ) -> Result<Json<Page<EventDto>>, ApiError> {
-    let limit = validate_limit(q.limit)?;
+    let day = q.day;
     let trip = q.trip;
+    if let Some(day) = day {
+        if trip.is_some() {
+            return Err(ApiError::bad_request(
+                "invalid_events_filter",
+                "day and trip filters are mutually exclusive",
+            ));
+        }
+        if !is_valid_civil_day(&day) {
+            return Err(ApiError::bad_request(
+                "invalid_day",
+                "day must match YYYY-MM-DD",
+            ));
+        }
+        // Day mode is unpaginated map hydration: it honours an explicit `limit`
+        // but caps at DAY_EVENTS_LIMIT, independent of the keyset `MAX_LIMIT`.
+        let day_limit = validate_day_limit(q.limit)?;
+        let items = read(state.catalog, move |conn| {
+            query::list_standalone_day_events(conn, &day, day_limit)
+        })
+        .await?;
+        return Ok(Json(Page {
+            items,
+            next_cursor: None,
+            limit: day_limit,
+        }));
+    }
+    let limit = validate_limit(q.limit)?;
     let keyset = if let Some(cursor) = q.cursor {
         let (ts, id, snap) = decode_cursor(&cursor, "events")?;
         query::Keyset {
@@ -1241,6 +1274,33 @@ fn validate_limit(limit: Option<i64>) -> Result<i64, ApiError> {
         }
         Some(value) => Ok(value.min(MAX_LIMIT)),
     }
+}
+
+/// Validate the page size for unpaginated day-mode event fetches. Day mode loads
+/// a whole civil day's standalone pins in one page, so it defaults to and caps at
+/// [`DAY_EVENTS_LIMIT`] (bypassing the keyset [`MAX_LIMIT`]) while still honouring
+/// a smaller explicit `limit` and rejecting `< 1`.
+fn validate_day_limit(limit: Option<i64>) -> Result<i64, ApiError> {
+    match limit {
+        None => Ok(DAY_EVENTS_LIMIT),
+        Some(value) if value < 1 => {
+            Err(ApiError::bad_request("invalid_limit", "limit must be >= 1"))
+        }
+        Some(value) => Ok(value.min(DAY_EVENTS_LIMIT)),
+    }
+}
+
+/// Shape-only check that `day` is `YYYY-MM-DD` (10 ASCII chars, digits with `-`
+/// at indices 4 and 7). The value feeds a parameterized `strftime` comparison, so
+/// a calendar-invalid-but-well-shaped value (e.g. `2026-99-99`) is harmless: it
+/// simply matches no rows. Full date validation is intentionally omitted.
+fn is_valid_civil_day(day: &str) -> bool {
+    let bytes = day.as_bytes();
+    bytes.len() == 10
+        && bytes.iter().enumerate().all(|(i, &b)| match i {
+            4 | 7 => b == b'-',
+            _ => b.is_ascii_digit(),
+        })
 }
 
 #[derive(Serialize, Deserialize)]

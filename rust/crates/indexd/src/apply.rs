@@ -37,9 +37,10 @@ use teslausb_core::sei::tesla::{AutopilotState, Gear};
 
 use crate::db::DbError;
 use crate::db::ingest::{
-    AngleFacts, ClipFacts, MediaFacts, ensure_clip, load_derive_clips, prune_missing_clips,
-    prune_missing_media, rebuild_derived, replace_clip_waypoints, upsert_angle_scan_preserving,
-    upsert_clip, upsert_media,
+    AngleFacts, ClipEventFacts, ClipFacts, MediaFacts, ensure_clip, load_clip_events,
+    load_derive_clips, prune_missing_clip_events, prune_missing_clips, prune_missing_media,
+    rebuild_derived, replace_clip_waypoints, upsert_angle_scan_preserving, upsert_clip,
+    upsert_clip_event, upsert_media,
 };
 use crate::derive::{DeriveConfig, derive};
 use crate::model::{DeriveWaypoint, FolderClass};
@@ -67,6 +68,11 @@ pub struct ApplyReport {
     /// Media rows pruned (present only when the producer inventoried media
     /// AND the batch was `complete`).
     pub media_pruned: usize,
+    /// Clip-event sidecar rows upserted this pass.
+    pub clip_events_written: usize,
+    /// Clip-event sidecar rows pruned (present only when the producer
+    /// inventoried clip events AND the batch was `complete`).
+    pub clip_events_pruned: usize,
     /// Trips materialized after the rebuild.
     pub trips: usize,
     /// Events materialized after the rebuild (driving + sentry).
@@ -264,8 +270,46 @@ pub fn apply(
         }
     }
 
+    if batch.clip_events_inventory {
+        for ev in &batch.clip_events {
+            if ev.validate().is_err() {
+                report.record_errors += 1;
+                continue;
+            }
+            // Present-set = the event_dir_keys this batch emitted; on a
+            // complete batch an inconsistent record is unreachable from the
+            // in-process producer.
+            upsert_clip_event(
+                &tx,
+                &ClipEventFacts {
+                    event_dir_key: ev.event_dir_key.clone(),
+                    bucket: ev.bucket.as_db_str().to_owned(),
+                    primary_canonical_key: ev.primary_canonical_key.clone(),
+                    timestamp_utc: ev.timestamp_utc,
+                    timestamp_local_naive: ev.timestamp_local_naive,
+                    timestamp_has_offset: ev.timestamp_has_offset,
+                    est_lat: ev.est_lat,
+                    est_lon: ev.est_lon,
+                    reason: ev.reason.clone(),
+                    city: ev.city.clone(),
+                    camera: ev.camera.clone(),
+                },
+            )?;
+            report.clip_events_written += 1;
+        }
+        if batch.complete {
+            let present_event_keys: HashSet<String> = batch
+                .clip_events
+                .iter()
+                .map(|e| e.event_dir_key.clone())
+                .collect();
+            report.clip_events_pruned = prune_missing_clip_events(&tx, &present_event_keys)?;
+        }
+    }
+
     let clips = load_derive_clips(&tx)?;
-    let derivation = derive(&clips, derive_cfg);
+    let clip_events = load_clip_events(&tx)?;
+    let derivation = derive(&clips, &clip_events, derive_cfg);
     rebuild_derived(&tx, &derivation)?;
     tx.commit().map_err(DbError::from)?;
 
@@ -292,8 +336,8 @@ mod tests {
     use rusqlite::Connection;
     use scannerd::produce::wire_waypoint_from_walk;
     use scannerd::record::{
-        AngleRecord, Bucket, ClipAngleRecord, MediaFileRecord, PROTOCOL_VERSION, ProducerStats,
-        ScanBatch,
+        AngleRecord, Bucket, ClipAngleRecord, ClipEventRecord, MediaFileRecord, PROTOCOL_VERSION,
+        ProducerStats, ScanBatch,
     };
     use scannerd::seiwalk::Waypoint;
     use teslausb_core::sei::tesla::{AutopilotState, Gear, SeiMessage};
@@ -411,6 +455,8 @@ mod tests {
             media: Vec::new(),
             media_present_paths: Vec::new(),
             media_inventory: false,
+            clip_events: Vec::new(),
+            clip_events_inventory: false,
         }
     }
 
@@ -463,6 +509,37 @@ mod tests {
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .ok()
+    }
+
+    fn clip_event_rec(
+        event_dir_key: &str,
+        est_lat: Option<f64>,
+        est_lon: Option<f64>,
+    ) -> ClipEventRecord {
+        ClipEventRecord {
+            event_dir_key: event_dir_key.to_owned(),
+            bucket: Bucket::SavedClips,
+            primary_canonical_key: "slot0:TeslaCam/SavedClips/clip".to_owned(),
+            timestamp_utc: 1_700_000_000,
+            timestamp_local_naive: 1_700_000_000,
+            timestamp_has_offset: false,
+            est_lat,
+            est_lon,
+            reason: Some("sentry".to_owned()),
+            city: Some("Seattle".to_owned()),
+            camera: Some("front".to_owned()),
+        }
+    }
+
+    fn clip_event_batch(
+        events: Vec<ClipEventRecord>,
+        inventory: bool,
+        complete: bool,
+    ) -> ScanBatch {
+        let mut b = batch(Vec::new(), complete);
+        b.clip_events = events;
+        b.clip_events_inventory = inventory;
+        b
     }
 
     #[test]
@@ -522,6 +599,60 @@ mod tests {
         let report = apply(&mut conn, &torn, DeriveConfig::default()).unwrap();
         assert_eq!(report.media_pruned, 0);
         assert_eq!(count(&conn, "media_entries"), 1);
+    }
+
+    #[test]
+    fn apply_persists_clip_events() {
+        let mut conn = open_in_memory().unwrap();
+        let event_key = "slot0:TeslaCam/SavedClips/2026-06-01_20-10-04";
+        let batch = clip_event_batch(
+            vec![clip_event_rec(event_key, Some(47.6), Some(-122.3))],
+            true,
+            true,
+        );
+        let report = apply(&mut conn, &batch, DeriveConfig::default()).unwrap();
+        assert_eq!(report.clip_events_written, 1);
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM clip_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        let est_lat: Option<f64> = conn
+            .query_row(
+                "SELECT est_lat FROM clip_events WHERE event_dir_key = ?1",
+                [event_key],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(est_lat, Some(47.6));
+    }
+
+    #[test]
+    fn apply_prunes_vanished_clip_events() {
+        let mut conn = open_in_memory().unwrap();
+        let event_key = "slot0:TeslaCam/SavedClips/2026-06-01_20-10-04";
+        let seed = clip_event_batch(vec![clip_event_rec(event_key, None, None)], true, true);
+        apply(&mut conn, &seed, DeriveConfig::default()).unwrap();
+        assert_eq!(count(&conn, "clip_events"), 1);
+
+        let next = clip_event_batch(Vec::new(), true, true);
+        let report = apply(&mut conn, &next, DeriveConfig::default()).unwrap();
+        assert_eq!(report.clip_events_pruned, 1);
+        assert_eq!(count(&conn, "clip_events"), 0);
+    }
+
+    #[test]
+    fn apply_without_clip_events_inventory_preserves_rows() {
+        let mut conn = open_in_memory().unwrap();
+        let event_key = "slot0:TeslaCam/SavedClips/2026-06-01_20-10-04";
+        let seed = clip_event_batch(vec![clip_event_rec(event_key, None, None)], true, true);
+        apply(&mut conn, &seed, DeriveConfig::default()).unwrap();
+        assert_eq!(count(&conn, "clip_events"), 1);
+
+        let unaware = clip_event_batch(Vec::new(), false, true);
+        let report = apply(&mut conn, &unaware, DeriveConfig::default()).unwrap();
+        assert_eq!(report.clip_events_written, 0);
+        assert_eq!(report.clip_events_pruned, 0);
+        assert_eq!(count(&conn, "clip_events"), 1);
     }
 
     #[test]

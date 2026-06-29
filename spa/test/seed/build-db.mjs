@@ -186,7 +186,7 @@ CREATE TABLE prefs (
 );
 `;
 
-// --- Sample data: one driving day, 3 trips / 30 clips / 3 events -------------
+// --- Sample data: one driving day, 3 trips / 30 clips / 3 events --------------
 // 2024-06-01 (UTC) is the driving day; clips span 2024-06-01, 2024-05-31, 2024-05-30.
 const DAY = "2024-06-01";
 const DAY_EPOCH = 1717200000; // 2024-06-01T00:00:00Z
@@ -264,8 +264,13 @@ const EVENTS = [
   // Two trip-linked, on-route bubbles (Sentry-derived hard-brake + accel) …
   [1, 1, 2, "harsh_braking", 3, 7.3, 37.79, -122.42, 1500, 45, "Harsh braking"],
   [2, 2, 3, "hard_acceleration", 2, 12.4, 37.83, -122.38, 1800, 54, "Hard acceleration"],
-  // … and one trip-less Sentry event (panel-only; not a per-trip map bubble).
-  [3, null, 4, "sentry", 1, 14.15, 37.76, -122.44, null, null, "Sentry event"],
+  // … and one trip-less Sentry event with NO estimable GPS (no lat/lon) — a
+  // sentry clip that carried no event.json, so it stays panel-only and is never a
+  // map pin. (Pre-Slice-5 this event's GPS was inert because trip-less events were
+  // never loaded; under Slice 5 a trip-less event WITH GPS becomes a standalone day
+  // pin, so this fixture event is deliberately kept GPS-less to hold the busy
+  // driving day at exactly 2 trip-linked markers.)
+  [3, null, 4, "sentry", 1, 14.15, null, null, null, null, "Sentry event"],
 ];
 
 /** Axis-aligned bbox of a [lat,lon][] list (nulls when empty). */
@@ -458,6 +463,15 @@ const eventTypes = one("SELECT COUNT(DISTINCT type) FROM events");
 if (eventTypes !== 3) checks.push(`distinct event types=${eventTypes} (expected 3)`);
 const tripLinked = one("SELECT COUNT(*) FROM events WHERE trip_id IS NOT NULL");
 if (tripLinked !== 2) checks.push(`trip-linked events=${tripLinked} (expected 2)`);
+// Invariant for the Slice-5 map tests: the real seed carries NO standalone-pinned
+// event (the only trip-less event, id=3, has no GPS), so the busy driving day stays
+// at exactly 2 trip-linked markers. The estimated-pin render is proven by a
+// mock-driven UAT (trip-map.spec.ts) + webd Rust unit tests for the day union.
+const standalonePinned = one(
+  "SELECT COUNT(*) FROM events WHERE trip_id IS NULL AND lat IS NOT NULL AND lon IS NOT NULL",
+);
+if (standalonePinned !== 0)
+  checks.push(`standalone pinned events=${standalonePinned} (expected 0)`);
 
 db.close();
 

@@ -17,7 +17,7 @@ use rusqlite::{Connection, OpenFlags};
 /// The highest catalog schema version this `webd` build understands. Mirrors
 /// `indexd`'s `LATEST_VERSION`; a catalog reporting a newer version was written
 /// by a newer `indexd` and is refused rather than misread.
-const SUPPORTED_SCHEMA_VERSION: i64 = 2;
+const SUPPORTED_SCHEMA_VERSION: i64 = 3;
 
 /// How long a read-only connection waits on a locked database before erroring.
 /// WAL readers rarely block, but this is cheap insurance against a checkpoint

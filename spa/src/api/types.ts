@@ -85,6 +85,8 @@ export interface EventsParams {
   cursor?: string;
   limit?: number;
   trip?: number;
+  /** Civil day (`YYYY-MM-DD`) for standalone pinned events. */
+  day?: string;
 }
 
 export interface Angle {

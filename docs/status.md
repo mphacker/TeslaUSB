@@ -49,12 +49,22 @@
 > (separate lanes, not this requirement): see below.
 >
 > **FILED V1-parity follow-ups (from the SEI/GPS doubt review):**
-> - [ ] **event.json as event-pin location source** — v1 `event_player`/mapping use the
+> - [x] **event.json as event-pin location source** — v1 `event_player`/mapping use the
 >   Tesla `event.json` (`reason`, `city`, est `lat/lon`, `timestamp`) for event metadata;
->   B-1 derives events from SEI waypoints only, so a no-GPS Sentry **event** gets
->   `lat/lon = None` (`derive.rs::materialize_sentry_clip`) and no map pin where v1 may
->   show one. **ASK-FIRST** (parity-critical `derive.rs`, `indexd.md §7`) — verify v1's
->   actual map/event-pin behavior before any change.
+>   B-1 derived events from SEI waypoints only, so a no-GPS Sentry **event** got
+>   `lat/lon = None` (`derive.rs::materialize_sentry_clip`) and no map pin where v1 shows
+>   one. **DONE 2026-06-29 (`fu-eventjson-pin`, commit `5046a46`):** scannerd parses
+>   `event.json` (`clip_event.rs`) → indexd persists a `clip_events` sidecar (schema v3,
+>   additive) and derives an estimated pin onto trip-less events → webd
+>   `GET /api/events?day=YYYY-MM-DD` + `/api/days` union surface them → SPA TripMap renders
+>   them as day-grouped standalone pins (clipless parked pins show description, no Watch
+>   link). Tests: podman webd 327 / indexd+scannerd green, clippy clean; full Playwright
+>   UAT green (both viewports) incl. a new mock-driven parked-day clipless-pin render test.
+>   **Live-verified on `cybertruckusb.local`:** v3 migration applied cleanly (counts
+>   preserved 176/5/6), and a real parked `saved` event (id 6, trip_id/clip_id NULL,
+>   42.9215/-83.6211, "…Dashcam Launcher…Holly") surfaces via `/api/events?day=2026-06-29`
+>   and renders as a single standalone map pin at both 1280px and 375px, 0 console errors.
+>   Evidence: `files/hw-results.md`, `eventjson-live-desktop.png`, `eventjson-live-mobile.png`.
 > - [x] **HUD client parser timing fallback parity** — B-1 `spa/src/player/dashcam-mp4.ts`
 >   required the full `moov/trak/mdia/minf/stbl/stts` chain and returned `[]` on any miss;
 >   v1 `dashcam-mp4.js` falls back to 33 ms/frame (`config.durations[i] || 33`).

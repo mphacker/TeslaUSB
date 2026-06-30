@@ -1,4 +1,7 @@
-# ADR-0007 — retentiond systemd hardware watchdog (hang detection)
+# ADR-0007 — retentiond systemd service watchdog (hang detection)
+
+> Note: this is a systemd **service** watchdog (`sd_notify("WATCHDOG=1")`), not
+> the hardware `/dev/watchdog` timer. "Watchdog" below always means the former.
 
 - Status: Accepted
 - Date: 2026-06-30
@@ -24,7 +27,7 @@ livelocked, or wedged in a blocking syscall that never returns. A hung archiver
 keeps the service `active` while silently archiving nothing, which is exactly the
 silent-footage-loss failure mode the self-sufficiency work targets.
 
-A systemd hardware watchdog closes this gap: the daemon must periodically send
+A systemd service watchdog closes this gap: the daemon must periodically send
 `sd_notify("WATCHDOG=1")`; if it fails to within `WatchdogSec`, systemd treats
 the service as failed, kills it (SIGABRT), and `Restart=always` restarts it. On
 restart the daemon re-enumerates RecentClips and resumes from durable markers
@@ -40,7 +43,7 @@ This design was reviewed by a parallel GPT-5.5 Tier-3 second opinion
 Keep `Type=simple` and `Restart=always`. Add:
 
 ```
-WatchdogSec=180
+WatchdogSec=240
 NotifyAccess=main
 ```
 
@@ -52,7 +55,7 @@ NotifyAccess=main
   failure, and `always` already restarts on failure; this also keeps crash and
   hang recovery on one policy.
 
-### 2. `WatchdogSec = 180s`
+### 2. `WatchdogSec = 240s`
 
 The tension: too short → **false kills** when `retentiond` is legitimately
 blocked in a slow copy/hash/fsync syscall under idle-I/O starvation (the car is
@@ -60,10 +63,18 @@ writing and retentiond's idle I/O class yields); too long → slow hang detectio
 
 A single camera-angle `.mp4` is tens of MB; under SD writeback pressure +
 idle-I/O starvation, one file's copy+hash+fsync+rename can plausibly stall
-80–200s. `60s` and `120s` are therefore unsafe/borderline. `180s` tolerates a
-worst-plausible single-file stall while still detecting a true hang within three
-minutes. A false kill is now bounded (copies are non-destructive staged-promote,
-ADR-0006) but still wastes I/O, so we err toward not false-killing.
+80–200s. The copy is now petted internally (per-window read pets, per-block hash
+pets, boundary pets before fsync/rename), so no single *un-petted* span
+approaches that figure — only an individual blocking syscall (one `sync_all`,
+one `read` window) could, and a single such syscall exceeding the deadline means
+effectively-dead storage. `60s`/`120s` are unsafe/borderline; `180s` is
+defensible for the petted design, but a Tier-3 deploy-plan review re-derived the
+~200s worst-case whole-op figure, so we set **`240s`** to clear it with ~20%
+margin. The cost is negligible: a true hang is still detected within ~4 min
+(plus `TimeoutStopSec` ≈ 90s to recover ≈ 5.5 min total), far inside Tesla's
+multi-hour RecentClips buffer, while false kills become even less likely. A
+false kill is bounded anyway (copies are non-destructive staged-promote,
+ADR-0006 — no footage loss).
 
 ### 3. Process-global `watchdog` module (best-effort, rate-limited)
 
@@ -111,8 +122,9 @@ effectively free (most are no-ops between intervals).
 
 ## Consequences
 
-- A hung `retentiond` is now detected and restarted within ~180s; combined with
-  durable markers + non-destructive copy, recovery loses no footage.
+- A hung `retentiond` is now detected and restarted within ~240s (plus
+  `TimeoutStopSec`); combined with durable markers + non-destructive copy,
+  recovery loses no footage.
 - New ambient process-global state (the notify socket), localized to one module
   and best-effort; pure env-parse logic is unit-tested.
 - `read_full_file_to_writer` and `hash_reader_sha256` gain a cheap best-effort
@@ -146,7 +158,7 @@ findings concerned **false-kill avoidance**, and were reconciled as follows:
 - **Resolved:** non-blocking notify socket (`set_nonblocking(true)`, ignore
   `WouldBlock`); init+first pet moved **before** the volume-image open (so slow
   storage at startup can't kill us pre-pet); pet-interval **capped at 10s** (was
-  effectively `WatchdogSec/2 = 90s`) so the hot-loop pets keep the 180s deadline
+  effectively `WatchdogSec/2`) so the hot-loop pets keep the 240s deadline
   fresh; boundary pets added around the discrete blocking steps that sit between
   the instrumented read/hash loops (`copy_and_hash_dest` start, before
   `sync_all`, before `rename`; `promote_dest` start); startup pets in

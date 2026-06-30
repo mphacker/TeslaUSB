@@ -15,7 +15,11 @@ ExecStart=/usr/local/bin/retentiond serve --archive-recent-only --no-delete --ar
 Restart=always
 RestartSec=5s
 # Catch hangs that do not exit; Restart=always only recovers after failure/exit.
-WatchdogSec=180
+# This is a systemd *service* watchdog (sd_notify WATCHDOG=1), not the hardware
+# /dev/watchdog timer. 240s clears the worst-case single-clip copy+hash+fsync
+# stall under microSD contention with margin; a false kill is bounded (no footage
+# loss — copies are non-destructive staged-promote, markers durable per ADR-0006).
+WatchdogSec=240
 NotifyAccess=main
 IOSchedulingClass=idle
 CPUWeight=10

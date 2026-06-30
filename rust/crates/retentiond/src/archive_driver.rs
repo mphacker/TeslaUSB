@@ -1,13 +1,18 @@
 //! Phase-1 `RecentClips` archive driver (mount-free).
 //!
-//! Inventory comes from read-only `indexd` `SQLite` candidates, and source bytes
-//! are copied by the injected `ArchiveStore` (live store uses `ReadFile`).
+//! Inventory comes from injected candidates, and source bytes are copied by the
+//! injected `ArchiveStore` (live store uses `ReadFile`).
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
+use std::fmt::Write as _;
+use std::fs;
 use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 use crate::archive::ArchiveStore;
 use crate::candidates::{Candidate, CandidateSource};
+use crate::durability::write_json_durable;
+use crate::io::ContentHash;
 use crate::probe::{ArchivePlayability, UnplayableReason};
 use crate::register_client::{
     ArchiveAngleRef, ArchiveItemRef, ArchiveRegistration, RegisterClient, RegisterError,
@@ -17,20 +22,20 @@ use crate::register_client::{
 pub const MAX_REGISTER_ATTEMPTS: u32 = 5;
 /// Maximum number of pending register payloads held in memory.
 pub const MAX_PENDING: usize = 256;
-/// Maximum number of deterministically-rejected canonical keys remembered to
-/// suppress futile re-copy. Bounded FIFO; eviction at worst causes one re-copy
-/// of an old rejected clip, which is then re-tombstoned.
-const MAX_REJECTED_TOMBSTONES: usize = 1024;
+const STATE_SCHEMA: u32 = 1;
+const MARKER_SCHEMA: u32 = 1;
+const MARKER_DIR: &str = ".retentiond/markers";
+const OUTBOX_FILE: &str = ".retentiond/register-outbox.json";
 
 /// One queued register payload awaiting retry.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PendingRegistration {
     reg: ArchiveRegistration,
     attempts: u32,
     disposition: RegistrationDisposition,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum RegistrationDisposition {
     Live,
     Quarantine,
@@ -40,8 +45,8 @@ enum RegistrationDisposition {
 #[derive(Debug, Default)]
 pub struct DriverState {
     pending: VecDeque<PendingRegistration>,
-    rejected_keys: HashSet<String>,
-    rejected_order: VecDeque<String>,
+    archive_root: Option<PathBuf>,
+    outbox_loaded: bool,
 }
 
 impl DriverState {
@@ -50,25 +55,61 @@ impl DriverState {
     pub fn new() -> Self {
         Self {
             pending: VecDeque::new(),
-            rejected_keys: HashSet::new(),
-            rejected_order: VecDeque::new(),
+            archive_root: None,
+            outbox_loaded: false,
         }
     }
 
-    fn mark_rejected(&mut self, canonical_key: &str) {
-        if self.rejected_keys.insert(canonical_key.to_owned()) {
-            self.rejected_order.push_back(canonical_key.to_owned());
-            while self.rejected_order.len() > MAX_REJECTED_TOMBSTONES {
-                if let Some(evicted) = self.rejected_order.pop_front() {
-                    self.rejected_keys.remove(&evicted);
-                }
-            }
+    /// Construct state with a durable archive root for marker/outbox persistence.
+    #[must_use]
+    pub fn with_archive_root(archive_root: impl Into<PathBuf>) -> Self {
+        Self {
+            pending: VecDeque::new(),
+            archive_root: Some(archive_root.into()),
+            outbox_loaded: false,
         }
     }
 
-    fn is_rejected(&self, canonical_key: &str) -> bool {
-        self.rejected_keys.contains(canonical_key)
+    /// Update the durable archive root used for marker/outbox persistence.
+    pub fn set_archive_root(&mut self, archive_root: impl Into<PathBuf>) {
+        self.archive_root = Some(archive_root.into());
+        self.outbox_loaded = false;
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct PersistedOutbox {
+    schema: u32,
+    pending: Vec<PendingRegistration>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum MarkerStatus {
+    CompleteLive,
+    Quarantined,
+    Partial,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct MarkerAngle {
+    camera: String,
+    file_ref: String,
+    valid_data_length: u64,
+    set_checksum_ok: bool,
+    destination_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct ClipMarker {
+    schema: u32,
+    canonical_key: String,
+    source_fingerprint: String,
+    volume_serial: u32,
+    partition: String,
+    status: MarkerStatus,
+    updated_at: i64,
+    angles: Vec<MarkerAngle>,
 }
 
 /// One cycle report for the archive-recent-only loop.
@@ -117,7 +158,8 @@ pub fn archive_recent_once(
     now_epoch_s: i64,
 ) -> io::Result<CycleReport> {
     let mut report = CycleReport::default();
-    drain_pending(store, register, state, &mut report);
+    load_outbox_if_needed(state);
+    drain_pending(register, state, &mut report);
 
     let clips = candidates.list_candidates()?;
     report.observed = clips.len();
@@ -132,8 +174,7 @@ pub fn archive_recent_once(
             continue;
         }
 
-        if state.is_rejected(&candidate.canonical_key) {
-            report.skipped_rejected = report.skipped_rejected.saturating_add(1);
+        if marker_is_complete_live(state, &candidate) {
             continue;
         }
 
@@ -143,33 +184,45 @@ pub fn archive_recent_once(
         };
 
         let mut copied_angles = Vec::with_capacity(candidate.angles.len());
+        let mut marker_angles = Vec::with_capacity(candidate.angles.len());
         let mut segment_size_bytes = 0_i64;
         let mut copy_failed = false;
 
         for angle in &candidate.angles {
             let file_name = basename(&angle.file_ref);
             let dest_rel = format!("{archive_item_path}/{file_name}");
-            if store
-                .copy_and_hash_dest(&angle.file_ref, &dest_rel)
-                .is_err()
-            {
+            let Ok(copy_hash) = store.copy_and_hash_dest(&angle.file_ref, &dest_rel) else {
                 report.copy_failed = report.copy_failed.saturating_add(1);
                 copy_failed = true;
                 break;
-            }
+            };
 
             let size_bytes = u64_to_i64_saturating(angle.size_bytes);
             segment_size_bytes = segment_size_bytes.saturating_add(size_bytes);
             copied_angles.push(ArchiveAngleRef {
                 camera: angle.camera.clone(),
-                file_ref: dest_rel,
+                file_ref: dest_rel.clone(),
                 offset_ms: angle.offset_ms,
                 duration_s: angle.duration_s,
                 size_bytes,
             });
+            marker_angles.push(MarkerAngle {
+                camera: angle.camera.clone(),
+                file_ref: dest_rel,
+                valid_data_length: angle.size_bytes,
+                set_checksum_ok: true,
+                destination_sha256: hash_hex(copy_hash),
+            });
         }
 
         if copy_failed {
+            write_marker(
+                state,
+                &candidate,
+                MarkerStatus::Partial,
+                marker_angles,
+                now_epoch_s,
+            );
             for copied in &copied_angles {
                 let _ = store.remove_dest(&copied.file_ref);
             }
@@ -192,7 +245,18 @@ pub fn archive_recent_once(
             angles: copied_angles,
         };
 
-        finalize_registration(store, register, reg, state, &mut report);
+        finalize_registration(
+            store,
+            register,
+            reg,
+            state,
+            &mut report,
+            RegistrationContext {
+                candidate: &candidate,
+                marker_angles,
+                now_epoch_s,
+            },
+        );
     }
 
     report.pending_len = state.pending.len();
@@ -204,25 +268,42 @@ pub fn archive_recent_once(
 /// Deterministic indexd rejections ([`RegisterError::Rejected`]) are logged and
 /// counted as `register_rejected` without being enqueued for retry; transient
 /// failures are deferred to the pending queue.
+struct RegistrationContext<'a> {
+    candidate: &'a Candidate,
+    marker_angles: Vec<MarkerAngle>,
+    now_epoch_s: i64,
+}
+
 fn finalize_registration(
     store: &dyn ArchiveStore,
     register: &dyn RegisterClient,
     reg: ArchiveRegistration,
     state: &mut DriverState,
     report: &mut CycleReport,
+    registration: RegistrationContext<'_>,
 ) {
     let probe_failures = collect_probe_failures(store, &reg.angles);
     if probe_failures.is_empty() {
+        if let Err(err) = stage_outbox_registration(state, &reg, RegistrationDisposition::Live) {
+            log_outbox_stage_failure(&reg.canonical_key, &err);
+            report.copy_failed = report.copy_failed.saturating_add(1);
+            return;
+        }
+        write_marker(
+            state,
+            registration.candidate,
+            MarkerStatus::CompleteLive,
+            registration.marker_angles,
+            registration.now_epoch_s,
+        );
         match register.register(&reg) {
             Ok(_) => {
+                persist_outbox(state);
                 report.registered = report.registered.saturating_add(1);
             }
             Err(RegisterError::Rejected { message }) => {
+                persist_outbox(state);
                 log_register_rejected_warning(&reg.canonical_key, &message);
-                for angle in &reg.angles {
-                    let _ = store.remove_dest(&angle.file_ref);
-                }
-                state.mark_rejected(&reg.canonical_key);
                 report.register_rejected = report.register_rejected.saturating_add(1);
             }
             Err(_) => {
@@ -237,16 +318,27 @@ fn finalize_registration(
             .collect::<Vec<_>>()
             .join(",");
         log_quarantine_warning(&reg.canonical_key, &failure_detail);
+        report.quarantined_undecodable = report.quarantined_undecodable.saturating_add(1);
+        if let Err(err) = stage_outbox_registration(state, &reg, RegistrationDisposition::Quarantine)
+        {
+            log_outbox_stage_failure(&reg.canonical_key, &err);
+            report.copy_failed = report.copy_failed.saturating_add(1);
+            return;
+        }
+        write_marker(
+            state,
+            registration.candidate,
+            MarkerStatus::Quarantined,
+            registration.marker_angles,
+            registration.now_epoch_s,
+        );
         match register.register_quarantined(&reg) {
             Ok(_) => {
-                report.quarantined_undecodable = report.quarantined_undecodable.saturating_add(1);
+                persist_outbox(state);
             }
             Err(RegisterError::Rejected { message }) => {
+                persist_outbox(state);
                 log_register_rejected_warning(&reg.canonical_key, &message);
-                for angle in &reg.angles {
-                    let _ = store.remove_dest(&angle.file_ref);
-                }
-                state.mark_rejected(&reg.canonical_key);
                 report.register_rejected = report.register_rejected.saturating_add(1);
             }
             Err(_) => {
@@ -266,12 +358,7 @@ fn archive_item_path_for_candidate(candidate: &Candidate) -> Option<String> {
     Some(format!("RecentClips/{date}/{timestamp}"))
 }
 
-fn drain_pending(
-    store: &dyn ArchiveStore,
-    register: &dyn RegisterClient,
-    state: &mut DriverState,
-    report: &mut CycleReport,
-) {
+fn drain_pending(register: &dyn RegisterClient, state: &mut DriverState, report: &mut CycleReport) {
     let mut retained = VecDeque::with_capacity(state.pending.len());
     for mut pending in std::mem::take(&mut state.pending) {
         match send_registration(register, pending.disposition, &pending.reg) {
@@ -281,10 +368,6 @@ fn drain_pending(
             }
             Err(RegisterError::Rejected { message }) => {
                 log_register_rejected_warning(&pending.reg.canonical_key, &message);
-                for angle in &pending.reg.angles {
-                    let _ = store.remove_dest(&angle.file_ref);
-                }
-                state.mark_rejected(&pending.reg.canonical_key);
                 report.register_rejected = report.register_rejected.saturating_add(1);
                 continue;
             }
@@ -303,6 +386,7 @@ fn drain_pending(
         retained.push_back(pending);
     }
     state.pending = retained;
+    persist_outbox(state);
 }
 
 fn enqueue_pending(
@@ -329,6 +413,7 @@ fn enqueue_pending(
         attempts: 1,
         disposition,
     });
+    persist_outbox(state);
 }
 
 fn send_registration(
@@ -340,6 +425,169 @@ fn send_registration(
         RegistrationDisposition::Live => register.register(reg),
         RegistrationDisposition::Quarantine => register.register_quarantined(reg),
     }
+}
+
+fn load_outbox_if_needed(state: &mut DriverState) {
+    if state.outbox_loaded {
+        return;
+    }
+    state.outbox_loaded = true;
+    let Some(root) = state.archive_root.as_ref() else {
+        return;
+    };
+    let path = root.join(OUTBOX_FILE);
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return,
+        Err(err) => {
+            let mut stderr = io::stderr();
+            let _ = writeln!(
+                &mut stderr,
+                "retentiond archive_recent_only: failed to read durable outbox {}: {err}",
+                path.display()
+            );
+            return;
+        }
+    };
+    match serde_json::from_str::<PersistedOutbox>(&raw) {
+        Ok(persisted) if persisted.schema == STATE_SCHEMA => {
+            state.pending = persisted.pending.into_iter().take(MAX_PENDING).collect();
+        }
+        Ok(_) => {
+            let mut stderr = io::stderr();
+            let _ = writeln!(
+                &mut stderr,
+                "retentiond archive_recent_only: ignoring outbox with schema mismatch at {}",
+                path.display()
+            );
+        }
+        Err(err) => {
+            let mut stderr = io::stderr();
+            let _ = writeln!(
+                &mut stderr,
+                "retentiond archive_recent_only: failed to decode durable outbox {}: {err}",
+                path.display()
+            );
+        }
+    }
+}
+
+fn persist_outbox(state: &DriverState) {
+    let Some(root) = state.archive_root.as_ref() else {
+        return;
+    };
+    let path = root.join(OUTBOX_FILE);
+    let persisted = PersistedOutbox {
+        schema: STATE_SCHEMA,
+        pending: state.pending.iter().cloned().collect(),
+    };
+    if let Err(err) = write_json_durable(&path, &persisted) {
+        let mut stderr = io::stderr();
+        let _ = writeln!(
+            &mut stderr,
+            "retentiond archive_recent_only: failed to persist durable outbox {}: {err}",
+            path.display()
+        );
+    }
+}
+
+fn stage_outbox_registration(
+    state: &DriverState,
+    reg: &ArchiveRegistration,
+    disposition: RegistrationDisposition,
+) -> io::Result<()> {
+    let Some(root) = state.archive_root.as_ref() else {
+        return Ok(());
+    };
+    let path = root.join(OUTBOX_FILE);
+    let mut pending: Vec<PendingRegistration> = state.pending.iter().cloned().collect();
+    if !pending
+        .iter()
+        .any(|entry| entry.reg.canonical_key == reg.canonical_key)
+    {
+        pending.push(PendingRegistration {
+            reg: reg.clone(),
+            attempts: 0,
+            disposition,
+        });
+    }
+    let persisted = PersistedOutbox {
+        schema: STATE_SCHEMA,
+        pending,
+    };
+    write_json_durable(&path, &persisted)
+}
+
+fn marker_is_complete_live(state: &DriverState, candidate: &Candidate) -> bool {
+    let Some(marker) = read_marker(state, candidate) else {
+        return false;
+    };
+    marker.status == MarkerStatus::CompleteLive
+        && marker.source_fingerprint == candidate.source_fingerprint
+}
+
+fn read_marker(state: &DriverState, candidate: &Candidate) -> Option<ClipMarker> {
+    let root = state.archive_root.as_ref()?;
+    let path = marker_path(root, &candidate.canonical_key);
+    let raw = fs::read_to_string(path).ok()?;
+    let marker: ClipMarker = serde_json::from_str(&raw).ok()?;
+    if marker.schema != MARKER_SCHEMA || marker.canonical_key != candidate.canonical_key {
+        return None;
+    }
+    Some(marker)
+}
+
+fn write_marker(
+    state: &DriverState,
+    candidate: &Candidate,
+    status: MarkerStatus,
+    angles: Vec<MarkerAngle>,
+    now_epoch_s: i64,
+) {
+    let Some(root) = state.archive_root.as_ref() else {
+        return;
+    };
+    let path = marker_path(root, &candidate.canonical_key);
+    let marker = ClipMarker {
+        schema: MARKER_SCHEMA,
+        canonical_key: candidate.canonical_key.clone(),
+        source_fingerprint: candidate.source_fingerprint.clone(),
+        volume_serial: candidate.source_volume_serial,
+        partition: candidate.partition.clone(),
+        status,
+        updated_at: now_epoch_s,
+        angles,
+    };
+    if let Err(err) = write_json_durable(&path, &marker) {
+        let mut stderr = io::stderr();
+        let _ = writeln!(
+            &mut stderr,
+            "retentiond archive_recent_only: failed to persist marker {}: {err}",
+            path.display()
+        );
+    }
+}
+
+fn marker_path(root: &Path, canonical_key: &str) -> PathBuf {
+    let file = format!("{}.json", stable_hex(canonical_key.as_bytes()));
+    root.join(MARKER_DIR).join(file)
+}
+
+fn stable_hex(bytes: &[u8]) -> String {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn hash_hex(hash: ContentHash) -> String {
+    let mut out = String::with_capacity(hash.0.len().saturating_mul(2));
+    for byte in hash.0 {
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    out
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -402,6 +650,14 @@ fn log_register_rejected_warning(canonical_key: &str, reason: &str) {
     );
 }
 
+fn log_outbox_stage_failure(canonical_key: &str, err: &io::Error) {
+    let mut stderr = io::stderr();
+    let _ = writeln!(
+        &mut stderr,
+        "retentiond archive_recent_only: failed to stage durable outbox key={canonical_key}: {err}"
+    );
+}
+
 fn u64_to_i64_saturating(value: u64) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
 }
@@ -430,7 +686,10 @@ mod tests {
     use std::{
         cell::{Cell, RefCell},
         collections::{HashMap, HashSet, VecDeque},
+        fs,
         io,
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
     };
 
     use crate::{
@@ -442,11 +701,22 @@ mod tests {
     };
 
     use super::{
-        DriverState, MAX_REGISTER_ATTEMPTS, RegistrationDisposition, archive_recent_once, basename,
+        DriverState, MAX_REGISTER_ATTEMPTS, MarkerStatus, OUTBOX_FILE, PersistedOutbox,
+        RegistrationDisposition, archive_recent_once, basename, read_marker,
     };
 
     const KEY: &str = "0:TeslaCam/RecentClips/2026-06-19_10-00-00";
     const PATH: &str = "RecentClips/2026-06-19/2026-06-19_10-00-00";
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn new_archive_root() -> PathBuf {
+        let unique = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::current_dir()
+            .expect("cwd")
+            .join(format!("retentiond-archive-driver-test-{}-{unique}", std::process::id()));
+        fs::create_dir_all(&dir).expect("create archive root");
+        dir
+    }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum RegisterFailure {
@@ -463,6 +733,8 @@ mod tests {
             started_at: 1_700_000_000,
             ended_at: 1_700_000_060,
             duration_s: Some(60),
+            source_volume_serial: 0x1234_5678,
+            source_fingerprint: "test-fingerprint-a".to_owned(),
             angles: vec![
                 CandidateAngle {
                     camera: "front".to_owned(),
@@ -821,25 +1093,30 @@ mod tests {
     }
 
     #[test]
-    fn rejected_fresh_candidate_is_suppressed_on_next_cycle() {
+    fn complete_live_marker_suppresses_recopy_after_rejected_registration() {
         let candidates = FakeCandidates::default();
         candidates.set(vec![sample_candidate()]);
         let store = FakeStore::default();
         let register = FakeRegister::with_live_rejection("invalid camera: left");
-        let mut state = DriverState::new();
+        let archive_root = new_archive_root();
+        let mut state = DriverState::with_archive_root(&archive_root);
 
         let first = archive_recent_once(&candidates, &store, &register, &mut state, 1).unwrap();
         assert_eq!(first.register_rejected, 1);
+        assert_eq!(store.copies.borrow().len(), 2);
         let live_calls_after_first = register.live_calls.borrow().len();
 
         let second = archive_recent_once(&candidates, &store, &register, &mut state, 2).unwrap();
-        assert_eq!(second.skipped_rejected, 1);
+        assert_eq!(second.skipped_rejected, 0);
         assert_eq!(second.register_rejected, 0);
         assert_eq!(register.live_calls.borrow().len(), live_calls_after_first);
+        assert_eq!(store.copies.borrow().len(), 2);
+
+        let _ = fs::remove_dir_all(archive_root);
     }
 
     #[test]
-    fn rejected_fresh_candidate_removes_copied_dest_files() {
+    fn rejected_registration_keeps_landed_bytes() {
         let candidates = FakeCandidates::default();
         candidates.set(vec![sample_candidate()]);
         let store = FakeStore::default();
@@ -848,18 +1125,10 @@ mod tests {
 
         let report = archive_recent_once(&candidates, &store, &register, &mut state, 1).unwrap();
         assert_eq!(report.register_rejected, 1);
-        assert_eq!(
-            store.removed.borrow().as_slice(),
-            &[
-                "RecentClips/2026-06-19/2026-06-19_10-00-00/2026-06-19_10-00-00-front.mp4"
-                    .to_owned(),
-                "RecentClips/2026-06-19/2026-06-19_10-00-00/2026-06-19_10-00-00-back.mp4"
-                    .to_owned(),
-            ]
-        );
+        assert!(store.removed.borrow().is_empty());
         assert!(
-            store.landed.borrow().is_empty(),
-            "rejected registration removes copied dest files"
+            !store.landed.borrow().is_empty(),
+            "register rejection must not roll back archived bytes"
         );
     }
 
@@ -933,7 +1202,7 @@ mod tests {
         let report = archive_recent_once(&candidates, &store, &register, &mut state, 1).unwrap();
         assert_eq!(report.register_deferred, 1);
         assert_eq!(report.pending_len, 1);
-        assert!(!state.is_rejected(KEY));
+        assert_eq!(report.skipped_rejected, 0);
     }
 
     #[test]
@@ -1137,6 +1406,133 @@ mod tests {
         assert_eq!(drained.pending_len, 0);
         assert_eq!(register.live_calls.borrow().len(), 0);
         assert!(register.quarantine_calls.borrow().len() > 2);
+    }
+
+    #[test]
+    fn probe_failure_writes_quarantined_marker_and_retries_copy() {
+        let candidates = FakeCandidates::default();
+        let candidate = sample_candidate();
+        candidates.set(vec![candidate.clone()]);
+        let store = FakeStore::default();
+        store.set_unplayable(
+            "RecentClips/2026-06-19/2026-06-19_10-00-00/2026-06-19_10-00-00-back.mp4",
+            UnplayableReason::NoMoov,
+        );
+        let register = FakeRegister::default();
+        let archive_root = new_archive_root();
+        let mut state = DriverState::with_archive_root(&archive_root);
+
+        let first = archive_recent_once(&candidates, &store, &register, &mut state, 1).unwrap();
+        assert_eq!(first.quarantined_undecodable, 1);
+        let marker = read_marker(&state, &candidate).expect("quarantined marker");
+        assert_eq!(marker.status, MarkerStatus::Quarantined);
+
+        let copies_after_first = store.copies.borrow().len();
+        let second = archive_recent_once(&candidates, &store, &register, &mut state, 2).unwrap();
+        assert_eq!(second.quarantined_undecodable, 1);
+        assert!(
+            store.copies.borrow().len() > copies_after_first,
+            "quarantined marker must not suppress retry copy"
+        );
+        let marker2 = read_marker(&state, &candidate).expect("quarantined marker");
+        assert_ne!(marker2.status, MarkerStatus::CompleteLive);
+
+        let _ = fs::remove_dir_all(archive_root);
+    }
+
+    #[test]
+    fn dedup_marker_is_content_addressed_not_size_only() {
+        let candidates = FakeCandidates::default();
+        let mut first_candidate = sample_candidate();
+        first_candidate.source_fingerprint = "fingerprint-a".to_owned();
+        candidates.set(vec![first_candidate.clone()]);
+
+        let store = FakeStore::default();
+        let register = FakeRegister::default();
+        let archive_root = new_archive_root();
+        let mut state = DriverState::with_archive_root(&archive_root);
+
+        let first = archive_recent_once(&candidates, &store, &register, &mut state, 1).unwrap();
+        assert_eq!(first.registered, 1);
+        assert_eq!(store.copies.borrow().len(), 2);
+
+        let second = archive_recent_once(&candidates, &store, &register, &mut state, 2).unwrap();
+        assert_eq!(second.registered, 0);
+        assert_eq!(store.copies.borrow().len(), 2);
+
+        let mut replacement = sample_candidate();
+        replacement.source_fingerprint = "fingerprint-b".to_owned();
+        candidates.set(vec![replacement]);
+        let third = archive_recent_once(&candidates, &store, &register, &mut state, 3).unwrap();
+        assert_eq!(third.registered, 1);
+        assert_eq!(store.copies.borrow().len(), 4);
+
+        let _ = fs::remove_dir_all(archive_root);
+    }
+
+    #[test]
+    fn durable_outbox_replays_after_restart_without_recopy() {
+        let candidates = FakeCandidates::default();
+        let candidate = sample_candidate();
+        candidates.set(vec![candidate.clone()]);
+        let store = FakeStore::default();
+        let register = FakeRegister::with_live_failures(vec![true, false]);
+        let archive_root = new_archive_root();
+        let mut state = DriverState::with_archive_root(&archive_root);
+
+        let first = archive_recent_once(&candidates, &store, &register, &mut state, 1).unwrap();
+        assert_eq!(first.register_deferred, 1);
+        assert_eq!(first.pending_len, 1);
+        assert_eq!(store.copies.borrow().len(), 2);
+        let marker = read_marker(&state, &candidate).expect("complete marker");
+        assert_eq!(marker.status, MarkerStatus::CompleteLive);
+
+        let outbox_raw =
+            fs::read_to_string(archive_root.join(OUTBOX_FILE)).expect("durable outbox must exist");
+        let outbox: PersistedOutbox = serde_json::from_str(&outbox_raw).expect("decode outbox");
+        assert_eq!(outbox.pending.len(), 1);
+        assert_eq!(outbox.pending[0].reg.canonical_key, KEY);
+
+        let mut restarted_state = DriverState::with_archive_root(&archive_root);
+        candidates.set(Vec::new());
+        let second = archive_recent_once(
+            &candidates,
+            &store,
+            &register,
+            &mut restarted_state,
+            2,
+        )
+        .unwrap();
+        assert_eq!(second.registered_from_pending, 1);
+        assert_eq!(second.pending_len, 0);
+        assert_eq!(store.copies.borrow().len(), 2);
+
+        let _ = fs::remove_dir_all(archive_root);
+    }
+
+    #[test]
+    fn outbox_stage_failure_prevents_complete_live_marker_and_register_attempt() {
+        let candidates = FakeCandidates::default();
+        let candidate = sample_candidate();
+        candidates.set(vec![candidate.clone()]);
+        let store = FakeStore::default();
+        let register = FakeRegister::default();
+        let archive_root = new_archive_root();
+        fs::create_dir_all(archive_root.join(".retentiond/register-outbox.json"))
+            .expect("reserve outbox path as directory to force stage failure");
+        let mut state = DriverState::with_archive_root(&archive_root);
+
+        let report = archive_recent_once(&candidates, &store, &register, &mut state, 1).unwrap();
+        assert_eq!(report.copy_failed, 1);
+        assert_eq!(report.registered, 0);
+        assert_eq!(report.register_deferred, 0);
+        assert_eq!(register.live_calls.borrow().len(), 0);
+        assert!(
+            read_marker(&state, &candidate).is_none(),
+            "complete marker must not be written when durable outbox staging fails"
+        );
+
+        let _ = fs::remove_dir_all(archive_root);
     }
 
     #[test]

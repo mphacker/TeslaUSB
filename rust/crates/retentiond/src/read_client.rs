@@ -4,6 +4,8 @@
 //! `register_client.rs`): no shared proto crate coupling.
 
 use std::io::{self, Read, Write};
+#[cfg(unix)]
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +25,9 @@ pub struct ClipIdentity {
     pub total_size: u64,
     /// exFAT `NameHash` of the resolved leaf.
     pub name_hash: u32,
+    /// FAT-chain digest for fragmented files (`None` for contiguous files).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_digest: Option<u64>,
 }
 
 /// One `ReadFile` request.
@@ -192,10 +197,12 @@ pub fn read_full_file_to_writer(
     }
 }
 
+#[cfg(any(unix, test))]
 fn frame_cap_usize(cap: u32) -> Result<usize, ReadFileError> {
     usize::try_from(cap).map_err(|_| ReadFileError::Decode("frame cap overflow".to_owned()))
 }
 
+#[cfg(any(unix, test))]
 fn read_frame(stream: &mut impl Read, cap: u32) -> Result<Vec<u8>, ReadFileError> {
     let mut len_buf = [0_u8; 4];
     stream.read_exact(&mut len_buf)?;
@@ -211,6 +218,7 @@ fn read_frame(stream: &mut impl Read, cap: u32) -> Result<Vec<u8>, ReadFileError
     Ok(payload)
 }
 
+#[cfg(any(unix, test))]
 fn write_frame(stream: &mut impl Write, payload: &[u8], cap: u32) -> Result<(), ReadFileError> {
     let cap_len = frame_cap_usize(cap)?;
     if payload.len() > cap_len {
@@ -229,6 +237,7 @@ fn write_frame(stream: &mut impl Write, payload: &[u8], cap: u32) -> Result<(), 
     Ok(())
 }
 
+#[cfg(any(unix, test))]
 fn validate_tail_len(len: u32, requested_len: u32) -> Result<(), ReadFileError> {
     let cap = MAX_READ_LEN.min(requested_len);
     if len > cap {
@@ -242,6 +251,7 @@ fn validate_tail_len(len: u32, requested_len: u32) -> Result<(), ReadFileError> 
     Ok(())
 }
 
+#[cfg(any(unix, test))]
 fn read_raw_tail(
     stream: &mut impl Read,
     expected_len: u32,
@@ -328,6 +338,332 @@ impl ReadFileClient for UnixReadFileClient {
     }
 }
 
+#[cfg(unix)]
+const MAX_PATH_LEN: usize = 1024;
+#[cfg(unix)]
+const MAX_COMPONENTS: usize = 32;
+
+#[cfg(unix)]
+#[derive(Debug, Clone)]
+/// Direct volume-image `ReadFile` client (no scannerd socket dependency).
+pub struct VolumeReadFileClient {
+    volume_image: std::path::PathBuf,
+    slot: u8,
+    slot_params: Arc<Mutex<SlotParamsCache>>,
+}
+
+#[cfg(unix)]
+impl VolumeReadFileClient {
+    /// Build a direct volume-image reader for `slot`.
+    #[must_use]
+    pub fn new(volume_image: impl Into<std::path::PathBuf>, slot: u8) -> Self {
+        Self {
+            volume_image: volume_image.into(),
+            slot,
+            slot_params: Arc::new(Mutex::new(SlotParamsCache::Uninitialized)),
+        }
+    }
+
+    fn get_slot_params(
+        &self,
+        reader: &crate::volume_reader::PreadBlockReader,
+    ) -> Result<Option<scannerd::boot::ExfatParams>, ReadFileError> {
+        let identity = reader.image_identity().map_err(ReadFileError::Io)?;
+        let mut slot_params = self.slot_params.lock().map_err(|_| {
+            ReadFileError::Decode("volume read client slot-params lock poisoned".to_owned())
+        })?;
+        if let SlotParamsCache::Cached {
+            identity: cached_identity,
+            params,
+        } = *slot_params
+        {
+            // Only trust cached geometry if it was parsed from the same image
+            // incarnation. A re-provisioned/replaced image (different
+            // dev/ino/size/mtime) invalidates the cache so we never read a new
+            // image through stale geometry.
+            if cached_identity == identity {
+                return Ok(params);
+            }
+        }
+        let parsed = parse_slot_params(reader, self.slot)?;
+        *slot_params = SlotParamsCache::Cached { identity, params: parsed };
+        Ok(parsed)
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SlotParamsCache {
+    Uninitialized,
+    Cached {
+        identity: crate::volume_reader::ImageIdentity,
+        params: Option<scannerd::boot::ExfatParams>,
+    },
+}
+
+#[cfg(unix)]
+impl ReadFileClient for VolumeReadFileClient {
+    fn read_file(&self, req: &ReadFileRequest) -> Result<ReadFileOk, ReadFileError> {
+        use scannerd::volume::Volume;
+
+        use crate::volume_reader::PreadBlockReader;
+
+        let components = validate_request_path(&req.path).map_err(ReadFileError::Decode)?;
+        let reader = PreadBlockReader::open(&self.volume_image).map_err(ReadFileError::Io)?;
+        let Some(params) = self.get_slot_params(&reader)? else {
+            return Err(ReadFileError::NotFound);
+        };
+        let volume = Volume::new(&reader, params);
+
+        let resolved = resolve_file(&volume, self.slot, &components)?;
+        let Some(resolved) = resolved else {
+            return Err(ReadFileError::NotFound);
+        };
+        if !resolved.record.set_checksum_ok || resolved.record.valid_data_length != resolved.record.data_length
+        {
+            return Err(ReadFileError::NotFound);
+        }
+
+        let identity = clip_identity(&volume, &resolved.record)?;
+        if req.handle.is_some_and(|expected| expected != identity) {
+            return Err(ReadFileError::Changed);
+        }
+
+        let readable_size = resolved.record.valid_data_length;
+        if req.offset > readable_size {
+            return Err(ReadFileError::OutOfRange);
+        }
+
+        let take = u64::from(req.len)
+            .min(u64::from(MAX_READ_LEN))
+            .min(readable_size.saturating_sub(req.offset));
+        let take_len = usize::try_from(take)
+            .map_err(|_| ReadFileError::Decode("window length exceeds usize".to_owned()))?;
+        let bytes = if take_len == 0 {
+            Vec::new()
+        } else {
+            volume
+                .read_file_window(
+                    resolved.record.first_cluster,
+                    resolved.record.no_fat_chain,
+                    readable_size,
+                    req.offset,
+                    take_len,
+                )
+                .map_err(|err| ReadFileError::Server {
+                    message: format!("read window failed: {err}"),
+                })?
+        };
+
+        if bytes.len() != take_len {
+            return Err(ReadFileError::Server {
+                message: format!("short read: expected {take_len} got {}", bytes.len()),
+            });
+        }
+
+        let post_resolved = resolve_file(&volume, self.slot, &components)?;
+        let Some(post_resolved) = post_resolved else {
+            return Err(ReadFileError::Changed);
+        };
+        if !post_resolved.record.set_checksum_ok
+            || post_resolved.record.valid_data_length != post_resolved.record.data_length
+        {
+            return Err(ReadFileError::Changed);
+        }
+        let post_identity = clip_identity(&volume, &post_resolved.record)?;
+        if post_identity != identity {
+            return Err(ReadFileError::Changed);
+        }
+
+        Ok(ReadFileOk {
+            identity,
+            readable_size,
+            eof: req.offset.saturating_add(take) >= readable_size,
+            bytes,
+        })
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone)]
+struct ResolvedFile {
+    record: scannerd::walk::FileRecord,
+}
+
+#[cfg(unix)]
+fn resolve_file(
+    volume: &scannerd::volume::Volume<'_, crate::volume_reader::PreadBlockReader>,
+    slot: u8,
+    components: &[String],
+) -> Result<Option<ResolvedFile>, ReadFileError> {
+    use scannerd::walk::resolve_file_by_components;
+
+    let found =
+        resolve_file_by_components(volume, slot, components).map_err(|err| ReadFileError::Server {
+            message: format!("resolve failed: {err}"),
+        })?;
+    Ok(found.map(|record| ResolvedFile { record }))
+}
+
+#[cfg(unix)]
+fn parse_slot_params(
+    reader: &crate::volume_reader::PreadBlockReader,
+    slot: u8,
+) -> Result<Option<scannerd::boot::ExfatParams>, ReadFileError> {
+    use scannerd::boot::parse_boot_sector;
+    use scannerd::mbr::parse_mbr;
+
+    let partitions = parse_mbr(reader).map_err(|err| ReadFileError::Server {
+        message: format!("mbr parse failed: {err}"),
+    })?;
+    let slot_entry = partitions
+        .iter()
+        .copied()
+        .find(|entry| entry.slot == slot && entry.is_exfat());
+    let Some(slot_entry) = slot_entry else {
+        return Ok(None);
+    };
+    let params = parse_boot_sector(reader, slot_entry.start_lba).map_err(|err| {
+        ReadFileError::Server {
+            message: format!("boot parse failed: {err}"),
+        }
+    })?;
+    Ok(Some(params))
+}
+
+#[cfg(unix)]
+fn clip_identity(
+    volume: &scannerd::volume::Volume<'_, crate::volume_reader::PreadBlockReader>,
+    record: &scannerd::walk::FileRecord,
+) -> Result<ClipIdentity, ReadFileError> {
+    Ok(ClipIdentity {
+        first_cluster: record.first_cluster,
+        total_size: record.data_length,
+        name_hash: record.name_hash,
+        chain_digest: compute_chain_digest(volume, record)?,
+    })
+}
+
+#[cfg(unix)]
+fn compute_chain_digest(
+    volume: &scannerd::volume::Volume<'_, crate::volume_reader::PreadBlockReader>,
+    record: &scannerd::walk::FileRecord,
+) -> Result<Option<u64>, ReadFileError> {
+    if record.no_fat_chain {
+        return Ok(None);
+    }
+    let span = record
+        .data_length
+        .div_ceil(volume.params().bytes_per_cluster())
+        .max(1);
+    let chain = volume
+        .follow_chain(record.first_cluster, false, span)
+        .map_err(|err| ReadFileError::Server {
+            message: format!("follow chain failed: {err}"),
+        })?;
+    Ok(Some(fold_chain_digest(&chain)))
+}
+
+#[cfg(unix)]
+fn fold_chain_digest(chain: &[u32]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    let mut hash = FNV_OFFSET;
+    let mut fold = |bytes: &[u8]| {
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+    };
+    let chain_len = u64::try_from(chain.len()).unwrap_or(u64::MAX);
+    fold(&chain_len.to_le_bytes());
+    for cluster in chain {
+        fold(&cluster.to_le_bytes());
+    }
+    hash
+}
+
+#[cfg(unix)]
+fn validate_request_path(path: &str) -> Result<Vec<String>, String> {
+    validate_path_layout(path)?;
+    let decoded = percent_decode_once(path)?;
+    validate_path_layout(&decoded)
+}
+
+#[cfg(unix)]
+fn validate_path_layout(path: &str) -> Result<Vec<String>, String> {
+    if path.is_empty() {
+        return Err("path is empty".to_owned());
+    }
+    if path.len() > MAX_PATH_LEN {
+        return Err("path is too long".to_owned());
+    }
+    if path.starts_with('/') {
+        return Err("path must be relative".to_owned());
+    }
+    if path.contains('\0') {
+        return Err("path contains NUL".to_owned());
+    }
+    if path.contains('\\') {
+        return Err("path contains backslash".to_owned());
+    }
+
+    let components: Vec<&str> = path.split('/').collect();
+    if components.is_empty() {
+        return Err("path has no components".to_owned());
+    }
+    if components.len() > MAX_COMPONENTS {
+        return Err("path has too many components".to_owned());
+    }
+    let mut normalized = Vec::with_capacity(components.len());
+    for component in components {
+        if component.is_empty() {
+            return Err("path contains empty component".to_owned());
+        }
+        if component == "." || component == ".." {
+            return Err("path contains reserved component".to_owned());
+        }
+        if component.encode_utf16().count() > 255 {
+            return Err("path component exceeds 255 utf16 code units".to_owned());
+        }
+        normalized.push(component.to_owned());
+    }
+    Ok(normalized)
+}
+
+#[cfg(unix)]
+fn percent_decode_once(path: &str) -> Result<String, String> {
+    let mut out = Vec::with_capacity(path.len());
+    let mut iter = path.as_bytes().iter().copied();
+    while let Some(byte) = iter.next() {
+        if byte == b'%' {
+            let Some(hi_raw) = iter.next() else {
+                return Err("path has invalid percent escape".to_owned());
+            };
+            let Some(lo_raw) = iter.next() else {
+                return Err("path has invalid percent escape".to_owned());
+            };
+            let hi = hex_value(hi_raw).ok_or_else(|| "path has invalid percent escape".to_owned())?;
+            let lo = hex_value(lo_raw).ok_or_else(|| "path has invalid percent escape".to_owned())?;
+            out.push((hi << 4) | lo);
+        } else {
+            out.push(byte);
+        }
+    }
+    String::from_utf8(out).map_err(|_| "percent-decoded path is not valid utf-8".to_owned())
+}
+
+#[cfg(unix)]
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(10 + byte - b'a'),
+        b'A'..=b'F' => Some(10 + byte - b'A'),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -365,6 +701,7 @@ mod tests {
             first_cluster: 1234,
             total_size: 2_097_152,
             name_hash: 3_735_928_559,
+            chain_digest: None,
         };
         let req2 = ReadFileRequest {
             path: "...".to_owned(),
@@ -377,6 +714,11 @@ mod tests {
             req2_json,
             "{\"path\":\"...\",\"offset\":8388608,\"len\":8388608,\"handle\":{\"first_cluster\":1234,\"total_size\":2097152,\"name_hash\":3735928559}}"
         );
+
+        let legacy_identity: ClipIdentity =
+            serde_json::from_str("{\"first_cluster\":7,\"total_size\":8,\"name_hash\":9}")
+                .expect("legacy identity without chain digest must decode");
+        assert_eq!(legacy_identity.chain_digest, None);
 
         let ok = ReadFileHeader::Ok {
             identity,
@@ -439,6 +781,7 @@ mod tests {
             first_cluster: 1,
             total_size: 7,
             name_hash: 9,
+            chain_digest: None,
         };
         let client = FakeReadFileClient::new(vec![
             Ok(ReadFileOk {
@@ -477,11 +820,45 @@ mod tests {
     }
 
     #[test]
+    fn read_full_file_detects_identity_change_mid_copy() {
+        let first = ClipIdentity {
+            first_cluster: 1,
+            total_size: 8,
+            name_hash: 11,
+            chain_digest: Some(0x10),
+        };
+        let second = ClipIdentity {
+            first_cluster: 1,
+            total_size: 8,
+            name_hash: 11,
+            chain_digest: Some(0x20),
+        };
+        let client = FakeReadFileClient::new(vec![
+            Ok(ReadFileOk {
+                identity: first,
+                readable_size: 8,
+                eof: false,
+                bytes: b"abcd".to_vec(),
+            }),
+            Ok(ReadFileOk {
+                identity: second,
+                readable_size: 8,
+                eof: true,
+                bytes: b"efgh".to_vec(),
+            }),
+        ]);
+        let err =
+            read_full_file(&client, "TeslaCam/RecentClips/file.mp4", 4).expect_err("must fail");
+        assert!(matches!(err, ReadFileError::Changed));
+    }
+
+    #[test]
     fn read_full_file_to_writer_streams_windows_and_echoes_identity() {
         let identity = ClipIdentity {
             first_cluster: 1,
             total_size: 7,
             name_hash: 9,
+            chain_digest: None,
         };
         let client = FakeReadFileClient::new(vec![
             Ok(ReadFileOk {

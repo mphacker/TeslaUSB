@@ -6,7 +6,6 @@
 #![allow(dead_code)]
 
 use std::ffi::CString;
-use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, Read};
 use std::path::{Component, Path, PathBuf};
@@ -14,6 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use retentiond::archive::ArchiveStore;
 use retentiond::delete::RandGen;
+use retentiond::durability::{canonicalize_under_root, make_temp_path, sync_dir, sync_dir_chain};
 use retentiond::governor::Statfs;
 use retentiond::io::{ContentHash, FileIdentity, FsStat};
 use retentiond::read_client::{MAX_READ_LEN, ReadFileClient, read_full_file_to_writer};
@@ -164,7 +164,6 @@ where
 
 const COPY_BUFFER_SIZE: usize = 64 * 1024;
 const READ_WINDOW_LEN: u32 = MAX_READ_LEN;
-static COPY_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Live Unix `ArchiveStore` seam.
 pub(crate) struct LiveArchiveStore {
@@ -351,72 +350,6 @@ fn validate_archive_parent_path(root: &Path, parent: &Path) -> io::Result<()> {
         }
     }
     Ok(())
-}
-
-fn canonicalize_under_root(root: &Path, path: &Path) -> io::Result<PathBuf> {
-    let canonical_root = root.canonicalize()?;
-    let canonical_path = path.canonicalize()?;
-    if canonical_path.starts_with(&canonical_root) {
-        Ok(canonical_path)
-    } else {
-        Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "path escapes jail (root={}, path={})",
-                root.display(),
-                path.display()
-            ),
-        ))
-    }
-}
-
-fn sync_dir_chain(root: &Path, leaf: &Path) -> io::Result<()> {
-    let canonical_root = root.canonicalize()?;
-    let mut current = leaf.to_path_buf();
-    if !current.starts_with(&canonical_root) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "directory escapes jail during sync (root={}, path={})",
-                canonical_root.display(),
-                current.display()
-            ),
-        ));
-    }
-    loop {
-        sync_dir(&current)?;
-        if current == canonical_root {
-            break;
-        }
-        let Some(parent) = current.parent() else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "directory {} has no parent while syncing",
-                    current.display()
-                ),
-            ));
-        };
-        current = parent.to_path_buf();
-    }
-    Ok(())
-}
-
-fn make_temp_path(dest_path: &Path) -> io::Result<PathBuf> {
-    let Some(file_name) = dest_path.file_name() else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "destination path must include a file name",
-        ));
-    };
-    let unique = COPY_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let mut temp_name = OsString::from(file_name);
-    temp_name.push(format!(".tmp-{}-{unique}", std::process::id()));
-    Ok(dest_path.with_file_name(temp_name))
-}
-
-fn sync_dir(path: &Path) -> io::Result<()> {
-    File::open(path)?.sync_all()
 }
 
 fn hash_file_sha256(path: &Path) -> io::Result<ContentHash> {
@@ -613,6 +546,8 @@ mod tests {
             started_at: 1_700_000_000,
             ended_at: 1_700_000_060,
             duration_s: Some(60),
+            source_volume_serial: 0x1234_5678,
+            source_fingerprint: "live-test-fingerprint".to_owned(),
             angles: vec![
                 CandidateAngle {
                     camera: "front".to_owned(),
@@ -637,6 +572,7 @@ mod tests {
             first_cluster: 1,
             total_size: 1024,
             name_hash: 2,
+            chain_digest: None,
         }
     }
 

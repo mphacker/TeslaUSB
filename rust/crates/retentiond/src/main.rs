@@ -26,18 +26,18 @@ use serde::Serialize;
 #[cfg(unix)]
 use retentiond::archive_driver::{DriverState, archive_recent_once};
 #[cfg(unix)]
-use retentiond::candidates::SqliteCandidateReader;
-#[cfg(unix)]
-use retentiond::read_client::{SCANNERD_READ_SOCKET_PATH, UnixReadFileClient};
+use retentiond::read_client::VolumeReadFileClient;
 #[cfg(unix)]
 use retentiond::register_client::{INDEXD_SOCKET_PATH, UnixRegisterClient};
+#[cfg(unix)]
+use retentiond::volume_source::VolumeCandidateSource;
 
 #[cfg(unix)]
 const DEFAULT_SLOT: u8 = 0;
 #[cfg(unix)]
 const DEFAULT_INTERVAL_SECS: u64 = 20;
 #[cfg(unix)]
-const DEFAULT_INDEXD_DB_PATH: &str = "/var/lib/teslausb/index.sqlite3";
+const DEFAULT_VOLUME_IMAGE: &str = "/data/teslausb/teslacam.img";
 #[cfg(unix)]
 const DEFAULT_HEALTH_FILE: &str = "/run/teslausb/retentiond.health.json";
 
@@ -76,7 +76,7 @@ fn main() -> ExitCode {
 fn usage() -> String {
     "usage: retentiond <version|serve|help>\n\
      serve mode (phase-1): retentiond serve --archive-recent-only --no-delete \\\n\
-       --archive-root <path> [--indexd-db <path>] [--scannerd-read-socket <path>] \\\n\
+      --archive-root <path> [--volume-image <path>] \\\n\
        [--indexd-socket <path>] [--slot <u8>] [--interval-secs <u64>]\n\
      note: this build only supports non-destructive archive-recent-only serve mode."
         .to_owned()
@@ -89,6 +89,7 @@ fn run_serve(_args: &[String]) -> ExitCode {
 }
 
 #[cfg(unix)]
+#[allow(clippy::too_many_lines)]
 fn run_serve(args: &[String]) -> ExitCode {
     let parsed = match parse_serve_args(args) {
         Ok(parsed) => parsed,
@@ -114,12 +115,12 @@ fn run_serve(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    let candidates = match SqliteCandidateReader::open(&parsed.indexd_db) {
+    let candidates = match VolumeCandidateSource::open(&parsed.volume_image, parsed.slot) {
         Ok(reader) => reader,
         Err(err) => {
             eprintln!(
-                "retentiond serve: cannot open indexd DB read-only at {}: {err}",
-                parsed.indexd_db.display()
+                "retentiond serve: cannot initialize volume candidate source at {}: {err}",
+                parsed.volume_image.display()
             );
             return ExitCode::FAILURE;
         }
@@ -128,14 +129,13 @@ fn run_serve(args: &[String]) -> ExitCode {
     install_shutdown_handlers();
 
     let store = LiveArchiveStore::new(
-        Box::new(UnixReadFileClient::new(&parsed.scannerd_read_socket)),
+        Box::new(VolumeReadFileClient::new(&parsed.volume_image, parsed.slot)),
         &archive_root,
     );
     let register = UnixRegisterClient::new(&parsed.indexd_socket);
-    let mut state = DriverState::new();
+    let mut state = DriverState::with_archive_root(&archive_root);
     let health_file = std::env::var_os("RETENTIOND_HEALTH_FILE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_HEALTH_FILE));
+        .map_or_else(|| PathBuf::from(DEFAULT_HEALTH_FILE), PathBuf::from);
     let startup_now = now_epoch_s_saturating();
     let mut last_progress_at = startup_now;
     let mut last_pending: u64 = 0;
@@ -282,8 +282,7 @@ struct ServeArgs {
     archive_recent_only: bool,
     no_delete: bool,
     archive_root: Option<PathBuf>,
-    indexd_db: PathBuf,
-    scannerd_read_socket: PathBuf,
+    volume_image: PathBuf,
     indexd_socket: PathBuf,
     slot: u8,
     interval_secs: u64,
@@ -296,8 +295,7 @@ impl Default for ServeArgs {
             archive_recent_only: false,
             no_delete: false,
             archive_root: None,
-            indexd_db: PathBuf::from(DEFAULT_INDEXD_DB_PATH),
-            scannerd_read_socket: PathBuf::from(SCANNERD_READ_SOCKET_PATH),
+            volume_image: PathBuf::from(DEFAULT_VOLUME_IMAGE),
             indexd_socket: PathBuf::from(INDEXD_SOCKET_PATH),
             slot: DEFAULT_SLOT,
             interval_secs: DEFAULT_INTERVAL_SECS,
@@ -317,13 +315,9 @@ fn parse_serve_args(args: &[String]) -> Result<ServeArgs, String> {
                 let value = next_arg_value(&mut iter, "--archive-root")?;
                 parsed.archive_root = Some(PathBuf::from(value));
             }
-            "--indexd-db" => {
-                let value = next_arg_value(&mut iter, "--indexd-db")?;
-                parsed.indexd_db = PathBuf::from(value);
-            }
-            "--scannerd-read-socket" => {
-                let value = next_arg_value(&mut iter, "--scannerd-read-socket")?;
-                parsed.scannerd_read_socket = PathBuf::from(value);
+            "--volume-image" => {
+                let value = next_arg_value(&mut iter, "--volume-image")?;
+                parsed.volume_image = PathBuf::from(value);
             }
             "--indexd-socket" => {
                 let value = next_arg_value(&mut iter, "--indexd-socket")?;
@@ -403,10 +397,8 @@ mod tests {
             "--no-delete".to_owned(),
             "--archive-root".to_owned(),
             "/data/teslausb/archive".to_owned(),
-            "--indexd-db".to_owned(),
-            "/var/lib/teslausb/index.sqlite3".to_owned(),
-            "--scannerd-read-socket".to_owned(),
-            "/run/teslausb/scannerd-read.sock".to_owned(),
+            "--volume-image".to_owned(),
+            "/data/teslausb/teslacam.img".to_owned(),
         ];
         let parsed = match parse_serve_args(&args) {
             Ok(parsed) => parsed,
@@ -419,12 +411,8 @@ mod tests {
             Some("/data/teslausb/archive")
         );
         assert_eq!(
-            parsed.indexd_db.to_str(),
-            Some("/var/lib/teslausb/index.sqlite3")
-        );
-        assert_eq!(
-            parsed.scannerd_read_socket.to_str(),
-            Some("/run/teslausb/scannerd-read.sock")
+            parsed.volume_image.to_str(),
+            Some("/data/teslausb/teslacam.img")
         );
     }
 

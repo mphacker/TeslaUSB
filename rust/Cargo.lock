@@ -607,6 +607,7 @@ dependencies = [
  "indexd",
  "libc",
  "rusqlite",
+ "scannerd",
  "serde",
  "serde_json",
  "sha2",

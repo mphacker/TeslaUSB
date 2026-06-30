@@ -42,6 +42,10 @@ pub struct Candidate {
     pub ended_at: i64,
     /// Clip duration in seconds when known.
     pub duration_s: Option<i64>,
+    /// Source exFAT volume serial from the boot sector.
+    pub source_volume_serial: u32,
+    /// Stable source fingerprint for archive-local dedup marker matching.
+    pub source_fingerprint: String,
     /// Live `ro_usb` angles to copy.
     pub angles: Vec<CandidateAngle>,
 }
@@ -160,6 +164,8 @@ impl SqliteCandidateReader {
                 started_at,
                 ended_at,
                 duration_s: duration_from_real(duration_raw),
+                source_volume_serial: 0,
+                source_fingerprint: format!("sqlite:{clip_id}"),
                 angles,
             });
         }

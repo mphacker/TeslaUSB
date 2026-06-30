@@ -1,6 +1,6 @@
 # ADR 0004 — `retentiond` archives via `scannerd` `ReadFile` + read-only `indexd` catalog; never mounts `teslacam.img`
 
-- **Status:** Accepted
+- **Status:** Superseded by [ADR 0005](0005-retentiond-self-sufficient-archive-read.md)
 - **Date:** 2026-06-19
 - **Deciders:** operator; Opus (orchestrator) reconciled with two independent GPT-5.5 adversarial reviews
 - **Scope:** `retentiond`, `scannerd`, `indexd`, `docs/specs/{retentiond,scannerd}.md`, `docs/specs/contracts/scannerd-readfile.md`

@@ -55,3 +55,6 @@ pub mod serve;
 pub mod status;
 pub mod time;
 pub mod value;
+/// Volume-image-backed `RecentClips` candidate inventory (`scannerd` library path).
+pub mod volume_source;
+mod volume_reader;

@@ -190,6 +190,52 @@
 >    copies instead of publishing them; spec `contracts/indexd-archive-register.md` §9;
 >    FU-1..FU-6 filed) — and the scannerd VDL-clamp check (still open, gated:C3).
 >
+> **⚠️ SELF-SUFFICIENT ARCHIVER re-architecture (ADR-0005) — DONE + HARDWARE-PROVEN 2026-06-29.**
+> Triggered by a real data-loss incident: a return drive's footage was permanently lost
+> because the old `retentiond` depended on `indexd` (work-list) **and** `scannerd` (clip
+> bytes); both livelocked during the drive and retentiond restart-flapped, so nothing
+> archived and the live RecentClips circular buffer recycled the clips. Operator directive:
+> **the archiver must be independent of every other daemon and always operational**, and
+> **I/O/CPU/memory efficient** (constrained Pi sharing one microSD with live recording).
+> Re-implemented via two trait seams feeding the UNCHANGED archive pipeline: (1)
+> `VolumeCandidateSource` reads `TeslaCam/RecentClips/*` directly from `teslacam.img` via
+> scannerd's *library* (compile-time dep, **not** the daemon) — targeted root→TeslaCam→
+> RecentClips descent, exFAT decode via `teslausb_core::dir_decode`, 2-scan/60s stability
+> gate; (2) `VolumeReadFileClient` reads bytes volume-direct via `pread`. Dedup is
+> **archive-local, content-addressed on-disk markers** (`.retentiond/markers/*.json`, keyed
+> on canonical_key + cheap FAT-chain `source_fingerprint`, no clip-byte reads); indexd
+> registration is **best-effort** via a durable outbox (`.retentiond/register-outbox.json`)
+> and NEVER blocks archiving. Unit (`deploy/systemd/retentiond.service`) is now
+> dependency-free: `Restart=always`, `RestartSec=5`, `StartLimitIntervalSec=0`,
+> `IOSchedulingClass=idle`, `CPUWeight=10`/`IOWeight=10`, `OOMScoreAdjust=100`, `LimitCORE=0`,
+> `RequiresMountsFor=/data/teslausb`. 162 tests pass, clippy clean, aarch64 cross-build green.
+>
+> **Hardware deploy (cybertruckusb.local) under the dead-man rails — PROVEN:**
+> - First deploy canary FAILED: every cycle errored `invalid cluster 0: chain start out of
+>   range` — my targeted walk had REIMPLEMENTED scannerd's traversal but OMITTED its
+>   `is_valid_cluster(first_cluster)` guard (`walk.rs:143`); an **empty exFAT dir reports
+>   `first_cluster=0`** and `follow_chain(0)` aborted the whole cycle. Rolled back safely.
+> - Fixed: added the guard in `read_dir_entries` + `chain_digests_for_records` (+2 regression
+>   tests). Re-deployed (binary `2b9f170a…`); canary clean (NRestarts=0, no cluster-0 error,
+>   markers + outbox created, heartbeat via the Ok path).
+> - **Decisive self-sufficiency test PASSED:** stopped **both `scannerd` and `indexd`**, and
+>   retentiond kept cycling, reading the volume directly, **no dependency error, no crash**.
+>   gadgetd recording untouched throughout; `df /data` held flat (no duplication, no
+>   OS-starvation). Evidence: `files/hw-results.md`.
+>
+> **Known characteristic — cold-start migration (ONE-TIME, self-resolving):** the FIRST boot
+> of the marker-based binary has zero markers (the old binary used indexd-based dedup), so
+> its first cycle re-copies the current volume RecentClips buffer (~2 GB observed) to seed
+> markers, contending with recording and freezing the 180s health heartbeat for the duration.
+> This does **not** recur: markers persist on `/data` (survives reboot) → every later boot
+> dedups cheaply with no byte reads. A `gpt-5.5` adversarial review **NO-GO'd** a
+> size-match "adopt-existing-archive" fast-path (it could permanently bless wrong/corrupt/
+> truncated bytes = silent clip loss); a *safe* adopt would have to re-hash+re-probe the dest
+> anyway, mostly defeating the savings — so it was abandoned. **Optional follow-up (operator
+> to approve, would need a 3rd hardware deploy):** cap copies-per-cycle + per-clip heartbeat
+> so a large batch (one-time migration, or a future sentry burst) paces I/O gently and keeps
+> the worker-health row live. See ADR-0005.
+>
 > **Phase-2 (the deleter) stays deferred + GATED** — leases/recovery, indexd delete-RPC,
 > gadgetd delete-handoff client, C2 governor calibration, safety gates + explicit operator
 > opt-in. Do NOT start autonomously.

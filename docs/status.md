@@ -231,10 +231,39 @@
 > dedups cheaply with no byte reads. A `gpt-5.5` adversarial review **NO-GO'd** a
 > size-match "adopt-existing-archive" fast-path (it could permanently bless wrong/corrupt/
 > truncated bytes = silent clip loss); a *safe* adopt would have to re-hash+re-probe the dest
-> anyway, mostly defeating the savings — so it was abandoned. **Optional follow-up (operator
-> to approve, would need a 3rd hardware deploy):** cap copies-per-cycle + per-clip heartbeat
-> so a large batch (one-time migration, or a future sentry burst) paces I/O gently and keeps
-> the worker-health row live. See ADR-0005.
+> anyway, mostly defeating the savings — so it was abandoned.
+>
+> **Copies-per-cycle cap + per-clip heartbeat — IMPLEMENTED + DEPLOYED 2026-06-29 (evening).**
+> `archive_recent_once` refactored into `archive_recent_capped(.., max_copies: Option<usize>,
+> on_progress: &mut dyn FnMut())`; the old fn is now a thin `None`/no-op wrapper so all ~35
+> existing call sites/tests are unchanged. Serve loop calls it with `Some(4)`. The cap counts
+> only candidates that enter the copy phase (cheap dedup/already-pending skips do NOT consume
+> budget and do NOT fire the callback); candidates are processed **oldest-first** (= eviction
+> order, verified `volume_source.rs:435`), so the most-at-risk clip is always archived next.
+> After the cap a cycle returns → serve loop writes a fresh heartbeat and sleeps 20s (idle gap
+> = gentler on recording), then resumes next cycle (already-copied clips dedup-skip cheaply).
+> `on_progress` keeps the heartbeat live mid-batch. A `gpt-5.4-mini` adversarial review found
+> ONE real issue — the end-of-cycle heartbeat reused the loop-entry timestamp, clobbering the
+> fresher `on_progress` writes; **fixed** by stamping a fresh `cycle_end` time. 166 tests pass,
+> clippy clean, aarch64 cross-build green (binary `a52017f2…`). Hardware canary clean:
+> NRestarts=0, 0 cluster-0 errors, heartbeat `updated_at` confirmed advancing (+64s across
+> reads, no false-stale), pending=0, wifi up, `df /data` 220 G free. Dead-man cancelled; device
+> healthy overnight. ⚠️ **The cap code (`archive_driver.rs`, `main.rs`) is UNCOMMITTED** — the
+> self-sufficient core was committed as `872e5e2`, but the cap+heartbeat diff still needs a
+> commit (it IS the source of the deployed `a52017f2` binary; tested + reviewed + proven).
+>
+> **NEXT (pick up tomorrow) — marker journal: prune + in-memory index (Tier-3 follow-up).**
+> Operator asked whether a journal could avoid re-checking each marker file on restart. Finding:
+> the per-clip markers ALREADY are that journal — they persist on `/data` and make restart cheap
+> (no re-copy; the 2 GB grind only happened because the *old* binary left no markers). The
+> per-cycle cost is only ~60 tiny marker reads (the live RecentClips window), which is noise.
+> The ONE real latent issue is **unbounded marker growth** (one file per clip ever archived, no
+> pruning today → eventual SD-card dir/inode bloat). Plan (gated, needs GPT-5.5 review + hardware
+> proof because it touches the no-loss path): **(1) prune markers to the live candidate window**
+> (drop markers for keys no longer present, conservatively — never a live key); **(2) load the
+> now-small set into an in-memory `HashMap<canonical_key,(fingerprint,status)>` in `DriverState`
+> at startup** so per-cycle dedup is zero-I/O. Bounds memory/inodes/I/O permanently. Todos
+> tracked: `prune-design`, `prune-impl`.
 >
 > **Phase-2 (the deleter) stays deferred + GATED** — leases/recovery, indexd delete-RPC,
 > gadgetd delete-handoff client, C2 governor calibration, safety gates + explicit operator

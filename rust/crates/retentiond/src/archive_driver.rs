@@ -157,14 +157,48 @@ pub fn archive_recent_once(
     state: &mut DriverState,
     now_epoch_s: i64,
 ) -> io::Result<CycleReport> {
+    archive_recent_capped(
+        candidates,
+        store,
+        register,
+        state,
+        now_epoch_s,
+        None,
+        &mut || {},
+    )
+}
+
+/// Run one non-destructive archive cycle with an optional per-cycle copy cap.
+///
+/// `max_copies` limits how many candidates that enter the copy phase are
+/// processed in this cycle; `None` keeps the cycle unbounded. `on_progress` is
+/// invoked once after each processed candidate that entered copy work.
+///
+/// # Errors
+///
+/// Returns candidate-inventory failures from [`CandidateSource::list_candidates`].
+#[allow(clippy::too_many_lines)]
+pub fn archive_recent_capped(
+    candidates: &dyn CandidateSource,
+    store: &dyn ArchiveStore,
+    register: &dyn RegisterClient,
+    state: &mut DriverState,
+    now_epoch_s: i64,
+    max_copies: Option<usize>,
+    on_progress: &mut dyn FnMut(),
+) -> io::Result<CycleReport> {
     let mut report = CycleReport::default();
     load_outbox_if_needed(state);
     drain_pending(register, state, &mut report);
 
     let clips = candidates.list_candidates()?;
     report.observed = clips.len();
+    let mut copies_done: usize = 0;
 
     for candidate in clips {
+        if max_copies.is_some_and(|max| copies_done >= max) {
+            break;
+        }
         if state
             .pending
             .iter()
@@ -178,85 +212,89 @@ pub fn archive_recent_once(
             continue;
         }
 
-        let Some(archive_item_path) = archive_item_path_for_candidate(&candidate) else {
-            report.copy_failed = report.copy_failed.saturating_add(1);
-            continue;
-        };
+        if let Some(archive_item_path) = archive_item_path_for_candidate(&candidate) {
+            let mut copied_angles = Vec::with_capacity(candidate.angles.len());
+            let mut marker_angles = Vec::with_capacity(candidate.angles.len());
+            let mut segment_size_bytes = 0_i64;
+            let mut copy_failed = false;
 
-        let mut copied_angles = Vec::with_capacity(candidate.angles.len());
-        let mut marker_angles = Vec::with_capacity(candidate.angles.len());
-        let mut segment_size_bytes = 0_i64;
-        let mut copy_failed = false;
+            for angle in &candidate.angles {
+                let file_name = basename(&angle.file_ref);
+                let dest_rel = format!("{archive_item_path}/{file_name}");
+                let Ok(copy_hash) = store.copy_and_hash_dest(&angle.file_ref, &dest_rel) else {
+                    report.copy_failed = report.copy_failed.saturating_add(1);
+                    copy_failed = true;
+                    break;
+                };
 
-        for angle in &candidate.angles {
-            let file_name = basename(&angle.file_ref);
-            let dest_rel = format!("{archive_item_path}/{file_name}");
-            let Ok(copy_hash) = store.copy_and_hash_dest(&angle.file_ref, &dest_rel) else {
-                report.copy_failed = report.copy_failed.saturating_add(1);
-                copy_failed = true;
-                break;
-            };
-
-            let size_bytes = u64_to_i64_saturating(angle.size_bytes);
-            segment_size_bytes = segment_size_bytes.saturating_add(size_bytes);
-            copied_angles.push(ArchiveAngleRef {
-                camera: angle.camera.clone(),
-                file_ref: dest_rel.clone(),
-                offset_ms: angle.offset_ms,
-                duration_s: angle.duration_s,
-                size_bytes,
-            });
-            marker_angles.push(MarkerAngle {
-                camera: angle.camera.clone(),
-                file_ref: dest_rel,
-                valid_data_length: angle.size_bytes,
-                set_checksum_ok: true,
-                destination_sha256: hash_hex(copy_hash),
-            });
-        }
-
-        if copy_failed {
-            write_marker(
-                state,
-                &candidate,
-                MarkerStatus::Partial,
-                marker_angles,
-                now_epoch_s,
-            );
-            for copied in &copied_angles {
-                let _ = store.remove_dest(&copied.file_ref);
+                let size_bytes = u64_to_i64_saturating(angle.size_bytes);
+                segment_size_bytes = segment_size_bytes.saturating_add(size_bytes);
+                copied_angles.push(ArchiveAngleRef {
+                    camera: angle.camera.clone(),
+                    file_ref: dest_rel.clone(),
+                    offset_ms: angle.offset_ms,
+                    duration_s: angle.duration_s,
+                    size_bytes,
+                });
+                marker_angles.push(MarkerAngle {
+                    camera: angle.camera.clone(),
+                    file_ref: dest_rel,
+                    valid_data_length: angle.size_bytes,
+                    set_checksum_ok: true,
+                    destination_sha256: hash_hex(copy_hash),
+                });
             }
-            continue;
+
+            if copy_failed {
+                write_marker(
+                    state,
+                    &candidate,
+                    MarkerStatus::Partial,
+                    marker_angles,
+                    now_epoch_s,
+                );
+                for copied in &copied_angles {
+                    let _ = store.remove_dest(&copied.file_ref);
+                }
+            } else {
+                let reg = ArchiveRegistration {
+                    canonical_key: candidate.canonical_key.clone(),
+                    folder_class: "RecentClips".to_owned(),
+                    partition: candidate.partition.clone(),
+                    started_at: candidate.started_at,
+                    ended_at: candidate.ended_at,
+                    duration_s: candidate.duration_s,
+                    archive: ArchiveItemRef {
+                        path: archive_item_path,
+                        size_bytes: segment_size_bytes,
+                        file_count: usize_to_i64_saturating(copied_angles.len()),
+                        archived_at: now_epoch_s,
+                    },
+                    angles: copied_angles,
+                };
+
+                finalize_registration(
+                    store,
+                    register,
+                    reg,
+                    state,
+                    &mut report,
+                    RegistrationContext {
+                        candidate: &candidate,
+                        marker_angles,
+                        now_epoch_s,
+                    },
+                );
+            }
+        } else {
+            report.copy_failed = report.copy_failed.saturating_add(1);
         }
 
-        let reg = ArchiveRegistration {
-            canonical_key: candidate.canonical_key.clone(),
-            folder_class: "RecentClips".to_owned(),
-            partition: candidate.partition.clone(),
-            started_at: candidate.started_at,
-            ended_at: candidate.ended_at,
-            duration_s: candidate.duration_s,
-            archive: ArchiveItemRef {
-                path: archive_item_path,
-                size_bytes: segment_size_bytes,
-                file_count: usize_to_i64_saturating(copied_angles.len()),
-                archived_at: now_epoch_s,
-            },
-            angles: copied_angles,
-        };
-
-        finalize_registration(
-            store,
-            register,
-            reg,
-            state,
-            &mut report,
-            RegistrationContext {
-                candidate: &candidate,
-                marker_angles,
-                now_epoch_s,
-            },
-        );
+        copies_done = copies_done.saturating_add(1);
+        on_progress();
+        if max_copies.is_some_and(|max| copies_done >= max) {
+            break;
+        }
     }
 
     report.pending_len = state.pending.len();
@@ -702,7 +740,7 @@ mod tests {
 
     use super::{
         DriverState, MAX_REGISTER_ATTEMPTS, MarkerStatus, OUTBOX_FILE, PersistedOutbox,
-        RegistrationDisposition, archive_recent_once, basename, read_marker,
+        RegistrationDisposition, archive_recent_capped, archive_recent_once, basename, read_marker,
     };
 
     const KEY: &str = "0:TeslaCam/RecentClips/2026-06-19_10-00-00";
@@ -752,6 +790,21 @@ mod tests {
                 },
             ],
         }
+    }
+
+    fn unique_candidate(id: usize, started_at: i64) -> Candidate {
+        let mut candidate = sample_candidate();
+        let clip_id = i64::try_from(id).expect("id fits in i64");
+        let timestamp = format!("2026-06-19_10-00-{id:02}");
+        candidate.clip_id = clip_id;
+        candidate.canonical_key = format!("0:TeslaCam/RecentClips/{timestamp}");
+        candidate.started_at = started_at;
+        candidate.ended_at = started_at.saturating_add(60);
+        candidate.source_fingerprint = format!("test-fingerprint-{id}");
+        for angle in &mut candidate.angles {
+            angle.file_ref = format!("TeslaCam/RecentClips/{timestamp}-{}-{id}.mp4", angle.camera);
+        }
+        candidate
     }
 
     #[derive(Default)]
@@ -1533,6 +1586,179 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(archive_root);
+    }
+
+    #[test]
+    fn capped_stops_after_max_copies_oldest_first() {
+        let candidates = FakeCandidates::default();
+        let clips = vec![
+            unique_candidate(1, 10),
+            unique_candidate(2, 20),
+            unique_candidate(3, 30),
+            unique_candidate(4, 40),
+            unique_candidate(5, 50),
+        ];
+        candidates.set(clips.clone());
+        let store = FakeStore::default();
+        let register = FakeRegister::default();
+        let archive_root = new_archive_root();
+        let mut state = DriverState::with_archive_root(&archive_root);
+
+        let first = archive_recent_capped(
+            &candidates,
+            &store,
+            &register,
+            &mut state,
+            1,
+            Some(2),
+            &mut || {},
+        )
+        .unwrap();
+        assert_eq!(first.registered, 2);
+        assert_eq!(store.copies.borrow().len(), 4);
+        let calls = register.live_calls.borrow();
+        assert_eq!(calls[0].canonical_key, clips[0].canonical_key);
+        assert_eq!(calls[1].canonical_key, clips[1].canonical_key);
+        drop(calls);
+
+        let second = archive_recent_capped(
+            &candidates,
+            &store,
+            &register,
+            &mut state,
+            2,
+            Some(2),
+            &mut || {},
+        )
+        .unwrap();
+        assert_eq!(second.registered, 2);
+        assert_eq!(store.copies.borrow().len(), 8);
+        let calls = register.live_calls.borrow();
+        assert_eq!(calls[2].canonical_key, clips[2].canonical_key);
+        assert_eq!(calls[3].canonical_key, clips[3].canonical_key);
+        drop(calls);
+
+        let third = archive_recent_capped(
+            &candidates,
+            &store,
+            &register,
+            &mut state,
+            3,
+            Some(2),
+            &mut || {},
+        )
+        .unwrap();
+        assert_eq!(third.registered, 1);
+        assert_eq!(store.copies.borrow().len(), 10);
+        let calls = register.live_calls.borrow();
+        assert_eq!(calls.len(), 5);
+        assert_eq!(calls[4].canonical_key, clips[4].canonical_key);
+        drop(calls);
+
+        let _ = fs::remove_dir_all(archive_root);
+    }
+
+    #[test]
+    fn capped_skips_do_not_consume_budget() {
+        let candidates = FakeCandidates::default();
+        let complete_1 = unique_candidate(1, 10);
+        let complete_2 = unique_candidate(2, 20);
+        let fresh_1 = unique_candidate(3, 30);
+        let fresh_2 = unique_candidate(4, 40);
+        let fresh_3 = unique_candidate(5, 50);
+        candidates.set(vec![complete_1.clone(), complete_2.clone()]);
+        let store = FakeStore::default();
+        let register = FakeRegister::default();
+        let archive_root = new_archive_root();
+        let mut state = DriverState::with_archive_root(&archive_root);
+
+        let seeded = archive_recent_once(&candidates, &store, &register, &mut state, 1).unwrap();
+        assert_eq!(seeded.registered, 2);
+        store.copies.borrow_mut().clear();
+        register.live_calls.borrow_mut().clear();
+
+        candidates.set(vec![
+            complete_1,
+            complete_2,
+            fresh_1.clone(),
+            fresh_2.clone(),
+            fresh_3,
+        ]);
+        let report = archive_recent_capped(
+            &candidates,
+            &store,
+            &register,
+            &mut state,
+            2,
+            Some(2),
+            &mut || {},
+        )
+        .unwrap();
+        assert_eq!(report.registered, 2);
+        assert_eq!(store.copies.borrow().len(), 4);
+        let calls = register.live_calls.borrow();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].canonical_key, fresh_1.canonical_key);
+        assert_eq!(calls[1].canonical_key, fresh_2.canonical_key);
+        drop(calls);
+
+        let _ = fs::remove_dir_all(archive_root);
+    }
+
+    #[test]
+    fn capped_invokes_on_progress_once_per_copied_clip() {
+        let candidates = FakeCandidates::default();
+        let complete = unique_candidate(1, 10);
+        let fresh_1 = unique_candidate(2, 20);
+        let fresh_2 = unique_candidate(3, 30);
+        let fresh_3 = unique_candidate(4, 40);
+        let store = FakeStore::default();
+        let register = FakeRegister::default();
+        let archive_root = new_archive_root();
+        let mut state = DriverState::with_archive_root(&archive_root);
+
+        candidates.set(vec![complete.clone()]);
+        let seeded = archive_recent_once(&candidates, &store, &register, &mut state, 1).unwrap();
+        assert_eq!(seeded.registered, 1);
+
+        candidates.set(vec![complete, fresh_1, fresh_2, fresh_3]);
+        let progress_ticks = Cell::new(0_usize);
+        let report = archive_recent_capped(
+            &candidates,
+            &store,
+            &register,
+            &mut state,
+            2,
+            Some(3),
+            &mut || progress_ticks.set(progress_ticks.get().saturating_add(1)),
+        )
+        .unwrap();
+
+        assert_eq!(report.registered, 3);
+        assert_eq!(progress_ticks.get(), 3);
+        assert_eq!(register.live_calls.borrow().len(), 4);
+
+        let _ = fs::remove_dir_all(archive_root);
+    }
+
+    #[test]
+    fn archive_recent_once_unbounded_preserves_behavior() {
+        let candidates = FakeCandidates::default();
+        candidates.set(vec![
+            unique_candidate(1, 10),
+            unique_candidate(2, 20),
+            unique_candidate(3, 30),
+            unique_candidate(4, 40),
+            unique_candidate(5, 50),
+        ]);
+        let store = FakeStore::default();
+        let register = FakeRegister::default();
+        let mut state = DriverState::new();
+
+        let report = archive_recent_once(&candidates, &store, &register, &mut state, 1).unwrap();
+        assert_eq!(report.registered, 5);
+        assert_eq!(store.copies.borrow().len(), 10);
+        assert_eq!(register.live_calls.borrow().len(), 5);
     }
 
     #[test]

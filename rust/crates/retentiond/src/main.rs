@@ -24,7 +24,7 @@ use live::LiveArchiveStore;
 #[cfg(unix)]
 use serde::Serialize;
 #[cfg(unix)]
-use retentiond::archive_driver::{DriverState, archive_recent_once};
+use retentiond::archive_driver::{DriverState, archive_recent_capped};
 #[cfg(unix)]
 use retentiond::read_client::VolumeReadFileClient;
 #[cfg(unix)]
@@ -40,6 +40,8 @@ const DEFAULT_INTERVAL_SECS: u64 = 20;
 const DEFAULT_VOLUME_IMAGE: &str = "/data/teslausb/teslacam.img";
 #[cfg(unix)]
 const DEFAULT_HEALTH_FILE: &str = "/run/teslausb/retentiond.health.json";
+#[cfg(unix)]
+const MAX_COPIES_PER_CYCLE: usize = 4;
 
 #[cfg(unix)]
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
@@ -150,8 +152,36 @@ fn run_serve(args: &[String]) -> ExitCode {
 
     while !SHUTDOWN.load(Ordering::Relaxed) {
         let now_epoch_s = now_epoch_s_saturating();
-        match archive_recent_once(&candidates, &store, &register, &mut state, now_epoch_s) {
+        let result = {
+            let pending_snapshot = last_pending;
+            let mut on_progress = || {
+                let t = now_epoch_s_saturating();
+                write_health_heartbeat_best_effort(
+                    &health_file,
+                    t,
+                    pending_snapshot,
+                    t,
+                    &mut health_write_error_logged,
+                );
+            };
+            archive_recent_capped(
+                &candidates,
+                &store,
+                &register,
+                &mut state,
+                now_epoch_s,
+                Some(MAX_COPIES_PER_CYCLE),
+                &mut on_progress,
+            )
+        };
+        match result {
             Ok(report) => {
+                // Stamp the end-of-cycle heartbeat with a FRESH timestamp, not the
+                // loop-entry `now_epoch_s`. A long cycle (e.g. a cold-start batch)
+                // advances real time while it runs; reusing the start time here would
+                // clobber the fresher timestamps written by `on_progress` and could
+                // falsely age the worker toward "stale" during the next sleep.
+                let cycle_end = now_epoch_s_saturating();
                 let has_activity = report.observed > 0
                     || report.registered > 0
                     || report.registered_from_pending > 0
@@ -186,12 +216,12 @@ fn run_serve(args: &[String]) -> ExitCode {
                 }
                 if report.observed > 0 || report.registered > 0 || report.registered_from_pending > 0
                 {
-                    last_progress_at = now_epoch_s;
+                    last_progress_at = cycle_end;
                 }
                 last_pending = u64::try_from(report.pending_len).unwrap_or(u64::MAX);
                 write_health_heartbeat_best_effort(
                     &health_file,
-                    now_epoch_s,
+                    cycle_end,
                     last_pending,
                     last_progress_at,
                     &mut health_write_error_logged,

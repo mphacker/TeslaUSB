@@ -3,7 +3,7 @@
 //! Inventory comes from injected candidates, and source bytes are copied by the
 //! injected `ArchiveStore` (live store uses `ReadFile`).
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Write};
@@ -22,10 +22,15 @@ use crate::register_client::{
 pub const MAX_REGISTER_ATTEMPTS: u32 = 5;
 /// Maximum number of pending register payloads held in memory.
 pub const MAX_PENDING: usize = 256;
+const PRUNE_MIN_MISSED_SCANS: u32 = 40;
+const PRUNE_GRACE_SECS: i64 = 3600;
+const PRUNE_EVERY_CYCLES: u32 = 5;
+const PRUNE_MAX_DELETIONS_PER_CYCLE: usize = 16;
 const STATE_SCHEMA: u32 = 1;
 const MARKER_SCHEMA: u32 = 1;
 const MARKER_DIR: &str = ".retentiond/markers";
 const OUTBOX_FILE: &str = ".retentiond/register-outbox.json";
+const STAGING_DIR: &str = ".retentiond/staging";
 
 /// One queued register payload awaiting retry.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -47,6 +52,9 @@ pub struct DriverState {
     pending: VecDeque<PendingRegistration>,
     archive_root: Option<PathBuf>,
     outbox_loaded: bool,
+    markers: HashMap<String, MarkerSummary>,
+    markers_loaded: bool,
+    prune_cycle_counter: u32,
 }
 
 impl DriverState {
@@ -57,6 +65,9 @@ impl DriverState {
             pending: VecDeque::new(),
             archive_root: None,
             outbox_loaded: false,
+            markers: HashMap::new(),
+            markers_loaded: false,
+            prune_cycle_counter: 0,
         }
     }
 
@@ -67,6 +78,9 @@ impl DriverState {
             pending: VecDeque::new(),
             archive_root: Some(archive_root.into()),
             outbox_loaded: false,
+            markers: HashMap::new(),
+            markers_loaded: false,
+            prune_cycle_counter: 0,
         }
     }
 
@@ -74,6 +88,9 @@ impl DriverState {
     pub fn set_archive_root(&mut self, archive_root: impl Into<PathBuf>) {
         self.archive_root = Some(archive_root.into());
         self.outbox_loaded = false;
+        self.markers_loaded = false;
+        self.markers.clear();
+        self.prune_cycle_counter = 0;
     }
 }
 
@@ -112,6 +129,14 @@ struct ClipMarker {
     angles: Vec<MarkerAngle>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MarkerSummary {
+    source_fingerprint: String,
+    status: MarkerStatus,
+    last_seen_epoch: i64,
+    missed_scans: u32,
+}
+
 /// One cycle report for the archive-recent-only loop.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CycleReport {
@@ -137,6 +162,8 @@ pub struct CycleReport {
     pub dropped_poison: usize,
     /// Pending queue length at cycle end.
     pub pending_len: usize,
+    /// Count of marker files pruned this cycle.
+    pub pruned_markers: usize,
 }
 
 /// Run one non-destructive archive cycle.
@@ -164,6 +191,7 @@ pub fn archive_recent_once(
         state,
         now_epoch_s,
         None,
+        false,
         &mut || {},
     )
 }
@@ -177,7 +205,7 @@ pub fn archive_recent_once(
 /// # Errors
 ///
 /// Returns candidate-inventory failures from [`CandidateSource::list_candidates`].
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub fn archive_recent_capped(
     candidates: &dyn CandidateSource,
     store: &dyn ArchiveStore,
@@ -185,14 +213,21 @@ pub fn archive_recent_capped(
     state: &mut DriverState,
     now_epoch_s: i64,
     max_copies: Option<usize>,
+    prune_enabled: bool,
     on_progress: &mut dyn FnMut(),
 ) -> io::Result<CycleReport> {
     let mut report = CycleReport::default();
+    load_markers_if_needed(state);
     load_outbox_if_needed(state);
     drain_pending(register, state, &mut report);
 
     let clips = candidates.list_candidates()?;
     report.observed = clips.len();
+    refresh_marker_scan_state(state, &clips, now_epoch_s);
+    state.prune_cycle_counter = state.prune_cycle_counter.saturating_add(1);
+    if prune_enabled && state.prune_cycle_counter % PRUNE_EVERY_CYCLES == 0 {
+        report.pruned_markers = prune_markers(state, now_epoch_s);
+    }
     let mut copies_done: usize = 0;
 
     for candidate in clips {
@@ -212,16 +247,24 @@ pub fn archive_recent_capped(
             continue;
         }
 
+        // Defensive: never stage/register a candidate with no angles — it would
+        // otherwise be marked CompleteLive as an empty (zero-file) archive item.
+        if candidate.angles.is_empty() {
+            report.copy_failed = report.copy_failed.saturating_add(1);
+            continue;
+        }
+
         if let Some(archive_item_path) = archive_item_path_for_candidate(&candidate) {
-            let mut copied_angles = Vec::with_capacity(candidate.angles.len());
+            let mut staged_angles = Vec::with_capacity(candidate.angles.len());
             let mut marker_angles = Vec::with_capacity(candidate.angles.len());
             let mut segment_size_bytes = 0_i64;
             let mut copy_failed = false;
 
             for angle in &candidate.angles {
                 let file_name = basename(&angle.file_ref);
-                let dest_rel = format!("{archive_item_path}/{file_name}");
-                let Ok(copy_hash) = store.copy_and_hash_dest(&angle.file_ref, &dest_rel) else {
+                let final_rel = format!("{archive_item_path}/{file_name}");
+                let staging_rel = format!("{STAGING_DIR}/{archive_item_path}/{file_name}");
+                let Ok(copy_hash) = store.copy_and_hash_dest(&angle.file_ref, &staging_rel) else {
                     report.copy_failed = report.copy_failed.saturating_add(1);
                     copy_failed = true;
                     break;
@@ -229,16 +272,16 @@ pub fn archive_recent_capped(
 
                 let size_bytes = u64_to_i64_saturating(angle.size_bytes);
                 segment_size_bytes = segment_size_bytes.saturating_add(size_bytes);
-                copied_angles.push(ArchiveAngleRef {
+                staged_angles.push(ArchiveAngleRef {
                     camera: angle.camera.clone(),
-                    file_ref: dest_rel.clone(),
+                    file_ref: final_rel.clone(),
                     offset_ms: angle.offset_ms,
                     duration_s: angle.duration_s,
                     size_bytes,
                 });
                 marker_angles.push(MarkerAngle {
                     camera: angle.camera.clone(),
-                    file_ref: dest_rel,
+                    file_ref: final_rel,
                     valid_data_length: angle.size_bytes,
                     set_checksum_ok: true,
                     destination_sha256: hash_hex(copy_hash),
@@ -246,6 +289,7 @@ pub fn archive_recent_capped(
             }
 
             if copy_failed {
+                discard_staged_files(store, &staged_angles, 0);
                 write_marker(
                     state,
                     &candidate,
@@ -253,38 +297,58 @@ pub fn archive_recent_capped(
                     marker_angles,
                     now_epoch_s,
                 );
-                for copied in &copied_angles {
-                    let _ = store.remove_dest(&copied.file_ref);
-                }
             } else {
-                let reg = ArchiveRegistration {
-                    canonical_key: candidate.canonical_key.clone(),
-                    folder_class: "RecentClips".to_owned(),
-                    partition: candidate.partition.clone(),
-                    started_at: candidate.started_at,
-                    ended_at: candidate.ended_at,
-                    duration_s: candidate.duration_s,
-                    archive: ArchiveItemRef {
-                        path: archive_item_path,
-                        size_bytes: segment_size_bytes,
-                        file_count: usize_to_i64_saturating(copied_angles.len()),
-                        archived_at: now_epoch_s,
-                    },
-                    angles: copied_angles,
-                };
-
-                finalize_registration(
-                    store,
-                    register,
-                    reg,
-                    state,
-                    &mut report,
-                    RegistrationContext {
-                        candidate: &candidate,
+                let mut promoted_angles = Vec::with_capacity(staged_angles.len());
+                let mut promote_failed_at = None;
+                for (idx, staged) in staged_angles.iter().enumerate() {
+                    let staging_rel = format!("{STAGING_DIR}/{}", staged.file_ref);
+                    if store.promote_dest(&staging_rel, &staged.file_ref).is_err() {
+                        report.copy_failed = report.copy_failed.saturating_add(1);
+                        promote_failed_at = Some(idx);
+                        break;
+                    }
+                    promoted_angles.push(staged.clone());
+                }
+                if let Some(failed_idx) = promote_failed_at {
+                    discard_staged_files(store, &staged_angles, failed_idx);
+                    write_marker(
+                        state,
+                        &candidate,
+                        MarkerStatus::Partial,
                         marker_angles,
                         now_epoch_s,
-                    },
-                );
+                    );
+                } else {
+                    remove_empty_staging_dirs_best_effort(state, &archive_item_path);
+                    let reg = ArchiveRegistration {
+                        canonical_key: candidate.canonical_key.clone(),
+                        folder_class: "RecentClips".to_owned(),
+                        partition: candidate.partition.clone(),
+                        started_at: candidate.started_at,
+                        ended_at: candidate.ended_at,
+                        duration_s: candidate.duration_s,
+                        archive: ArchiveItemRef {
+                            path: archive_item_path,
+                            size_bytes: segment_size_bytes,
+                            file_count: usize_to_i64_saturating(promoted_angles.len()),
+                            archived_at: now_epoch_s,
+                        },
+                        angles: promoted_angles,
+                    };
+
+                    finalize_registration(
+                        store,
+                        register,
+                        reg,
+                        state,
+                        &mut report,
+                        RegistrationContext {
+                            candidate: &candidate,
+                            marker_angles,
+                            now_epoch_s,
+                        },
+                    );
+                }
             }
         } else {
             report.copy_failed = report.copy_failed.saturating_add(1);
@@ -394,6 +458,88 @@ fn archive_item_path_for_candidate(candidate: &Candidate) -> Option<String> {
     }
     let date = timestamp.get(..10)?;
     Some(format!("RecentClips/{date}/{timestamp}"))
+}
+
+fn refresh_marker_scan_state(state: &mut DriverState, clips: &[Candidate], now_epoch_s: i64) {
+    if state.markers.is_empty() {
+        return;
+    }
+    let observed_keys: HashSet<&str> = clips.iter().map(|clip| clip.canonical_key.as_str()).collect();
+    for (canonical_key, marker) in &mut state.markers {
+        if observed_keys.contains(canonical_key.as_str()) {
+            marker.missed_scans = 0;
+            marker.last_seen_epoch = now_epoch_s;
+        } else {
+            marker.missed_scans = marker.missed_scans.saturating_add(1);
+        }
+    }
+}
+
+fn prune_markers(state: &mut DriverState, now_epoch_s: i64) -> usize {
+    let Some(root) = state.archive_root.as_ref() else {
+        return 0;
+    };
+    let to_prune: Vec<String> = state
+        .markers
+        .iter()
+        .filter(|(_, marker)| {
+            marker.missed_scans >= PRUNE_MIN_MISSED_SCANS
+                && now_epoch_s.saturating_sub(marker.last_seen_epoch) >= PRUNE_GRACE_SECS
+        })
+        .map(|(key, _)| key.clone())
+        .take(PRUNE_MAX_DELETIONS_PER_CYCLE)
+        .collect();
+    let mut pruned = 0_usize;
+    for key in &to_prune {
+        let marker_file = marker_path(root, key);
+        match fs::remove_file(&marker_file) {
+            Ok(()) => {
+                state.markers.remove(key);
+                pruned = pruned.saturating_add(1);
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                // Already absent: index and disk now agree.
+                state.markers.remove(key);
+                pruned = pruned.saturating_add(1);
+            }
+            Err(err) => {
+                // Deletion failed and the file still exists: keep the index entry
+                // so the in-memory map never claims a marker is gone while it is
+                // still on disk. It is re-evaluated next prune pass (and rebuilt
+                // from disk on restart).
+                let mut stderr = io::stderr();
+                let _ = writeln!(
+                    &mut stderr,
+                    "retentiond archive_recent_only: failed to prune marker {}: {err}",
+                    marker_file.display()
+                );
+            }
+        }
+    }
+    pruned
+}
+
+fn discard_staged_files(store: &dyn ArchiveStore, staged: &[ArchiveAngleRef], start_idx: usize) {
+    for angle in staged.iter().skip(start_idx) {
+        let staging_rel = format!("{STAGING_DIR}/{}", angle.file_ref);
+        let _ = store.remove_dest(&staging_rel);
+    }
+}
+
+fn remove_empty_staging_dirs_best_effort(state: &DriverState, archive_item_path: &str) {
+    let Some(root) = state.archive_root.as_ref() else {
+        return;
+    };
+    let mut current = root.join(STAGING_DIR).join(archive_item_path);
+    let staging_root = root.join(STAGING_DIR);
+    while let Ok(()) = fs::remove_dir(&current) {
+        if current == staging_root {
+            break;
+        }
+        if !current.pop() {
+            break;
+        }
+    }
 }
 
 fn drain_pending(register: &dyn RegisterClient, state: &mut DriverState, report: &mut CycleReport) {
@@ -510,6 +656,92 @@ fn load_outbox_if_needed(state: &mut DriverState) {
     }
 }
 
+fn load_markers_if_needed(state: &mut DriverState) {
+    if state.markers_loaded {
+        return;
+    }
+    state.markers_loaded = true;
+    let Some(root) = state.archive_root.as_ref() else {
+        return;
+    };
+    let _ = fs::remove_dir_all(root.join(STAGING_DIR));
+
+    let marker_dir = root.join(MARKER_DIR);
+    let entries = match fs::read_dir(&marker_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return,
+        Err(err) => {
+            let mut stderr = io::stderr();
+            let _ = writeln!(
+                &mut stderr,
+                "retentiond archive_recent_only: failed to scan marker directory {}: {err}",
+                marker_dir.display()
+            );
+            return;
+        }
+    };
+
+    for entry in entries {
+        let path = match entry {
+            Ok(entry) => entry.path(),
+            Err(err) => {
+                let mut stderr = io::stderr();
+                let _ = writeln!(
+                    &mut stderr,
+                    "retentiond archive_recent_only: failed to enumerate marker directory {}: {err}",
+                    marker_dir.display()
+                );
+                continue;
+            }
+        };
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let raw = match fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(err) => {
+                let mut stderr = io::stderr();
+                let _ = writeln!(
+                    &mut stderr,
+                    "retentiond archive_recent_only: failed to read marker {}: {err}",
+                    path.display()
+                );
+                continue;
+            }
+        };
+        let Ok(marker) = serde_json::from_str::<ClipMarker>(&raw) else {
+            continue;
+        };
+        if marker.schema != MARKER_SCHEMA {
+            continue;
+        }
+        // Defense-in-depth: trust a marker's `canonical_key` only when the file
+        // name matches the canonical `stable_hex(canonical_key).json` we would
+        // have written. This rejects a stray/duplicate/tampered marker whose
+        // body claims a different clip, which could otherwise suppress a real
+        // copy via the in-memory dedup index.
+        let expected_stem = stable_hex(marker.canonical_key.as_bytes());
+        if path.file_stem().and_then(|stem| stem.to_str()) != Some(expected_stem.as_str()) {
+            let mut stderr = io::stderr();
+            let _ = writeln!(
+                &mut stderr,
+                "retentiond archive_recent_only: ignoring off-path marker {} (key/name mismatch)",
+                path.display()
+            );
+            continue;
+        }
+        state.markers.insert(
+            marker.canonical_key,
+            MarkerSummary {
+                source_fingerprint: marker.source_fingerprint,
+                status: marker.status,
+                last_seen_epoch: marker.updated_at,
+                missed_scans: 0,
+            },
+        );
+    }
+}
+
 fn persist_outbox(state: &DriverState) {
     let Some(root) = state.archive_root.as_ref() else {
         return;
@@ -557,13 +789,14 @@ fn stage_outbox_registration(
 }
 
 fn marker_is_complete_live(state: &DriverState, candidate: &Candidate) -> bool {
-    let Some(marker) = read_marker(state, candidate) else {
+    let Some(marker) = state.markers.get(&candidate.canonical_key) else {
         return false;
     };
     marker.status == MarkerStatus::CompleteLive
         && marker.source_fingerprint == candidate.source_fingerprint
 }
 
+#[cfg(test)]
 fn read_marker(state: &DriverState, candidate: &Candidate) -> Option<ClipMarker> {
     let root = state.archive_root.as_ref()?;
     let path = marker_path(root, &candidate.canonical_key);
@@ -576,7 +809,7 @@ fn read_marker(state: &DriverState, candidate: &Candidate) -> Option<ClipMarker>
 }
 
 fn write_marker(
-    state: &DriverState,
+    state: &mut DriverState,
     candidate: &Candidate,
     status: MarkerStatus,
     angles: Vec<MarkerAngle>,
@@ -603,7 +836,17 @@ fn write_marker(
             "retentiond archive_recent_only: failed to persist marker {}: {err}",
             path.display()
         );
+        return;
     }
+    state.markers.insert(
+        candidate.canonical_key.clone(),
+        MarkerSummary {
+            source_fingerprint: candidate.source_fingerprint.clone(),
+            status,
+            last_seen_epoch: now_epoch_s,
+            missed_scans: 0,
+        },
+    );
 }
 
 fn marker_path(root: &Path, canonical_key: &str) -> PathBuf {
@@ -733,14 +976,17 @@ mod tests {
     use crate::{
         archive::ArchiveStore,
         candidates::{Candidate, CandidateAngle, CandidateSource},
+        durability::write_json_durable,
         io::{ContentHash, FileIdentity},
         probe::{ArchivePlayability, UnplayableReason},
         register_client::{ArchiveRegistration, RegisterClient, RegisterError, RegistrationOk},
     };
 
     use super::{
-        DriverState, MAX_REGISTER_ATTEMPTS, MarkerStatus, OUTBOX_FILE, PersistedOutbox,
-        RegistrationDisposition, archive_recent_capped, archive_recent_once, basename, read_marker,
+        ClipMarker, CycleReport, DriverState, MARKER_SCHEMA, MAX_REGISTER_ATTEMPTS, MarkerAngle,
+        MarkerStatus, MarkerSummary, OUTBOX_FILE, PRUNE_EVERY_CYCLES, PRUNE_GRACE_SECS,
+        PRUNE_MIN_MISSED_SCANS, PersistedOutbox, RegistrationDisposition, archive_recent_capped,
+        archive_recent_once, basename, marker_path, read_marker,
     };
 
     const KEY: &str = "0:TeslaCam/RecentClips/2026-06-19_10-00-00";
@@ -807,6 +1053,47 @@ mod tests {
         candidate
     }
 
+    fn replacement_candidate_with_fingerprint(candidate: &Candidate, fingerprint: &str) -> Candidate {
+        let mut replacement = candidate.clone();
+        replacement.source_fingerprint = fingerprint.to_owned();
+        replacement
+    }
+
+    fn write_test_marker(
+        archive_root: &std::path::Path,
+        candidate: &Candidate,
+        status: MarkerStatus,
+        updated_at: i64,
+        schema: u32,
+    ) {
+        let marker = ClipMarker {
+            schema,
+            canonical_key: candidate.canonical_key.clone(),
+            source_fingerprint: candidate.source_fingerprint.clone(),
+            volume_serial: candidate.source_volume_serial,
+            partition: candidate.partition.clone(),
+            status,
+            updated_at,
+            angles: vec![MarkerAngle {
+                camera: "front".to_owned(),
+                file_ref: format!("{PATH}/2026-06-19_10-00-00-front.mp4"),
+                valid_data_length: 10,
+                set_checksum_ok: true,
+                destination_sha256: "00".repeat(32),
+            }],
+        };
+        let marker_file = marker_path(archive_root, &candidate.canonical_key);
+        write_json_durable(&marker_file, &marker).expect("write test marker");
+    }
+
+    fn final_front_path() -> String {
+        "RecentClips/2026-06-19/2026-06-19_10-00-00/2026-06-19_10-00-00-front.mp4".to_owned()
+    }
+
+    fn final_back_path() -> String {
+        "RecentClips/2026-06-19/2026-06-19_10-00-00/2026-06-19_10-00-00-back.mp4".to_owned()
+    }
+
     #[derive(Default)]
     struct FakeCandidates {
         clips: RefCell<Vec<Candidate>>,
@@ -827,6 +1114,7 @@ mod tests {
     #[derive(Default)]
     struct FakeStore {
         copies: RefCell<Vec<(String, String)>>,
+        promotions: RefCell<Vec<(String, String)>>,
         fail_once_src: RefCell<Option<String>>,
         removed: RefCell<Vec<String>>,
         landed: RefCell<HashSet<String>>,
@@ -848,6 +1136,7 @@ mod tests {
         fn set_probe_error(&self, dest_rel: &str) {
             self.probe_error.borrow_mut().insert(dest_rel.to_owned());
         }
+
     }
 
     impl ArchiveStore for FakeStore {
@@ -874,6 +1163,21 @@ mod tests {
         fn remove_dest(&self, dest_rel: &str) -> io::Result<()> {
             self.removed.borrow_mut().push(dest_rel.to_owned());
             self.landed.borrow_mut().remove(dest_rel);
+            Ok(())
+        }
+
+        fn promote_dest(&self, staging_rel: &str, final_rel: &str) -> io::Result<()> {
+            let mut landed = self.landed.borrow_mut();
+            if !landed.remove(staging_rel) {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("staging file not found: {staging_rel}"),
+                ));
+            }
+            landed.insert(final_rel.to_owned());
+            self.promotions
+                .borrow_mut()
+                .push((staging_rel.to_owned(), final_rel.to_owned()));
             Ok(())
         }
 
@@ -1037,12 +1341,13 @@ mod tests {
         assert_eq!(copies.len(), 2);
         assert_eq!(
             copies[0].1,
-            "RecentClips/2026-06-19/2026-06-19_10-00-00/2026-06-19_10-00-00-front.mp4"
+            ".retentiond/staging/RecentClips/2026-06-19/2026-06-19_10-00-00/2026-06-19_10-00-00-front.mp4"
         );
         assert_eq!(
             copies[1].1,
-            "RecentClips/2026-06-19/2026-06-19_10-00-00/2026-06-19_10-00-00-back.mp4"
+            ".retentiond/staging/RecentClips/2026-06-19/2026-06-19_10-00-00/2026-06-19_10-00-00-back.mp4"
         );
+        assert_eq!(store.promotions.borrow().len(), 2);
 
         let calls = register.live_calls.borrow();
         assert_eq!(calls.len(), 1);
@@ -1079,7 +1384,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_failure_after_first_angle_removes_landed_dest_and_retries_cleanly() {
+    fn copy_failure_after_first_angle_discards_staged_dest_and_retries_cleanly() {
         let candidates = FakeCandidates::default();
         candidates.set(vec![sample_candidate()]);
         let store = FakeStore::default();
@@ -1093,7 +1398,7 @@ mod tests {
         assert_eq!(
             store.removed.borrow().as_slice(),
             &[
-                "RecentClips/2026-06-19/2026-06-19_10-00-00/2026-06-19_10-00-00-front.mp4"
+                ".retentiond/staging/RecentClips/2026-06-19/2026-06-19_10-00-00/2026-06-19_10-00-00-front.mp4"
                     .to_owned()
             ]
         );
@@ -1524,6 +1829,461 @@ mod tests {
     }
 
     #[test]
+    fn index_load() {
+        let complete_candidate = sample_candidate();
+        let partial_candidate = unique_candidate(2, 20);
+        let archive_root = new_archive_root();
+        write_test_marker(
+            &archive_root,
+            &complete_candidate,
+            MarkerStatus::CompleteLive,
+            10,
+            MARKER_SCHEMA,
+        );
+        write_test_marker(
+            &archive_root,
+            &partial_candidate,
+            MarkerStatus::Partial,
+            10,
+            MARKER_SCHEMA,
+        );
+
+        let candidates = FakeCandidates::default();
+        candidates.set(vec![complete_candidate, partial_candidate.clone()]);
+        let store = FakeStore::default();
+        let register = FakeRegister::default();
+        let mut state = DriverState::with_archive_root(&archive_root);
+
+        let report = archive_recent_once(&candidates, &store, &register, &mut state, 100).unwrap();
+        assert_eq!(report.registered, 1);
+        assert_eq!(store.copies.borrow().len(), 2);
+        assert_eq!(register.live_calls.borrow().len(), 1);
+        assert_eq!(
+            register.live_calls.borrow()[0].canonical_key,
+            partial_candidate.canonical_key
+        );
+
+        let _ = fs::remove_dir_all(archive_root);
+    }
+
+    #[test]
+    fn index_load_skips_bad_schema() {
+        let candidate = sample_candidate();
+        let archive_root = new_archive_root();
+        write_test_marker(
+            &archive_root,
+            &candidate,
+            MarkerStatus::CompleteLive,
+            10,
+            999,
+        );
+
+        let candidates = FakeCandidates::default();
+        candidates.set(vec![candidate]);
+        let store = FakeStore::default();
+        let register = FakeRegister::default();
+        let mut state = DriverState::with_archive_root(&archive_root);
+
+        let report = archive_recent_once(&candidates, &store, &register, &mut state, 100).unwrap();
+        assert_eq!(report.registered, 1);
+        assert_eq!(store.copies.borrow().len(), 2);
+
+        let _ = fs::remove_dir_all(archive_root);
+    }
+
+    #[test]
+    fn write_then_dedup_via_map() {
+        let candidate = sample_candidate();
+        let archive_root = new_archive_root();
+        let candidates = FakeCandidates::default();
+        candidates.set(vec![candidate.clone()]);
+        let store = FakeStore::default();
+        let register = FakeRegister::default();
+        let mut state = DriverState::with_archive_root(&archive_root);
+
+        let first = archive_recent_once(&candidates, &store, &register, &mut state, 1).unwrap();
+        assert_eq!(first.registered, 1);
+        assert_eq!(store.copies.borrow().len(), 2);
+
+        let marker_file = marker_path(&archive_root, &candidate.canonical_key);
+        fs::remove_file(marker_file).expect("remove marker file");
+
+        let second = archive_recent_once(&candidates, &store, &register, &mut state, 2).unwrap();
+        assert_eq!(second.registered, 0);
+        assert_eq!(store.copies.borrow().len(), 2);
+
+        let _ = fs::remove_dir_all(archive_root);
+    }
+
+    #[test]
+    fn write_marker_file_failure_keeps_map_clean() {
+        let candidate = sample_candidate();
+        let archive_root = new_archive_root();
+        fs::create_dir_all(archive_root.join(".retentiond")).expect("create retentiond dir");
+        fs::write(archive_root.join(".retentiond/markers"), "occupied-by-file")
+            .expect("occupy markers path");
+
+        let candidates = FakeCandidates::default();
+        candidates.set(vec![candidate.clone()]);
+        let store = FakeStore::default();
+        let register = FakeRegister::default();
+        let mut state = DriverState::with_archive_root(&archive_root);
+
+        let first = archive_recent_once(&candidates, &store, &register, &mut state, 1).unwrap();
+        assert_eq!(first.registered, 1);
+        assert!(
+            !state.markers.contains_key(&candidate.canonical_key),
+            "map must not gain a complete marker when durable marker write fails"
+        );
+
+        let second = archive_recent_once(&candidates, &store, &register, &mut state, 2).unwrap();
+        assert_eq!(second.registered, 1);
+        assert_eq!(store.copies.borrow().len(), 4);
+
+        let _ = fs::remove_dir_all(archive_root);
+    }
+
+    #[test]
+    fn prune_after_absence() {
+        let candidate = sample_candidate();
+        let archive_root = new_archive_root();
+        write_test_marker(
+            &archive_root,
+            &candidate,
+            MarkerStatus::CompleteLive,
+            0,
+            MARKER_SCHEMA,
+        );
+        let marker_file = marker_path(&archive_root, &candidate.canonical_key);
+
+        let candidates = FakeCandidates::default();
+        candidates.set(vec![candidate.clone()]);
+        let store = FakeStore::default();
+        let register = FakeRegister::default();
+        let mut state = DriverState::with_archive_root(&archive_root);
+
+        let first = archive_recent_capped(
+            &candidates,
+            &store,
+            &register,
+            &mut state,
+            0,
+            None,
+            true,
+            &mut || {},
+        )
+        .unwrap();
+        assert_eq!(first.pruned_markers, 0);
+
+        candidates.set(Vec::new());
+        for scan in 1..=44 {
+            let report = archive_recent_capped(
+                &candidates,
+                &store,
+                &register,
+                &mut state,
+                i64::from(scan),
+                None,
+                true,
+                &mut || {},
+            )
+            .unwrap();
+            assert_eq!(report.pruned_markers, 0);
+            assert!(marker_file.exists(), "marker should not prune before grace");
+        }
+
+        let mut final_report = CycleReport::default();
+        for scan in 45..=49 {
+            final_report = archive_recent_capped(
+                &candidates,
+                &store,
+                &register,
+                &mut state,
+                PRUNE_GRACE_SECS + i64::from(scan),
+                None,
+                true,
+                &mut || {},
+            )
+            .unwrap();
+        }
+        assert_eq!(final_report.pruned_markers, 1);
+        assert!(
+            !state.markers.contains_key(&candidate.canonical_key),
+            "prune removes marker from map"
+        );
+        assert!(!marker_file.exists(), "prune removes marker file");
+
+        let _ = fs::remove_dir_all(archive_root);
+    }
+
+    #[test]
+    fn prune_disabled() {
+        let candidate = sample_candidate();
+        let archive_root = new_archive_root();
+        write_test_marker(
+            &archive_root,
+            &candidate,
+            MarkerStatus::CompleteLive,
+            0,
+            MARKER_SCHEMA,
+        );
+        let marker_file = marker_path(&archive_root, &candidate.canonical_key);
+
+        let candidates = FakeCandidates::default();
+        candidates.set(Vec::new());
+        let store = FakeStore::default();
+        let register = FakeRegister::default();
+        let mut state = DriverState::with_archive_root(&archive_root);
+
+        for scan in 0..60 {
+            let report = archive_recent_capped(
+                &candidates,
+                &store,
+                &register,
+                &mut state,
+                PRUNE_GRACE_SECS + i64::from(scan),
+                None,
+                false,
+                &mut || {},
+            )
+            .unwrap();
+            assert_eq!(report.pruned_markers, 0);
+        }
+        assert!(marker_file.exists());
+        assert!(state.markers.contains_key(&candidate.canonical_key));
+
+        let _ = fs::remove_dir_all(archive_root);
+    }
+
+    #[test]
+    fn prune_refresh_keeps_live() {
+        let candidate = sample_candidate();
+        let archive_root = new_archive_root();
+        write_test_marker(
+            &archive_root,
+            &candidate,
+            MarkerStatus::CompleteLive,
+            0,
+            MARKER_SCHEMA,
+        );
+        let marker_file = marker_path(&archive_root, &candidate.canonical_key);
+
+        let candidates = FakeCandidates::default();
+        candidates.set(vec![candidate.clone()]);
+        let store = FakeStore::default();
+        let register = FakeRegister::default();
+        let mut state = DriverState::with_archive_root(&archive_root);
+
+        for scan in 0..(PRUNE_MIN_MISSED_SCANS + PRUNE_EVERY_CYCLES + 10) {
+            let report = archive_recent_capped(
+                &candidates,
+                &store,
+                &register,
+                &mut state,
+                PRUNE_GRACE_SECS + i64::from(scan),
+                None,
+                true,
+                &mut || {},
+            )
+            .unwrap();
+            assert_eq!(report.pruned_markers, 0);
+        }
+
+        assert!(marker_file.exists());
+        let summary = state
+            .markers
+            .get(&candidate.canonical_key)
+            .expect("marker summary present");
+        assert_eq!(summary.missed_scans, 0);
+
+        let _ = fs::remove_dir_all(archive_root);
+    }
+
+    #[test]
+    fn copy_nondestructive_on_partial_failure() {
+        let base_candidate = sample_candidate();
+        let replacement = replacement_candidate_with_fingerprint(&base_candidate, "fingerprint-b");
+        let archive_root = new_archive_root();
+        let candidates = FakeCandidates::default();
+        candidates.set(vec![base_candidate.clone()]);
+        let store = FakeStore::default();
+        let register = FakeRegister::default();
+        let mut state = DriverState::with_archive_root(&archive_root);
+
+        let seeded = archive_recent_once(&candidates, &store, &register, &mut state, 1).unwrap();
+        assert_eq!(seeded.registered, 1);
+        assert!(store.landed.borrow().contains(&final_front_path()));
+        assert!(store.landed.borrow().contains(&final_back_path()));
+
+        candidates.set(vec![replacement.clone()]);
+        store.fail_once_for("TeslaCam/RecentClips/2026-06-19_10-00-00-back.mp4");
+        let failed = archive_recent_once(&candidates, &store, &register, &mut state, 2).unwrap();
+        assert_eq!(failed.copy_failed, 1);
+        assert!(
+            store.landed.borrow().contains(&final_front_path()),
+            "existing final front must survive failed recopy"
+        );
+        assert!(
+            store.landed.borrow().contains(&final_back_path()),
+            "existing final back must survive failed recopy"
+        );
+        let marker = read_marker(&state, &replacement).expect("partial marker");
+        assert_eq!(marker.status, MarkerStatus::Partial);
+
+        let _ = fs::remove_dir_all(archive_root);
+    }
+
+    #[test]
+    fn staged_promote_happy() {
+        let candidate = sample_candidate();
+        let archive_root = new_archive_root();
+        let candidates = FakeCandidates::default();
+        candidates.set(vec![candidate.clone()]);
+        let store = FakeStore::default();
+        let register = FakeRegister::default();
+        let mut state = DriverState::with_archive_root(&archive_root);
+
+        let report = archive_recent_once(&candidates, &store, &register, &mut state, 1).unwrap();
+        assert_eq!(report.registered, 1);
+        assert_eq!(store.promotions.borrow().len(), 2);
+        assert!(store.landed.borrow().contains(&final_front_path()));
+        assert!(store.landed.borrow().contains(&final_back_path()));
+        assert!(
+            store
+                .landed
+                .borrow()
+                .iter()
+                .all(|path| !path.starts_with(".retentiond/staging/")),
+            "staging files should be gone after promote"
+        );
+        let marker = read_marker(&state, &candidate).expect("complete marker");
+        assert_eq!(marker.status, MarkerStatus::CompleteLive);
+        let summary = state
+            .markers
+            .get(&candidate.canonical_key)
+            .expect("marker summary");
+        assert_eq!(summary.status, MarkerStatus::CompleteLive);
+        assert_eq!(summary.source_fingerprint, candidate.source_fingerprint);
+
+        let _ = fs::remove_dir_all(archive_root);
+    }
+
+    #[test]
+    fn index_load_skips_off_path_marker() {
+        // A marker whose body claims a clip but whose FILE NAME is not
+        // stable_hex(canonical_key).json must be ignored, so it cannot suppress a
+        // real copy.
+        let candidate = sample_candidate();
+        let archive_root = new_archive_root();
+        let marker = ClipMarker {
+            schema: MARKER_SCHEMA,
+            canonical_key: candidate.canonical_key.clone(),
+            source_fingerprint: candidate.source_fingerprint.clone(),
+            volume_serial: candidate.source_volume_serial,
+            partition: candidate.partition.clone(),
+            status: MarkerStatus::CompleteLive,
+            updated_at: 10,
+            angles: Vec::new(),
+        };
+        // Write it under a deliberately WRONG file name (not the canonical hash).
+        let wrong_path = archive_root
+            .join(".retentiond/markers")
+            .join("deadbeefdeadbeef.json");
+        write_json_durable(&wrong_path, &marker).expect("write off-path marker");
+        // Sanity: the wrong name is not the canonical one.
+        assert_ne!(
+            wrong_path,
+            marker_path(&archive_root, &candidate.canonical_key)
+        );
+
+        let candidates = FakeCandidates::default();
+        candidates.set(vec![candidate]);
+        let store = FakeStore::default();
+        let register = FakeRegister::default();
+        let mut state = DriverState::with_archive_root(&archive_root);
+
+        let report = archive_recent_once(&candidates, &store, &register, &mut state, 100).unwrap();
+        assert_eq!(report.registered, 1, "off-path marker must not dedup");
+        assert_eq!(store.copies.borrow().len(), 2);
+
+        let _ = fs::remove_dir_all(archive_root);
+    }
+
+    #[test]
+    fn prune_keeps_entry_when_file_delete_fails() {
+        // If the marker file cannot be removed (and still exists), the in-memory
+        // index entry must be retained so the map never diverges from disk.
+        let candidate = sample_candidate();
+        let archive_root = new_archive_root();
+        // Occupy the marker path with a NON-EMPTY directory so remove_file fails
+        // with a non-NotFound error.
+        let marker_file = marker_path(&archive_root, &candidate.canonical_key);
+        fs::create_dir_all(marker_file.join("occupied")).expect("occupy marker path with dir");
+
+        let candidates = FakeCandidates::default();
+        candidates.set(Vec::new());
+        let store = FakeStore::default();
+        let register = FakeRegister::default();
+        let mut state = DriverState::with_archive_root(&archive_root);
+        // Seed an aged index entry directly (well past both prune thresholds).
+        state.markers.insert(
+            candidate.canonical_key.clone(),
+            MarkerSummary {
+                source_fingerprint: candidate.source_fingerprint.clone(),
+                status: MarkerStatus::CompleteLive,
+                last_seen_epoch: 0,
+                missed_scans: PRUNE_MIN_MISSED_SCANS,
+            },
+        );
+
+        let mut report = CycleReport::default();
+        for scan in 0..(PRUNE_EVERY_CYCLES + 1) {
+            report = archive_recent_capped(
+                &candidates,
+                &store,
+                &register,
+                &mut state,
+                PRUNE_GRACE_SECS + i64::from(scan),
+                None,
+                true,
+                &mut || {},
+            )
+            .unwrap();
+        }
+        assert_eq!(report.pruned_markers, 0, "delete failure is not counted");
+        assert!(
+            state.markers.contains_key(&candidate.canonical_key),
+            "index entry retained when file delete fails"
+        );
+        assert!(marker_file.is_dir(), "occupying dir still present");
+
+        let _ = fs::remove_dir_all(archive_root);
+    }
+
+    #[test]
+    fn zero_angle_candidate_not_marked_complete() {
+        let mut candidate = sample_candidate();
+        candidate.angles.clear();
+        let archive_root = new_archive_root();
+        let candidates = FakeCandidates::default();
+        candidates.set(vec![candidate.clone()]);
+        let store = FakeStore::default();
+        let register = FakeRegister::default();
+        let mut state = DriverState::with_archive_root(&archive_root);
+
+        let report = archive_recent_once(&candidates, &store, &register, &mut state, 100).unwrap();
+        assert_eq!(report.registered, 0);
+        assert_eq!(report.copy_failed, 1);
+        assert!(store.copies.borrow().is_empty(), "no staging for zero angles");
+        assert!(
+            !state.markers.contains_key(&candidate.canonical_key),
+            "zero-angle candidate must not gain a complete marker"
+        );
+
+        let _ = fs::remove_dir_all(archive_root);
+    }
+
+    #[test]
     fn durable_outbox_replays_after_restart_without_recopy() {
         let candidates = FakeCandidates::default();
         let candidate = sample_candidate();
@@ -1611,6 +2371,7 @@ mod tests {
             &mut state,
             1,
             Some(2),
+            false,
             &mut || {},
         )
         .unwrap();
@@ -1628,6 +2389,7 @@ mod tests {
             &mut state,
             2,
             Some(2),
+            false,
             &mut || {},
         )
         .unwrap();
@@ -1645,6 +2407,7 @@ mod tests {
             &mut state,
             3,
             Some(2),
+            false,
             &mut || {},
         )
         .unwrap();
@@ -1691,6 +2454,7 @@ mod tests {
             &mut state,
             2,
             Some(2),
+            false,
             &mut || {},
         )
         .unwrap();
@@ -1730,6 +2494,7 @@ mod tests {
             &mut state,
             2,
             Some(3),
+            false,
             &mut || progress_ticks.set(progress_ticks.get().saturating_add(1)),
         )
         .unwrap();

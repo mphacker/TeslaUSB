@@ -236,6 +236,23 @@ impl ArchiveStore for LiveArchiveStore {
         }
     }
 
+    fn promote_dest(&self, staging_rel: &str, final_rel: &str) -> io::Result<()> {
+        let staging_path = jailed_join(&self.archive_root, staging_rel)?;
+        let final_path = jailed_join(&self.archive_root, final_rel)?;
+        let final_parent = final_path.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "destination path must include a parent directory",
+            )
+        })?;
+        validate_archive_parent_path(&self.archive_root, final_parent)?;
+        fs::create_dir_all(final_parent)?;
+        let canonical_final_parent = canonicalize_under_root(&self.archive_root, final_parent)?;
+        sync_dir_chain(&self.archive_root, &canonical_final_parent)?;
+        fs::rename(staging_path, &final_path)?;
+        sync_dir(&canonical_final_parent)
+    }
+
     fn probe_dest_playability(
         &self,
         dest_rel: &str,

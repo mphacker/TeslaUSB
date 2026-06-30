@@ -55,12 +55,21 @@ pub trait ArchiveStore {
 
     /// Remove an already-archived destination file at `dest_rel`.
     ///
-    /// Used by `RecentClips` archiving to roll back already-copied angles when a
-    /// multi-angle candidate aborts mid-copy.
+    /// Used by `RecentClips` archiving to discard staged files after a failed
+    /// staged copy/promote attempt.
     ///
     /// # Errors
     /// Any underlying I/O failure removing the destination file.
     fn remove_dest(&self, dest_rel: &str) -> std::io::Result<()>;
+
+    /// Promote a staged destination file to its final archive destination.
+    ///
+    /// Implementations should atomically move `staging_rel` to `final_rel`
+    /// within the archive root.
+    ///
+    /// # Errors
+    /// Any underlying I/O failure promoting the staged file.
+    fn promote_dest(&self, staging_rel: &str, final_rel: &str) -> std::io::Result<()>;
 
     /// Probe an already-landed destination file for container completeness.
     ///
@@ -380,17 +389,22 @@ mod tests {
         source: HashMap<String, FileIdentity>,
         listing: Vec<String>,
         copies: RefCell<Vec<String>>,
+        landed: RefCell<Vec<String>>,
     }
     impl ArchiveStore for FakeStore {
         fn copy_and_hash_dest(
             &self,
             src_rel: &str,
-            _dest_rel: &str,
+            dest_rel: &str,
         ) -> std::io::Result<ContentHash> {
             self.copies.borrow_mut().push(src_rel.to_owned());
             self.dest_hash
                 .get(src_rel)
                 .copied()
+                .map(|hash| {
+                    self.landed.borrow_mut().push(dest_rel.to_owned());
+                    hash
+                })
                 .ok_or_else(|| std::io::Error::other(format!("no dest for {src_rel}")))
         }
         fn source_identity(&self, src_rel: &str) -> std::io::Result<FileIdentity> {
@@ -402,7 +416,20 @@ mod tests {
         fn list_source_rel_names(&self, _src_dir: &str) -> std::io::Result<Vec<String>> {
             Ok(self.listing.clone())
         }
-        fn remove_dest(&self, _dest_rel: &str) -> std::io::Result<()> {
+        fn remove_dest(&self, dest_rel: &str) -> std::io::Result<()> {
+            self.landed.borrow_mut().retain(|path| path != dest_rel);
+            Ok(())
+        }
+        fn promote_dest(&self, staging_rel: &str, final_rel: &str) -> std::io::Result<()> {
+            let mut landed = self.landed.borrow_mut();
+            let Some(index) = landed.iter().position(|path| path == staging_rel) else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("staging file not found: {staging_rel}"),
+                ));
+            };
+            landed.remove(index);
+            landed.push(final_rel.to_owned());
             Ok(())
         }
         fn probe_dest_playability(
@@ -434,6 +461,7 @@ mod tests {
             source,
             listing,
             copies: RefCell::new(Vec::new()),
+            landed: RefCell::new(Vec::new()),
         }
     }
 

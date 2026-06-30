@@ -811,6 +811,7 @@ mod tests {
     struct FakeStore {
         files: HashMap<String, (u64, u8)>,
         copies: RefCell<Vec<(String, String)>>,
+        landed: RefCell<HashSet<String>>,
         fail_copy: bool,
     }
     impl FakeStore {
@@ -821,6 +822,7 @@ mod tests {
                     .map(|(n, s, h)| ((*n).to_string(), (*s, *h)))
                     .collect(),
                 copies: RefCell::new(Vec::new()),
+                landed: RefCell::new(HashSet::new()),
                 fail_copy: false,
             }
         }
@@ -837,7 +839,10 @@ mod tests {
                 return Err(io::Error::other("copy failed"));
             }
             match self.files.get(Self::name_of(src_rel)) {
-                Some((_, h)) => Ok(ContentHash::new([*h; 32])),
+                Some((_, h)) => {
+                    self.landed.borrow_mut().insert(dest_rel.to_string());
+                    Ok(ContentHash::new([*h; 32]))
+                }
                 None => Err(io::Error::other("missing source")),
             }
         }
@@ -853,7 +858,19 @@ mod tests {
         fn list_source_rel_names(&self, _src_dir: &str) -> io::Result<Vec<String>> {
             Ok(self.files.keys().cloned().collect())
         }
-        fn remove_dest(&self, _dest_rel: &str) -> io::Result<()> {
+        fn remove_dest(&self, dest_rel: &str) -> io::Result<()> {
+            self.landed.borrow_mut().remove(dest_rel);
+            Ok(())
+        }
+        fn promote_dest(&self, staging_rel: &str, final_rel: &str) -> io::Result<()> {
+            let mut landed = self.landed.borrow_mut();
+            if !landed.remove(staging_rel) {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("staging file not found: {staging_rel}"),
+                ));
+            }
+            landed.insert(final_rel.to_string());
             Ok(())
         }
         fn probe_dest_playability(

@@ -171,6 +171,7 @@ fn run_serve(args: &[String]) -> ExitCode {
                 &mut state,
                 now_epoch_s,
                 Some(MAX_COPIES_PER_CYCLE),
+                true,
                 &mut on_progress,
             )
         };
@@ -192,6 +193,7 @@ fn run_serve(args: &[String]) -> ExitCode {
                     || report.skipped_already_pending > 0
                     || report.skipped_rejected > 0
                     || report.dropped_poison > 0
+                    || report.pruned_markers > 0
                     || report.pending_len > 0;
                 if has_activity {
                     println!(
@@ -199,6 +201,7 @@ fn run_serve(args: &[String]) -> ExitCode {
                          registered_from_pending={} copy_failed={} register_deferred={} \
                          register_rejected={} quarantined_undecodable={} \
                          skipped_already_pending={} skipped_rejected={} dropped_poison={} \
+                         pruned_markers={} \
                          pending={}",
                         parsed.slot,
                         report.observed,
@@ -211,6 +214,7 @@ fn run_serve(args: &[String]) -> ExitCode {
                         report.skipped_already_pending,
                         report.skipped_rejected,
                         report.dropped_poison,
+                        report.pruned_markers,
                         report.pending_len
                     );
                 }

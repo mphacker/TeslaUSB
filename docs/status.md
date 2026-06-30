@@ -248,22 +248,36 @@
 > clippy clean, aarch64 cross-build green (binary `a52017f2…`). Hardware canary clean:
 > NRestarts=0, 0 cluster-0 errors, heartbeat `updated_at` confirmed advancing (+64s across
 > reads, no false-stale), pending=0, wifi up, `df /data` 220 G free. Dead-man cancelled; device
-> healthy overnight. ⚠️ **The cap code (`archive_driver.rs`, `main.rs`) is UNCOMMITTED** — the
-> self-sufficient core was committed as `872e5e2`, but the cap+heartbeat diff still needs a
-> commit (it IS the source of the deployed `a52017f2` binary; tested + reviewed + proven).
+> healthy overnight. The self-sufficient core was committed as `872e5e2`; the cap+heartbeat diff
+> was committed as `d1d73bb` (source of the deployed `a52017f2` binary; tested + reviewed + proven)
+> and pushed to `origin/mhackermsft/b1-clean`.
 >
-> **NEXT (pick up tomorrow) — marker journal: prune + in-memory index (Tier-3 follow-up).**
-> Operator asked whether a journal could avoid re-checking each marker file on restart. Finding:
-> the per-clip markers ALREADY are that journal — they persist on `/data` and make restart cheap
-> (no re-copy; the 2 GB grind only happened because the *old* binary left no markers). The
-> per-cycle cost is only ~60 tiny marker reads (the live RecentClips window), which is noise.
-> The ONE real latent issue is **unbounded marker growth** (one file per clip ever archived, no
-> pruning today → eventual SD-card dir/inode bloat). Plan (gated, needs GPT-5.5 review + hardware
-> proof because it touches the no-loss path): **(1) prune markers to the live candidate window**
-> (drop markers for keys no longer present, conservatively — never a live key); **(2) load the
-> now-small set into an in-memory `HashMap<canonical_key,(fingerprint,status)>` in `DriverState`
-> at startup** so per-cycle dedup is zero-I/O. Bounds memory/inodes/I/O permanently. Todos
-> tracked: `prune-design`, `prune-impl`.
+> **MARKER JOURNAL: in-memory index + bounded prune + non-destructive copy (ADR-0006) —
+> IMPLEMENTED + REVIEWED + GATED 2026-06-30.** Operator approved the full-scope option after a
+> GPT-5.5 second opinion rejected an earlier "prune is inherently safety-neutral" framing. Three
+> parts, all in `rust/crates/retentiond/`:
+> **(A) In-memory marker index.** `DriverState` gains `markers: HashMap<canonical_key,
+> MarkerSummary{source_fingerprint,status,last_seen_epoch,missed_scans}>` loaded ONCE at startup
+> (mirrors `load_outbox_if_needed`), skipping parse/schema failures AND off-path markers whose
+> file name ≠ `stable_hex(canonical_key).json`. `marker_is_complete_live` now reads the MAP
+> (zero per-cycle marker file reads). `write_marker` writes the durable file FIRST, upserts the
+> map only on success → the cache can never claim CompleteLive without a durable marker.
+> **(B) Conservative source-aware prune.** Bounds marker growth to ≈live-window size. A marker
+> is pruned (file + map) only after `missed_scans≥40` consecutive absent scans AND `≥3600s` wall
+> floor; runs every 5 cycles, ≤16 deletions/cycle; refresh-before-prune so a live clip is never
+> pruned; only the deployed `VolumeCandidateSource` enables it (the SQLite source filters
+> archived clips and must NOT). On a real (non-NotFound) delete failure the index entry is KEPT
+> so the map never diverges from disk.
+> **(C) Non-destructive staged-promote copy.** Fixes a PRE-EXISTING latent loss bug GPT-5.5
+> found: the old rollback deleted already-archived angles on a mid-clip re-copy failure. Now each
+> angle stages to `.retentiond/staging/…`, hashed; only after ALL stage OK are they promoted
+> (rename) to final via new `ArchiveStore::promote_dest`. Any failure discards STAGING only —
+> finals are never touched. Startup wipes `.retentiond/staging/` (crash orphans).
+> **Process:** GPT-5.5 design second-opinion + adversarial code review (verdict: no blocking
+> footage-loss/index-divergence; 3 hardening items applied + tested, 1 fsync item consciously
+> skipped as footage-safe + I/O-costly). **178 tests pass, clippy clean, aarch64 cross-build
+> green (binary `868a630e…`).** Deploying to hardware under the dead-man rails next; ADR at
+> `docs/adr/0006-retentiond-marker-index-prune.md`.
 >
 > **Phase-2 (the deleter) stays deferred + GATED** — leases/recovery, indexd delete-RPC,
 > gadgetd delete-handoff client, C2 governor calibration, safety gates + explicit operator

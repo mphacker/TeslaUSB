@@ -284,6 +284,30 @@
 > wifi/SSH/boot untouched. Evidence: `files/hw-results.md` §Marker journal. ADR at
 > `docs/adr/0006-retentiond-marker-index-prune.md`.
 >
+> **SYSTEMD SERVICE WATCHDOG (ADR-0007) — DEPLOYED + LIVE-VERIFIED 2026-06-30.**
+> Completes the "archiver always operational" mandate: `Restart=always` only
+> recovers a crashed archiver, not a hung one. retentiond now sends
+> `sd_notify("WATCHDOG=1")` (hand-rolled over `UnixDatagram`, zero new deps,
+> rate-limited ≤10s) from a process-global best-effort `watchdog` module; the
+> unit gains `WatchdogSec=240` + `NotifyAccess=main` (kept Type=simple,
+> Restart=always). Pets sit in the serve loop (on_progress, Ok/Err arms, 1s
+> sleep tick) AND inside the read/hash/copy chunk loops, plus boundary pets
+> (sync_all/rename, startup staging wipe + marker load, candidate scan). A false
+> kill is bounded-no-loss (non-destructive staged-promote + durable markers,
+> ADR-0006), so a hung cycle is now restarted within ~240s with zero footage
+> loss. **Process:** GPT-5.5 design 2nd-opinion (WatchdogSec, per-chunk gap) +
+> 2 adversarial code reviews (false-kill findings reconciled; bounded stop
+> documented) + a GPT-5.5 deploy-plan review (NO-GO-as-written → binary-first
+> ordering, 180→240s, strengthened canary, /home/pi staging — all adopted).
+> **184 tests, clippy clean, aarch64 `98915f74…`.** Deployed under the dead-man
+> rails (commits `d76ebef` + `33fb7b1`, pushed): watchdog ARMED (WatchdogUSec=240)
+> + continuously pet (WatchdogTimestampMonotonic advancing), new binary running
+> (`/proc/$MainPID/exe`=98915f74), NRestarts=0 over the window (no false kills),
+> health advancing, StartLimitIntervalUSec=0, wifi/SSH/boot untouched (degraded =
+> pre-existing unrelated zram timer only). Idle-path load-scope caveat recorded.
+> Evidence: `files/hw-results.md` §retentiond systemd service watchdog. ADR at
+> `docs/adr/0007-retentiond-systemd-watchdog.md`.
+>
 > **Phase-2 (the deleter) stays deferred + GATED** — leases/recovery, indexd delete-RPC,
 > gadgetd delete-handoff client, C2 governor calibration, safety gates + explicit operator
 > opt-in. Do NOT start autonomously.

@@ -3,7 +3,9 @@
 //! Wire types intentionally remain crate-local (same pattern as
 //! `register_client.rs`): no shared proto crate coupling.
 
-use std::io::{self, Read, Write};
+#[cfg(any(unix, test))]
+use std::io::Read;
+use std::io::{self, Write};
 #[cfg(unix)]
 use std::sync::{Arc, Mutex};
 
@@ -167,6 +169,7 @@ pub fn read_full_file_to_writer(
     let mut handle: Option<ClipIdentity> = None;
     let req_len = chunk_len.min(MAX_READ_LEN);
     loop {
+        crate::watchdog::pet();
         let req = ReadFileRequest {
             path: path.to_owned(),
             offset,

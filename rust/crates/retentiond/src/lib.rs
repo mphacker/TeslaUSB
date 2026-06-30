@@ -57,4 +57,5 @@ pub mod time;
 pub mod value;
 /// Volume-image-backed `RecentClips` candidate inventory (`scannerd` library path).
 pub mod volume_source;
+pub mod watchdog;
 mod volume_reader;

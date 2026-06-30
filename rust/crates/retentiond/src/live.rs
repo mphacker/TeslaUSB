@@ -186,6 +186,7 @@ impl LiveArchiveStore {
 
 impl ArchiveStore for LiveArchiveStore {
     fn copy_and_hash_dest(&self, src_rel: &str, dest_rel: &str) -> io::Result<ContentHash> {
+        retentiond::watchdog::pet();
         validate_source_rel_path(src_rel)?;
 
         let dest_path = jailed_join(&self.archive_root, dest_rel)?;
@@ -213,8 +214,13 @@ impl ArchiveStore for LiveArchiveStore {
                 &mut writer,
             )
             .map_err(|err| io::Error::other(err.to_string()))?;
+            // Fresh keepalive right before the discrete blocking steps
+            // (fsync/rename/dir-sync) that are not inside the chunk loops, so a
+            // stalled sync_all under idle-I/O starvation gets a full budget.
+            retentiond::watchdog::pet();
             writer.sync_all()?;
             drop(writer);
+            retentiond::watchdog::pet();
             fs::rename(&temp_path, &dest_path)?;
             sync_dir(&canonical_parent)?;
             let landed = canonicalize_under_root(&self.archive_root, &dest_path)?;
@@ -237,6 +243,7 @@ impl ArchiveStore for LiveArchiveStore {
     }
 
     fn promote_dest(&self, staging_rel: &str, final_rel: &str) -> io::Result<()> {
+        retentiond::watchdog::pet();
         let staging_path = jailed_join(&self.archive_root, staging_rel)?;
         let final_path = jailed_join(&self.archive_root, final_rel)?;
         let final_parent = final_path.parent().ok_or_else(|| {
@@ -379,6 +386,7 @@ fn hash_reader_sha256(reader: &mut dyn Read) -> io::Result<ContentHash> {
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; COPY_BUFFER_SIZE];
     loop {
+        retentiond::watchdog::pet();
         let read = reader.read(&mut buffer)?;
         if read == 0 {
             break;

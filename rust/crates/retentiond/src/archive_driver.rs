@@ -221,7 +221,10 @@ pub fn archive_recent_capped(
     load_outbox_if_needed(state);
     drain_pending(register, state, &mut report);
 
-    let clips = candidates.list_candidates()?;
+    let clips = {
+        crate::watchdog::pet();
+        candidates.list_candidates()?
+    };
     report.observed = clips.len();
     refresh_marker_scan_state(state, &clips, now_epoch_s);
     state.prune_cycle_counter = state.prune_cycle_counter.saturating_add(1);
@@ -421,7 +424,8 @@ fn finalize_registration(
             .join(",");
         log_quarantine_warning(&reg.canonical_key, &failure_detail);
         report.quarantined_undecodable = report.quarantined_undecodable.saturating_add(1);
-        if let Err(err) = stage_outbox_registration(state, &reg, RegistrationDisposition::Quarantine)
+        if let Err(err) =
+            stage_outbox_registration(state, &reg, RegistrationDisposition::Quarantine)
         {
             log_outbox_stage_failure(&reg.canonical_key, &err);
             report.copy_failed = report.copy_failed.saturating_add(1);
@@ -464,7 +468,10 @@ fn refresh_marker_scan_state(state: &mut DriverState, clips: &[Candidate], now_e
     if state.markers.is_empty() {
         return;
     }
-    let observed_keys: HashSet<&str> = clips.iter().map(|clip| clip.canonical_key.as_str()).collect();
+    let observed_keys: HashSet<&str> = clips
+        .iter()
+        .map(|clip| clip.canonical_key.as_str())
+        .collect();
     for (canonical_key, marker) in &mut state.markers {
         if observed_keys.contains(canonical_key.as_str()) {
             marker.missed_scans = 0;
@@ -664,6 +671,7 @@ fn load_markers_if_needed(state: &mut DriverState) {
     let Some(root) = state.archive_root.as_ref() else {
         return;
     };
+    crate::watchdog::pet();
     let _ = fs::remove_dir_all(root.join(STAGING_DIR));
 
     let marker_dir = root.join(MARKER_DIR);
@@ -682,6 +690,7 @@ fn load_markers_if_needed(state: &mut DriverState) {
     };
 
     for entry in entries {
+        crate::watchdog::pet();
         let path = match entry {
             Ok(entry) => entry.path(),
             Err(err) => {
@@ -967,8 +976,7 @@ mod tests {
     use std::{
         cell::{Cell, RefCell},
         collections::{HashMap, HashSet, VecDeque},
-        fs,
-        io,
+        fs, io,
         path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},
     };
@@ -995,9 +1003,10 @@ mod tests {
 
     fn new_archive_root() -> PathBuf {
         let unique = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::current_dir()
-            .expect("cwd")
-            .join(format!("retentiond-archive-driver-test-{}-{unique}", std::process::id()));
+        let dir = std::env::current_dir().expect("cwd").join(format!(
+            "retentiond-archive-driver-test-{}-{unique}",
+            std::process::id()
+        ));
         fs::create_dir_all(&dir).expect("create archive root");
         dir
     }
@@ -1053,7 +1062,10 @@ mod tests {
         candidate
     }
 
-    fn replacement_candidate_with_fingerprint(candidate: &Candidate, fingerprint: &str) -> Candidate {
+    fn replacement_candidate_with_fingerprint(
+        candidate: &Candidate,
+        fingerprint: &str,
+    ) -> Candidate {
         let mut replacement = candidate.clone();
         replacement.source_fingerprint = fingerprint.to_owned();
         replacement
@@ -1136,7 +1148,6 @@ mod tests {
         fn set_probe_error(&self, dest_rel: &str) {
             self.probe_error.borrow_mut().insert(dest_rel.to_owned());
         }
-
     }
 
     impl ArchiveStore for FakeStore {
@@ -2274,7 +2285,10 @@ mod tests {
         let report = archive_recent_once(&candidates, &store, &register, &mut state, 100).unwrap();
         assert_eq!(report.registered, 0);
         assert_eq!(report.copy_failed, 1);
-        assert!(store.copies.borrow().is_empty(), "no staging for zero angles");
+        assert!(
+            store.copies.borrow().is_empty(),
+            "no staging for zero angles"
+        );
         assert!(
             !state.markers.contains_key(&candidate.canonical_key),
             "zero-angle candidate must not gain a complete marker"
@@ -2308,14 +2322,8 @@ mod tests {
 
         let mut restarted_state = DriverState::with_archive_root(&archive_root);
         candidates.set(Vec::new());
-        let second = archive_recent_once(
-            &candidates,
-            &store,
-            &register,
-            &mut restarted_state,
-            2,
-        )
-        .unwrap();
+        let second =
+            archive_recent_once(&candidates, &store, &register, &mut restarted_state, 2).unwrap();
         assert_eq!(second.registered_from_pending, 1);
         assert_eq!(second.pending_len, 0);
         assert_eq!(store.copies.borrow().len(), 2);

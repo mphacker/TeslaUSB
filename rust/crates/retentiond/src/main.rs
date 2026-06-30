@@ -117,6 +117,12 @@ fn run_serve(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     };
 
+    // Arm the watchdog and send the first keepalive BEFORE any storage I/O
+    // (volume open below can block on slow/bad media) so systemd doesn't kill us
+    // during startup.
+    retentiond::watchdog::init();
+    retentiond::watchdog::pet();
+
     let candidates = match VolumeCandidateSource::open(&parsed.volume_image, parsed.slot) {
         Ok(reader) => reader,
         Err(err) => {
@@ -129,6 +135,7 @@ fn run_serve(args: &[String]) -> ExitCode {
     };
 
     install_shutdown_handlers();
+    retentiond::watchdog::pet();
 
     let store = LiveArchiveStore::new(
         Box::new(VolumeReadFileClient::new(&parsed.volume_image, parsed.slot)),
@@ -163,6 +170,7 @@ fn run_serve(args: &[String]) -> ExitCode {
                     t,
                     &mut health_write_error_logged,
                 );
+                retentiond::watchdog::pet();
             };
             archive_recent_capped(
                 &candidates,
@@ -230,6 +238,7 @@ fn run_serve(args: &[String]) -> ExitCode {
                     last_progress_at,
                     &mut health_write_error_logged,
                 );
+                retentiond::watchdog::pet();
             }
             Err(err) => {
                 // Intentionally do NOT refresh the heartbeat on a failed cycle: a
@@ -238,6 +247,7 @@ fn run_serve(args: &[String]) -> ExitCode {
                 // frozen lets webd age it into "stale" then "Worker not running",
                 // which is the whole point of this health signal.
                 eprintln!("retentiond archive_recent_only: cycle error: {err}");
+                retentiond::watchdog::pet();
             }
         }
         sleep_interruptible(parsed.interval_secs);
@@ -252,6 +262,7 @@ fn sleep_interruptible(interval_secs: u64) {
         if SHUTDOWN.load(Ordering::Relaxed) {
             break;
         }
+        retentiond::watchdog::pet();
         thread::sleep(Duration::from_secs(1));
     }
 }

@@ -276,7 +276,12 @@
 > **Process:** GPT-5.5 design second-opinion + adversarial code review (verdict: no blocking
 > footage-loss/index-divergence; 3 hardening items applied + tested, 1 fsync item consciously
 > skipped as footage-safe + I/O-costly). **178 tests pass, clippy clean, aarch64 cross-build
-> green (binary `868a630e…`).** Deploying to hardware under the dead-man rails next; ADR at
+> green (binary `868a630e…`).** **DEPLOYED + LIVE-VERIFIED 2026-06-30** under the dead-man rails
+> (commit `fde2e09`, pushed): new binary running (NRestarts=0), cycles clean (observed≈178,
+> registered=4/cycle, copy_failed=0, pending=0, no errors), heartbeat advancing, staged-promote
+> copy proven non-destructive (staging created→promoted→cleaned each cycle, zero byte loss),
+> prune correctly conservative (markers 204→209, won't fire until the 40-scan/1hr threshold),
+> wifi/SSH/boot untouched. Evidence: `files/hw-results.md` §Marker journal. ADR at
 > `docs/adr/0006-retentiond-marker-index-prune.md`.
 >
 > **Phase-2 (the deleter) stays deferred + GATED** — leases/recovery, indexd delete-RPC,

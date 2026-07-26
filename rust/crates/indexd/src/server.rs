@@ -15,9 +15,10 @@ use teslausb_core::manifest_digest::{ManifestDigestEntry, manifest_digest_v1_hex
 
 use crate::db::cloud::{
     CloudConfig, CloudQueuePk, CloudQueueRetryResolution, CloudQueueUpsertItem, cloud_candidates,
-    cloud_config_get, cloud_config_put, cloud_discover, cloud_history_load, cloud_queue_load,
-    cloud_queue_retry, cloud_queue_upsert, cloud_stats_get, cloud_stats_reset, cloud_upload_commit,
-    cloud_upload_fail, upload_lease_acquire, upload_lease_release, upload_lease_renew,
+    cloud_config_get, cloud_config_put, cloud_discover, cloud_history_load,
+    cloud_pending_upload_sets_load, cloud_queue_load, cloud_queue_retry, cloud_queue_upsert,
+    cloud_stats_get, cloud_stats_reset, cloud_upload_commit, cloud_upload_fail, upload_lease_acquire,
+    upload_lease_release, upload_lease_renew,
 };
 use crate::db::ingest::{
     AngleFacts, ArchiveAngleRegistration, ArchiveRegistration, ArchiveUnitRegistration, ClipFacts,
@@ -33,6 +34,7 @@ use crate::model::FolderClass;
 use crate::proto::{
     CloudCandidateWire, CloudConfigWire, CloudDiscoverWire, CloudHistoryRowWire,
     CloudFinalizeParentUploadRequest, CloudFinalizeParentUploadResponse,
+    CloudPendingUploadSetWire,
     CloudPrepareParentUploadChildWire, CloudPrepareParentUploadRequest, CloudPrepareParentUploadResponse,
     CloudQueueRetryResolutionWire, CloudQueueRowWire, CloudQueueUpsertWire, EvictionCandidateWire,
     FinalizeEventArchiveRequest, FinalizeEventArchiveResponse, RecoveryRowWire, RegisterArchivedClip,
@@ -198,11 +200,26 @@ fn handle_connection(
             Request::CloudQueueLoad {
                 after_cursor,
                 limit,
-            } => match handle_cloud_queue_load(conn, after_cursor.as_deref(), limit) {
+                upload_set_id,
+            } => match handle_cloud_queue_load(
+                conn,
+                after_cursor.as_deref(),
+                limit,
+                upload_set_id.as_deref(),
+            ) {
                 Ok((items, next_cursor)) => Response::CloudQueuePage { items, next_cursor },
                 Err(HandlerError::Rejected(message)) => Response::Rejected { message },
                 Err(HandlerError::Internal(message)) => Response::Error { message },
             },
+            Request::CloudPendingUploadSetsLoad { after_cursor, limit } => {
+                match handle_cloud_pending_upload_sets_load(conn, after_cursor.as_deref(), limit) {
+                    Ok((items, next_cursor)) => {
+                        Response::CloudPendingUploadSetsPage { items, next_cursor }
+                    }
+                    Err(HandlerError::Rejected(message)) => Response::Rejected { message },
+                    Err(HandlerError::Internal(message)) => Response::Error { message },
+                }
+            }
             Request::CloudQueueUpsert { item } => match handle_cloud_queue_upsert(conn, &item) {
                 Ok(state) => Response::CloudQueueState { state },
                 Err(HandlerError::Rejected(message)) => Response::Rejected { message },
@@ -211,11 +228,13 @@ fn handle_connection(
             Request::CloudQueueRetry {
                 archive_item_id,
                 child_key,
+                upload_set_id,
                 resolution,
             } => match handle_cloud_queue_retry(
                 conn,
                 archive_item_id,
                 child_key.as_deref(),
+                upload_set_id.as_deref(),
                 &resolution,
             ) {
                 Ok(state) => Response::CloudQueueState { state },
@@ -255,6 +274,7 @@ fn handle_connection(
             Request::CloudUploadCommit {
                 queue_pk,
                 attempt_id,
+                upload_set_id,
                 hash,
                 hash_alg,
                 size,
@@ -263,6 +283,7 @@ fn handle_connection(
                 &queue_pk.destination_id,
                 &queue_pk.remote_key,
                 &attempt_id,
+                upload_set_id.as_deref(),
                 &hash,
                 &hash_alg,
                 size,
@@ -274,6 +295,7 @@ fn handle_connection(
             Request::CloudUploadFail {
                 queue_pk,
                 attempt_id,
+                upload_set_id,
                 error_class,
                 not_before,
                 terminal,
@@ -282,6 +304,7 @@ fn handle_connection(
                 &queue_pk.destination_id,
                 &queue_pk.remote_key,
                 &attempt_id,
+                upload_set_id.as_deref(),
                 &error_class,
                 not_before,
                 terminal,
@@ -616,11 +639,12 @@ fn handle_cloud_queue_load(
     conn: &Arc<Mutex<Connection>>,
     after_cursor: Option<&str>,
     limit: u32,
+    upload_set_id: Option<&str>,
 ) -> Result<(Vec<CloudQueueRowWire>, Option<String>), HandlerError> {
     let locked = conn
         .lock()
         .map_err(|_| HandlerError::Internal("index database mutex is poisoned".to_owned()))?;
-    let page = cloud_queue_load(&locked, after_cursor, limit).map_err(map_db_error)?;
+    let page = cloud_queue_load(&locked, after_cursor, limit, upload_set_id).map_err(map_db_error)?;
     Ok((
         page.items
             .into_iter()
@@ -640,6 +664,31 @@ fn handle_cloud_queue_load(
                 attempts: row.attempts,
                 not_before: row.not_before,
                 last_error: row.last_error,
+                upload_set_id: row.upload_set_id,
+            })
+            .collect(),
+        page.next_cursor,
+    ))
+}
+
+fn handle_cloud_pending_upload_sets_load(
+    conn: &Arc<Mutex<Connection>>,
+    after_cursor: Option<&str>,
+    limit: u32,
+) -> Result<(Vec<CloudPendingUploadSetWire>, Option<String>), HandlerError> {
+    let locked = conn
+        .lock()
+        .map_err(|_| HandlerError::Internal("index database mutex is poisoned".to_owned()))?;
+    let page = cloud_pending_upload_sets_load(&locked, after_cursor, limit).map_err(map_db_error)?;
+    Ok((
+        page.items
+            .into_iter()
+            .map(|row| CloudPendingUploadSetWire {
+                upload_set_id: row.upload_set_id,
+                archive_item_id: row.archive_item_id,
+                destination_id: row.destination_id,
+                source_manifest_digest: row.source_manifest_digest,
+                expected_child_count: row.expected_child_count,
             })
             .collect(),
         page.next_cursor,
@@ -699,6 +748,7 @@ fn handle_cloud_queue_retry(
     conn: &Arc<Mutex<Connection>>,
     archive_item_id: i64,
     child_key: Option<&str>,
+    upload_set_id: Option<&str>,
     resolution: &CloudQueueRetryResolutionWire,
 ) -> Result<String, HandlerError> {
     let locked = conn
@@ -708,6 +758,7 @@ fn handle_cloud_queue_retry(
         &locked,
         archive_item_id,
         child_key,
+        upload_set_id,
         &from_retry_resolution_wire(resolution),
     )
     .map_err(map_db_error)
@@ -764,6 +815,7 @@ fn handle_cloud_upload_commit(
     destination_id: &str,
     remote_key: &str,
     attempt_id: &str,
+    upload_set_id: Option<&str>,
     hash: &str,
     hash_alg: &str,
     size: i64,
@@ -781,6 +833,7 @@ fn handle_cloud_upload_commit(
         hash,
         hash_alg,
         size,
+        upload_set_id,
     )
     .map_err(map_db_error)?;
     Ok((result.ok, result.durable_parent))
@@ -792,6 +845,7 @@ fn handle_cloud_upload_fail(
     destination_id: &str,
     remote_key: &str,
     attempt_id: &str,
+    upload_set_id: Option<&str>,
     error_class: &str,
     not_before: Option<i64>,
     terminal: bool,
@@ -809,6 +863,7 @@ fn handle_cloud_upload_fail(
         error_class,
         not_before,
         terminal,
+        upload_set_id,
     )
     .map_err(map_db_error)?;
     Ok((result.ok, result.state))
@@ -1562,6 +1617,7 @@ const FINALIZE_EVENT_TOO_LARGE_MESSAGE: &str = "event too large — chunked stag
 const FINALIZE_CONFLICT_SAME_DIGEST_MESSAGE: &str =
     "finalize conflict: digest matches but content differs";
 const FINALIZE_CAS_STALE_MESSAGE: &str = "finalize CAS stale";
+const FINALIZE_SUPERSEDE_PARK_MESSAGE: &str = "parked: superseded by newer event generation";
 const SEGMENT_SET_DIGEST_DOMAIN_TAG: &[u8] = b"teslausb.segment_set.v1\0";
 const FINALIZE_METADATA_DIGEST_DOMAIN_TAG: &[u8] = b"teslausb.finalize_metadata.v1\0";
 
@@ -1704,12 +1760,6 @@ fn finalize_existing(
             "finalize rejected: active upload lease".to_owned(),
         ));
     }
-    if has_active_cloud_parent_operation(tx, existing.id)? {
-        return Err(HandlerError::Rejected(
-            "finalize rejected: active cloud parent upload".to_owned(),
-        ));
-    }
-
     let clip_map = upsert_finalize_clips_and_angles(tx, validated)?;
     supersede_current_parent_upload_set(tx, existing.id, request.archived_at)?;
     replace_archive_item_links(tx, existing.id, &clip_map, &validated.clip_cameras)
@@ -1837,29 +1887,28 @@ fn linked_clip_keys(
     rows.collect()
 }
 
-fn has_active_cloud_parent_operation(
-    conn: &Connection,
-    archive_item_id: i64,
-) -> Result<bool, HandlerError> {
-    let count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*)
-               FROM cloud_parent_upload_sets
-              WHERE archive_item_id = ?1
-                AND superseded_at IS NULL
-                AND finalized_at IS NULL",
-            params![archive_item_id],
-            |row| row.get(0),
-        )
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
-    Ok(count > 0)
-}
-
 fn supersede_current_parent_upload_set(
     conn: &Connection,
     archive_item_id: i64,
     archived_at: i64,
 ) -> Result<(), HandlerError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT upload_set_id
+               FROM cloud_parent_upload_sets
+              WHERE archive_item_id = ?1
+                AND superseded_at IS NULL",
+        )
+        .map_err(map_finalize_sqlite_error)?;
+    let rows = stmt
+        .query_map(params![archive_item_id], |row| row.get::<_, String>(0))
+        .map_err(map_finalize_sqlite_error)?;
+    let mut superseded_set_ids = Vec::new();
+    for row in rows {
+        superseded_set_ids.push(row.map_err(map_finalize_sqlite_error)?);
+    }
+    drop(stmt);
+
     let superseded_at = archived_at.max(now_epoch_s());
     conn.execute(
         "UPDATE cloud_parent_upload_sets
@@ -1869,6 +1918,20 @@ fn supersede_current_parent_upload_set(
         params![archive_item_id, superseded_at],
     )
     .map_err(map_finalize_sqlite_error)?;
+    for superseded_set_id in superseded_set_ids {
+        conn.execute(
+            "UPDATE cloud_upload_queue
+                SET state = 'parked',
+                    bytes_uploaded = 0,
+                    attempts = 0,
+                    not_before = NULL,
+                    last_error = ?2
+              WHERE upload_set_id = ?1
+                AND state <> 'done'",
+            params![superseded_set_id, FINALIZE_SUPERSEDE_PARK_MESSAGE],
+        )
+        .map_err(map_finalize_sqlite_error)?;
+    }
     Ok(())
 }
 
@@ -2422,11 +2485,12 @@ mod tests {
 
     use super::{
         FINALIZE_CAS_STALE_MESSAGE, FINALIZE_CONFLICT_SAME_DIGEST_MESSAGE,
-        FINALIZE_EVENT_TOO_LARGE_MESSAGE, compute_segment_set_digest,
+        FINALIZE_EVENT_TOO_LARGE_MESSAGE, FINALIZE_SUPERSEDE_PARK_MESSAGE,
+        compute_segment_set_digest,
         handle_cloud_finalize_parent_upload, handle_cloud_prepare_parent_upload,
         handle_finalize_event_archive, parse_folder_class, spawn, validate_payload,
     };
-    use crate::db::cloud::{CloudQueuePk, cloud_upload_commit};
+    use crate::db::cloud::{CloudQueuePk, cloud_upload_commit, cloud_upload_fail};
     use crate::db::mutations::BootContext;
     use crate::db::open_in_memory;
     use crate::proto::{
@@ -3075,6 +3139,7 @@ mod tests {
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "sha256",
                 111,
+                None,
             );
             assert!(commit.is_err());
 
@@ -3089,6 +3154,136 @@ mod tests {
                 )
                 .expect("read current set");
             assert_eq!(current_set, second_result.upload_set_id);
+        }
+
+        #[test]
+        fn cloud_prepare_retag_then_late_prior_set_commit_rejected() {
+            let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
+            let children_a = vec![prepare_child!(
+                "front.mp4",
+                "rk/shared",
+                1,
+                111,
+                1_718_805_700_000,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "11111111111111111111111111111111",
+                "md5",
+            )];
+            let digest_a = manifest_digest_for_prepare_children(&children_a);
+            let archive_item_id = {
+                let locked = conn.lock().expect("lock db");
+                insert_prepare_parent(
+                    &locked,
+                    "archive/events/prepare-retag",
+                    "LIVE",
+                    0,
+                    Some(digest_a.as_str()),
+                )
+            };
+            let prepare_a = CloudPrepareParentUploadRequest {
+                archive_item_id,
+                destination_id: "dest".to_owned(),
+                source_manifest_digest: digest_a,
+                children: children_a,
+            };
+            let Response::CloudPrepareParentUpload(first_result) = call_prepare(&conn, &prepare_a) else {
+                panic!("expected first prepare response");
+            };
+
+            let children_b = vec![prepare_child!(
+                "front.mp4",
+                "rk/shared",
+                1,
+                222,
+                1_718_805_701_000,
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "22222222222222222222222222222222",
+                "md5",
+            )];
+            let digest_b = manifest_digest_for_prepare_children(&children_b);
+            {
+                let locked = conn.lock().expect("lock db");
+                locked
+                    .execute(
+                        "UPDATE archive_items SET manifest_digest = ?2 WHERE id = ?1",
+                        params![archive_item_id, digest_b],
+                    )
+                    .expect("update parent digest");
+            }
+            let prepare_b = CloudPrepareParentUploadRequest {
+                archive_item_id,
+                destination_id: "dest".to_owned(),
+                source_manifest_digest: manifest_digest_for_prepare_children(&children_b),
+                children: children_b,
+            };
+            let Response::CloudPrepareParentUpload(second_result) = call_prepare(&conn, &prepare_b) else {
+                panic!("expected second prepare response");
+            };
+            assert_ne!(first_result.upload_set_id, second_result.upload_set_id);
+
+            let mut locked = conn.lock().expect("lock db");
+            let queue_set_id: Option<String> = locked
+                .query_row(
+                    "SELECT upload_set_id
+                       FROM cloud_upload_queue
+                      WHERE destination_id = 'dest' AND remote_key = 'rk/shared'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("read queue upload_set_id");
+            assert_eq!(queue_set_id.as_deref(), Some(second_result.upload_set_id.as_str()));
+            let attempts_before: i64 = locked
+                .query_row("SELECT COUNT(*) FROM cloud_upload_attempts", [], |row| row.get(0))
+                .expect("count attempts before");
+            let history_before: i64 = locked
+                .query_row("SELECT COUNT(*) FROM cloud_sync_history", [], |row| row.get(0))
+                .expect("count history before");
+
+            let late_commit = cloud_upload_commit(
+                &mut locked,
+                &CloudQueuePk {
+                    destination_id: "dest".to_owned(),
+                    remote_key: "rk/shared".to_owned(),
+                },
+                "attempt-late-commit",
+                "22222222222222222222222222222222",
+                "md5",
+                222,
+                Some(first_result.upload_set_id.as_str()),
+            );
+            assert!(late_commit.is_err());
+            let late_fail = cloud_upload_fail(
+                &mut locked,
+                &CloudQueuePk {
+                    destination_id: "dest".to_owned(),
+                    remote_key: "rk/shared".to_owned(),
+                },
+                "attempt-late-fail",
+                "timeout",
+                Some(1234),
+                false,
+                Some(first_result.upload_set_id.as_str()),
+            );
+            assert!(late_fail.is_err());
+
+            let attempts_after: i64 = locked
+                .query_row("SELECT COUNT(*) FROM cloud_upload_attempts", [], |row| row.get(0))
+                .expect("count attempts after");
+            let history_after: i64 = locked
+                .query_row("SELECT COUNT(*) FROM cloud_sync_history", [], |row| row.get(0))
+                .expect("count history after");
+            let queue_state: String = locked
+                .query_row(
+                    "SELECT state
+                       FROM cloud_upload_queue
+                      WHERE destination_id = 'dest' AND remote_key = 'rk/shared'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("read queue state");
+            assert_eq!(attempts_after, attempts_before);
+            assert_eq!(history_after, history_before);
+            assert_eq!(queue_state, "queued");
         }
 
         #[test]
@@ -4213,6 +4408,116 @@ mod tests {
         }
 
         #[test]
+        fn finalize_changed_generation_supersedes_and_parks_unfinished_rows() {
+            let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
+            let boot = Arc::new(BootContext::new());
+            let request = finalize_payload();
+            let Response::FinalizeEventArchive(initial) = call_finalize(&conn, &boot, &request) else {
+                panic!("expected finalize response");
+            };
+            {
+                let locked = conn.lock().expect("lock db");
+                locked
+                    .execute(
+                        "INSERT INTO cloud_parent_upload_sets
+                            (upload_set_id, archive_item_id, destination_id, source_manifest_digest, request_digest,
+                             expected_child_count, created_at, finalized_at, superseded_at)
+                         VALUES (?1, ?2, 'dest', ?3, ?4, 2, 100, NULL, NULL)",
+                        params![
+                            "abababababababababababababababab",
+                            initial.archive_item_id,
+                            request.manifest_digest,
+                            "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+                        ],
+                    )
+                    .expect("insert active upload set");
+                locked
+                    .execute(
+                        "INSERT INTO cloud_upload_queue
+                            (archive_item_id, child_key, destination_id, remote_key, category, seq, total_bytes, bytes_uploaded,
+                             expected_hash, verify_alg, content_sha256, state, attempts, not_before, last_error, upload_set_id)
+                         VALUES (?1, 'child-done', 'dest', 'rk/done', 'event_sentry', 1, 10, 10,
+                                 'etag-done', 'md5',
+                                 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                                 'done', 1, NULL, NULL, ?2)",
+                        params![initial.archive_item_id, "abababababababababababababababab"],
+                    )
+                    .expect("insert done queue row");
+                locked
+                    .execute(
+                        "INSERT INTO cloud_upload_queue
+                            (archive_item_id, child_key, destination_id, remote_key, category, seq, total_bytes, bytes_uploaded,
+                             expected_hash, verify_alg, content_sha256, state, attempts, not_before, last_error, upload_set_id)
+                         VALUES (?1, 'child-queued', 'dest', 'rk/queued', 'event_sentry', 2, 20, 5,
+                                 'etag-queued', 'md5',
+                                 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                                 'queued', 3, 1234, 'transient', ?2)",
+                        params![initial.archive_item_id, "abababababababababababababababab"],
+                    )
+                    .expect("insert queued row");
+            }
+
+            let next = finalize_payload_generation_two();
+            let response = call_finalize(&conn, &boot, &next);
+            let Response::FinalizeEventArchive(result) = response else {
+                panic!("expected finalize response");
+            };
+            assert!(!result.already_finalized);
+            assert_eq!(result.archive_item_id, initial.archive_item_id);
+
+            let locked = conn.lock().expect("lock db");
+            let superseded_at: Option<i64> = locked
+                .query_row(
+                    "SELECT superseded_at
+                       FROM cloud_parent_upload_sets
+                      WHERE upload_set_id = 'abababababababababababababababab'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("read superseded_at");
+            assert!(superseded_at.is_some());
+            let done_row: (String, i64, i64, Option<i64>, Option<String>) = locked
+                .query_row(
+                    "SELECT state, bytes_uploaded, attempts, not_before, last_error
+                       FROM cloud_upload_queue
+                      WHERE destination_id='dest' AND remote_key='rk/done'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                )
+                .expect("read done row");
+            assert_eq!(done_row.0, "done");
+            assert_eq!(done_row.1, 10);
+            assert_eq!(done_row.2, 1);
+            assert_eq!(done_row.3, None);
+            assert_eq!(done_row.4, None);
+            let queued_row: (String, i64, i64, Option<i64>, Option<String>) = locked
+                .query_row(
+                    "SELECT state, bytes_uploaded, attempts, not_before, last_error
+                       FROM cloud_upload_queue
+                      WHERE destination_id='dest' AND remote_key='rk/queued'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                )
+                .expect("read queued row");
+            assert_eq!(queued_row.0, "parked");
+            assert_eq!(queued_row.1, 0);
+            assert_eq!(queued_row.2, 0);
+            assert_eq!(queued_row.3, None);
+            assert_eq!(
+                queued_row.4.as_deref(),
+                Some(FINALIZE_SUPERSEDE_PARK_MESSAGE)
+            );
+            let durable: i64 = locked
+                .query_row(
+                    "SELECT durable FROM archive_items WHERE id = ?1",
+                    params![initial.archive_item_id],
+                    |row| row.get(0),
+                )
+                .expect("read durable");
+            assert_eq!(durable, 0);
+        }
+
+        #[test]
         fn finalize_event_archive_cas_stale_rejected_without_mutation() {
             let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
             let boot = Arc::new(BootContext::new());
@@ -4791,6 +5096,7 @@ mod tests {
                     remote_key: "rk/a".to_owned(),
                 },
                 attempt_id: "attempt-a".to_owned(),
+                upload_set_id: None,
                 hash: hash_a.to_owned(),
                 hash_alg: "sha256".to_owned(),
                 size: 10,
@@ -4811,6 +5117,7 @@ mod tests {
                     remote_key: "rk/b".to_owned(),
                 },
                 attempt_id: "attempt-b".to_owned(),
+                upload_set_id: None,
                 hash: hash_b.to_owned(),
                 hash_alg: "sha256".to_owned(),
                 size: 20,
@@ -4857,6 +5164,7 @@ mod tests {
                     remote_key: "rk/c".to_owned(),
                 },
                 attempt_id: "attempt-c".to_owned(),
+                upload_set_id: None,
                 error_class: "timeout".to_owned(),
                 not_before: Some(1234),
                 terminal: false,
@@ -4892,6 +5200,7 @@ mod tests {
             &Request::CloudQueueLoad {
                 after_cursor: None,
                 limit: 10,
+                upload_set_id: None,
             },
         );
         assert!(matches!(queue, Response::CloudQueuePage { .. }));
@@ -4930,6 +5239,7 @@ mod tests {
             &Request::CloudQueueRetry {
                 archive_item_id: 101,
                 child_key: Some("child-c".to_owned()),
+                upload_set_id: None,
                 resolution: CloudQueueRetryResolutionWire::Replace,
             },
         );

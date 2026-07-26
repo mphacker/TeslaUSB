@@ -137,6 +137,23 @@ pub struct CloudQueueRow {
     pub not_before: Option<i64>,
     /// Last error class/message (sanitized).
     pub last_error: Option<String>,
+    /// Sealed upload set id, when row membership has been finalized.
+    pub upload_set_id: Option<String>,
+}
+
+/// One `cloud_pending_upload_sets_load` item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudPendingUploadSet {
+    /// Upload set id.
+    pub upload_set_id: String,
+    /// Parent archive item id.
+    pub archive_item_id: i64,
+    /// Destination id.
+    pub destination_id: String,
+    /// Source manifest digest.
+    pub source_manifest_digest: String,
+    /// Expected child count.
+    pub expected_child_count: i64,
 }
 
 /// `cloud_queue_retry` conflict resolution mode.
@@ -264,6 +281,12 @@ struct QueueCursor {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PendingSetsCursor {
+    created_at: i64,
+    upload_set_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct DiscoverCursor {
     archive_item_id: i64,
 }
@@ -314,6 +337,47 @@ fn validate_lower_hex_len(value: &str, field: &str, len: usize) -> Result<(), Db
         return Err(invalid_input(&format!("{field} must be lowercase hex")));
     }
     Ok(())
+}
+
+fn validate_optional_upload_set_id(upload_set_id: Option<&str>) -> Result<(), DbError> {
+    if let Some(id) = upload_set_id {
+        validate_lower_hex_len(id, "upload_set_id", 32)?;
+    }
+    Ok(())
+}
+
+fn enforce_upload_set_fence(
+    tx: &Connection,
+    row_upload_set_id: Option<&str>,
+    requested: Option<&str>,
+) -> Result<(), DbError> {
+    match row_upload_set_id {
+        None => {
+            if requested.is_some() {
+                return Err(invalid_input(
+                    "upload_set_id supplied for an unsealed queue row",
+                ));
+            }
+            Ok(())
+        }
+        Some(row_id) => match requested {
+            Some(req) if req == row_id => {
+                let live: Option<i64> = tx
+                    .query_row(
+                        "SELECT 1 FROM cloud_parent_upload_sets
+                          WHERE upload_set_id = ?1 AND superseded_at IS NULL",
+                        params![row_id],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if live.is_none() {
+                    return Err(invalid_input("upload_set_id is superseded or unknown"));
+                }
+                Ok(())
+            }
+            _ => Err(invalid_input("upload_set_id does not match sealed queue row")),
+        },
+    }
 }
 
 fn validate_category(value: &str) -> Result<(), DbError> {
@@ -467,7 +531,15 @@ fn cloud_queue_row_estimated_size(row: &CloudQueueRow) -> usize {
         + json_escaped_len(&row.state)
         + row.not_before.map_or(0, |_| 16)
         + row.last_error.as_deref().map_or(0, json_escaped_len)
+        + row.upload_set_id.as_deref().map_or(0, json_escaped_len)
         + 384
+}
+
+fn cloud_pending_upload_set_estimated_size(row: &CloudPendingUploadSet) -> usize {
+    json_escaped_len(&row.upload_set_id)
+        + json_escaped_len(&row.destination_id)
+        + json_escaped_len(&row.source_manifest_digest)
+        + 256
 }
 
 fn cloud_history_row_estimated_size(row: &CloudHistoryRow) -> usize {
@@ -804,6 +876,7 @@ pub fn cloud_queue_load(
     conn: &Connection,
     after_cursor: Option<&str>,
     limit: u32,
+    upload_set_id: Option<&str>,
 ) -> Result<CloudPage<CloudQueueRow>, DbError> {
     let page_size = page_limit(limit)?;
     let cursor = after_cursor
@@ -820,21 +893,23 @@ pub fn cloud_queue_load(
     let mut stmt = conn.prepare(
         "SELECT archive_item_id, child_key, destination_id, remote_key, category, seq,
                 total_bytes, bytes_uploaded, expected_hash, verify_alg, content_sha256, state,
-                attempts, not_before, last_error
+               attempts, not_before, last_error, upload_set_id
            FROM cloud_upload_queue
           WHERE (?1 IS NULL
                  OR seq > ?1
                  OR (seq = ?1 AND destination_id > ?2)
                  OR (seq = ?1 AND destination_id = ?2 AND remote_key > ?3))
+            AND (?4 IS NULL OR upload_set_id = ?4)
           ORDER BY seq ASC, destination_id ASC, remote_key ASC
-          LIMIT ?4",
+          LIMIT ?5",
     )?;
     let rows = stmt.query_map(
         params![
-            seq,
-            destination_id,
-            remote_key,
-            i64::try_from(page_size + 1).unwrap_or(i64::MAX),
+           seq,
+           destination_id,
+           remote_key,
+           upload_set_id,
+           i64::try_from(page_size + 1).unwrap_or(i64::MAX),
         ],
         |row| {
             Ok(CloudQueueRow {
@@ -853,6 +928,7 @@ pub fn cloud_queue_load(
                 attempts: row.get(12)?,
                 not_before: row.get(13)?,
                 last_error: row.get(14)?,
+                upload_set_id: row.get(15)?,
             })
         },
     )?;
@@ -876,6 +952,78 @@ pub fn cloud_queue_load(
         None
     }
     .transpose()?;
+    Ok(CloudPage { items, next_cursor })
+}
+
+/// Load current prepared parent upload sets for post-reboot resume.
+///
+/// "Current" means `finalized_at IS NULL` and `superseded_at IS NULL`.
+pub fn cloud_pending_upload_sets_load(
+    conn: &Connection,
+    after_cursor: Option<&str>,
+    limit: u32,
+) -> Result<CloudPage<CloudPendingUploadSet>, DbError> {
+    let page_size = page_limit(limit)?;
+    let cursor = after_cursor
+        .map(|value| decode_cursor::<PendingSetsCursor>("pending-sets-v1", value))
+        .transpose()?;
+    let (created_at, upload_set_id) =
+        cursor.map_or((None, None), |value| (Some(value.created_at), Some(value.upload_set_id)));
+
+    let mut stmt = conn.prepare(
+        "SELECT upload_set_id, archive_item_id, destination_id, source_manifest_digest,
+                expected_child_count, created_at
+           FROM cloud_parent_upload_sets
+          WHERE finalized_at IS NULL AND superseded_at IS NULL
+            AND (?1 IS NULL OR created_at > ?1 OR (created_at = ?1 AND upload_set_id > ?2))
+          ORDER BY created_at ASC, upload_set_id ASC
+          LIMIT ?3",
+    )?;
+    let rows = stmt.query_map(
+        params![
+            created_at,
+            upload_set_id,
+            i64::try_from(page_size + 1).unwrap_or(i64::MAX),
+        ],
+        |row| {
+            Ok((
+                CloudPendingUploadSet {
+                    upload_set_id: row.get(0)?,
+                    archive_item_id: row.get(1)?,
+                    destination_id: row.get(2)?,
+                    source_manifest_digest: row.get(3)?,
+                    expected_child_count: row.get(4)?,
+                },
+                row.get::<_, i64>(5)?,
+            ))
+        },
+    )?;
+    let mut queried = Vec::new();
+    for row in rows {
+        queried.push(row?);
+    }
+    let (items_with_created_at, has_more) =
+        paginate_with_budget(queried, page_size, |(row, _)| {
+            cloud_pending_upload_set_estimated_size(row)
+        });
+    let next_cursor = if has_more {
+        items_with_created_at.last().map(|(last, created_at)| {
+            encode_cursor(
+                "pending-sets-v1",
+                &PendingSetsCursor {
+                    created_at: *created_at,
+                    upload_set_id: last.upload_set_id.clone(),
+                },
+            )
+        })
+    } else {
+        None
+    }
+    .transpose()?;
+    let items = items_with_created_at
+        .into_iter()
+        .map(|(row, _)| row)
+        .collect();
     Ok(CloudPage { items, next_cursor })
 }
 
@@ -923,7 +1071,7 @@ pub fn cloud_queue_upsert(
 
     let existing = tx
         .query_row(
-            "SELECT content_sha256, total_bytes, state
+            "SELECT content_sha256, total_bytes, state, upload_set_id
                FROM cloud_upload_queue
               WHERE destination_id = ?1 AND remote_key = ?2",
             params![item.destination_id, remote_key],
@@ -932,13 +1080,17 @@ pub fn cloud_queue_upsert(
                     row.get::<_, String>(0)?,
                     row.get::<_, i64>(1)?,
                     row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
                 ))
             },
         )
         .optional()?;
 
     let state = match existing {
-        Some((existing_hash, existing_size, existing_state)) => {
+        Some((existing_hash, existing_size, existing_state, existing_upload_set_id)) => {
+            if existing_upload_set_id.is_some() {
+                return Err(invalid_input("cannot upsert a sealed queue row"));
+            }
             if existing_hash != item.content_sha256 || existing_size != item.total_bytes {
                 tx.commit()?;
                 return Ok("parked".to_owned());
@@ -1056,47 +1208,81 @@ pub fn cloud_queue_retry(
     conn: &Connection,
     archive_item_id: i64,
     child_key: Option<&str>,
+    upload_set_id: Option<&str>,
     resolution: &CloudQueueRetryResolution,
 ) -> Result<String, DbError> {
     if archive_item_id <= 0 {
         return Err(invalid_input("archive_item_id must be > 0"));
     }
+    validate_optional_upload_set_id(upload_set_id)?;
     let tx = conn.unchecked_transaction()?;
     let target = tx
         .query_row(
-            "SELECT destination_id, remote_key, content_sha256, total_bytes
+            "SELECT destination_id, remote_key, content_sha256, total_bytes,
+                    verify_alg, expected_hash, upload_set_id
                FROM cloud_upload_queue
               WHERE archive_item_id = ?1
                 AND (?2 IS NULL OR child_key = ?2)
+                AND (?3 IS NULL OR upload_set_id = ?3)
               ORDER BY seq ASC, destination_id ASC, remote_key ASC
               LIMIT 1",
-            params![archive_item_id, child_key],
+            params![archive_item_id, child_key, upload_set_id],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
                 ))
             },
         )
         .optional()?;
-    let Some((destination_id, remote_key, content_sha256, total_bytes)) = target else {
+    let Some((
+        destination_id,
+        remote_key,
+        content_sha256,
+        total_bytes,
+        row_verify_alg,
+        row_expected_hash,
+        row_upload_set_id,
+    )) = target
+    else {
         return Err(invalid_input("target queue row not found"));
     };
+    enforce_upload_set_fence(&tx, row_upload_set_id.as_deref(), upload_set_id)?;
 
     let resulting_state = match resolution {
         CloudQueueRetryResolution::KeepExisting => {
-            let has_matching_evidence = tx
+            let evidence = tx
                 .query_row(
-                    "SELECT content_sha256, size_bytes
+                    "SELECT content_sha256, size_bytes, verify_alg, verify_value
                        FROM cloud_synced_files
                       WHERE destination_id = ?1 AND remote_key = ?2",
                     params![destination_id, remote_key],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                        ))
+                    },
                 )
-                .optional()?
-                .is_some_and(|(hash, size)| hash == content_sha256 && size == total_bytes);
+                .optional()?;
+            let has_matching_evidence = evidence.is_some_and(|(hash, size, synced_alg, synced_value)| {
+                let base = hash == content_sha256 && size == total_bytes;
+                if row_upload_set_id.is_some() {
+                    base
+                        && synced_alg == row_verify_alg
+                        && synced_value.unwrap_or_default()
+                            == row_expected_hash.clone().unwrap_or_default()
+                } else {
+                    base
+                }
+            });
             if has_matching_evidence {
                 tx.execute(
                     "UPDATE cloud_upload_queue
@@ -1105,8 +1291,10 @@ pub fn cloud_queue_retry(
                             attempts = 0,
                             not_before = NULL,
                             last_error = NULL
-                      WHERE destination_id = ?1 AND remote_key = ?2",
-                    params![destination_id, remote_key],
+                      WHERE destination_id = ?1
+                        AND remote_key = ?2
+                        AND upload_set_id IS ?3",
+                    params![destination_id, remote_key, row_upload_set_id],
                 )?;
                 "done".to_owned()
             } else {
@@ -1134,6 +1322,9 @@ pub fn cloud_queue_retry(
         CloudQueueRetryResolution::Rekey {
             remote_key: new_key,
         } => {
+            if row_upload_set_id.is_some() {
+                return Err(invalid_input("cannot rekey a sealed queue row"));
+            }
             let new_key = normalize_remote_key(new_key)?;
             let dedup_state = tx
                 .query_row(
@@ -1324,12 +1515,14 @@ pub fn cloud_upload_commit(
     hash: &str,
     hash_alg: &str,
     size: i64,
+    upload_set_id: Option<&str>,
 ) -> Result<CloudUploadCommitResult, DbError> {
     validate_non_empty_len(&queue_pk.destination_id, "destination_id", 128)?;
     let remote_key = normalize_remote_key(&queue_pk.remote_key)?;
     validate_non_empty_len(attempt_id, "attempt_id", 128)?;
     validate_verify_alg(hash_alg)?;
     let verify_value = validate_backend_hash(hash, hash_alg)?;
+    validate_optional_upload_set_id(upload_set_id)?;
     if size < 0 {
         return Err(invalid_input("size must be >= 0"));
     }
@@ -1338,7 +1531,7 @@ pub fn cloud_upload_commit(
     let tx = conn.transaction()?;
     let previous = tx
         .query_row(
-            "SELECT destination_id, remote_key, outcome, hash, size_bytes
+            "SELECT destination_id, remote_key, outcome, hash, size_bytes, upload_set_id
                FROM cloud_upload_attempts
               WHERE attempt_id = ?1",
             params![attempt_id],
@@ -1349,14 +1542,20 @@ pub fn cloud_upload_commit(
                     r.get::<_, String>(2)?,
                     r.get::<_, String>(3)?,
                     r.get::<_, i64>(4)?,
+                    r.get::<_, Option<String>>(5)?,
                 ))
             },
         )
         .optional()?;
-    if let Some((dest, key, outcome, prior_hash, prior_size)) = previous {
+    if let Some((dest, key, outcome, prior_hash, prior_size, prior_upload_set_id)) = previous {
         if dest != queue_pk.destination_id || key != remote_key {
             return Err(invalid_input(
                 "attempt_id already used with a different queue primary key",
+            ));
+        }
+        if prior_upload_set_id.as_deref() != upload_set_id {
+            return Err(invalid_input(
+                "attempt_id already used with a different upload_set_id",
             ));
         }
         let prior_verify = tx
@@ -1405,7 +1604,7 @@ pub fn cloud_upload_commit(
     let row = tx
         .query_row(
             "SELECT archive_item_id, child_key, total_bytes, expected_hash, verify_alg,
-                    content_sha256, state
+                    content_sha256, state, upload_set_id
                FROM cloud_upload_queue
               WHERE destination_id = ?1 AND remote_key = ?2",
             params![queue_pk.destination_id, remote_key],
@@ -1418,6 +1617,7 @@ pub fn cloud_upload_commit(
                     r.get::<_, String>(4)?,
                     r.get::<_, String>(5)?,
                     r.get::<_, String>(6)?,
+                    r.get::<_, Option<String>>(7)?,
                 ))
             },
         )
@@ -1430,10 +1630,12 @@ pub fn cloud_upload_commit(
         verify_alg,
         content_sha256,
         state,
+        row_upload_set_id,
     )) = row
     else {
         return Err(invalid_input("queue row does not exist"));
     };
+    enforce_upload_set_fence(&tx, row_upload_set_id.as_deref(), upload_set_id)?;
     if state == "parked" {
         return Err(invalid_input("cannot commit a parked queue row"));
     }
@@ -1456,7 +1658,7 @@ pub fn cloud_upload_commit(
     }
     let existing_synced = tx
         .query_row(
-            "SELECT verify_alg, verify_value, content_sha256, size_bytes
+            "SELECT verify_alg, verify_value, content_sha256, size_bytes, completion_seq
                FROM cloud_synced_files
               WHERE destination_id = ?1 AND remote_key = ?2",
             params![queue_pk.destination_id, remote_key],
@@ -1466,11 +1668,12 @@ pub fn cloud_upload_commit(
                     r.get::<_, Option<String>>(1)?,
                     r.get::<_, String>(2)?,
                     r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
                 ))
             },
         )
         .optional()?;
-    if let Some((_, _, synced_content_sha256, _)) = existing_synced.as_ref() {
+    if let Some((_, _, synced_content_sha256, _, _)) = existing_synced.as_ref() {
         if synced_content_sha256.as_str() != content_sha256.as_str() {
             return Err(invalid_input(
                 "destination key already has a different synced content hash",
@@ -1485,7 +1688,7 @@ pub fn cloud_upload_commit(
         // commit asserts the identical content proof as the recorded synced record,
         // mirroring the attempt-idempotency consistency check above. Never flips durable
         // (contract §7.5).
-        let Some((synced_alg, synced_value, _, synced_size)) = existing_synced else {
+        let Some((synced_alg, synced_value, _, synced_size, synced_completion_seq)) = existing_synced else {
             return Err(invalid_input("queue row is done but has no synced record"));
         };
         let hash_matches = if synced_alg == "none" {
@@ -1498,6 +1701,22 @@ pub fn cloud_upload_commit(
                 "queue row is done with a different upload outcome",
             ));
         }
+        tx.execute(
+            "INSERT INTO cloud_upload_attempts
+                (attempt_id, destination_id, remote_key, outcome, durable_parent, completion_seq,
+                 state_after, hash, size_bytes, created_at, upload_set_id)
+             VALUES (?1, ?2, ?3, 'uploaded', 0, ?4, 'done', ?5, ?6, ?7, ?8)",
+            params![
+                attempt_id,
+                queue_pk.destination_id,
+                remote_key,
+                synced_completion_seq,
+                content_sha256,
+                size,
+                now,
+                upload_set_id,
+            ],
+        )?;
         tx.commit()?;
         return Ok(CloudUploadCommitResult {
             ok: true,
@@ -1552,15 +1771,17 @@ pub fn cloud_upload_commit(
                 bytes_uploaded = total_bytes,
                 not_before = NULL,
                 last_error = NULL
-          WHERE destination_id = ?1 AND remote_key = ?2",
-        params![queue_pk.destination_id, remote_key],
+          WHERE destination_id = ?1
+            AND remote_key = ?2
+            AND upload_set_id IS ?3",
+        params![queue_pk.destination_id, remote_key, upload_set_id],
     )?;
     let durable_parent = false;
     tx.execute(
         "INSERT INTO cloud_upload_attempts
             (attempt_id, destination_id, remote_key, outcome, durable_parent, completion_seq,
-             state_after, hash, size_bytes, created_at)
-         VALUES (?1, ?2, ?3, 'uploaded', ?4, ?5, 'done', ?6, ?7, ?8)",
+             state_after, hash, size_bytes, created_at, upload_set_id)
+         VALUES (?1, ?2, ?3, 'uploaded', ?4, ?5, 'done', ?6, ?7, ?8, ?9)",
         params![
             attempt_id,
             queue_pk.destination_id,
@@ -1570,6 +1791,7 @@ pub fn cloud_upload_commit(
             content_sha256,
             size,
             now,
+            upload_set_id,
         ],
     )?;
     tx.commit()?;
@@ -1587,11 +1809,13 @@ pub fn cloud_upload_fail(
     error_class: &str,
     not_before: Option<i64>,
     terminal: bool,
+    upload_set_id: Option<&str>,
 ) -> Result<CloudUploadFailResult, DbError> {
     validate_non_empty_len(&queue_pk.destination_id, "destination_id", 128)?;
     let remote_key = normalize_remote_key(&queue_pk.remote_key)?;
     validate_non_empty_len(attempt_id, "attempt_id", 128)?;
     validate_non_empty_len(error_class, "error_class", 128)?;
+    validate_optional_upload_set_id(upload_set_id)?;
     if let Some(value) = not_before {
         if value < 0 {
             return Err(invalid_input("not_before must be >= 0"));
@@ -1602,7 +1826,7 @@ pub fn cloud_upload_fail(
     let tx = conn.transaction()?;
     let previous = tx
         .query_row(
-            "SELECT destination_id, remote_key, outcome, state_after
+            "SELECT destination_id, remote_key, outcome, state_after, upload_set_id
                FROM cloud_upload_attempts
               WHERE attempt_id = ?1",
             params![attempt_id],
@@ -1612,14 +1836,20 @@ pub fn cloud_upload_fail(
                     r.get::<_, String>(1)?,
                     r.get::<_, String>(2)?,
                     r.get::<_, String>(3)?,
+                    r.get::<_, Option<String>>(4)?,
                 ))
             },
         )
         .optional()?;
-    if let Some((dest, key, outcome, state_after)) = previous {
+    if let Some((dest, key, outcome, state_after, prior_upload_set_id)) = previous {
         if dest != queue_pk.destination_id || key != remote_key {
             return Err(invalid_input(
                 "attempt_id already used with a different queue primary key",
+            ));
+        }
+        if prior_upload_set_id.as_deref() != upload_set_id {
+            return Err(invalid_input(
+                "attempt_id already used with a different upload_set_id",
             ));
         }
         if outcome != "failed" {
@@ -1635,7 +1865,7 @@ pub fn cloud_upload_fail(
 
     let row = tx
         .query_row(
-            "SELECT archive_item_id, child_key, total_bytes
+            "SELECT archive_item_id, child_key, total_bytes, upload_set_id
                FROM cloud_upload_queue
               WHERE destination_id = ?1 AND remote_key = ?2",
             params![queue_pk.destination_id, remote_key],
@@ -1644,13 +1874,15 @@ pub fn cloud_upload_fail(
                     r.get::<_, i64>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, i64>(2)?,
+                    r.get::<_, Option<String>>(3)?,
                 ))
             },
         )
         .optional()?;
-    let Some((archive_item_id, child_key, total_bytes)) = row else {
+    let Some((archive_item_id, child_key, total_bytes, row_upload_set_id)) = row else {
         return Err(invalid_input("queue row does not exist"));
     };
+    enforce_upload_set_fence(&tx, row_upload_set_id.as_deref(), upload_set_id)?;
     let state = if terminal { "parked" } else { "failed" };
     let completion_seq = next_completion_seq(&tx, now)?;
     tx.execute(
@@ -1685,8 +1917,8 @@ pub fn cloud_upload_fail(
     tx.execute(
         "INSERT INTO cloud_upload_attempts
             (attempt_id, destination_id, remote_key, outcome, durable_parent, completion_seq,
-             state_after, hash, size_bytes, created_at)
-         VALUES (?1, ?2, ?3, 'failed', 0, ?4, ?5, '', ?6, ?7)",
+             state_after, hash, size_bytes, created_at, upload_set_id)
+         VALUES (?1, ?2, ?3, 'failed', 0, ?4, ?5, '', ?6, ?7, ?8)",
         params![
             attempt_id,
             queue_pk.destination_id,
@@ -1694,7 +1926,8 @@ pub fn cloud_upload_fail(
             completion_seq,
             state,
             total_bytes,
-            now
+            now,
+            upload_set_id,
         ],
     )?;
     tx.commit()?;
@@ -1893,11 +2126,12 @@ mod tests {
     use rusqlite::params;
 
     use super::{
-        CloudCandidateRow, CloudDiscoverRow, CloudHistoryRow, CloudQueuePk,
+        CloudCandidateRow, CloudDiscoverRow, CloudHistoryRow, CloudPendingUploadSet, CloudQueuePk,
         CloudQueueRetryResolution, CloudQueueRow, CloudQueueUpsertItem,
         cloud_candidate_row_estimated_size, cloud_candidates, cloud_config_get, cloud_config_put,
         cloud_discover, cloud_discover_row_estimated_size, cloud_history_load,
-        cloud_history_row_estimated_size, cloud_queue_load, cloud_queue_retry,
+        cloud_history_row_estimated_size, cloud_pending_upload_set_estimated_size,
+        cloud_pending_upload_sets_load, cloud_queue_load, cloud_queue_retry,
         cloud_queue_row_estimated_size, cloud_queue_upsert, cloud_stats_get, cloud_stats_reset,
         cloud_upload_commit, cloud_upload_fail, json_escaped_len, upload_lease_acquire,
         upload_lease_release, upload_lease_renew,
@@ -1963,6 +2197,148 @@ mod tests {
         .unwrap()
     }
 
+    fn seal_queue_row(
+        conn: &rusqlite::Connection,
+        archive_item_id: i64,
+        destination_id: &str,
+        remote_key: &str,
+        upload_set_id: &str,
+        superseded_at: Option<i64>,
+    ) {
+        conn.execute(
+            "INSERT INTO cloud_parent_upload_sets
+                (upload_set_id, archive_item_id, destination_id, source_manifest_digest,
+                 request_digest, expected_child_count, created_at, finalized_at, superseded_at)
+             VALUES (?1, ?2, ?3,
+                     '11111111111111111111111111111111',
+                     '2222222222222222222222222222222222222222222222222222222222222222',
+                     1, 0, NULL, ?4)",
+            params![upload_set_id, archive_item_id, destination_id, superseded_at],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE cloud_upload_queue
+                SET upload_set_id = ?1
+              WHERE destination_id = ?2 AND remote_key = ?3",
+            params![upload_set_id, destination_id, remote_key],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn commit_rejects_wrong_upload_set_id_on_sealed_row() {
+        let mut conn = open_in_memory().unwrap();
+        let parent = insert_archive_item(&conn, "archive/commit-sealed-fence");
+        let hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let set_a = "11111111111111111111111111111111";
+        let set_b = "22222222222222222222222222222222";
+        upsert_item(&conn, parent, "dest", "rk/fence", "child-fence", 1, 10, hash);
+        seal_queue_row(&conn, parent, "dest", "rk/fence", set_a, None);
+        let other_parent = insert_archive_item(&conn, "archive/commit-sealed-fence-other");
+        conn.execute(
+            "INSERT INTO cloud_parent_upload_sets
+                (upload_set_id, archive_item_id, destination_id, source_manifest_digest,
+                 request_digest, expected_child_count, created_at, finalized_at, superseded_at)
+             VALUES (?1, ?2, 'dest',
+                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                     'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                     1, 0, NULL, NULL)",
+            params![set_b, other_parent],
+        )
+        .unwrap();
+
+        let wrong = cloud_upload_commit(
+            &mut conn,
+            &CloudQueuePk {
+                destination_id: "dest".to_owned(),
+                remote_key: "rk/fence".to_owned(),
+            },
+            "attempt-wrong-set",
+            hash,
+            "sha256",
+            10,
+            Some(set_b),
+        );
+        assert!(wrong.is_err());
+
+        let ok = cloud_upload_commit(
+            &mut conn,
+            &CloudQueuePk {
+                destination_id: "dest".to_owned(),
+                remote_key: "rk/fence".to_owned(),
+            },
+            "attempt-right-set",
+            hash,
+            "sha256",
+            10,
+            Some(set_a),
+        )
+        .unwrap();
+        assert!(ok.ok);
+    }
+
+    #[test]
+    fn commit_rejects_superseded_upload_set() {
+        let mut conn = open_in_memory().unwrap();
+        let parent = insert_archive_item(&conn, "archive/commit-superseded-fence");
+        let hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let set_a = "33333333333333333333333333333333";
+        upsert_item(&conn, parent, "dest", "rk/superseded", "child-superseded", 1, 10, hash);
+        seal_queue_row(&conn, parent, "dest", "rk/superseded", set_a, Some(5));
+
+        let superseded = cloud_upload_commit(
+            &mut conn,
+            &CloudQueuePk {
+                destination_id: "dest".to_owned(),
+                remote_key: "rk/superseded".to_owned(),
+            },
+            "attempt-superseded",
+            hash,
+            "sha256",
+            10,
+            Some(set_a),
+        );
+        assert!(superseded.is_err());
+    }
+
+    #[test]
+    fn commit_unsealed_row_rejects_supplied_set_id() {
+        let mut conn = open_in_memory().unwrap();
+        let parent = insert_archive_item(&conn, "archive/commit-unsealed-fence");
+        let hash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let set_a = "44444444444444444444444444444444";
+        upsert_item(&conn, parent, "dest", "rk/unsealed", "child-unsealed", 1, 10, hash);
+
+        let wrong = cloud_upload_commit(
+            &mut conn,
+            &CloudQueuePk {
+                destination_id: "dest".to_owned(),
+                remote_key: "rk/unsealed".to_owned(),
+            },
+            "attempt-unsealed-wrong",
+            hash,
+            "sha256",
+            10,
+            Some(set_a),
+        );
+        assert!(wrong.is_err());
+
+        let ok = cloud_upload_commit(
+            &mut conn,
+            &CloudQueuePk {
+                destination_id: "dest".to_owned(),
+                remote_key: "rk/unsealed".to_owned(),
+            },
+            "attempt-unsealed-ok",
+            hash,
+            "sha256",
+            10,
+            None,
+        )
+        .unwrap();
+        assert!(ok.ok);
+    }
+
     #[test]
     fn cloud_upload_commit_is_idempotent_and_never_flips_durable() {
         let mut conn = open_in_memory().unwrap();
@@ -1982,6 +2358,7 @@ mod tests {
             hash_a,
             "sha256",
             10,
+            None,
         )
         .unwrap();
         assert!(first.ok);
@@ -1997,6 +2374,7 @@ mod tests {
             hash_a,
             "sha256",
             10,
+            None,
         )
         .unwrap();
         assert_eq!(replay, first);
@@ -2010,6 +2388,7 @@ mod tests {
             hash_b,
             "sha256",
             10,
+            None,
         );
         assert!(conflicting_replay.is_err());
         let uploaded_rows: i64 = conn
@@ -2039,6 +2418,7 @@ mod tests {
             hash_b,
             "sha256",
             20,
+            None,
         )
         .unwrap();
         assert!(second.ok);
@@ -2055,7 +2435,7 @@ mod tests {
     }
 
     #[test]
-    fn cloud_upload_commit_done_recommit_fresh_attempt_id_is_idempotent() {
+    fn commit_done_recommit_records_attempt_row() {
         let mut conn = open_in_memory().unwrap();
         let parent = insert_archive_item(&conn, "archive/done-recommit");
         let hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -2071,6 +2451,7 @@ mod tests {
             hash,
             "sha256",
             10,
+            None,
         )
         .unwrap();
         assert!(first.ok);
@@ -2093,6 +2474,7 @@ mod tests {
             hash,
             "sha256",
             10,
+            None,
         )
         .unwrap();
         assert!(recommit.ok);
@@ -2114,12 +2496,23 @@ mod tests {
             })
             .unwrap();
         assert_eq!(seq_after_recommit, seq_after_first);
-        // The fresh attempt_id is intentionally not recorded (a later replay re-hits the
-        // done path and returns the same result), so only the original attempt persists.
+        // The idempotent re-commit records an attempts ledger row using the existing
+        // synced completion_seq, without appending cloud_sync_history.
         let attempts: i64 = conn
             .query_row("SELECT COUNT(*) FROM cloud_upload_attempts", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(attempts, 1);
+        assert_eq!(attempts, 2);
+        let (attempt_completion_seq, attempt_upload_set_id): (i64, Option<String>) = conn
+            .query_row(
+                "SELECT completion_seq, upload_set_id
+                   FROM cloud_upload_attempts
+                  WHERE attempt_id = 'attempt-2-fresh'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(attempt_completion_seq, seq_after_first);
+        assert_eq!(attempt_upload_set_id, None);
     }
 
     #[test]
@@ -2157,6 +2550,7 @@ mod tests {
             content,
             "sha256",
             10,
+            None,
         )
         .unwrap();
 
@@ -2171,6 +2565,7 @@ mod tests {
             different,
             "sha256",
             10,
+            None,
         );
         assert!(conflict.is_err());
         // The rejected re-commit left the recorded verify proof and history untouched.
@@ -2267,10 +2662,23 @@ mod tests {
             attempts: i64::MAX,
             not_before: Some(i64::MIN),
             last_error: Some(big.clone()),
+            upload_set_id: Some(big.clone()),
         };
         assert!(
             cloud_queue_row_estimated_size(&queue)
                 >= serde_json::to_string(&queue).unwrap().len()
+        );
+
+        let pending_set = CloudPendingUploadSet {
+            upload_set_id: big.clone(),
+            archive_item_id: i64::MAX,
+            destination_id: big.clone(),
+            source_manifest_digest: big.clone(),
+            expected_child_count: i64::MAX,
+        };
+        assert!(
+            cloud_pending_upload_set_estimated_size(&pending_set)
+                >= serde_json::to_string(&pending_set).unwrap().len()
         );
 
         let history = CloudHistoryRow {
@@ -2291,6 +2699,59 @@ mod tests {
     }
 
     #[test]
+    fn fail_rejects_wrong_upload_set_id_on_sealed_row() {
+        let mut conn = open_in_memory().unwrap();
+        let parent = insert_archive_item(&conn, "archive/fail-sealed-fence");
+        let hash = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        let set_a = "55555555555555555555555555555555";
+        let set_b = "66666666666666666666666666666666";
+        upsert_item(&conn, parent, "dest", "rk/fail-fence", "child-fail-fence", 1, 10, hash);
+        seal_queue_row(&conn, parent, "dest", "rk/fail-fence", set_a, None);
+        let other_parent = insert_archive_item(&conn, "archive/fail-sealed-fence-other");
+        conn.execute(
+            "INSERT INTO cloud_parent_upload_sets
+                (upload_set_id, archive_item_id, destination_id, source_manifest_digest,
+                 request_digest, expected_child_count, created_at, finalized_at, superseded_at)
+             VALUES (?1, ?2, 'dest',
+                     'cccccccccccccccccccccccccccccccc',
+                     'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+                     1, 0, NULL, NULL)",
+            params![set_b, other_parent],
+        )
+        .unwrap();
+
+        let wrong = cloud_upload_fail(
+            &mut conn,
+            &CloudQueuePk {
+                destination_id: "dest".to_owned(),
+                remote_key: "rk/fail-fence".to_owned(),
+            },
+            "attempt-fail-wrong-set",
+            "timeout",
+            Some(1234),
+            false,
+            Some(set_b),
+        );
+        assert!(wrong.is_err());
+
+        let ok = cloud_upload_fail(
+            &mut conn,
+            &CloudQueuePk {
+                destination_id: "dest".to_owned(),
+                remote_key: "rk/fail-fence".to_owned(),
+            },
+            "attempt-fail-right-set",
+            "timeout",
+            Some(1234),
+            false,
+            Some(set_a),
+        )
+        .unwrap();
+        assert!(ok.ok);
+        assert_eq!(ok.state, "failed");
+    }
+
+    #[test]
     fn cloud_upload_fail_is_idempotent_on_attempt_id() {
         let mut conn = open_in_memory().unwrap();
         let parent = insert_archive_item(&conn, "archive/fail");
@@ -2307,6 +2768,7 @@ mod tests {
             "timeout",
             Some(1234),
             false,
+            None,
         )
         .unwrap();
         let replay = cloud_upload_fail(
@@ -2319,6 +2781,7 @@ mod tests {
             "timeout",
             Some(9999),
             true,
+            None,
         )
         .unwrap();
         assert_eq!(replay, first);
@@ -2410,11 +2873,11 @@ mod tests {
         upsert_item(&conn, parent, "dest", "k2", "c2", 2, 10, h2);
         upsert_item(&conn, parent, "dest", "k3", "c3", 3, 10, h3);
 
-        let first = cloud_queue_load(&conn, None, 2).unwrap();
+        let first = cloud_queue_load(&conn, None, 2, None).unwrap();
         assert_eq!(first.items.len(), 2);
         let cursor = first.next_cursor.clone().expect("next cursor");
         upsert_item(&conn, parent, "dest", "k0", "c0", 0, 10, h4);
-        let second = cloud_queue_load(&conn, Some(&cursor), 10).unwrap();
+        let second = cloud_queue_load(&conn, Some(&cursor), 10, None).unwrap();
         let keys: Vec<String> = second.items.into_iter().map(|row| row.remote_key).collect();
         assert_eq!(keys, vec!["k3".to_owned()]);
     }
@@ -2458,7 +2921,7 @@ mod tests {
         )
         .unwrap();
 
-        let page = cloud_queue_load(&conn, None, 10).unwrap();
+        let page = cloud_queue_load(&conn, None, 10, None).unwrap();
         assert_eq!(page.items.len(), 2);
         let with_expected = page
             .items
@@ -2480,6 +2943,209 @@ mod tests {
     }
 
     #[test]
+    fn pending_upload_sets_load_returns_current_unfinalized_only() {
+        let conn = open_in_memory().unwrap();
+        let parent_current = insert_archive_item(&conn, "archive/pending-current");
+        let parent_final = insert_archive_item(&conn, "archive/pending-final");
+        let parent_superseded = insert_archive_item(&conn, "archive/pending-superseded");
+
+        conn.execute(
+            "INSERT INTO cloud_parent_upload_sets
+                (upload_set_id, archive_item_id, destination_id, source_manifest_digest,
+                 request_digest, expected_child_count, created_at, finalized_at, superseded_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                parent_current,
+                "dest-current",
+                "11111111111111111111111111111111",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                3_i64,
+                10_i64,
+                Option::<i64>::None,
+                Option::<i64>::None
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cloud_parent_upload_sets
+                (upload_set_id, archive_item_id, destination_id, source_manifest_digest,
+                 request_digest, expected_child_count, created_at, finalized_at, superseded_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                parent_final,
+                "dest-final",
+                "22222222222222222222222222222222",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                4_i64,
+                20_i64,
+                Some(5_i64),
+                Option::<i64>::None
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cloud_parent_upload_sets
+                (upload_set_id, archive_item_id, destination_id, source_manifest_digest,
+                 request_digest, expected_child_count, created_at, finalized_at, superseded_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                "cccccccccccccccccccccccccccccccc",
+                parent_superseded,
+                "dest-superseded",
+                "33333333333333333333333333333333",
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                5_i64,
+                30_i64,
+                Option::<i64>::None,
+                Some(7_i64)
+            ],
+        )
+        .unwrap();
+
+        let page = cloud_pending_upload_sets_load(&conn, None, 100).unwrap();
+        assert_eq!(
+            page.items,
+            vec![CloudPendingUploadSet {
+                upload_set_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                archive_item_id: parent_current,
+                destination_id: "dest-current".to_owned(),
+                source_manifest_digest: "11111111111111111111111111111111".to_owned(),
+                expected_child_count: 3,
+            }]
+        );
+        assert_eq!(page.next_cursor, None);
+    }
+
+    #[test]
+    fn pending_upload_sets_load_paginates_keyset_stable() {
+        let conn = open_in_memory().unwrap();
+        let parent_a = insert_archive_item(&conn, "archive/pending-page-a");
+        let parent_b = insert_archive_item(&conn, "archive/pending-page-b");
+        let parent_c = insert_archive_item(&conn, "archive/pending-page-c");
+        let rows = [
+            (
+                "11111111111111111111111111111111",
+                parent_a,
+                "dest-a",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                2_i64,
+                10_i64,
+            ),
+            (
+                "22222222222222222222222222222220",
+                parent_b,
+                "dest-b",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                3_i64,
+                20_i64,
+            ),
+            (
+                "2222222222222222222222222222222f",
+                parent_c,
+                "dest-c",
+                "cccccccccccccccccccccccccccccccc",
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                4_i64,
+                20_i64,
+            ),
+        ];
+        for row in rows {
+            conn.execute(
+                "INSERT INTO cloud_parent_upload_sets
+                    (upload_set_id, archive_item_id, destination_id, source_manifest_digest,
+                     request_digest, expected_child_count, created_at, finalized_at, superseded_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL)",
+                params![row.0, row.1, row.2, row.3, row.4, row.5, row.6],
+            )
+            .unwrap();
+        }
+
+        let first = cloud_pending_upload_sets_load(&conn, None, 2).unwrap();
+        assert_eq!(first.items.len(), 2);
+        let first_ids: Vec<String> = first
+            .items
+            .iter()
+            .map(|item| item.upload_set_id.clone())
+            .collect();
+        assert_eq!(
+            first_ids,
+            vec![
+                "11111111111111111111111111111111".to_owned(),
+                "22222222222222222222222222222220".to_owned()
+            ]
+        );
+        let cursor = first.next_cursor.clone().expect("next cursor");
+        let second = cloud_pending_upload_sets_load(&conn, Some(&cursor), 2).unwrap();
+        assert_eq!(second.items.len(), 1);
+        assert_eq!(second.next_cursor, None);
+        let second_id = second.items.first().expect("one row").upload_set_id.clone();
+        assert_eq!(second_id, "2222222222222222222222222222222f");
+        assert!(!first_ids.contains(&second_id));
+    }
+
+    #[test]
+    fn queue_load_set_filter_returns_only_that_set_with_upload_set_id_populated() {
+        let conn = open_in_memory().unwrap();
+        let parent = insert_archive_item(&conn, "archive/queue-set-filter");
+        let h1 = "1010101010101010101010101010101010101010101010101010101010101010";
+        let h2 = "2020202020202020202020202020202020202020202020202020202020202020";
+        let h3 = "3030303030303030303030303030303030303030303030303030303030303030";
+        let h4 = "4040404040404040404040404040404040404040404040404040404040404040";
+        let set_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let set_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        upsert_item(&conn, parent, "dest", "rk/a", "child-a", 1, 10, h1);
+        upsert_item(&conn, parent, "dest", "rk/b", "child-b", 2, 10, h2);
+        upsert_item(&conn, parent, "dest", "rk/c", "child-c", 3, 10, h3);
+        upsert_item(&conn, parent, "dest", "rk/d", "child-d", 4, 10, h4);
+        seal_queue_row(&conn, parent, "dest", "rk/a", set_a, None);
+        conn.execute(
+            "UPDATE cloud_upload_queue
+                SET upload_set_id = ?1
+              WHERE destination_id = 'dest' AND remote_key = 'rk/b'",
+            params![set_a],
+        )
+        .unwrap();
+        seal_queue_row(&conn, parent, "dest", "rk/c", set_b, Some(9));
+
+        let filtered = cloud_queue_load(&conn, None, 100, Some(set_a)).unwrap();
+        assert_eq!(filtered.items.len(), 2);
+        for row in &filtered.items {
+            assert_eq!(row.upload_set_id.as_deref(), Some(set_a));
+        }
+        let filtered_keys: Vec<String> = filtered
+            .items
+            .into_iter()
+            .map(|row| row.remote_key)
+            .collect();
+        assert_eq!(filtered_keys, vec!["rk/a".to_owned(), "rk/b".to_owned()]);
+
+        let unfiltered = cloud_queue_load(&conn, None, 100, None).unwrap();
+        assert_eq!(unfiltered.items.len(), 4);
+        let a_row = unfiltered
+            .items
+            .iter()
+            .find(|row| row.remote_key == "rk/a")
+            .unwrap();
+        assert_eq!(a_row.upload_set_id.as_deref(), Some(set_a));
+        let c_row = unfiltered
+            .items
+            .iter()
+            .find(|row| row.remote_key == "rk/c")
+            .unwrap();
+        assert_eq!(c_row.upload_set_id.as_deref(), Some(set_b));
+        let d_row = unfiltered
+            .items
+            .iter()
+            .find(|row| row.remote_key == "rk/d")
+            .unwrap();
+        assert_eq!(d_row.upload_set_id, None);
+    }
+
+    #[test]
     fn stats_are_derived_and_reset_rebases_baseline() {
         let mut conn = open_in_memory().unwrap();
         let parent = insert_archive_item(&conn, "archive/stats");
@@ -2498,6 +3164,7 @@ mod tests {
             h1,
             "sha256",
             10,
+            None,
         )
         .unwrap();
         cloud_upload_commit(
@@ -2510,6 +3177,7 @@ mod tests {
             h2,
             "sha256",
             20,
+            None,
         )
         .unwrap();
         let before_reset = cloud_stats_get(&conn).unwrap();
@@ -2530,6 +3198,7 @@ mod tests {
             h3,
             "sha256",
             40,
+            None,
         )
         .unwrap();
         let after_new_upload = cloud_stats_get(&conn).unwrap();
@@ -2552,6 +3221,7 @@ mod tests {
             &conn,
             parent,
             Some("child-r"),
+            None,
             &CloudQueueRetryResolution::Replace,
         )
         .unwrap();
@@ -2584,6 +3254,7 @@ mod tests {
             &conn,
             parent,
             Some("child-k"),
+            None,
             &CloudQueueRetryResolution::KeepExisting,
         )
         .unwrap();
@@ -2609,6 +3280,7 @@ mod tests {
             &conn,
             parent,
             Some("child-k"),
+            None,
             &CloudQueueRetryResolution::KeepExisting,
         )
         .unwrap();
@@ -2621,6 +3293,257 @@ mod tests {
             )
             .unwrap();
         assert_eq!(durable, 0);
+    }
+
+    #[test]
+    fn queue_retry_keep_existing_requires_full_verify_tuple() {
+        let conn = open_in_memory().unwrap();
+        let parent = insert_archive_item(&conn, "archive/retry-keep-sealed-verify");
+        let hash = "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef";
+        let set_id = "77777777777777777777777777777777";
+        cloud_queue_upsert(
+            &conn,
+            &CloudQueueUpsertItem {
+                archive_item_id: parent,
+                child_key: "child-sealed".to_owned(),
+                destination_id: "dest".to_owned(),
+                remote_key: "rk/sealed".to_owned(),
+                category: "bulk".to_owned(),
+                seq: 1,
+                total_bytes: 10,
+                content_sha256: hash.to_owned(),
+                expected_hash: Some("etag-good".to_owned()),
+                verify_alg: "md5".to_owned(),
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE cloud_upload_queue
+                SET state='parked', attempts=2
+              WHERE destination_id='dest' AND remote_key='rk/sealed'",
+            [],
+        )
+        .unwrap();
+        seal_queue_row(&conn, parent, "dest", "rk/sealed", set_id, None);
+        conn.execute(
+            "INSERT INTO cloud_synced_files
+                (destination_id, remote_key, archive_item_id, child_key, content_sha256, verify_alg,
+                 verify_value, size_bytes, synced_at, completion_seq)
+             VALUES ('dest', 'rk/sealed', ?1, 'child-sealed', ?2, 'md5', 'etag-wrong', 10, 0, 31)",
+            params![parent, hash],
+        )
+        .unwrap();
+
+        let wrong_verify = cloud_queue_retry(
+            &conn,
+            parent,
+            Some("child-sealed"),
+            Some(set_id),
+            &CloudQueueRetryResolution::KeepExisting,
+        )
+        .unwrap();
+        assert_eq!(wrong_verify, "parked");
+
+        conn.execute(
+            "UPDATE cloud_synced_files
+                SET verify_value = 'etag-good'
+              WHERE destination_id = 'dest' AND remote_key = 'rk/sealed'",
+            [],
+        )
+        .unwrap();
+        let matched = cloud_queue_retry(
+            &conn,
+            parent,
+            Some("child-sealed"),
+            Some(set_id),
+            &CloudQueueRetryResolution::KeepExisting,
+        )
+        .unwrap();
+        assert_eq!(matched, "done");
+    }
+
+    #[test]
+    fn queue_retry_keep_existing_unsealed_uses_hash_size_only() {
+        let conn = open_in_memory().unwrap();
+        let parent = insert_archive_item(&conn, "archive/retry-keep-unsealed");
+        let hash = "1212121212121212121212121212121212121212121212121212121212121212";
+        cloud_queue_upsert(
+            &conn,
+            &CloudQueueUpsertItem {
+                archive_item_id: parent,
+                child_key: "child-unsealed".to_owned(),
+                destination_id: "dest".to_owned(),
+                remote_key: "rk/unsealed".to_owned(),
+                category: "bulk".to_owned(),
+                seq: 1,
+                total_bytes: 10,
+                content_sha256: hash.to_owned(),
+                expected_hash: None,
+                verify_alg: "none".to_owned(),
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE cloud_upload_queue
+                SET state='parked', attempts=2
+              WHERE destination_id='dest' AND remote_key='rk/unsealed'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cloud_synced_files
+                (destination_id, remote_key, archive_item_id, child_key, content_sha256, verify_alg,
+                 verify_value, size_bytes, synced_at, completion_seq)
+             VALUES ('dest', 'rk/unsealed', ?1, 'child-unsealed', ?2, 'md5', 'other-proof', 10, 0, 32)",
+            params![parent, hash],
+        )
+        .unwrap();
+
+        let state = cloud_queue_retry(
+            &conn,
+            parent,
+            Some("child-unsealed"),
+            None,
+            &CloudQueueRetryResolution::KeepExisting,
+        )
+        .unwrap();
+        assert_eq!(state, "done");
+    }
+
+    #[test]
+    fn queue_retry_selects_requested_generation_not_superseded() {
+        let conn = open_in_memory().unwrap();
+        let parent = insert_archive_item(&conn, "archive/retry-generation-filter");
+        let hash_a = "2323232323232323232323232323232323232323232323232323232323232323";
+        let hash_b = "3434343434343434343434343434343434343434343434343434343434343434";
+        let set_a = "88888888888888888888888888888888";
+        let set_b = "99999999999999999999999999999999";
+        cloud_queue_upsert(
+            &conn,
+            &CloudQueueUpsertItem {
+                archive_item_id: parent,
+                child_key: "child-shared".to_owned(),
+                destination_id: "dest".to_owned(),
+                remote_key: "rk/gen-a".to_owned(),
+                category: "bulk".to_owned(),
+                seq: 1,
+                total_bytes: 10,
+                content_sha256: hash_a.to_owned(),
+                expected_hash: Some("etag-a".to_owned()),
+                verify_alg: "md5".to_owned(),
+            },
+        )
+        .unwrap();
+        cloud_queue_upsert(
+            &conn,
+            &CloudQueueUpsertItem {
+                archive_item_id: parent,
+                child_key: "child-shared".to_owned(),
+                destination_id: "dest".to_owned(),
+                remote_key: "rk/gen-b".to_owned(),
+                category: "bulk".to_owned(),
+                seq: 2,
+                total_bytes: 10,
+                content_sha256: hash_b.to_owned(),
+                expected_hash: Some("etag-b".to_owned()),
+                verify_alg: "md5".to_owned(),
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE cloud_upload_queue SET state='parked', attempts=1
+              WHERE destination_id='dest' AND remote_key IN ('rk/gen-a', 'rk/gen-b')",
+            [],
+        )
+        .unwrap();
+        seal_queue_row(&conn, parent, "dest", "rk/gen-a", set_a, Some(11));
+        seal_queue_row(&conn, parent, "dest", "rk/gen-b", set_b, None);
+        conn.execute(
+            "INSERT INTO cloud_synced_files
+                (destination_id, remote_key, archive_item_id, child_key, content_sha256, verify_alg,
+                 verify_value, size_bytes, synced_at, completion_seq)
+             VALUES ('dest', 'rk/gen-b', ?1, 'child-shared', ?2, 'md5', 'etag-b', 10, 0, 33)",
+            params![parent, hash_b],
+        )
+        .unwrap();
+
+        let state = cloud_queue_retry(
+            &conn,
+            parent,
+            Some("child-shared"),
+            Some(set_b),
+            &CloudQueueRetryResolution::KeepExisting,
+        )
+        .unwrap();
+        assert_eq!(state, "done");
+        let done_a: String = conn
+            .query_row(
+                "SELECT state
+                   FROM cloud_upload_queue
+                  WHERE destination_id='dest' AND remote_key='rk/gen-a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let done_b: String = conn
+            .query_row(
+                "SELECT state
+                   FROM cloud_upload_queue
+                  WHERE destination_id='dest' AND remote_key='rk/gen-b'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(done_a, "parked");
+        assert_eq!(done_b, "done");
+    }
+
+    #[test]
+    fn cloud_queue_retry_rekey_sealed_rejected() {
+        let conn = open_in_memory().unwrap();
+        let parent = insert_archive_item(&conn, "archive/retry-rekey-sealed");
+        let hash = "4545454545454545454545454545454545454545454545454545454545454545";
+        let set_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab";
+        upsert_item(&conn, parent, "dest", "rk/rekey", "child-rekey", 1, 10, hash);
+        seal_queue_row(&conn, parent, "dest", "rk/rekey", set_a, None);
+
+        let result = cloud_queue_retry(
+            &conn,
+            parent,
+            Some("child-rekey"),
+            Some(set_a),
+            &CloudQueueRetryResolution::Rekey {
+                remote_key: "rk/new".to_owned(),
+            },
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cloud_queue_upsert_sealed_rejected() {
+        let conn = open_in_memory().unwrap();
+        let parent = insert_archive_item(&conn, "archive/upsert-sealed");
+        let hash = "5656565656565656565656565656565656565656565656565656565656565656";
+        let set_a = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbc";
+        upsert_item(&conn, parent, "dest", "rk/upsert-sealed", "child-upsert", 1, 10, hash);
+        seal_queue_row(&conn, parent, "dest", "rk/upsert-sealed", set_a, None);
+
+        let result = cloud_queue_upsert(
+            &conn,
+            &CloudQueueUpsertItem {
+                archive_item_id: parent,
+                child_key: "child-upsert".to_owned(),
+                destination_id: "dest".to_owned(),
+                remote_key: "rk/upsert-sealed".to_owned(),
+                category: "bulk".to_owned(),
+                seq: 1,
+                total_bytes: 10,
+                content_sha256: hash.to_owned(),
+                expected_hash: Some(hash.to_owned()),
+                verify_alg: "sha256".to_owned(),
+            },
+        );
+        assert!(result.is_err());
     }
 
     #[test]
@@ -2644,6 +3567,7 @@ mod tests {
             hash,
             "sha256",
             10,
+            None,
         );
         assert!(parked.is_err());
 
@@ -2671,6 +3595,7 @@ mod tests {
             hash_q,
             "sha256",
             10,
+            None,
         );
         assert!(collision.is_err());
         let oracle_hash: String = conn
@@ -2719,6 +3644,7 @@ mod tests {
             "0123456789abcdef0123456789abcdef",
             "md5",
             10,
+            None,
         )
         .unwrap();
         assert!(md5.ok);
@@ -2732,6 +3658,7 @@ mod tests {
             "0123456789abcdef0123456789abcdef",
             "md5",
             10,
+            None,
         )
         .unwrap();
         assert_eq!(md5_replay, md5);
@@ -2745,6 +3672,7 @@ mod tests {
             "ffffffffffffffffffffffffffffffff",
             "md5",
             10,
+            None,
         );
         assert!(md5_conflict.is_err());
         let (verify_alg, verify_value): (String, Option<String>) = conn
@@ -2789,6 +3717,7 @@ mod tests {
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "md5",
             10,
+            None,
         )
         .unwrap();
 
@@ -2819,6 +3748,7 @@ mod tests {
             "22222222222222222222222222222222",
             "md5",
             10,
+            None,
         );
         assert!(native_mismatch.is_err());
 
@@ -2849,6 +3779,7 @@ mod tests {
             "4444444444444444444444444444444444444444",
             "sha1",
             10,
+            None,
         );
         assert!(wrong_alg.is_err());
 
@@ -2879,6 +3810,7 @@ mod tests {
             "55555555555555555555555555555555",
             "md5",
             10,
+            None,
         );
         assert!(none_requires_empty.is_err());
         cloud_upload_commit(
@@ -2891,6 +3823,7 @@ mod tests {
             "",
             "none",
             10,
+            None,
         )
         .unwrap();
         let verify_none: Option<String> = conn
@@ -3134,6 +4067,7 @@ mod tests {
             h1,
             "sha256",
             10,
+            None,
         )
         .unwrap();
         cloud_upload_fail(
@@ -3146,6 +4080,7 @@ mod tests {
             "timeout",
             Some(3000),
             false,
+            None,
         )
         .unwrap();
         let first = cloud_history_load(&conn, None, 1).unwrap();

@@ -96,6 +96,16 @@ pub enum Request {
         after_cursor: Option<String>,
         /// Page size (server capped).
         limit: u32,
+        /// Optional filter: only rows bound to this upload set.
+        #[serde(default)]
+        upload_set_id: Option<String>,
+    },
+    /// Paginated load of current prepared-but-unfinalized parent upload sets (post-reboot resume).
+    CloudPendingUploadSetsLoad {
+        /// Optional opaque keyset cursor.
+        after_cursor: Option<String>,
+        /// Page size (server capped).
+        limit: u32,
     },
     /// Idempotent queue row upsert.
     CloudQueueUpsert {
@@ -108,6 +118,9 @@ pub enum Request {
         archive_item_id: i64,
         /// Optional child discriminator.
         child_key: Option<String>,
+        /// Optional sealed upload-set fence.
+        #[serde(default)]
+        upload_set_id: Option<String>,
         /// Resolution mode.
         resolution: CloudQueueRetryResolutionWire,
     },
@@ -136,6 +149,9 @@ pub enum Request {
         queue_pk: CloudQueuePkWire,
         /// Idempotency key for this transfer attempt.
         attempt_id: String,
+        /// Optional sealed upload-set fence.
+        #[serde(default)]
+        upload_set_id: Option<String>,
         /// Backend verification hash.
         hash: String,
         /// Hash algorithm.
@@ -149,6 +165,9 @@ pub enum Request {
         queue_pk: CloudQueuePkWire,
         /// Idempotency key for this transfer attempt.
         attempt_id: String,
+        /// Optional sealed upload-set fence.
+        #[serde(default)]
+        upload_set_id: Option<String>,
         /// Sanitized error class.
         error_class: String,
         /// Retry gate (unix seconds), null = immediate retry.
@@ -383,6 +402,9 @@ pub struct CloudQueueRowWire {
     pub not_before: Option<i64>,
     /// Last error.
     pub last_error: Option<String>,
+    /// Sealed upload set id, if any.
+    #[serde(default)]
+    pub upload_set_id: Option<String>,
 }
 
 /// History row over the wire.
@@ -594,6 +616,21 @@ pub struct CloudFinalizeParentUploadResponse {
     pub already_finalized: bool,
 }
 
+/// Pending upload set row over the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudPendingUploadSetWire {
+    /// Upload set id.
+    pub upload_set_id: String,
+    /// Parent archive item id.
+    pub archive_item_id: i64,
+    /// Destination id.
+    pub destination_id: String,
+    /// Source manifest digest (32-hex).
+    pub source_manifest_digest: String,
+    /// Expected child count.
+    pub expected_child_count: i64,
+}
+
 /// Outbound RPC response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -734,6 +771,13 @@ pub enum Response {
         /// Opaque next cursor.
         next_cursor: Option<String>,
     },
+    /// Pending upload sets page.
+    CloudPendingUploadSetsPage {
+        /// Pending set rows.
+        items: Vec<CloudPendingUploadSetWire>,
+        /// Opaque next cursor.
+        next_cursor: Option<String>,
+    },
     /// Finalize-event response.
     FinalizeEventArchive(FinalizeEventArchiveResponse),
     /// Prepare-parent-upload response.
@@ -810,6 +854,7 @@ mod tests {
     use super::{
         ArchiveAngle, ArchiveUnit, CloudCandidateWire, CloudConfigWire, CloudDiscoverWire,
         CloudFinalizeParentUploadRequest, CloudFinalizeParentUploadResponse, CloudHistoryRowWire,
+        CloudPendingUploadSetWire,
         CloudPrepareParentUploadChildWire, CloudPrepareParentUploadRequest,
         CloudPrepareParentUploadResponse, CloudQueuePkWire, CloudQueueRetryResolutionWire,
         CloudQueueRowWire, CloudQueueUpsertWire, EvictionCandidateWire,
@@ -1029,6 +1074,14 @@ mod tests {
                 Request::CloudQueueLoad {
                     after_cursor: Some("opaque".to_owned()),
                     limit: 10,
+                    upload_set_id: None,
+                },
+            ),
+            (
+                "cloud_pending_upload_sets_load",
+                Request::CloudPendingUploadSetsLoad {
+                    after_cursor: Some("opaque".to_owned()),
+                    limit: 10,
                 },
             ),
             (
@@ -1062,6 +1115,7 @@ mod tests {
                 Request::CloudQueueRetry {
                     archive_item_id: 1,
                     child_key: Some("child".to_owned()),
+                    upload_set_id: None,
                     resolution: CloudQueueRetryResolutionWire::Replace,
                 },
             ),
@@ -1093,6 +1147,7 @@ mod tests {
                         remote_key: "rk".to_owned(),
                     },
                     attempt_id: "a1".to_owned(),
+                    upload_set_id: None,
                     hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                         .to_owned(),
                     hash_alg: "sha256".to_owned(),
@@ -1107,6 +1162,7 @@ mod tests {
                         remote_key: "rk".to_owned(),
                     },
                     attempt_id: "a2".to_owned(),
+                    upload_set_id: None,
                     error_class: "timeout".to_owned(),
                     not_before: Some(123),
                     terminal: false,
@@ -1319,6 +1375,7 @@ mod tests {
                         attempts: 0,
                         not_before: None,
                         last_error: None,
+                        upload_set_id: Some("44444444444444444444444444444444".to_owned()),
                     }],
                     next_cursor: None,
                 },
@@ -1429,6 +1486,19 @@ mod tests {
                 },
             ),
             (
+                "cloud_pending_upload_sets_page",
+                Response::CloudPendingUploadSetsPage {
+                    items: vec![CloudPendingUploadSetWire {
+                        upload_set_id: "99999999999999999999999999999999".to_owned(),
+                        archive_item_id: 2,
+                        destination_id: "dest".to_owned(),
+                        source_manifest_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                        expected_child_count: 3,
+                    }],
+                    next_cursor: Some("opaque".to_owned()),
+                },
+            ),
+            (
                 "finalize_event_archive",
                 Response::FinalizeEventArchive(FinalizeEventArchiveResponse {
                     archive_item_id: 7,
@@ -1471,6 +1541,50 @@ mod tests {
         });
         let result = serde_json::from_value::<Request>(raw);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn cloud_queue_load_upload_set_id_defaults_to_none_when_absent() {
+        let raw = json!({
+            "cmd": "cloud_queue_load",
+            "after_cursor": "opaque",
+            "limit": 10
+        });
+        let decoded: Request = serde_json::from_value(raw).unwrap();
+        assert_eq!(
+            decoded,
+            Request::CloudQueueLoad {
+                after_cursor: Some("opaque".to_owned()),
+                limit: 10,
+                upload_set_id: None,
+            }
+        );
+    }
+
+    #[test]
+    fn cloud_queue_row_wire_upload_set_id_roundtrips() {
+        let row = CloudQueueRowWire {
+            archive_item_id: 1,
+            child_key: "child".to_owned(),
+            destination_id: "dest".to_owned(),
+            remote_key: "rk".to_owned(),
+            category: "bulk".to_owned(),
+            seq: 1,
+            total_bytes: 10,
+            bytes_uploaded: 0,
+            expected_hash: Some("etag-value".to_owned()),
+            verify_alg: "md5".to_owned(),
+            content_sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                .to_owned(),
+            state: "queued".to_owned(),
+            attempts: 0,
+            not_before: None,
+            last_error: None,
+            upload_set_id: Some("12341234123412341234123412341234".to_owned()),
+        };
+        let decoded: CloudQueueRowWire =
+            serde_json::from_value(serde_json::to_value(&row).unwrap()).unwrap();
+        assert_eq!(decoded, row);
     }
 
     #[test]

@@ -1,5 +1,7 @@
 //! Live Unix adapters for `uploadd` seams.
 
+/// Live discover→enqueue producer and archive child hashing seam.
+pub mod enqueue;
 /// Live `indexd`-backed queue and lease adapters.
 pub mod indexd;
 /// Live system adapters (archive I/O, throttle, time, subprocess).

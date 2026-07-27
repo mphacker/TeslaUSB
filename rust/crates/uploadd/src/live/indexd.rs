@@ -30,13 +30,21 @@ const ERROR_CLASS_UPLOAD_FAILED: &str = "upload_failed";
 /// Live queue store backed by `IndexdCloudClient`.
 pub struct LiveQueueStore<C: IndexdCloudClient> {
     client: C,
+    max_attempts: u32,
 }
 
 impl<C: IndexdCloudClient> LiveQueueStore<C> {
     #[must_use]
     /// Build a queue store from an indexd client.
-    pub fn new(client: C) -> Self {
-        Self { client }
+    ///
+    /// `max_attempts` mirrors [`crate::config::RetryConfig::max_attempts`] and is
+    /// needed at load time: the store elects a single parent to work, and that
+    /// election must ignore parents with no workable rows left.
+    pub fn new(client: C, max_attempts: u32) -> Self {
+        Self {
+            client,
+            max_attempts,
+        }
     }
 
     fn map_row(row: CloudQueueRow) -> Result<Option<QueueItem>, IndexError> {
@@ -145,21 +153,32 @@ impl<C: IndexdCloudClient> QueueStore for LiveQueueStore<C> {
             }
         }
 
-        let mut unsealed: Vec<CloudQueueRow> = rows
-            .into_iter()
-            .filter(|row| row.upload_set_id.is_none())
-            .collect();
-        if let Some(lowest_parent) = unsealed.iter().map(|row| row.archive_item_id).min() {
-            unsealed.retain(|row| row.archive_item_id == lowest_parent);
-        }
-
-        let mut out = Vec::new();
-        for row in unsealed {
+        let mut items = Vec::new();
+        for row in rows {
+            if row.upload_set_id.is_some() {
+                continue;
+            }
             if let Some(item) = Self::map_row(row)? {
-                out.push(item);
+                items.push(item);
             }
         }
-        Ok(out)
+
+        // Elect the single parent this drain will work. `map_row` has already
+        // dropped `done` rows, so a finished parent cannot win the election;
+        // requiring a *retryable* row additionally excludes a parent whose
+        // children have all burned their retries. Both cases would otherwise
+        // latch here forever, because indexd never deletes a queue row — commit
+        // only sets `state = 'done'`.
+        let lowest_workable = items
+            .iter()
+            .filter(|item| item.is_retryable(self.max_attempts))
+            .map(|item| item.archive_item_id)
+            .min();
+        match lowest_workable {
+            Some(parent) => items.retain(|item| item.archive_item_id == parent),
+            None => items.clear(),
+        }
+        Ok(items)
     }
 
     fn persist(&self, item: &QueueItem) -> Result<(), IndexError> {
@@ -383,6 +402,8 @@ mod tests {
 
     use super::*;
 
+    const MAX_ATTEMPTS: u32 = 5;
+
     struct FakeClient {
         pages: RefCell<Vec<Page<CloudQueueRow>>>,
         fail_persist: Rc<RefCell<Option<CloudQueueFailRequest>>>,
@@ -518,6 +539,50 @@ mod tests {
         }
     }
 
+    /// indexd never deletes a queue row — commit only does `SET state = 'done'`
+    /// — so a fully-uploaded parent keeps its rows forever. Picking the lowest
+    /// parent *before* dropping done rows therefore latches onto that finished
+    /// parent permanently: every later load maps its rows to `None`, the
+    /// scheduler idles, and no younger parent is ever loaded again. That would
+    /// upload exactly one parent's clips and then silently stop.
+    #[test]
+    fn load_skips_a_parent_whose_rows_are_all_done() {
+        let client = FakeClient::with_pages(vec![Page {
+            items: vec![row(10, "done", None), row(20, "queued", None)],
+            next_cursor: None,
+        }]);
+        let store = LiveQueueStore::new(client, MAX_ATTEMPTS);
+        let items = store.load().expect("load");
+        let parents: Vec<i64> = items.iter().map(|item| item.archive_item_id.0).collect();
+        assert_eq!(
+            parents,
+            vec![20],
+            "a finished parent must not block younger parents"
+        );
+    }
+
+    /// Same head-of-line hazard, reached the other way: a child that has burned
+    /// every retry stays in the queue as `failed` forever. If it still wins the
+    /// lowest-parent election, one permanently-broken clip stalls the entire
+    /// upload pipeline.
+    #[test]
+    fn load_skips_a_parent_whose_rows_are_all_exhausted() {
+        let mut exhausted = row(10, "failed", None);
+        exhausted.attempts = i64::from(MAX_ATTEMPTS);
+        let client = FakeClient::with_pages(vec![Page {
+            items: vec![exhausted, row(20, "queued", None)],
+            next_cursor: None,
+        }]);
+        let store = LiveQueueStore::new(client, MAX_ATTEMPTS);
+        let items = store.load().expect("load");
+        let parents: Vec<i64> = items.iter().map(|item| item.archive_item_id.0).collect();
+        assert_eq!(
+            parents,
+            vec![20],
+            "an exhausted parent must not block younger parents"
+        );
+    }
+
     fn row(parent: i64, state: &str, upload_set_id: Option<&str>) -> CloudQueueRow {
         CloudQueueRow {
             archive_item_id: parent,
@@ -553,7 +618,7 @@ mod tests {
             items: vec![row(10, "done", None)],
             next_cursor: None,
         };
-        let store = LiveQueueStore::new(FakeClient::with_pages(vec![page1, page2]));
+        let store = LiveQueueStore::new(FakeClient::with_pages(vec![page1, page2]), MAX_ATTEMPTS);
         let loaded = store.load().expect("load queue");
         assert_eq!(loaded.len(), 1);
         let first = loaded.first().expect("first loaded item");
@@ -563,7 +628,7 @@ mod tests {
 
     #[test]
     fn persist_done_state_is_rejected() {
-        let store = LiveQueueStore::new(FakeClient::default());
+        let store = LiveQueueStore::new(FakeClient::default(), MAX_ATTEMPTS);
         let item = QueueItem {
             key: QueueKey::new("dest-a", "remote-a"),
             archive_item_id: ArchiveItemId(1),
@@ -591,7 +656,7 @@ mod tests {
             })),
             ..FakeClient::default()
         };
-        let store = LiveQueueStore::new(client);
+        let store = LiveQueueStore::new(client, MAX_ATTEMPTS);
         let item = QueueItem {
             key: QueueKey::new("dest-a", "remote-a"),
             archive_item_id: ArchiveItemId(1),
@@ -645,7 +710,7 @@ mod tests {
             fail_persist: Rc::clone(&captured),
             ..FakeClient::default()
         };
-        let store = LiveQueueStore::new(client);
+        let store = LiveQueueStore::new(client, MAX_ATTEMPTS);
         let reason_path = "/mnt/archive/SentryClips/2026/very/long/path/file.mp4";
         let reason_url = "https://example.invalid/bucket/private/object";
         let mut long_reason = String::from("source path rejected: ");

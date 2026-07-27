@@ -18,6 +18,7 @@ workspace = true
 # in the gated binary. sha2 bounds the commit `attempt_id` to a fixed width
 # (indexd caps it at 128 bytes while `remote_key` may be up to 1024).
 [dependencies]
+libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

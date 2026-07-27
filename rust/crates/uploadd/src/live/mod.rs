@@ -4,5 +4,7 @@
 pub mod enqueue;
 /// Live `indexd`-backed queue and lease adapters.
 pub mod indexd;
+/// Live daemon serve loop (`discover -> hydrate -> drain`).
+pub mod serve;
 /// Live system adapters (archive I/O, throttle, time, subprocess).
 pub mod system;

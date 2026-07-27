@@ -61,6 +61,9 @@ pub mod error;
 /// `indexd` transport client for cloud queue/discovery RPCs.
 pub mod indexd_client;
 pub mod lease;
+/// Live Unix adapters for queue/lease/system seams.
+#[cfg(unix)]
+pub mod live;
 pub mod priority;
 pub mod queue;
 pub mod rclone;

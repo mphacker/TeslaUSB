@@ -1,0 +1,733 @@
+//! Live `indexd` adapters for the queue and lease seams.
+
+use std::str::FromStr;
+use std::sync::Mutex;
+
+use crate::error::IndexError;
+use crate::indexd_client::{
+    CloudQueueCommitRequest, CloudQueueFailRequest, CloudQueueRow, IndexdClientError, IndexdCloudClient,
+    UploadLeaseAcquireResult, UploadLeaseReleaseResult, UploadLeaseRenewResult,
+};
+use crate::lease::{LeaseClient, LeaseGen, LeaseGrant, LeaseId, LeaseKind, ReleaseResult, RenewResult};
+use crate::priority::UploadCategory;
+use crate::queue::{CommitEvidence, QueueItem, QueueKey, QueueStore, UploadState, attempt_id_for};
+use crate::source::ArchiveItemId;
+use crate::transfer::{VerifyAlg, VerifySpec};
+
+const LOAD_PAGE_SIZE: u32 = 256;
+const SOURCE_REJECTED_PREFIX: &str = "source path rejected";
+/// Shared opening of both engines' integrity messages (`rclone.rs` and
+/// `engine.rs` diverge after this point), so either engine's corruption report
+/// classifies as `integrity` rather than degrading to a generic failure.
+const INTEGRITY_FAILURE_PREFIX: &str = "integrity check failed";
+const LEASE_LOST_PREFIX: &str = "subject no longer LIVE";
+const LEASE_RENEW_PREFIX: &str = "lease renew ";
+const ERROR_CLASS_SOURCE_REJECTED: &str = "source_rejected";
+const ERROR_CLASS_INTEGRITY: &str = "integrity";
+const ERROR_CLASS_LEASE_LOST: &str = "lease_lost";
+const ERROR_CLASS_UPLOAD_FAILED: &str = "upload_failed";
+
+/// Live queue store backed by `IndexdCloudClient`.
+pub struct LiveQueueStore<C: IndexdCloudClient> {
+    client: C,
+}
+
+impl<C: IndexdCloudClient> LiveQueueStore<C> {
+    #[must_use]
+    /// Build a queue store from an indexd client.
+    pub fn new(client: C) -> Self {
+        Self { client }
+    }
+
+    fn map_row(row: CloudQueueRow) -> Result<Option<QueueItem>, IndexError> {
+        let state = match row.state.as_str() {
+            "queued" => UploadState::Queued,
+            "in_progress" => UploadState::InProgress,
+            "done" => return Ok(None),
+            "failed" | "parked" => UploadState::Failed,
+            other => {
+                return Err(IndexError::new(
+                    "load",
+                    format!("unsupported queue state `{other}`"),
+                ))
+            }
+        };
+        let category = match row.category.as_str() {
+            "event_sentry" => UploadCategory::EventSentry,
+            "trip" => UploadCategory::Trip,
+            "bulk" => UploadCategory::Bulk,
+            other => {
+                return Err(IndexError::new(
+                    "load",
+                    format!("unsupported upload category `{other}`"),
+                ))
+            }
+        };
+        let seq = u64::try_from(row.seq)
+            .map_err(|_| IndexError::new("load", format!("seq out of range: {}", row.seq)))?;
+        let total_bytes = u64::try_from(row.total_bytes).map_err(|_| {
+            IndexError::new("load", format!("total_bytes out of range: {}", row.total_bytes))
+        })?;
+        let bytes_uploaded = u64::try_from(row.bytes_uploaded).map_err(|_| {
+            IndexError::new(
+                "load",
+                format!("bytes_uploaded out of range: {}", row.bytes_uploaded),
+            )
+        })?;
+        let attempts = u32::try_from(row.attempts)
+            .map_err(|_| IndexError::new("load", format!("attempts out of range: {}", row.attempts)))?;
+
+        let verify = if row.verify_alg == "none" {
+            VerifySpec::CopyIntegrity
+        } else {
+            let alg = VerifyAlg::from_str(&row.verify_alg).map_err(|_| {
+                IndexError::new(
+                    "load",
+                    format!("unsupported verify_alg `{}`", row.verify_alg),
+                )
+            })?;
+            let expected = row.expected_hash.ok_or_else(|| {
+                IndexError::new(
+                    "load",
+                    format!("missing expected_hash for verify_alg `{}`", row.verify_alg),
+                )
+            })?;
+            VerifySpec::Native { alg, expected }
+        };
+
+        Ok(Some(QueueItem {
+            key: QueueKey::new(row.destination_id, row.remote_key),
+            archive_item_id: ArchiveItemId(row.archive_item_id),
+            child_key: row.child_key,
+            source_rel: String::new(),
+            category,
+            seq,
+            total_bytes,
+            verify,
+            state,
+            bytes_uploaded,
+            attempts,
+            not_before: row.not_before,
+            last_error: row.last_error,
+        }))
+    }
+
+    fn classify_error_class(reason: Option<&str>) -> &'static str {
+        let Some(reason) = reason else {
+            return ERROR_CLASS_UPLOAD_FAILED;
+        };
+        if reason.starts_with(SOURCE_REJECTED_PREFIX) {
+            return ERROR_CLASS_SOURCE_REJECTED;
+        }
+        if reason.starts_with(INTEGRITY_FAILURE_PREFIX) {
+            return ERROR_CLASS_INTEGRITY;
+        }
+        if reason.starts_with(LEASE_LOST_PREFIX) || reason.starts_with(LEASE_RENEW_PREFIX) {
+            return ERROR_CLASS_LEASE_LOST;
+        }
+        ERROR_CLASS_UPLOAD_FAILED
+    }
+}
+
+impl<C: IndexdCloudClient> QueueStore for LiveQueueStore<C> {
+    fn load(&self) -> Result<Vec<QueueItem>, IndexError> {
+        let mut cursor = None;
+        let mut rows = Vec::new();
+        loop {
+            let page = self
+                .client
+                .cloud_queue_load(cursor.clone(), LOAD_PAGE_SIZE, None)
+                .map_err(|err| IndexError::new("load", err.to_string()))?;
+            rows.extend(page.items);
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+
+        let mut unsealed: Vec<CloudQueueRow> = rows
+            .into_iter()
+            .filter(|row| row.upload_set_id.is_none())
+            .collect();
+        if let Some(lowest_parent) = unsealed.iter().map(|row| row.archive_item_id).min() {
+            unsealed.retain(|row| row.archive_item_id == lowest_parent);
+        }
+
+        let mut out = Vec::new();
+        for row in unsealed {
+            if let Some(item) = Self::map_row(row)? {
+                out.push(item);
+            }
+        }
+        Ok(out)
+    }
+
+    fn persist(&self, item: &QueueItem) -> Result<(), IndexError> {
+        match item.state {
+            UploadState::Failed => {
+                let error_class = Self::classify_error_class(item.last_error.as_deref());
+                let request = CloudQueueFailRequest {
+                    queue_pk: crate::indexd_client::CloudQueuePk {
+                        destination_id: item.key.destination_id.clone(),
+                        remote_key: item.key.remote_key.clone(),
+                    },
+                    attempt_id: attempt_id_for(&item.key, item.attempts),
+                    upload_set_id: None,
+                    error_class: error_class.to_owned(),
+                    not_before: item.not_before,
+                    terminal: false,
+                };
+                self.client
+                    .cloud_upload_fail(&request)
+                    .map_err(|err| IndexError::new("persist", err.to_string()))?;
+                Ok(())
+            }
+            UploadState::Queued | UploadState::InProgress => {
+                // Whole-file `rclone copyto` has no mid-file checkpoint protocol.
+                // A crash simply retries from byte zero against indexd's queued row.
+                Ok(())
+            }
+            UploadState::Done => Err(IndexError::new(
+                "persist",
+                "done state must be written through commit(item, evidence)",
+            )),
+        }
+    }
+
+    fn commit(&self, item: &QueueItem, evidence: &CommitEvidence) -> Result<(), IndexError> {
+        let size = i64::try_from(evidence.size)
+            .map_err(|_| IndexError::new("commit", "evidence.size exceeds i64"))?;
+        let request = CloudQueueCommitRequest {
+            queue_pk: crate::indexd_client::CloudQueuePk {
+                destination_id: item.key.destination_id.clone(),
+                remote_key: item.key.remote_key.clone(),
+            },
+            attempt_id: evidence.attempt_id.clone(),
+            upload_set_id: evidence.upload_set_id.clone(),
+            hash: evidence.hash.clone(),
+            hash_alg: evidence.hash_alg.clone(),
+            size,
+        };
+        match self.client.cloud_queue_commit(&request) {
+            Ok(_) => Ok(()),
+            Err(IndexdClientError::Rejected { message }) => {
+                Err(IndexError::new("commit", format!("rejected: {message}")))
+            }
+            Err(other) => Err(IndexError::new("commit", other.to_string())),
+        }
+    }
+}
+
+/// Live lease client backed by `IndexdCloudClient`.
+pub struct LiveLeaseClient<C: IndexdCloudClient> {
+    client: C,
+    tokens: Mutex<Vec<(LeaseId, LeaseGen, String)>>,
+}
+
+impl<C: IndexdCloudClient> LiveLeaseClient<C> {
+    #[must_use]
+    /// Build a lease client from an indexd client.
+    pub fn new(client: C) -> Self {
+        Self {
+            client,
+            tokens: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn parse_lease_token(token: &str) -> Option<(LeaseId, LeaseGen)> {
+        let (lease_id_raw, gen_raw) = token.split_once(':')?;
+        let lease_id = lease_id_raw.parse::<i64>().ok()?;
+        let gen_token = u128::from_str_radix(gen_raw, 16).ok()?;
+        Some((LeaseId(lease_id), LeaseGen(gen_token)))
+    }
+
+    fn wire_token(lease_id: LeaseId, gen_token: LeaseGen) -> String {
+        format!("{}:{:032x}", lease_id.0, gen_token.0)
+    }
+
+    fn token_for(&self, lease_id: LeaseId, gen_token: LeaseGen) -> Option<String> {
+        let guard = self.tokens.lock().ok()?;
+        guard
+            .iter()
+            .find(|(id, generation, _)| *id == lease_id && *generation == gen_token)
+            .map(|(_, _, token)| token.clone())
+    }
+
+    fn record_token(&self, lease_id: LeaseId, gen_token: LeaseGen, token: String) {
+        if let Ok(mut guard) = self.tokens.lock() {
+            if let Some(entry) = guard
+                .iter_mut()
+                .find(|(id, generation, _)| *id == lease_id && *generation == gen_token)
+            {
+                *entry = (lease_id, gen_token, token);
+                return;
+            }
+            guard.push((lease_id, gen_token, token));
+        }
+    }
+
+    fn drop_token(&self, lease_id: LeaseId, gen_token: LeaseGen) {
+        if let Ok(mut guard) = self.tokens.lock() {
+            guard.retain(|(id, generation, _)| !(*id == lease_id && *generation == gen_token));
+        }
+    }
+
+    fn acquire_inner(&self, archive_item_id: i64, ttl_ms: u32) -> Result<UploadLeaseAcquireResult, IndexdClientError> {
+        self.client.upload_lease_acquire(archive_item_id, ttl_ms)
+    }
+
+    fn renew_inner(&self, token: &str, ttl_ms: u32) -> Result<UploadLeaseRenewResult, IndexdClientError> {
+        self.client.upload_lease_renew(token, ttl_ms)
+    }
+
+    fn release_inner(&self, token: &str) -> Result<UploadLeaseReleaseResult, IndexdClientError> {
+        self.client.upload_lease_release(token)
+    }
+}
+
+impl<C: IndexdCloudClient> LeaseClient for LiveLeaseClient<C> {
+    fn acquire(&self, item: ArchiveItemId, kind: LeaseKind, _holder: &str, ttl_ms: i64) -> LeaseGrant {
+        if kind != LeaseKind::Upload {
+            return LeaseGrant::Denied {
+                reason: "unsupported lease kind".to_owned(),
+            };
+        }
+        let Ok(ttl_ms) = u32::try_from(ttl_ms) else {
+            return LeaseGrant::Denied {
+                reason: "invalid lease ttl".to_owned(),
+            };
+        };
+
+        match self.acquire_inner(item.0, ttl_ms) {
+            Ok(UploadLeaseAcquireResult {
+                granted: true,
+                token: Some(token),
+                expires_mono_ms: Some(expires_mono_ms),
+                ..
+            }) => match Self::parse_lease_token(&token) {
+                Some((lease_id, gen_token)) => {
+                    self.record_token(lease_id, gen_token, token);
+                    LeaseGrant::Granted {
+                        lease_id,
+                        gen_token,
+                        expires_mono_ms: crate::time::MonoMs(expires_mono_ms),
+                    }
+                }
+                None => LeaseGrant::Denied {
+                    reason: "invalid lease token format".to_owned(),
+                },
+            },
+            Ok(UploadLeaseAcquireResult { granted: false, .. }) => LeaseGrant::Denied {
+                reason: "lease denied".to_owned(),
+            },
+            Ok(_) => LeaseGrant::Denied {
+                reason: "lease acquire response missing token or expiry".to_owned(),
+            },
+            Err(err) => LeaseGrant::Denied {
+                reason: err.to_string(),
+            },
+        }
+    }
+
+    fn renew(&self, lease_id: LeaseId, gen_token: LeaseGen, ttl_ms: i64) -> RenewResult {
+        let Ok(ttl_ms) = u32::try_from(ttl_ms) else {
+            return RenewResult::Stale {
+                reason: "invalid lease ttl".to_owned(),
+            };
+        };
+        let token = self
+            .token_for(lease_id, gen_token)
+            .unwrap_or_else(|| Self::wire_token(lease_id, gen_token));
+        match self.renew_inner(&token, ttl_ms) {
+            Ok(UploadLeaseRenewResult {
+                ok: true,
+                expires_mono_ms: Some(expires_mono_ms),
+            }) => RenewResult::Renewed {
+                expires_mono_ms: crate::time::MonoMs(expires_mono_ms),
+            },
+            Ok(UploadLeaseRenewResult { ok: false, .. }) => RenewResult::Stale {
+                reason: "lease renew denied".to_owned(),
+            },
+            Ok(_) => RenewResult::Stale {
+                reason: "lease renew response missing expiry".to_owned(),
+            },
+            Err(err) => RenewResult::Stale {
+                reason: err.to_string(),
+            },
+        }
+    }
+
+    fn release(&self, lease_id: LeaseId, gen_token: LeaseGen) -> ReleaseResult {
+        let token = self
+            .token_for(lease_id, gen_token)
+            .unwrap_or_else(|| Self::wire_token(lease_id, gen_token));
+        let result = self.release_inner(&token);
+        self.drop_token(lease_id, gen_token);
+        match result {
+            Ok(UploadLeaseReleaseResult { ok: true }) => ReleaseResult::Released,
+            Ok(UploadLeaseReleaseResult { ok: false }) | Err(_) => ReleaseResult::NoOp,
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use crate::indexd_client::{
+        CloudCandidateRow, CloudDiscoverRow, CloudQueueCommitResult, CloudQueueFailResult, CloudQueueRetryRequest,
+        CloudQueueRow, CloudQueueUpsertItem, Page,
+    };
+
+    use super::*;
+
+    struct FakeClient {
+        pages: RefCell<Vec<Page<CloudQueueRow>>>,
+        fail_persist: Rc<RefCell<Option<CloudQueueFailRequest>>>,
+        commit_error: RefCell<Option<IndexdClientError>>,
+        lease_acquire_error: bool,
+        lease_renew_error: bool,
+        lease_release_error: bool,
+    }
+
+    impl FakeClient {
+        fn with_pages(pages: Vec<Page<CloudQueueRow>>) -> Self {
+            Self {
+                pages: RefCell::new(pages),
+                ..Self::default()
+            }
+        }
+    }
+
+    impl Default for FakeClient {
+        fn default() -> Self {
+            Self {
+                pages: RefCell::new(Vec::new()),
+                fail_persist: Rc::new(RefCell::new(None)),
+                commit_error: RefCell::new(None),
+                lease_acquire_error: false,
+                lease_renew_error: false,
+                lease_release_error: false,
+            }
+        }
+    }
+
+    impl IndexdCloudClient for FakeClient {
+        fn cloud_discover(
+            &self,
+            _after_cursor: Option<String>,
+            _limit: u32,
+        ) -> Result<Page<CloudDiscoverRow>, IndexdClientError> {
+            panic!("unused")
+        }
+
+        fn cloud_queue_upsert(&self, _item: &CloudQueueUpsertItem) -> Result<String, IndexdClientError> {
+            panic!("unused")
+        }
+
+        fn cloud_queue_load(
+            &self,
+            _after_cursor: Option<String>,
+            _limit: u32,
+            _upload_set_id: Option<String>,
+        ) -> Result<Page<CloudQueueRow>, IndexdClientError> {
+            let mut pages = self.pages.borrow_mut();
+            if pages.is_empty() {
+                return Ok(Page {
+                    items: Vec::new(),
+                    next_cursor: None,
+                });
+            }
+            Ok(pages.remove(0))
+        }
+
+        fn cloud_queue_commit(
+            &self,
+            _request: &CloudQueueCommitRequest,
+        ) -> Result<CloudQueueCommitResult, IndexdClientError> {
+            if let Some(err) = self.commit_error.borrow_mut().take() {
+                return Err(err);
+            }
+            Ok(CloudQueueCommitResult {
+                ok: true,
+                durable_parent: false,
+            })
+        }
+
+        fn cloud_queue_retry(&self, _request: &CloudQueueRetryRequest) -> Result<String, IndexdClientError> {
+            panic!("unused")
+        }
+
+        fn upload_lease_acquire(
+            &self,
+            _archive_item_id: i64,
+            _ttl_ms: u32,
+        ) -> Result<UploadLeaseAcquireResult, IndexdClientError> {
+            if self.lease_acquire_error {
+                return Err(IndexdClientError::Io(std::io::Error::other("offline")));
+            }
+            Ok(UploadLeaseAcquireResult {
+                granted: true,
+                token: Some("1:00000000000000000000000000000001".to_owned()),
+                boot_id: Some("boot-1".to_owned()),
+                expires_mono_ms: Some(1_000),
+            })
+        }
+
+        fn upload_lease_renew(
+            &self,
+            _token: &str,
+            _ttl_ms: u32,
+        ) -> Result<UploadLeaseRenewResult, IndexdClientError> {
+            if self.lease_renew_error {
+                return Err(IndexdClientError::Io(std::io::Error::other("offline")));
+            }
+            Ok(UploadLeaseRenewResult {
+                ok: true,
+                expires_mono_ms: Some(2_000),
+            })
+        }
+
+        fn upload_lease_release(&self, _token: &str) -> Result<UploadLeaseReleaseResult, IndexdClientError> {
+            if self.lease_release_error {
+                return Err(IndexdClientError::Io(std::io::Error::other("offline")));
+            }
+            Ok(UploadLeaseReleaseResult { ok: true })
+        }
+
+        fn cloud_upload_fail(
+            &self,
+            request: &CloudQueueFailRequest,
+        ) -> Result<CloudQueueFailResult, IndexdClientError> {
+            *self.fail_persist.borrow_mut() = Some(request.clone());
+            Ok(CloudQueueFailResult {
+                ok: true,
+                state: "failed".to_owned(),
+            })
+        }
+
+        fn cloud_candidates(
+            &self,
+            _folders: &[String],
+            _after_cursor: Option<String>,
+            _limit: u32,
+        ) -> Result<Page<CloudCandidateRow>, IndexdClientError> {
+            panic!("unused")
+        }
+    }
+
+    fn row(parent: i64, state: &str, upload_set_id: Option<&str>) -> CloudQueueRow {
+        CloudQueueRow {
+            archive_item_id: parent,
+            child_key: format!("child-{parent}"),
+            destination_id: "dest-a".to_owned(),
+            remote_key: format!("remote-{parent}.mp4"),
+            category: "bulk".to_owned(),
+            seq: parent,
+            total_bytes: 100,
+            bytes_uploaded: 0,
+            expected_hash: Some("hash".to_owned()),
+            verify_alg: "sha256".to_owned(),
+            content_sha256: "a".repeat(64),
+            state: state.to_owned(),
+            attempts: 1,
+            not_before: None,
+            last_error: None,
+            upload_set_id: upload_set_id.map(ToOwned::to_owned),
+        }
+    }
+
+    #[test]
+    fn load_pages_filters_sealed_and_keeps_lowest_parent_only() {
+        let page1 = Page {
+            items: vec![
+                row(20, "queued", None),
+                row(10, "queued", None),
+                row(10, "queued", Some("sealed")),
+            ],
+            next_cursor: Some("next".to_owned()),
+        };
+        let page2 = Page {
+            items: vec![row(10, "done", None)],
+            next_cursor: None,
+        };
+        let store = LiveQueueStore::new(FakeClient::with_pages(vec![page1, page2]));
+        let loaded = store.load().expect("load queue");
+        assert_eq!(loaded.len(), 1);
+        let first = loaded.first().expect("first loaded item");
+        assert_eq!(first.archive_item_id, ArchiveItemId(10));
+        assert_eq!(first.state, UploadState::Queued);
+    }
+
+    #[test]
+    fn persist_done_state_is_rejected() {
+        let store = LiveQueueStore::new(FakeClient::default());
+        let item = QueueItem {
+            key: QueueKey::new("dest-a", "remote-a"),
+            archive_item_id: ArchiveItemId(1),
+            child_key: "c".to_owned(),
+            source_rel: String::new(),
+            category: UploadCategory::Bulk,
+            seq: 1,
+            total_bytes: 1,
+            verify: VerifySpec::CopyIntegrity,
+            state: UploadState::Done,
+            bytes_uploaded: 1,
+            attempts: 1,
+            not_before: None,
+            last_error: None,
+        };
+        let err = store.persist(&item).expect_err("done state should fail");
+        assert!(err.reason.contains("commit"));
+    }
+
+    #[test]
+    fn commit_rejected_maps_distinct_reason() {
+        let client = FakeClient {
+            commit_error: RefCell::new(Some(IndexdClientError::Rejected {
+                message: "fence mismatch".to_owned(),
+            })),
+            ..FakeClient::default()
+        };
+        let store = LiveQueueStore::new(client);
+        let item = QueueItem {
+            key: QueueKey::new("dest-a", "remote-a"),
+            archive_item_id: ArchiveItemId(1),
+            child_key: "c".to_owned(),
+            source_rel: String::new(),
+            category: UploadCategory::Bulk,
+            seq: 1,
+            total_bytes: 1,
+            verify: VerifySpec::CopyIntegrity,
+            state: UploadState::InProgress,
+            bytes_uploaded: 1,
+            attempts: 1,
+            not_before: None,
+            last_error: None,
+        };
+        let evidence = CommitEvidence {
+            attempt_id: "attempt-1".to_owned(),
+            hash: String::new(),
+            hash_alg: "none".to_owned(),
+            size: 1,
+            upload_set_id: None,
+        };
+        let err = store.commit(&item, &evidence).expect_err("commit should fail");
+        assert!(err.reason.contains("rejected: fence mismatch"));
+    }
+
+    #[test]
+    fn lease_rpc_errors_fail_closed() {
+        let client = FakeClient {
+            lease_acquire_error: true,
+            lease_renew_error: true,
+            lease_release_error: true,
+            ..FakeClient::default()
+        };
+        let lease = LiveLeaseClient::new(client);
+        assert!(matches!(
+            lease.acquire(ArchiveItemId(1), LeaseKind::Upload, "uploadd", 1000),
+            LeaseGrant::Denied { .. }
+        ));
+        assert!(matches!(
+            lease.renew(LeaseId(1), LeaseGen(1), 1000),
+            RenewResult::Stale { .. }
+        ));
+        assert_eq!(lease.release(LeaseId(1), LeaseGen(1)), ReleaseResult::NoOp);
+    }
+
+    #[test]
+    fn persist_failed_uses_sanitized_bounded_error_class() {
+        let captured = Rc::new(RefCell::new(None));
+        let client = FakeClient {
+            fail_persist: Rc::clone(&captured),
+            ..FakeClient::default()
+        };
+        let store = LiveQueueStore::new(client);
+        let reason_path = "/mnt/archive/SentryClips/2026/very/long/path/file.mp4";
+        let reason_url = "https://example.invalid/bucket/private/object";
+        let mut long_reason = String::from("source path rejected: ");
+        long_reason.push_str(reason_path);
+        long_reason.push(' ');
+        long_reason.push_str(reason_url);
+        long_reason.push(' ');
+        long_reason.push_str(&"x".repeat(5_000));
+        let item = QueueItem {
+            key: QueueKey::new("dest-a", "remote-a"),
+            archive_item_id: ArchiveItemId(1),
+            child_key: "c".to_owned(),
+            source_rel: String::new(),
+            category: UploadCategory::Bulk,
+            seq: 1,
+            total_bytes: 1,
+            verify: VerifySpec::CopyIntegrity,
+            state: UploadState::Failed,
+            bytes_uploaded: 0,
+            attempts: 1,
+            not_before: None,
+            last_error: Some(long_reason),
+        };
+        store.persist(&item).expect("persist failed state");
+        let request = captured
+            .borrow()
+            .as_ref()
+            .cloned()
+            .expect("captured fail request");
+        assert!(matches!(
+            request.error_class.as_str(),
+            ERROR_CLASS_SOURCE_REJECTED
+                | ERROR_CLASS_INTEGRITY
+                | ERROR_CLASS_LEASE_LOST
+                | ERROR_CLASS_UPLOAD_FAILED
+        ));
+        assert!(request.error_class.len() <= 128);
+        assert!(!request.error_class.contains(reason_path));
+        assert!(!request.error_class.contains(reason_url));
+    }
+
+    /// Both upload engines report integrity failures, and their messages diverge
+    /// after a shared opening. Keying the classifier on one engine's full
+    /// sentence silently demotes the other engine's corruption report to a
+    /// generic failure — losing the single signal most worth distinguishing in
+    /// the durable attempts ledger.
+    #[test]
+    fn integrity_failures_from_either_engine_classify_as_integrity() {
+        let rclone_reason =
+            "integrity check failed: remote verification did not match expected spec";
+        let engine_reason = "integrity check failed: remote verification mismatch";
+        assert_eq!(
+            LiveQueueStore::<FakeClient>::classify_error_class(Some(rclone_reason)),
+            ERROR_CLASS_INTEGRITY,
+            "rclone engine integrity failure must classify as integrity"
+        );
+        assert_eq!(
+            LiveQueueStore::<FakeClient>::classify_error_class(Some(engine_reason)),
+            ERROR_CLASS_INTEGRITY,
+            "chunked engine integrity failure must classify as integrity"
+        );
+    }
+
+    #[test]
+    fn release_drops_cached_token_on_failed_release() {
+        let lease = LiveLeaseClient::new(FakeClient {
+            lease_release_error: true,
+            ..FakeClient::default()
+        });
+        let grant = lease.acquire(ArchiveItemId(1), LeaseKind::Upload, "uploadd", 1000);
+        let (lease_id, gen_token) = match grant {
+            LeaseGrant::Granted {
+                lease_id,
+                gen_token,
+                ..
+            } => (lease_id, gen_token),
+            other @ LeaseGrant::Denied { .. } => {
+                panic!("expected granted lease, got {other:?}")
+            }
+        };
+        assert_eq!(lease.release(lease_id, gen_token), ReleaseResult::NoOp);
+        let token_count = lease.tokens.lock().expect("token cache lock").len();
+        assert_eq!(token_count, 0);
+    }
+}

@@ -83,6 +83,62 @@ pub struct CloudQueueCommitResult {
     pub durable_parent: bool,
 }
 
+/// One `upload_lease_acquire` response payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UploadLeaseAcquireResult {
+    /// Lease granted.
+    pub granted: bool,
+    /// Lease token.
+    pub token: Option<String>,
+    /// Lease boot id.
+    pub boot_id: Option<String>,
+    /// Monotonic expiry.
+    pub expires_mono_ms: Option<i64>,
+}
+
+/// One `upload_lease_renew` response payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UploadLeaseRenewResult {
+    /// Renew success.
+    pub ok: bool,
+    /// New expiry.
+    pub expires_mono_ms: Option<i64>,
+}
+
+/// One `upload_lease_release` response payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UploadLeaseReleaseResult {
+    /// Release success.
+    pub ok: bool,
+}
+
+/// One `cloud_upload_fail` payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudQueueFailRequest {
+    /// Queue primary key.
+    pub queue_pk: CloudQueuePk,
+    /// Idempotency key for this transfer attempt.
+    pub attempt_id: String,
+    /// Optional sealed upload-set fence.
+    #[serde(default)]
+    pub upload_set_id: Option<String>,
+    /// Sanitized error class.
+    pub error_class: String,
+    /// Retry gate (unix seconds), null = immediate retry.
+    pub not_before: Option<i64>,
+    /// Terminal failure marker.
+    pub terminal: bool,
+}
+
+/// One `cloud_upload_fail` response payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudQueueFailResult {
+    /// Fail record success.
+    pub ok: bool,
+    /// Resulting queue state.
+    pub state: String,
+}
+
 /// `cloud_queue_retry` conflict resolution mode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
@@ -281,6 +337,49 @@ pub trait IndexdCloudClient {
         request: &CloudQueueRetryRequest,
     ) -> Result<String, IndexdClientError>;
 
+    /// Acquire an upload lease token.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IndexdClientError`] on transport, framing, decode, or
+    /// server-reported failures.
+    fn upload_lease_acquire(
+        &self,
+        archive_item_id: i64,
+        ttl_ms: u32,
+    ) -> Result<UploadLeaseAcquireResult, IndexdClientError>;
+
+    /// Renew an upload lease token.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IndexdClientError`] on transport, framing, decode, or
+    /// server-reported failures.
+    fn upload_lease_renew(
+        &self,
+        token: &str,
+        ttl_ms: u32,
+    ) -> Result<UploadLeaseRenewResult, IndexdClientError>;
+
+    /// Release an upload lease token.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IndexdClientError`] on transport, framing, decode, or
+    /// server-reported failures.
+    fn upload_lease_release(&self, token: &str) -> Result<UploadLeaseReleaseResult, IndexdClientError>;
+
+    /// Record one failed upload attempt and return resulting state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IndexdClientError`] on transport, framing, decode, or
+    /// server-reported failures.
+    fn cloud_upload_fail(
+        &self,
+        request: &CloudQueueFailRequest,
+    ) -> Result<CloudQueueFailResult, IndexdClientError>;
+
     /// Request one candidates page.
     ///
     /// # Errors
@@ -328,6 +427,26 @@ enum WireRequest {
         upload_set_id: Option<String>,
         resolution: CloudQueueRetryResolution,
     },
+    UploadLeaseAcquire {
+        archive_item_id: i64,
+        ttl_ms: u32,
+    },
+    UploadLeaseRenew {
+        token: String,
+        ttl_ms: u32,
+    },
+    UploadLeaseRelease {
+        token: String,
+    },
+    CloudUploadFail {
+        queue_pk: CloudQueuePk,
+        attempt_id: String,
+        #[serde(default)]
+        upload_set_id: Option<String>,
+        error_class: String,
+        not_before: Option<i64>,
+        terminal: bool,
+    },
     CloudCandidates {
         folders: Vec<String>,
         after_cursor: Option<String>,
@@ -352,6 +471,23 @@ enum WireResponse {
     CloudUploadCommitted {
         ok: bool,
         durable_parent: bool,
+    },
+    UploadLeaseAcquired {
+        granted: bool,
+        token: Option<String>,
+        boot_id: Option<String>,
+        expires_mono_ms: Option<i64>,
+    },
+    UploadLeaseRenewed {
+        ok: bool,
+        expires_mono_ms: Option<i64>,
+    },
+    UploadLeaseReleased {
+        ok: bool,
+    },
+    CloudUploadFailed {
+        ok: bool,
+        state: String,
     },
     CloudCandidates {
         items: Vec<CloudCandidateRow>,
@@ -508,12 +644,74 @@ fn decode_candidates_page(response: WireResponse) -> Result<Page<CloudCandidateR
     }
 }
 
+fn decode_upload_lease_acquired(
+    response: WireResponse,
+) -> Result<UploadLeaseAcquireResult, IndexdClientError> {
+    match response {
+        WireResponse::UploadLeaseAcquired {
+            granted,
+            token,
+            boot_id,
+            expires_mono_ms,
+        } => Ok(UploadLeaseAcquireResult {
+            granted,
+            token,
+            boot_id,
+            expires_mono_ms,
+        }),
+        other => Err(IndexdClientError::Decode(format!(
+            "unexpected response status: {}",
+            wire_response_status(&other)
+        ))),
+    }
+}
+
+fn decode_upload_lease_renewed(
+    response: WireResponse,
+) -> Result<UploadLeaseRenewResult, IndexdClientError> {
+    match response {
+        WireResponse::UploadLeaseRenewed { ok, expires_mono_ms } => {
+            Ok(UploadLeaseRenewResult { ok, expires_mono_ms })
+        }
+        other => Err(IndexdClientError::Decode(format!(
+            "unexpected response status: {}",
+            wire_response_status(&other)
+        ))),
+    }
+}
+
+fn decode_upload_lease_released(
+    response: WireResponse,
+) -> Result<UploadLeaseReleaseResult, IndexdClientError> {
+    match response {
+        WireResponse::UploadLeaseReleased { ok } => Ok(UploadLeaseReleaseResult { ok }),
+        other => Err(IndexdClientError::Decode(format!(
+            "unexpected response status: {}",
+            wire_response_status(&other)
+        ))),
+    }
+}
+
+fn decode_upload_failed(response: WireResponse) -> Result<CloudQueueFailResult, IndexdClientError> {
+    match response {
+        WireResponse::CloudUploadFailed { ok, state } => Ok(CloudQueueFailResult { ok, state }),
+        other => Err(IndexdClientError::Decode(format!(
+            "unexpected response status: {}",
+            wire_response_status(&other)
+        ))),
+    }
+}
+
 fn wire_response_status(response: &WireResponse) -> &'static str {
     match response {
         WireResponse::CloudDiscoverPage { .. } => "cloud_discover_page",
         WireResponse::CloudQueueState { .. } => "cloud_queue_state",
         WireResponse::CloudQueuePage { .. } => "cloud_queue_page",
         WireResponse::CloudUploadCommitted { .. } => "cloud_upload_committed",
+        WireResponse::UploadLeaseAcquired { .. } => "upload_lease_acquired",
+        WireResponse::UploadLeaseRenewed { .. } => "upload_lease_renewed",
+        WireResponse::UploadLeaseReleased { .. } => "upload_lease_released",
+        WireResponse::CloudUploadFailed { .. } => "cloud_upload_failed",
         WireResponse::CloudCandidates { .. } => "cloud_candidates",
         WireResponse::Error { .. } => "error",
         WireResponse::Rejected { .. } => "rejected",
@@ -623,6 +821,52 @@ impl IndexdCloudClient for UnixIndexdClient {
         decode_queue_state(response)
     }
 
+    fn upload_lease_acquire(
+        &self,
+        archive_item_id: i64,
+        ttl_ms: u32,
+    ) -> Result<UploadLeaseAcquireResult, IndexdClientError> {
+        let response = self.send_request(&WireRequest::UploadLeaseAcquire {
+            archive_item_id,
+            ttl_ms,
+        })?;
+        decode_upload_lease_acquired(response)
+    }
+
+    fn upload_lease_renew(
+        &self,
+        token: &str,
+        ttl_ms: u32,
+    ) -> Result<UploadLeaseRenewResult, IndexdClientError> {
+        let response = self.send_request(&WireRequest::UploadLeaseRenew {
+            token: token.to_owned(),
+            ttl_ms,
+        })?;
+        decode_upload_lease_renewed(response)
+    }
+
+    fn upload_lease_release(&self, token: &str) -> Result<UploadLeaseReleaseResult, IndexdClientError> {
+        let response = self.send_request(&WireRequest::UploadLeaseRelease {
+            token: token.to_owned(),
+        })?;
+        decode_upload_lease_released(response)
+    }
+
+    fn cloud_upload_fail(
+        &self,
+        request: &CloudQueueFailRequest,
+    ) -> Result<CloudQueueFailResult, IndexdClientError> {
+        let response = self.send_request(&WireRequest::CloudUploadFail {
+            queue_pk: request.queue_pk.clone(),
+            attempt_id: request.attempt_id.clone(),
+            upload_set_id: request.upload_set_id.clone(),
+            error_class: request.error_class.clone(),
+            not_before: request.not_before,
+            terminal: request.terminal,
+        })?;
+        decode_upload_failed(response)
+    }
+
     fn cloud_candidates(
         &self,
         folders: &[String],
@@ -644,15 +888,17 @@ mod tests {
         clippy::unwrap_used,
         clippy::expect_used,
         clippy::panic,
-        clippy::indexing_slicing
+        clippy::indexing_slicing,
+        clippy::too_many_lines
     )]
 
     use super::{
         CloudCandidateRow, CloudDiscoverRow, CloudQueueCommitRequest, CloudQueueCommitResult,
-        CloudQueuePk, CloudQueueRetryRequest, CloudQueueRetryResolution, CloudQueueRow,
-        CloudQueueUpsertItem, IndexdClientError, MAX_REQUEST_FRAME, WireRequest, WireResponse,
-        decode_response_frame, decode_response_payload, encode_wire_request_frame, read_frame,
-        write_frame,
+        CloudQueueFailRequest, CloudQueueFailResult, CloudQueuePk, CloudQueueRetryRequest,
+        CloudQueueRetryResolution, CloudQueueRow, CloudQueueUpsertItem, IndexdClientError,
+        MAX_REQUEST_FRAME, UploadLeaseAcquireResult, UploadLeaseReleaseResult, UploadLeaseRenewResult,
+        WireRequest, WireResponse, decode_response_frame, decode_response_payload,
+        encode_wire_request_frame, read_frame, write_frame,
     };
     use serde_json::json;
     use std::io::Cursor;
@@ -739,6 +985,40 @@ mod tests {
                     resolution: CloudQueueRetryResolution::Replace,
                 },
                 "cloud_queue_retry",
+            ),
+            (
+                WireRequest::UploadLeaseAcquire {
+                    archive_item_id: 42,
+                    ttl_ms: 60_000,
+                },
+                "upload_lease_acquire",
+            ),
+            (
+                WireRequest::UploadLeaseRenew {
+                    token: "42:0123456789abcdef0123456789abcdef".to_owned(),
+                    ttl_ms: 60_000,
+                },
+                "upload_lease_renew",
+            ),
+            (
+                WireRequest::UploadLeaseRelease {
+                    token: "42:0123456789abcdef0123456789abcdef".to_owned(),
+                },
+                "upload_lease_release",
+            ),
+            (
+                WireRequest::CloudUploadFail {
+                    queue_pk: CloudQueuePk {
+                        destination_id: "dest-a".to_owned(),
+                        remote_key: "remote/front.mp4".to_owned(),
+                    },
+                    attempt_id: "attempt-2".to_owned(),
+                    upload_set_id: None,
+                    error_class: "timeout".to_owned(),
+                    not_before: Some(1234),
+                    terminal: false,
+                },
+                "cloud_upload_fail",
             ),
             (
                 WireRequest::CloudCandidates {
@@ -840,6 +1120,52 @@ mod tests {
         assert!(matches!(
             decode_response_payload(&retry_payload).expect("decode queue retry response"),
             WireResponse::CloudQueueState { .. }
+        ));
+
+        let lease_acquire_payload = serde_json::to_vec(&WireResponse::UploadLeaseAcquired {
+            granted: true,
+            token: Some("42:0123456789abcdef0123456789abcdef".to_owned()),
+            boot_id: Some("boot-1".to_owned()),
+            expires_mono_ms: Some(1200),
+        })
+        .expect("encode lease acquire response");
+        let lease_acquire = decode_response_payload(&lease_acquire_payload)
+            .expect("decode lease acquire response");
+        assert_eq!(
+            lease_acquire,
+            WireResponse::UploadLeaseAcquired {
+                granted: true,
+                token: Some("42:0123456789abcdef0123456789abcdef".to_owned()),
+                boot_id: Some("boot-1".to_owned()),
+                expires_mono_ms: Some(1200)
+            }
+        );
+
+        let lease_renew_payload = serde_json::to_vec(&WireResponse::UploadLeaseRenewed {
+            ok: true,
+            expires_mono_ms: Some(1800),
+        })
+        .expect("encode lease renew response");
+        assert!(matches!(
+            decode_response_payload(&lease_renew_payload).expect("decode lease renew response"),
+            WireResponse::UploadLeaseRenewed { .. }
+        ));
+
+        let lease_release_payload = serde_json::to_vec(&WireResponse::UploadLeaseReleased { ok: true })
+            .expect("encode lease release response");
+        assert!(matches!(
+            decode_response_payload(&lease_release_payload).expect("decode lease release response"),
+            WireResponse::UploadLeaseReleased { .. }
+        ));
+
+        let fail_payload = serde_json::to_vec(&WireResponse::CloudUploadFailed {
+            ok: true,
+            state: "failed".to_owned(),
+        })
+        .expect("encode upload fail response");
+        assert!(matches!(
+            decode_response_payload(&fail_payload).expect("decode upload fail response"),
+            WireResponse::CloudUploadFailed { .. }
         ));
 
         let candidates_payload = serde_json::to_vec(&WireResponse::CloudCandidates {
@@ -971,6 +1297,61 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&result).expect("to value"))
                 .expect("from value");
         assert_eq!(decoded, result);
+    }
+
+    #[test]
+    fn cloud_upload_fail_result_roundtrip_shape() {
+        let result = CloudQueueFailResult {
+            ok: true,
+            state: "failed".to_owned(),
+        };
+        let decoded: CloudQueueFailResult =
+            serde_json::from_value(serde_json::to_value(&result).expect("to value"))
+                .expect("from value");
+        assert_eq!(decoded, result);
+    }
+
+    #[test]
+    fn upload_lease_result_shapes_roundtrip() {
+        let acquired = UploadLeaseAcquireResult {
+            granted: true,
+            token: Some("42:0123456789abcdef0123456789abcdef".to_owned()),
+            boot_id: Some("boot-1".to_owned()),
+            expires_mono_ms: Some(1234),
+        };
+        let renewed = UploadLeaseRenewResult {
+            ok: true,
+            expires_mono_ms: Some(2345),
+        };
+        let released = UploadLeaseReleaseResult { ok: true };
+        let fail = CloudQueueFailRequest {
+            queue_pk: CloudQueuePk {
+                destination_id: "dest-a".to_owned(),
+                remote_key: "remote/front.mp4".to_owned(),
+            },
+            attempt_id: "attempt-2".to_owned(),
+            upload_set_id: None,
+            error_class: "timeout".to_owned(),
+            not_before: Some(1234),
+            terminal: false,
+        };
+
+        let acquired_rt: UploadLeaseAcquireResult =
+            serde_json::from_value(serde_json::to_value(&acquired).expect("to value"))
+                .expect("from value");
+        let renewed_rt: UploadLeaseRenewResult =
+            serde_json::from_value(serde_json::to_value(&renewed).expect("to value"))
+                .expect("from value");
+        let released_rt: UploadLeaseReleaseResult =
+            serde_json::from_value(serde_json::to_value(&released).expect("to value"))
+                .expect("from value");
+        let fail_rt: CloudQueueFailRequest =
+            serde_json::from_value(serde_json::to_value(&fail).expect("to value"))
+                .expect("from value");
+        assert_eq!(acquired_rt, acquired);
+        assert_eq!(renewed_rt, renewed);
+        assert_eq!(released_rt, released);
+        assert_eq!(fail_rt, fail);
     }
 }
 

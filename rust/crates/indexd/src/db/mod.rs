@@ -19,6 +19,43 @@ use rusqlite::Connection;
 
 use self::migrations::{LATEST_VERSION, MIGRATIONS};
 
+pub(crate) const PROVEN_DURABLE_PROOF_SQL: &str = "(ai.durable = 1 AND EXISTS (
+     SELECT 1
+       FROM cloud_parent_upload_sets pus
+      WHERE pus.archive_item_id = ai.id
+        AND pus.superseded_at IS NULL
+        AND pus.finalized_at IS NOT NULL
+        AND ai.delete_state = 'LIVE'
+        AND ai.manifest_digest IS NOT NULL
+        AND ai.manifest_digest = pus.source_manifest_digest
+        AND pus.expected_child_count > 0
+        AND pus.expected_child_count = (
+            SELECT COUNT(*) FROM cloud_parent_upload_set_children pusc
+             WHERE pusc.upload_set_id = pus.upload_set_id)
+        AND pus.expected_child_count = (
+            SELECT COUNT(*) FROM cloud_upload_queue puq
+             WHERE puq.upload_set_id = pus.upload_set_id)
+        AND NOT EXISTS (
+            SELECT 1
+              FROM cloud_parent_upload_set_children pm
+              LEFT JOIN cloud_upload_queue pq
+                ON pq.upload_set_id = pm.upload_set_id
+               AND pq.destination_id = pm.destination_id
+               AND pq.remote_key = pm.remote_key
+             WHERE pm.upload_set_id = pus.upload_set_id
+               AND (
+                   pq.upload_set_id IS NULL
+                   OR pq.state <> 'done'
+                   OR pq.content_sha256 <> pm.content_sha256
+                   OR pq.verify_alg <> pm.verify_alg
+                   OR COALESCE(pq.expected_hash, '') <> pm.expected_hash
+                   OR pq.child_key <> pm.child_key
+                   OR pq.category <> pm.category
+                   OR pq.seq <> pm.seq
+                   OR pq.total_bytes <> pm.total_bytes
+               ))
+ ))";
+
 /// Errors from opening, migrating, or mutating the index database.
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {

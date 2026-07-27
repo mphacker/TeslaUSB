@@ -2,7 +2,7 @@
 
 use rusqlite::{Connection, params};
 
-use crate::db::DbError;
+use crate::db::{DbError, PROVEN_DURABLE_PROOF_SQL};
 
 /// Hard cap for server-exposed list queries to bound frame size.
 const MAX_LIST_ROWS: u32 = 512;
@@ -58,14 +58,14 @@ pub fn list_eviction_candidates(
     // is likewise epoch-seconds. An item is a candidate only if EVERY linked clip is
     // RecentClips, non-Sentry, has a known (>0) start, and the NEWEST is older than
     // the floor; anything else fails closed (INNER JOIN + all-clip HAVING guards).
-    let mut stmt = conn.prepare(
+    let sql = format!(
         "SELECT ai.id, ai.path, ai.size_bytes, ai.archived_at, ai.folder_class
            FROM archive_items AS ai
            JOIN archive_item_clips AS aic ON aic.archive_item_id = ai.id
            JOIN clips AS c ON c.id = aic.clip_id
            LEFT JOIN front_parse_attempts AS fpa ON fpa.canonical_key = c.canonical_key
           WHERE ai.delete_state = 'LIVE'
-            AND (ai.durable = 1 OR ?3 = 1)
+            AND (?3 = 1 OR {PROVEN_DURABLE_PROOF_SQL})
             AND ai.pinned = 0
             AND ai.folder_class = 'RecentClips'
             AND (ai.suppress_until IS NULL OR ai.suppress_until < ?2)
@@ -81,8 +81,9 @@ pub fn list_eviction_candidates(
                ELSE 1
              END) ASC,
             MIN(c.started_at) ASC, ai.id ASC
-          LIMIT ?4",
-    )?;
+          LIMIT ?4"
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(
         params![
           recency_floor_epoch,
@@ -159,6 +160,15 @@ mod tests {
         delete_gen: Option<&'a str>,
     }
 
+    #[derive(Debug, Clone)]
+    struct ProvingUploadSetFixture {
+        upload_set_id: String,
+        digest: String,
+        destination_id: String,
+        remote_key: String,
+        child_key: String,
+    }
+
     fn insert_archive_item_unlinked(conn: &Connection, seed: &ArchiveSeed<'_>) -> i64 {
         conn.execute(
             "INSERT INTO archive_items
@@ -178,7 +188,11 @@ mod tests {
             ],
         )
         .expect("insert archive item");
-        conn.last_insert_rowid()
+        let archive_item_id = conn.last_insert_rowid();
+        if seed.durable == 1 {
+            seed_proving_upload_set(conn, archive_item_id);
+        }
+        archive_item_id
     }
 
     fn insert_linked_clip(
@@ -201,6 +215,231 @@ mod tests {
         )
         .expect("insert archive-item clip link");
         clip_id
+    }
+
+    fn proving_upload_set_fixture(archive_item_id: i64) -> ProvingUploadSetFixture {
+        ProvingUploadSetFixture {
+            upload_set_id: format!("{archive_item_id:032x}"),
+            digest: format!("{:032x}", archive_item_id + 0x1000),
+            destination_id: format!("dest-{archive_item_id}"),
+            remote_key: format!("remote-{archive_item_id}"),
+            child_key: format!("child-{archive_item_id}"),
+        }
+    }
+
+    fn seed_proving_upload_set(conn: &Connection, archive_item_id: i64) -> ProvingUploadSetFixture {
+        let fixture = proving_upload_set_fixture(archive_item_id);
+        let request_digest = format!("{archive_item_id:064x}");
+        let content_sha256 = "a".repeat(64);
+        conn.execute(
+            "UPDATE archive_items SET manifest_digest = ?2 WHERE id = ?1",
+            params![archive_item_id, fixture.digest.as_str()],
+        )
+        .expect("set manifest digest");
+        conn.execute(
+            "INSERT INTO cloud_parent_upload_sets
+                (upload_set_id, archive_item_id, destination_id, source_manifest_digest, request_digest,
+                 expected_child_count, created_at, finalized_at, superseded_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1, 0, 1, NULL)",
+            params![
+                fixture.upload_set_id.as_str(),
+                archive_item_id,
+                fixture.destination_id.as_str(),
+                fixture.digest.as_str(),
+                request_digest
+            ],
+        )
+        .expect("insert upload set");
+        conn.execute(
+            "INSERT INTO cloud_parent_upload_set_children
+                (upload_set_id, child_key, destination_id, remote_key, category, seq, total_bytes,
+                 manifest_mtime_ms, content_sha256, expected_hash, verify_alg)
+             VALUES (?1, ?2, ?3, ?4, 'bulk', 0, 4096, 0, ?5, 'expected-hash', 'sha256')",
+            params![
+                fixture.upload_set_id.as_str(),
+                fixture.child_key.as_str(),
+                fixture.destination_id.as_str(),
+                fixture.remote_key.as_str(),
+                content_sha256
+            ],
+        )
+        .expect("insert upload child");
+        conn.execute(
+            "INSERT INTO cloud_upload_queue
+                (archive_item_id, child_key, destination_id, remote_key, category, seq, total_bytes,
+                 bytes_uploaded, expected_hash, verify_alg, content_sha256, state, attempts, upload_set_id)
+             VALUES (?1, ?2, ?3, ?4, 'bulk', 0, 4096, 4096, 'expected-hash', 'sha256', ?5, 'done', 0, ?6)",
+            params![
+                archive_item_id,
+                fixture.child_key.as_str(),
+                fixture.destination_id.as_str(),
+                fixture.remote_key.as_str(),
+                content_sha256,
+                fixture.upload_set_id.as_str()
+            ],
+        )
+        .expect("insert upload queue row");
+        fixture
+    }
+
+    fn insert_extra_queue_row_for_set(
+        conn: &Connection,
+        archive_item_id: i64,
+        fixture: &ProvingUploadSetFixture,
+    ) {
+        let extra_child_key = format!("{}-extra", fixture.child_key);
+        let extra_destination_id = format!("{}-extra", fixture.destination_id);
+        let extra_remote_key = format!("{}-extra", fixture.remote_key);
+        let extra_content_sha256 = "b".repeat(64);
+        conn.execute(
+            "INSERT INTO cloud_upload_queue
+                (archive_item_id, child_key, destination_id, remote_key, category, seq, total_bytes,
+                 bytes_uploaded, expected_hash, verify_alg, content_sha256, state, attempts, upload_set_id)
+             VALUES (?1, ?2, ?3, ?4, 'bulk', 99, 1, 0, 'extra-expected-hash', 'sha256', ?5, 'done', 0, ?6)",
+            params![
+                archive_item_id,
+                extra_child_key,
+                extra_destination_id,
+                extra_remote_key,
+                extra_content_sha256,
+                fixture.upload_set_id.as_str()
+            ],
+        )
+        .expect("insert extra queue row");
+    }
+
+    fn break_arm_a(conn: &Connection, archive_item_id: i64, _: &ProvingUploadSetFixture) {
+        conn.execute(
+            "UPDATE archive_items SET durable = 0 WHERE id = ?1",
+            params![archive_item_id],
+        )
+        .expect("break arm a");
+    }
+
+    fn break_arm_f(conn: &Connection, archive_item_id: i64, _: &ProvingUploadSetFixture) {
+        conn.execute(
+            "UPDATE archive_items SET manifest_digest = NULL WHERE id = ?1",
+            params![archive_item_id],
+        )
+        .expect("break arm f");
+    }
+
+    fn break_arm_g(conn: &Connection, archive_item_id: i64, _: &ProvingUploadSetFixture) {
+        conn.execute(
+            "UPDATE archive_items
+                SET manifest_digest = 'ffffffffffffffffffffffffffffffff'
+              WHERE id = ?1",
+            params![archive_item_id],
+        )
+        .expect("break arm g");
+    }
+
+    fn break_arm_i(conn: &Connection, archive_item_id: i64, fixture: &ProvingUploadSetFixture) {
+        conn.execute(
+            "UPDATE cloud_parent_upload_sets
+                SET expected_child_count = 2
+              WHERE upload_set_id = ?1",
+            params![fixture.upload_set_id.as_str()],
+        )
+        .expect("break arm i expected count");
+        insert_extra_queue_row_for_set(conn, archive_item_id, fixture);
+    }
+
+    fn break_arm_j(conn: &Connection, archive_item_id: i64, fixture: &ProvingUploadSetFixture) {
+        insert_extra_queue_row_for_set(conn, archive_item_id, fixture);
+    }
+
+    fn break_arm_k(conn: &Connection, _: i64, fixture: &ProvingUploadSetFixture) {
+        let mismatched_remote_key = format!("{}-mismatch", fixture.remote_key);
+        conn.execute(
+            "UPDATE cloud_upload_queue
+                SET remote_key = ?3
+              WHERE upload_set_id = ?1
+                AND child_key = ?2",
+            params![
+                fixture.upload_set_id.as_str(),
+                fixture.child_key.as_str(),
+                mismatched_remote_key
+            ],
+        )
+        .expect("break arm k");
+    }
+
+    fn break_arm_n(conn: &Connection, _: i64, fixture: &ProvingUploadSetFixture) {
+        conn.execute(
+            "UPDATE cloud_upload_queue
+                SET verify_alg = 'md5'
+              WHERE upload_set_id = ?1
+                AND child_key = ?2",
+            params![fixture.upload_set_id.as_str(), fixture.child_key.as_str()],
+        )
+        .expect("break arm n");
+    }
+
+    fn break_arm_o_null(conn: &Connection, _: i64, fixture: &ProvingUploadSetFixture) {
+        conn.execute(
+            "UPDATE cloud_upload_queue
+                SET expected_hash = NULL
+              WHERE upload_set_id = ?1
+                AND child_key = ?2",
+            params![fixture.upload_set_id.as_str(), fixture.child_key.as_str()],
+        )
+        .expect("break arm o null");
+    }
+
+    fn break_arm_o_differs(conn: &Connection, _: i64, fixture: &ProvingUploadSetFixture) {
+        conn.execute(
+            "UPDATE cloud_upload_queue
+                SET expected_hash = 'different-hash'
+              WHERE upload_set_id = ?1
+                AND child_key = ?2",
+            params![fixture.upload_set_id.as_str(), fixture.child_key.as_str()],
+        )
+        .expect("break arm o differs");
+    }
+
+    fn break_arm_p(conn: &Connection, _: i64, fixture: &ProvingUploadSetFixture) {
+        conn.execute(
+            "UPDATE cloud_upload_queue
+                SET child_key = 'other-child'
+              WHERE upload_set_id = ?1
+                AND child_key = ?2",
+            params![fixture.upload_set_id.as_str(), fixture.child_key.as_str()],
+        )
+        .expect("break arm p");
+    }
+
+    fn break_arm_q(conn: &Connection, _: i64, fixture: &ProvingUploadSetFixture) {
+        conn.execute(
+            "UPDATE cloud_upload_queue
+                SET category = 'trip'
+              WHERE upload_set_id = ?1
+                AND child_key = ?2",
+            params![fixture.upload_set_id.as_str(), fixture.child_key.as_str()],
+        )
+        .expect("break arm q");
+    }
+
+    fn break_arm_r(conn: &Connection, _: i64, fixture: &ProvingUploadSetFixture) {
+        conn.execute(
+            "UPDATE cloud_upload_queue
+                SET seq = 1
+              WHERE upload_set_id = ?1
+                AND child_key = ?2",
+            params![fixture.upload_set_id.as_str(), fixture.child_key.as_str()],
+        )
+        .expect("break arm r");
+    }
+
+    fn break_arm_s(conn: &Connection, _: i64, fixture: &ProvingUploadSetFixture) {
+        conn.execute(
+            "UPDATE cloud_upload_queue
+                SET total_bytes = 8192
+              WHERE upload_set_id = ?1
+                AND child_key = ?2",
+            params![fixture.upload_set_id.as_str(), fixture.child_key.as_str()],
+        )
+        .expect("break arm s");
     }
 
     fn insert_archive_item(conn: &Connection, seed: &ArchiveSeed<'_>) -> i64 {
@@ -372,6 +611,326 @@ mod tests {
         assert!(!paths.iter().any(|p| p.contains("not-live")));
         assert!(rows.iter().any(|r| r.id == old_a));
         assert!(rows.iter().any(|r| r.id == old_b));
+    }
+
+    #[test]
+    fn list_eviction_candidates_rejects_stale_durable_without_proving_set() {
+        let conn = open_in_memory().expect("open db");
+        let item = insert_archive_item_unlinked(
+            &conn,
+            &ArchiveSeed {
+                folder_class: "RecentClips",
+                path: "archive/stale-durable-no-set",
+                size_bytes: 1_000,
+                archived_at: 100,
+                delete_state: "LIVE",
+                durable: 1,
+                pinned: 0,
+                suppress_until: None,
+                delete_gen: None,
+            },
+        );
+        insert_linked_clip(&conn, item, "clip:stale-durable-no-set", 100, "RecentClips");
+        conn.execute(
+            "DELETE FROM cloud_upload_queue WHERE archive_item_id = ?1",
+            params![item],
+        )
+        .expect("delete queue rows");
+        conn.execute(
+            "DELETE FROM cloud_parent_upload_set_children WHERE upload_set_id = ?1",
+            params![format!("{item:032x}")],
+        )
+        .expect("delete child rows");
+        conn.execute(
+            "DELETE FROM cloud_parent_upload_sets WHERE archive_item_id = ?1",
+            params![item],
+        )
+        .expect("delete set rows");
+
+        let rows = list_eviction_candidates(&conn, 1_000, 1_000, false, 100).expect("query");
+        assert!(!rows.iter().any(|row| row.id == item));
+    }
+
+    #[test]
+    fn list_eviction_candidates_rejects_superseded_proving_set() {
+        let conn = open_in_memory().expect("open db");
+        let item = insert_archive_item_unlinked(
+            &conn,
+            &ArchiveSeed {
+                folder_class: "RecentClips",
+                path: "archive/superseded-set",
+                size_bytes: 1_000,
+                archived_at: 100,
+                delete_state: "LIVE",
+                durable: 1,
+                pinned: 0,
+                suppress_until: None,
+                delete_gen: None,
+            },
+        );
+        insert_linked_clip(&conn, item, "clip:superseded-set", 100, "RecentClips");
+        conn.execute(
+            "UPDATE cloud_parent_upload_sets SET superseded_at = 2 WHERE archive_item_id = ?1",
+            params![item],
+        )
+        .expect("supersede set");
+
+        let rows = list_eviction_candidates(&conn, 1_000, 1_000, false, 100).expect("query");
+        assert!(!rows.iter().any(|row| row.id == item));
+    }
+
+    #[test]
+    fn list_eviction_candidates_rejects_unfinalized_proving_set() {
+        let conn = open_in_memory().expect("open db");
+        let item = insert_archive_item_unlinked(
+            &conn,
+            &ArchiveSeed {
+                folder_class: "RecentClips",
+                path: "archive/unfinalized-set",
+                size_bytes: 1_000,
+                archived_at: 100,
+                delete_state: "LIVE",
+                durable: 1,
+                pinned: 0,
+                suppress_until: None,
+                delete_gen: None,
+            },
+        );
+        insert_linked_clip(&conn, item, "clip:unfinalized-set", 100, "RecentClips");
+        conn.execute(
+            "UPDATE cloud_parent_upload_sets SET finalized_at = NULL WHERE archive_item_id = ?1",
+            params![item],
+        )
+        .expect("clear finalized_at");
+
+        let rows = list_eviction_candidates(&conn, 1_000, 1_000, false, 100).expect("query");
+        assert!(!rows.iter().any(|row| row.id == item));
+    }
+
+    #[test]
+    fn list_eviction_candidates_rejects_incomplete_proving_set_when_queue_state_not_done() {
+        let conn = open_in_memory().expect("open db");
+        let item = insert_archive_item_unlinked(
+            &conn,
+            &ArchiveSeed {
+                folder_class: "RecentClips",
+                path: "archive/incomplete-state",
+                size_bytes: 1_000,
+                archived_at: 100,
+                delete_state: "LIVE",
+                durable: 1,
+                pinned: 0,
+                suppress_until: None,
+                delete_gen: None,
+            },
+        );
+        insert_linked_clip(&conn, item, "clip:incomplete-state", 100, "RecentClips");
+        conn.execute(
+            "UPDATE cloud_upload_queue SET state = 'queued' WHERE archive_item_id = ?1",
+            params![item],
+        )
+        .expect("mark queue not done");
+
+        let rows = list_eviction_candidates(&conn, 1_000, 1_000, false, 100).expect("query");
+        assert!(!rows.iter().any(|row| row.id == item));
+    }
+
+    #[test]
+    fn list_eviction_candidates_rejects_incomplete_proving_set_when_content_sha_differs() {
+        let conn = open_in_memory().expect("open db");
+        let item = insert_archive_item_unlinked(
+            &conn,
+            &ArchiveSeed {
+                folder_class: "RecentClips",
+                path: "archive/incomplete-sha",
+                size_bytes: 1_000,
+                archived_at: 100,
+                delete_state: "LIVE",
+                durable: 1,
+                pinned: 0,
+                suppress_until: None,
+                delete_gen: None,
+            },
+        );
+        insert_linked_clip(&conn, item, "clip:incomplete-sha", 100, "RecentClips");
+        conn.execute(
+            "UPDATE cloud_upload_queue
+                SET content_sha256 = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+              WHERE archive_item_id = ?1",
+            params![item],
+        )
+        .expect("mismatch queue hash");
+
+        let rows = list_eviction_candidates(&conn, 1_000, 1_000, false, 100).expect("query");
+        assert!(!rows.iter().any(|row| row.id == item));
+    }
+
+    #[test]
+    fn list_eviction_candidates_allows_fully_proven_item_without_allow_undurable() {
+        let conn = open_in_memory().expect("open db");
+        let item = insert_archive_item_unlinked(
+            &conn,
+            &ArchiveSeed {
+                folder_class: "RecentClips",
+                path: "archive/proven",
+                size_bytes: 1_000,
+                archived_at: 100,
+                delete_state: "LIVE",
+                durable: 1,
+                pinned: 0,
+                suppress_until: None,
+                delete_gen: None,
+            },
+        );
+        insert_linked_clip(&conn, item, "clip:proven", 100, "RecentClips");
+
+        let rows = list_eviction_candidates(&conn, 1_000, 1_000, false, 100).expect("query");
+        assert!(rows.iter().any(|row| row.id == item));
+    }
+
+    #[test]
+    fn list_eviction_candidates_allow_undurable_bypasses_proven_durable_gate() {
+        let conn = open_in_memory().expect("open db");
+        let item = insert_archive_item_unlinked(
+            &conn,
+            &ArchiveSeed {
+                folder_class: "RecentClips",
+                path: "archive/bypass-unproven",
+                size_bytes: 1_000,
+                archived_at: 100,
+                delete_state: "LIVE",
+                durable: 1,
+                pinned: 0,
+                suppress_until: None,
+                delete_gen: None,
+            },
+        );
+        insert_linked_clip(&conn, item, "clip:bypass-unproven", 100, "RecentClips");
+        conn.execute(
+            "DELETE FROM cloud_upload_queue WHERE archive_item_id = ?1",
+            params![item],
+        )
+        .expect("delete queue rows");
+        conn.execute(
+            "DELETE FROM cloud_parent_upload_set_children WHERE upload_set_id = ?1",
+            params![format!("{item:032x}")],
+        )
+        .expect("delete child rows");
+        conn.execute(
+            "DELETE FROM cloud_parent_upload_sets WHERE archive_item_id = ?1",
+            params![item],
+        )
+        .expect("delete set rows");
+
+        let rows = list_eviction_candidates(&conn, 1_000, 1_000, true, 100).expect("query");
+        assert!(rows.iter().any(|row| row.id == item));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn list_eviction_candidates_rejects_each_proven_durable_arm_break() {
+        type ArmMutator = fn(&Connection, i64, &ProvingUploadSetFixture);
+        let cases: [(&str, &str, ArmMutator); 13] = [
+            ("arm_a_durable_bit", "ai.durable = 1", break_arm_a),
+            (
+                "arm_f_manifest_digest_non_null",
+                "ai.manifest_digest IS NOT NULL",
+                break_arm_f,
+            ),
+            (
+                "arm_g_manifest_digest_matches_parent",
+                "ai.manifest_digest = pus.source_manifest_digest",
+                break_arm_g,
+            ),
+            (
+                "arm_i_expected_equals_child_count",
+                "SELECT COUNT(*) FROM cloud_parent_upload_set_children pusc",
+                break_arm_i,
+            ),
+            (
+                "arm_j_expected_equals_queue_count",
+                "SELECT COUNT(*) FROM cloud_upload_queue puq",
+                break_arm_j,
+            ),
+            (
+                "arm_k_joined_queue_row_must_exist",
+                "pq.upload_set_id IS NULL",
+                break_arm_k,
+            ),
+            (
+                "arm_n_verify_alg_matches",
+                "pq.verify_alg <> pm.verify_alg",
+                break_arm_n,
+            ),
+            (
+                "arm_o_expected_hash_null",
+                "COALESCE(pq.expected_hash, '') <> pm.expected_hash",
+                break_arm_o_null,
+            ),
+            (
+                "arm_o_expected_hash_differs",
+                "COALESCE(pq.expected_hash, '') <> pm.expected_hash",
+                break_arm_o_differs,
+            ),
+            (
+                "arm_p_child_key_matches",
+                "pq.child_key <> pm.child_key",
+                break_arm_p,
+            ),
+            (
+                "arm_q_category_matches",
+                "pq.category <> pm.category",
+                break_arm_q,
+            ),
+            ("arm_r_seq_matches", "pq.seq <> pm.seq", break_arm_r),
+            (
+                "arm_s_total_bytes_matches",
+                "pq.total_bytes <> pm.total_bytes",
+                break_arm_s,
+            ),
+        ];
+        // Arm h (expected_child_count > 0) is schema-enforced by
+        // cloud_parent_upload_sets.expected_child_count CHECK(expected_child_count > 0).
+        let mut unexpectedly_listed = Vec::new();
+        for (case_name, required_clause, mutate) in cases {
+            assert!(
+                crate::db::PROVEN_DURABLE_PROOF_SQL.contains(required_clause),
+                "case {case_name}: required proof clause missing from PROVEN_DURABLE_PROOF_SQL"
+            );
+            let conn = open_in_memory().expect("open db");
+            let item = insert_archive_item_unlinked(
+                &conn,
+                &ArchiveSeed {
+                    folder_class: "RecentClips",
+                    path: "archive/proven-arm-break",
+                    size_bytes: 1_000,
+                    archived_at: 100,
+                    delete_state: "LIVE",
+                    durable: 1,
+                    pinned: 0,
+                    suppress_until: None,
+                    delete_gen: None,
+                },
+            );
+            insert_linked_clip(&conn, item, "clip:proven-arm-break", 100, "RecentClips");
+            let baseline =
+                list_eviction_candidates(&conn, 1_000, 1_000, false, 100).expect("baseline query");
+            assert!(
+                baseline.iter().any(|row| row.id == item),
+                "case {case_name}: baseline proven seed must be listed before mutation"
+            );
+            let fixture = proving_upload_set_fixture(item);
+            mutate(&conn, item, &fixture);
+            let rows =
+                list_eviction_candidates(&conn, 1_000, 1_000, false, 100).expect("query mutated");
+            if rows.iter().any(|row| row.id == item) {
+                unexpectedly_listed.push(case_name);
+            }
+        }
+        assert!(
+            unexpectedly_listed.is_empty(),
+            "list_eviction_candidates unexpectedly included broken-proof cases: {unexpectedly_listed:?}"
+        );
     }
 
     #[test]

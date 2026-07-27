@@ -4771,6 +4771,15 @@ mod tests {
         dir
     }
 
+    #[derive(Debug, Clone)]
+    struct ProvingUploadSetFixture {
+        upload_set_id: String,
+        digest: String,
+        destination_id: String,
+        remote_key: String,
+        child_key: String,
+    }
+
     fn insert_archive_item(
         conn: &Connection,
         path: &str,
@@ -4787,6 +4796,9 @@ mod tests {
         )
         .expect("insert archive item");
         let archive_item_id = conn.last_insert_rowid();
+        if durable == 1 {
+            seed_proving_upload_set(conn, archive_item_id);
+        }
         // The recency gate now keys on clips.started_at, so link a clip whose
         // recording instant mirrors archived_at to preserve the intended age.
         conn.execute(
@@ -4803,6 +4815,71 @@ mod tests {
         )
         .expect("link archive item to clip");
         archive_item_id
+    }
+
+    fn proving_upload_set_fixture(archive_item_id: i64) -> ProvingUploadSetFixture {
+        ProvingUploadSetFixture {
+            upload_set_id: format!("{archive_item_id:032x}"),
+            digest: format!("{:032x}", archive_item_id + 0x1000),
+            destination_id: format!("dest-{archive_item_id}"),
+            remote_key: format!("remote-{archive_item_id}"),
+            child_key: format!("child-{archive_item_id}"),
+        }
+    }
+
+    fn seed_proving_upload_set(conn: &Connection, archive_item_id: i64) -> ProvingUploadSetFixture {
+        let fixture = proving_upload_set_fixture(archive_item_id);
+        let request_digest = format!("{archive_item_id:064x}");
+        let content_sha256 = "a".repeat(64);
+        conn.execute(
+            "UPDATE archive_items SET manifest_digest = ?2 WHERE id = ?1",
+            params![archive_item_id, fixture.digest.as_str()],
+        )
+        .expect("set manifest digest");
+        conn.execute(
+            "INSERT INTO cloud_parent_upload_sets
+                (upload_set_id, archive_item_id, destination_id, source_manifest_digest, request_digest,
+                 expected_child_count, created_at, finalized_at, superseded_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1, 0, 1, NULL)",
+            params![
+                fixture.upload_set_id.as_str(),
+                archive_item_id,
+                fixture.destination_id.as_str(),
+                fixture.digest.as_str(),
+                request_digest
+            ],
+        )
+        .expect("insert upload set");
+        conn.execute(
+            "INSERT INTO cloud_parent_upload_set_children
+                (upload_set_id, child_key, destination_id, remote_key, category, seq, total_bytes,
+                 manifest_mtime_ms, content_sha256, expected_hash, verify_alg)
+             VALUES (?1, ?2, ?3, ?4, 'bulk', 0, 4096, 0, ?5, 'expected-hash', 'sha256')",
+            params![
+                fixture.upload_set_id.as_str(),
+                fixture.child_key.as_str(),
+                fixture.destination_id.as_str(),
+                fixture.remote_key.as_str(),
+                content_sha256
+            ],
+        )
+        .expect("insert upload child");
+        conn.execute(
+            "INSERT INTO cloud_upload_queue
+                (archive_item_id, child_key, destination_id, remote_key, category, seq, total_bytes,
+                 bytes_uploaded, expected_hash, verify_alg, content_sha256, state, attempts, upload_set_id)
+             VALUES (?1, ?2, ?3, ?4, 'bulk', 0, 4096, 4096, 'expected-hash', 'sha256', ?5, 'done', 0, ?6)",
+            params![
+                archive_item_id,
+                fixture.child_key.as_str(),
+                fixture.destination_id.as_str(),
+                fixture.remote_key.as_str(),
+                content_sha256,
+                fixture.upload_set_id.as_str()
+            ],
+        )
+        .expect("insert upload queue row");
+        fixture
     }
 
     fn send(socket_path: &Path, request: &Request) -> Response {

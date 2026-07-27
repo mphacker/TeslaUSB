@@ -705,6 +705,11 @@ fn run_serve(args: &[String]) -> ExitCode {
 
         let mut last_outcome: Option<DrainOutcome> = None;
         if !evict_budget.latched {
+            // Coupling note: allow_undurable is wired to enable_eviction, so
+            // armed eviction currently bypasses indexd's PROVEN_DURABLE gate.
+            // Do not flip this path to allow_undurable=false until uploadd's
+            // prepare/finalize seam reliably writes finalized COMPLETE parent
+            // upload sets, or eviction will stop freeing space.
             shared.set_cycle_context(
                 now_epoch_s_saturating().saturating_sub(cfg.target_drain.recency_floor_secs),
                 parsed.enable_eviction,

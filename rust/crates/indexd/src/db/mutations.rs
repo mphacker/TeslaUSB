@@ -22,7 +22,7 @@ use std::time::Instant;
 
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::db::{DbError, now_epoch_s};
+use crate::db::{DbError, PROVEN_DURABLE_PROOF_SQL, now_epoch_s};
 
 /// Lease kind (`leases.kind` CHECK constraint).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -589,9 +589,11 @@ pub fn claim_for_delete(
 /// for a permanent-loss op: a stale candidate list can never delete a row
 /// that has since become ineligible). Aborts (returns `None`) on any
 /// unexpired lease OR if the row is not: `LIVE`, `folder_class='RecentClips'`,
-/// `pinned=0`, (`durable=1` OR `allow_undurable`), all linked clips with
-/// `folder_class='RecentClips'` and known (`started_at > 0`) recording time,
-/// and newest linked `started_at < recency_floor_epoch`,
+/// `pinned=0`, (`PROVEN_DURABLE` OR `allow_undurable`) where
+/// `PROVEN_DURABLE := durable=1 AND finalized current COMPLETE upload set`,
+/// all linked clips with `folder_class='RecentClips'` and known
+/// (`started_at > 0`) recording time, and newest linked
+/// `started_at < recency_floor_epoch`,
 /// and unsuppressed (`suppress_until` `NULL` or `< now_epoch`). On success
 /// transitions `LIVE -> DELETE_CLAIMED`, records a fresh random `delete_gen`,
 /// and returns it.
@@ -613,13 +615,12 @@ pub fn claim_eviction_candidate(
         drop(tx);
         return Ok(None);
     }
-    let eligible: bool = tx
-        .query_row(
-            // Fail-closed recency gate on clips.started_at (true recording instant,
-            // epoch-seconds), mirroring list_eviction_candidates: every linked clip
-            // must be RecentClips, non-Sentry, with a known (>0) start, and the
-            // newest must precede recency_floor_epoch (also epoch-seconds).
-            "SELECT EXISTS (
+    let eligible_sql = format!(
+        // Fail-closed recency gate on clips.started_at (true recording instant,
+        // epoch-seconds), mirroring list_eviction_candidates: every linked clip
+        // must be RecentClips, non-Sentry, with a known (>0) start, and the
+        // newest must precede recency_floor_epoch (also epoch-seconds).
+        "SELECT EXISTS (
                  SELECT 1
                    FROM archive_items AS ai
                    JOIN archive_item_clips AS aic ON aic.archive_item_id = ai.id
@@ -628,14 +629,18 @@ pub fn claim_eviction_candidate(
                     AND ai.delete_state = 'LIVE'
                     AND ai.folder_class = 'RecentClips'
                     AND ai.pinned = 0
-                    AND (ai.durable = 1 OR ?2 = 1)
+                    AND (?2 = 1 OR {PROVEN_DURABLE_PROOF_SQL})
                     AND (ai.suppress_until IS NULL OR ai.suppress_until < ?4)
                   GROUP BY ai.id
                  HAVING MIN(CASE WHEN c.folder_class = 'RecentClips' THEN 1 ELSE 0 END) = 1
                     AND MAX(c.is_sentry) = 0
                     AND MIN(CASE WHEN c.started_at > 0 THEN 1 ELSE 0 END) = 1
                     AND MAX(c.started_at) < ?3
-             )",
+             )"
+    );
+    let eligible: bool = tx
+        .query_row(
+            &eligible_sql,
             params![
                 archive_item_id,
                 i64::from(allow_undurable),
@@ -815,6 +820,15 @@ mod tests {
     const BOOT: &str = "boot-current";
     const TTL: u32 = 60;
 
+    #[derive(Debug, Clone)]
+    struct ProvingUploadSetFixture {
+        upload_set_id: String,
+        digest: String,
+        destination_id: String,
+        remote_key: String,
+        child_key: String,
+    }
+
     fn insert_archive_item(conn: &Connection, path: &str) -> i64 {
         conn.execute(
             "INSERT INTO archive_items (folder_class, path, archived_at, created_at, updated_at)
@@ -865,6 +879,9 @@ mod tests {
         )
         .unwrap();
         let archive_item_id = conn.last_insert_rowid();
+        if durable == 1 {
+            seed_proving_upload_set(conn, archive_item_id);
+        }
         insert_clip_for_eviction(conn, archive_item_id, &path, archived_at, folder_class);
         archive_item_id
     }
@@ -897,7 +914,11 @@ mod tests {
             ],
         )
         .unwrap();
-        conn.last_insert_rowid()
+        let archive_item_id = conn.last_insert_rowid();
+        if durable == 1 {
+            seed_proving_upload_set(conn, archive_item_id);
+        }
+        archive_item_id
     }
 
     fn insert_clip_for_eviction(
@@ -917,6 +938,231 @@ mod tests {
         conn.execute(
             "INSERT INTO archive_item_clips (archive_item_id, clip_id) VALUES (?1, ?2)",
             params![archive_item_id, clip_id],
+        )
+        .unwrap();
+    }
+
+    fn proving_upload_set_fixture(archive_item_id: i64) -> ProvingUploadSetFixture {
+        ProvingUploadSetFixture {
+            upload_set_id: format!("{archive_item_id:032x}"),
+            digest: format!("{:032x}", archive_item_id + 0x1000),
+            destination_id: format!("dest-{archive_item_id}"),
+            remote_key: format!("remote-{archive_item_id}"),
+            child_key: format!("child-{archive_item_id}"),
+        }
+    }
+
+    fn seed_proving_upload_set(conn: &Connection, archive_item_id: i64) -> ProvingUploadSetFixture {
+        let fixture = proving_upload_set_fixture(archive_item_id);
+        let request_digest = format!("{archive_item_id:064x}");
+        let content_sha256 = "a".repeat(64);
+        conn.execute(
+            "UPDATE archive_items SET manifest_digest = ?2 WHERE id = ?1",
+            params![archive_item_id, fixture.digest.as_str()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cloud_parent_upload_sets
+                (upload_set_id, archive_item_id, destination_id, source_manifest_digest, request_digest,
+                 expected_child_count, created_at, finalized_at, superseded_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1, 0, 1, NULL)",
+            params![
+                fixture.upload_set_id.as_str(),
+                archive_item_id,
+                fixture.destination_id.as_str(),
+                fixture.digest.as_str(),
+                request_digest
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cloud_parent_upload_set_children
+                (upload_set_id, child_key, destination_id, remote_key, category, seq, total_bytes,
+                 manifest_mtime_ms, content_sha256, expected_hash, verify_alg)
+             VALUES (?1, ?2, ?3, ?4, 'bulk', 0, 4096, 0, ?5, 'expected-hash', 'sha256')",
+            params![
+                fixture.upload_set_id.as_str(),
+                fixture.child_key.as_str(),
+                fixture.destination_id.as_str(),
+                fixture.remote_key.as_str(),
+                content_sha256
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cloud_upload_queue
+                (archive_item_id, child_key, destination_id, remote_key, category, seq, total_bytes,
+                 bytes_uploaded, expected_hash, verify_alg, content_sha256, state, attempts, upload_set_id)
+             VALUES (?1, ?2, ?3, ?4, 'bulk', 0, 4096, 4096, 'expected-hash', 'sha256', ?5, 'done', 0, ?6)",
+            params![
+                archive_item_id,
+                fixture.child_key.as_str(),
+                fixture.destination_id.as_str(),
+                fixture.remote_key.as_str(),
+                content_sha256,
+                fixture.upload_set_id.as_str()
+            ],
+        )
+        .unwrap();
+        fixture
+    }
+
+    fn insert_extra_queue_row_for_set(
+        conn: &Connection,
+        archive_item_id: i64,
+        fixture: &ProvingUploadSetFixture,
+    ) {
+        let extra_child_key = format!("{}-extra", fixture.child_key);
+        let extra_destination_id = format!("{}-extra", fixture.destination_id);
+        let extra_remote_key = format!("{}-extra", fixture.remote_key);
+        let extra_content_sha256 = "b".repeat(64);
+        conn.execute(
+            "INSERT INTO cloud_upload_queue
+                (archive_item_id, child_key, destination_id, remote_key, category, seq, total_bytes,
+                 bytes_uploaded, expected_hash, verify_alg, content_sha256, state, attempts, upload_set_id)
+             VALUES (?1, ?2, ?3, ?4, 'bulk', 99, 1, 0, 'extra-expected-hash', 'sha256', ?5, 'done', 0, ?6)",
+            params![
+                archive_item_id,
+                extra_child_key,
+                extra_destination_id,
+                extra_remote_key,
+                extra_content_sha256,
+                fixture.upload_set_id.as_str()
+            ],
+        )
+        .unwrap();
+    }
+
+    fn break_arm_a(conn: &Connection, archive_item_id: i64, _: &ProvingUploadSetFixture) {
+        conn.execute(
+            "UPDATE archive_items SET durable = 0 WHERE id = ?1",
+            params![archive_item_id],
+        )
+        .unwrap();
+    }
+
+    fn break_arm_f(conn: &Connection, archive_item_id: i64, _: &ProvingUploadSetFixture) {
+        conn.execute(
+            "UPDATE archive_items SET manifest_digest = NULL WHERE id = ?1",
+            params![archive_item_id],
+        )
+        .unwrap();
+    }
+
+    fn break_arm_g(conn: &Connection, archive_item_id: i64, _: &ProvingUploadSetFixture) {
+        conn.execute(
+            "UPDATE archive_items
+                SET manifest_digest = 'ffffffffffffffffffffffffffffffff'
+              WHERE id = ?1",
+            params![archive_item_id],
+        )
+        .unwrap();
+    }
+
+    fn break_arm_i(conn: &Connection, archive_item_id: i64, fixture: &ProvingUploadSetFixture) {
+        conn.execute(
+            "UPDATE cloud_parent_upload_sets
+                SET expected_child_count = 2
+              WHERE upload_set_id = ?1",
+            params![fixture.upload_set_id.as_str()],
+        )
+        .unwrap();
+        insert_extra_queue_row_for_set(conn, archive_item_id, fixture);
+    }
+
+    fn break_arm_j(conn: &Connection, archive_item_id: i64, fixture: &ProvingUploadSetFixture) {
+        insert_extra_queue_row_for_set(conn, archive_item_id, fixture);
+    }
+
+    fn break_arm_k(conn: &Connection, _: i64, fixture: &ProvingUploadSetFixture) {
+        let mismatched_remote_key = format!("{}-mismatch", fixture.remote_key);
+        conn.execute(
+            "UPDATE cloud_upload_queue
+                SET remote_key = ?3
+              WHERE upload_set_id = ?1
+                AND child_key = ?2",
+            params![
+                fixture.upload_set_id.as_str(),
+                fixture.child_key.as_str(),
+                mismatched_remote_key
+            ],
+        )
+        .unwrap();
+    }
+
+    fn break_arm_n(conn: &Connection, _: i64, fixture: &ProvingUploadSetFixture) {
+        conn.execute(
+            "UPDATE cloud_upload_queue
+                SET verify_alg = 'md5'
+              WHERE upload_set_id = ?1
+                AND child_key = ?2",
+            params![fixture.upload_set_id.as_str(), fixture.child_key.as_str()],
+        )
+        .unwrap();
+    }
+
+    fn break_arm_o_null(conn: &Connection, _: i64, fixture: &ProvingUploadSetFixture) {
+        conn.execute(
+            "UPDATE cloud_upload_queue
+                SET expected_hash = NULL
+              WHERE upload_set_id = ?1
+                AND child_key = ?2",
+            params![fixture.upload_set_id.as_str(), fixture.child_key.as_str()],
+        )
+        .unwrap();
+    }
+
+    fn break_arm_o_differs(conn: &Connection, _: i64, fixture: &ProvingUploadSetFixture) {
+        conn.execute(
+            "UPDATE cloud_upload_queue
+                SET expected_hash = 'different-hash'
+              WHERE upload_set_id = ?1
+                AND child_key = ?2",
+            params![fixture.upload_set_id.as_str(), fixture.child_key.as_str()],
+        )
+        .unwrap();
+    }
+
+    fn break_arm_p(conn: &Connection, _: i64, fixture: &ProvingUploadSetFixture) {
+        conn.execute(
+            "UPDATE cloud_upload_queue
+                SET child_key = 'other-child'
+              WHERE upload_set_id = ?1
+                AND child_key = ?2",
+            params![fixture.upload_set_id.as_str(), fixture.child_key.as_str()],
+        )
+        .unwrap();
+    }
+
+    fn break_arm_q(conn: &Connection, _: i64, fixture: &ProvingUploadSetFixture) {
+        conn.execute(
+            "UPDATE cloud_upload_queue
+                SET category = 'trip'
+              WHERE upload_set_id = ?1
+                AND child_key = ?2",
+            params![fixture.upload_set_id.as_str(), fixture.child_key.as_str()],
+        )
+        .unwrap();
+    }
+
+    fn break_arm_r(conn: &Connection, _: i64, fixture: &ProvingUploadSetFixture) {
+        conn.execute(
+            "UPDATE cloud_upload_queue
+                SET seq = 1
+              WHERE upload_set_id = ?1
+                AND child_key = ?2",
+            params![fixture.upload_set_id.as_str(), fixture.child_key.as_str()],
+        )
+        .unwrap();
+    }
+
+    fn break_arm_s(conn: &Connection, _: i64, fixture: &ProvingUploadSetFixture) {
+        conn.execute(
+            "UPDATE cloud_upload_queue
+                SET total_bytes = 8192
+              WHERE upload_set_id = ?1
+                AND child_key = ?2",
+            params![fixture.upload_set_id.as_str(), fixture.child_key.as_str()],
         )
         .unwrap();
     }
@@ -1227,6 +1473,239 @@ mod tests {
         let generation = claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false)
             .unwrap();
         assert!(generation.is_some());
+    }
+
+    #[test]
+    fn claim_eviction_candidate_rejects_stale_durable_without_proving_set() {
+        let mut conn = open_in_memory().unwrap();
+        let item = insert_eviction_item(&conn, "RecentClips", 100, 1, 0, None, "LIVE");
+        conn.execute(
+            "DELETE FROM cloud_upload_queue WHERE archive_item_id = ?1",
+            params![item],
+        )
+        .unwrap();
+        conn.execute(
+            "DELETE FROM cloud_parent_upload_set_children WHERE upload_set_id = ?1",
+            params![format!("{item:032x}")],
+        )
+        .unwrap();
+        conn.execute(
+            "DELETE FROM cloud_parent_upload_sets WHERE archive_item_id = ?1",
+            params![item],
+        )
+        .unwrap();
+
+        let generation = claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false)
+            .unwrap();
+        assert_eq!(generation, None);
+    }
+
+    #[test]
+    fn claim_eviction_candidate_rejects_superseded_proving_set() {
+        let mut conn = open_in_memory().unwrap();
+        let item = insert_eviction_item(&conn, "RecentClips", 100, 1, 0, None, "LIVE");
+        conn.execute(
+            "UPDATE cloud_parent_upload_sets SET superseded_at = 2 WHERE archive_item_id = ?1",
+            params![item],
+        )
+        .unwrap();
+
+        let generation = claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false)
+            .unwrap();
+        assert_eq!(generation, None);
+    }
+
+    #[test]
+    fn claim_eviction_candidate_rejects_unfinalized_proving_set() {
+        let mut conn = open_in_memory().unwrap();
+        let item = insert_eviction_item(&conn, "RecentClips", 100, 1, 0, None, "LIVE");
+        conn.execute(
+            "UPDATE cloud_parent_upload_sets SET finalized_at = NULL WHERE archive_item_id = ?1",
+            params![item],
+        )
+        .unwrap();
+
+        let generation = claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false)
+            .unwrap();
+        assert_eq!(generation, None);
+    }
+
+    #[test]
+    fn claim_eviction_candidate_rejects_incomplete_proving_set_when_queue_state_not_done() {
+        let mut conn = open_in_memory().unwrap();
+        let item = insert_eviction_item(&conn, "RecentClips", 100, 1, 0, None, "LIVE");
+        conn.execute(
+            "UPDATE cloud_upload_queue SET state = 'queued' WHERE archive_item_id = ?1",
+            params![item],
+        )
+        .unwrap();
+
+        let generation = claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false)
+            .unwrap();
+        assert_eq!(generation, None);
+    }
+
+    #[test]
+    fn claim_eviction_candidate_rejects_incomplete_proving_set_when_content_sha_differs() {
+        let mut conn = open_in_memory().unwrap();
+        let item = insert_eviction_item(&conn, "RecentClips", 100, 1, 0, None, "LIVE");
+        conn.execute(
+            "UPDATE cloud_upload_queue
+                SET content_sha256 = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+              WHERE archive_item_id = ?1",
+            params![item],
+        )
+        .unwrap();
+
+        let generation = claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false)
+            .unwrap();
+        assert_eq!(generation, None);
+    }
+
+    #[test]
+    fn claim_eviction_candidate_allows_fully_proven_item_without_allow_undurable() {
+        let mut conn = open_in_memory().unwrap();
+        let item = insert_eviction_item(&conn, "RecentClips", 100, 1, 0, None, "LIVE");
+
+        let generation = claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false)
+            .unwrap();
+        assert!(generation.is_some());
+    }
+
+    #[test]
+    fn claim_eviction_candidate_allow_undurable_bypasses_proven_durable_gate() {
+        let mut conn = open_in_memory().unwrap();
+        let item = insert_eviction_item(&conn, "RecentClips", 100, 1, 0, None, "LIVE");
+        conn.execute(
+            "DELETE FROM cloud_upload_queue WHERE archive_item_id = ?1",
+            params![item],
+        )
+        .unwrap();
+        conn.execute(
+            "DELETE FROM cloud_parent_upload_set_children WHERE upload_set_id = ?1",
+            params![format!("{item:032x}")],
+        )
+        .unwrap();
+        conn.execute(
+            "DELETE FROM cloud_parent_upload_sets WHERE archive_item_id = ?1",
+            params![item],
+        )
+        .unwrap();
+
+        let generation = claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, true)
+            .unwrap();
+        assert!(generation.is_some());
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn claim_eviction_candidate_rejects_each_proven_durable_arm_break() {
+        type ArmMutator = fn(&Connection, i64, &ProvingUploadSetFixture);
+        let cases: [(&str, &str, ArmMutator); 13] = [
+            ("arm_a_durable_bit", "ai.durable = 1", break_arm_a),
+            (
+                "arm_f_manifest_digest_non_null",
+                "ai.manifest_digest IS NOT NULL",
+                break_arm_f,
+            ),
+            (
+                "arm_g_manifest_digest_matches_parent",
+                "ai.manifest_digest = pus.source_manifest_digest",
+                break_arm_g,
+            ),
+            (
+                "arm_i_expected_equals_child_count",
+                "SELECT COUNT(*) FROM cloud_parent_upload_set_children pusc",
+                break_arm_i,
+            ),
+            (
+                "arm_j_expected_equals_queue_count",
+                "SELECT COUNT(*) FROM cloud_upload_queue puq",
+                break_arm_j,
+            ),
+            (
+                "arm_k_joined_queue_row_must_exist",
+                "pq.upload_set_id IS NULL",
+                break_arm_k,
+            ),
+            (
+                "arm_n_verify_alg_matches",
+                "pq.verify_alg <> pm.verify_alg",
+                break_arm_n,
+            ),
+            (
+                "arm_o_expected_hash_null",
+                "COALESCE(pq.expected_hash, '') <> pm.expected_hash",
+                break_arm_o_null,
+            ),
+            (
+                "arm_o_expected_hash_differs",
+                "COALESCE(pq.expected_hash, '') <> pm.expected_hash",
+                break_arm_o_differs,
+            ),
+            (
+                "arm_p_child_key_matches",
+                "pq.child_key <> pm.child_key",
+                break_arm_p,
+            ),
+            (
+                "arm_q_category_matches",
+                "pq.category <> pm.category",
+                break_arm_q,
+            ),
+            ("arm_r_seq_matches", "pq.seq <> pm.seq", break_arm_r),
+            (
+                "arm_s_total_bytes_matches",
+                "pq.total_bytes <> pm.total_bytes",
+                break_arm_s,
+            ),
+        ];
+        // Arm h (expected_child_count > 0) is schema-enforced by
+        // cloud_parent_upload_sets.expected_child_count CHECK(expected_child_count > 0).
+        let mut unexpectedly_claimed = Vec::new();
+        for (case_name, required_clause, mutate) in cases {
+            assert!(
+                crate::db::PROVEN_DURABLE_PROOF_SQL.contains(required_clause),
+                "case {case_name}: required proof clause missing from PROVEN_DURABLE_PROOF_SQL"
+            );
+            let mut conn = open_in_memory().unwrap();
+            let sanity_item = insert_eviction_item(&conn, "RecentClips", 100, 1, 0, None, "LIVE");
+            let sanity = claim_eviction_candidate(
+                &mut conn,
+                BOOT,
+                1_000,
+                1_000,
+                sanity_item,
+                500,
+                false,
+            )
+            .unwrap();
+            assert!(
+                sanity.is_some(),
+                "case {case_name}: baseline proven seed must be claimable before mutation"
+            );
+            let candidate_item =
+                insert_eviction_item(&conn, "RecentClips", 101, 1, 0, None, "LIVE");
+            let fixture = proving_upload_set_fixture(candidate_item);
+            mutate(&conn, candidate_item, &fixture);
+            let claim = claim_eviction_candidate(
+                &mut conn,
+                BOOT,
+                1_000,
+                1_000,
+                candidate_item,
+                500,
+                false,
+            )
+            .unwrap();
+            if claim.is_some() {
+                unexpectedly_claimed.push(case_name);
+            }
+        }
+        assert!(
+            unexpectedly_claimed.is_empty(),
+            "claim_eviction_candidate unexpectedly accepted broken-proof cases: {unexpectedly_claimed:?}"
+        );
     }
 
     fn insert_sentry_flagged_recent_clip_for_eviction(

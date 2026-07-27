@@ -28,6 +28,19 @@ use crate::indexd_client::{CloudDiscoverRow, CloudQueueUpsertItem, IndexdCloudCl
 use crate::source::ArchiveRoot;
 
 const PAGE_LIMIT: u32 = 256;
+/// How many *new* parents one pass may hash.
+///
+/// The producer streams and SHA-256s every child of every parent it processes.
+/// On the target the archive holds ~1,264 event folders / 267 GB, so an
+/// unbounded pass would hash the entire archive in one cycle: hours of sustained
+/// reads on the *same* microSD the car records to, which can starve those
+/// writes. A parent is one event folder (~6 camera files, ~200 MB), so this
+/// budget caps a pass near ~1 GB of reads and the next cycle resumes where this
+/// one stopped.
+///
+/// There is also no value in running ahead: the drain is capped by the `WiFi` TX
+/// limit, so a queue hours deep buys nothing and costs SD I/O now.
+const DEFAULT_MAX_PARENTS_PER_PASS: u32 = 4;
 const REMOTE_KEY_LIMIT: usize = 1024;
 const DESTINATION_ID_LIMIT: usize = 128;
 const VERIFY_ALG_NONE: &str = "none";
@@ -65,6 +78,9 @@ pub struct EnqueueReport {
     pub enqueued_children: u64,
     /// Number of children skipped because their composed remote key exceeded 1024.
     pub skipped_remote_key_too_long: u64,
+    /// True when the pass stopped early because it hit the per-pass parent
+    /// budget; the remaining parents are picked up by the next cycle.
+    pub stopped_at_parent_budget: bool,
     /// Sanitized bounded skip/error codes surfaced by this pass.
     pub event_codes: Vec<&'static str>,
 }
@@ -75,6 +91,7 @@ pub struct DiscoverEnqueuer<'a, C: IndexdCloudClient, S: ChildSource> {
     child_source: &'a S,
     destination_id: String,
     remote_prefix: String,
+    max_parents_per_pass: u32,
 }
 
 impl<'a, C: IndexdCloudClient, S: ChildSource> DiscoverEnqueuer<'a, C, S> {
@@ -100,7 +117,18 @@ impl<'a, C: IndexdCloudClient, S: ChildSource> DiscoverEnqueuer<'a, C, S> {
             child_source,
             destination_id,
             remote_prefix: remote_prefix.into().trim_matches('/').to_owned(),
+            max_parents_per_pass: DEFAULT_MAX_PARENTS_PER_PASS,
         })
+    }
+
+    /// Override how many *new* parents one pass may hash.
+    ///
+    /// Clamped to at least 1: a budget of zero would enqueue nothing, ever,
+    /// and stall uploads silently.
+    #[must_use]
+    pub fn with_max_parents_per_pass(mut self, parents: u32) -> Self {
+        self.max_parents_per_pass = parents.max(1);
+        self
     }
 
     /// Run one discover→enqueue pass.
@@ -115,6 +143,7 @@ impl<'a, C: IndexdCloudClient, S: ChildSource> DiscoverEnqueuer<'a, C, S> {
         let mut report = EnqueueReport::default();
         let (mut queued_parents, mut seq) = self.load_existing_queue_state()?;
         let mut discover_cursor = None;
+        let mut processed_parents: u32 = 0;
         loop {
             let page = self
                 .client
@@ -125,6 +154,13 @@ impl<'a, C: IndexdCloudClient, S: ChildSource> DiscoverEnqueuer<'a, C, S> {
                 if queued_parents.contains(&parent.archive_item_id) {
                     report.skipped_existing_parents = report.skipped_existing_parents.saturating_add(1);
                     continue;
+                }
+                // Stop *before* hashing this parent: reading and digesting its
+                // children is the expensive, recording-adjacent work this budget
+                // exists to bound.
+                if processed_parents >= self.max_parents_per_pass {
+                    report.stopped_at_parent_budget = true;
+                    return Ok(report);
                 }
                 let children = self.child_source.children_for_parent(&parent)?;
                 for child in children {
@@ -160,6 +196,7 @@ impl<'a, C: IndexdCloudClient, S: ChildSource> DiscoverEnqueuer<'a, C, S> {
                     seq = seq.saturating_add(1);
                 }
                 queued_parents.insert(parent.archive_item_id);
+                processed_parents = processed_parents.saturating_add(1);
             }
             discover_cursor = page.next_cursor;
             if discover_cursor.is_none() {
@@ -491,6 +528,73 @@ mod tests {
             total_bytes: bytes,
             content_sha256: hash.to_owned(),
         }
+    }
+
+    /// The producer streams and SHA-256s every child of every parent it
+    /// processes. On the target that archive is 267 GB across ~1,264 event
+    /// folders, so an unbounded pass would hash the whole archive in a single
+    /// cycle — hours of sustained reads on the *same* microSD the car is
+    /// recording to, which can starve those writes. A pass therefore hashes at
+    /// most `max_parents_per_pass` new parents and the next cycle resumes.
+    ///
+    /// Asserting that the third parent produced no upsert proves its children
+    /// were never read: the fake would have returned a child for it, so an
+    /// upsert would exist had `children_for_parent` been called.
+    #[test]
+    fn run_stops_at_the_parent_budget_without_hashing_the_rest() {
+        let client = FakeClient {
+            discover_pages: RefCell::new(vec![Page {
+                items: vec![
+                    discover_parent(20, "RecentClips", "bulk"),
+                    discover_parent(21, "RecentClips", "bulk"),
+                    discover_parent(22, "RecentClips", "bulk"),
+                ],
+                next_cursor: None,
+            }]),
+            ..FakeClient::default()
+        };
+        let source = FakeChildSource {
+            by_parent: BTreeMap::from([
+                (20, vec![child("a.mp4", 1, &"1".repeat(64))]),
+                (21, vec![child("a.mp4", 1, &"2".repeat(64))]),
+                (22, vec![child("a.mp4", 1, &"3".repeat(64))]),
+            ]),
+        };
+        let producer = DiscoverEnqueuer::new(&client, &source, "dest-a", "root")
+            .expect("producer")
+            .with_max_parents_per_pass(2);
+        let report = producer.run().expect("run");
+        let upserts = client.upserts.borrow();
+        let parents: Vec<i64> = upserts.iter().map(|item| item.archive_item_id).collect();
+        assert_eq!(
+            parents,
+            vec![20, 21],
+            "the parent past the budget must not be hashed or enqueued this pass"
+        );
+        assert!(
+            report.stopped_at_parent_budget,
+            "the caller must be able to see the pass was truncated"
+        );
+    }
+
+    /// A zero budget would enqueue nothing forever and stall uploads silently.
+    #[test]
+    fn parent_budget_of_zero_is_clamped_to_one() {
+        let client = FakeClient {
+            discover_pages: RefCell::new(vec![Page {
+                items: vec![discover_parent(20, "RecentClips", "bulk")],
+                next_cursor: None,
+            }]),
+            ..FakeClient::default()
+        };
+        let source = FakeChildSource {
+            by_parent: BTreeMap::from([(20, vec![child("a.mp4", 1, &"1".repeat(64))])]),
+        };
+        let producer = DiscoverEnqueuer::new(&client, &source, "dest-a", "root")
+            .expect("producer")
+            .with_max_parents_per_pass(0);
+        let report = producer.run().expect("run");
+        assert_eq!(report.enqueued_children, 1);
     }
 
     /// `seq` is a *global* FIFO key: indexd drains `ORDER BY seq ASC` across the

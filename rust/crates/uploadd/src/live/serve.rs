@@ -37,6 +37,8 @@ struct ServeArgs {
     rclone_binary: String,
     rclone_config: Option<String>,
     interval_secs: u64,
+    /// `None` leaves the producer's own default in place.
+    max_parents_per_pass: Option<u32>,
     once: bool,
 }
 
@@ -62,6 +64,9 @@ impl Default for ServeArgs {
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(DEFAULT_INTERVAL_SECS),
+            max_parents_per_pass: std::env::var("UPLOADD_MAX_PARENTS_PER_PASS")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok()),
             once: false,
         }
     }
@@ -251,6 +256,11 @@ fn parse_serve_args(args: &[String]) -> Result<ServeArgs, String> {
                 let value = next_arg_value(&mut iter, "--interval-secs")?;
                 parsed.interval_secs = parse_arg::<u64>("--interval-secs", &value)?;
             }
+            "--max-parents-per-pass" => {
+                let value = next_arg_value(&mut iter, "--max-parents-per-pass")?;
+                parsed.max_parents_per_pass =
+                    Some(parse_arg::<u32>("--max-parents-per-pass", &value)?);
+            }
             "--once" => parsed.once = true,
             other => return Err(format!("uploadd serve: unknown option `{other}`.\n{}", serve_usage())),
         }
@@ -334,7 +344,10 @@ pub fn run_serve(args: &[String]) -> ExitCode {
         parsed.destination_id.clone(),
         parsed.remote_prefix.clone(),
     ) {
-        Ok(value) => value,
+        Ok(value) => match parsed.max_parents_per_pass {
+            Some(budget) => value.with_max_parents_per_pass(budget),
+            None => value,
+        },
         Err(err) => {
             write_stderr_line(&format!("uploadd serve: startup config error: {err}"));
             return ExitCode::FAILURE;
@@ -384,10 +397,11 @@ pub fn serve_usage() -> String {
     "uploadd serve [--indexd-socket <path>] [--wifid-socket <path>] \
 --archive-root <path> --destination-id <id> [--remote-prefix <prefix>] \
 [--rclone-remote <name>] [--rclone-binary <path>] [--rclone-config <path>] \
-[--interval-secs <u64>] [--once]\n\
+[--interval-secs <u64>] [--max-parents-per-pass <u32>] [--once]\n\
 env fallback: UPLOADD_INDEXD_SOCKET, UPLOADD_WIFID_SOCKET, UPLOADD_ARCHIVE_ROOT, \
 UPLOADD_DESTINATION_ID, UPLOADD_REMOTE_PREFIX, UPLOADD_RCLONE_REMOTE, \
-UPLOADD_RCLONE_BINARY, UPLOADD_RCLONE_CONFIG, UPLOADD_INTERVAL_SECS"
+UPLOADD_RCLONE_BINARY, UPLOADD_RCLONE_CONFIG, UPLOADD_INTERVAL_SECS, \
+UPLOADD_MAX_PARENTS_PER_PASS"
         .to_owned()
 }
 

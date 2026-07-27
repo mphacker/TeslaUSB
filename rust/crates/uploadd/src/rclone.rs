@@ -246,7 +246,8 @@ impl RcloneUploadEngine<'_> {
         }
     }
 
-    /// `rclone [--config C] copyto <src> <remote:key> --bwlimit <max_tx>B`.
+    /// `rclone [--config C] copyto <src> <remote:key> --bwlimit <max_tx>B
+    /// --buffer-size 0 --retries 1`.
     fn run_copy(
         &self,
         path: &ArchivePath,
@@ -262,6 +263,16 @@ impl RcloneUploadEngine<'_> {
         // number would be KiB/sec); this is the same cap `wifid` enforces in the
         // kernel, so the belt and braces agree.
         args.push(format!("{max_tx}B"));
+        // Drop the read-ahead buffer: it saves ~6 MB RSS on the 415 MB target
+        // (spike `vs-0b`) and buys nothing, since `--bwlimit` already paces the
+        // transfer far below disk read speed.
+        args.push("--buffer-size".to_owned());
+        args.push("0".to_owned());
+        // This queue owns retry, backoff and the indexd attempts ledger. Leaving
+        // `rclone` to retry internally (default 3) would burn attempts invisibly
+        // to that ledger and spend up to 3x the TX budget the cap protects.
+        args.push("--retries".to_owned());
+        args.push("1".to_owned());
         let out = self
             .runner
             .run(&self.remote.binary, &args)
@@ -741,6 +752,55 @@ mod tests {
         assert!(copy.contains(&"1048576B".to_owned()));
         assert!(copy.contains(&"teslausb-cloud:remote/clip.mp4".to_owned()));
         assert!(copy.contains(&"/mnt/archive/SentryClips/clip.mp4".to_owned()));
+    }
+
+    /// The value following `flag`, so a test asserts an actual flag/value pair
+    /// rather than the mere presence of a bare token like `"1"` somewhere in the
+    /// vector (which `contains` would satisfy for the wrong reason).
+    fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+        let i = args.iter().position(|a| a == flag)?;
+        args.get(i + 1).map(String::as_str)
+    }
+
+    /// `--buffer-size 0` and `--retries 1` are pinned on every copy.
+    ///
+    /// `--buffer-size 0`: measured on the target (hardware spike `vs-0b`) to cut
+    /// peak RSS 63 MB -> 57 MB on a 415 MB device. The read-ahead buffer buys
+    /// nothing here because `--bwlimit` already paces the transfer well below
+    /// disk read speed.
+    ///
+    /// `--retries 1` is a *correctness* requirement, not a tuning knob: this
+    /// queue owns retry, backoff and the indexd attempts ledger. Letting
+    /// `rclone` retry internally (its default is 3) would burn attempts
+    /// invisibly to that ledger and spend up to 3x the TX budget the `WiFi` cap
+    /// exists to protect.
+    #[test]
+    fn copyto_pins_buffer_size_and_retries() {
+        let cfg = UploaddConfig::default();
+        let root = ArchiveRoot::new("/mnt/archive");
+        let remote = remote();
+        let runner = FakeRunner::ok(&expected_sha256(), 1_000);
+        let lease = FakeLease::granting();
+        let store = FakeStore::default();
+        let throttle = FakeThrottle::running();
+        let engine = RcloneUploadEngine {
+            cfg: &cfg,
+            archive_root: &root,
+            remote: &remote,
+            runner: &runner,
+            lease: &lease,
+            queue_store: &store,
+            throttle: &throttle,
+        };
+        let mut it = item();
+        engine.process(&mut it).unwrap();
+        let calls = runner.calls.borrow();
+        let copy = calls
+            .iter()
+            .find(|a| a.contains(&"copyto".to_owned()))
+            .unwrap();
+        assert_eq!(flag_value(copy, "--buffer-size"), Some("0"));
+        assert_eq!(flag_value(copy, "--retries"), Some("1"));
     }
 
     #[test]

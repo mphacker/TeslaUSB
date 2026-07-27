@@ -11,9 +11,17 @@
 # setup-lib/common.sh). When the live loop lands: move the name into
 # TESLAUSB_APP_SERVICES and add the cloud credential via LoadCredential=.
 #
-# Hardening note: cgroup MemoryMax / sandboxing are device-calibrated in
-# migration M5 / Task 7.4c. The OOM order (SPEC.md §7) is encoded via
-# OOMScoreAdjust — uploadd is the FIRST to be OOM-killed (pure convenience).
+# Hardening note: **`MemoryMax=`/`MemoryHigh=` DO NOT WORK on this target.** The
+# Raspberry Pi OS kernel cmdline ships `cgroup_disable=memory`, so /proc/cgroups
+# has no memory subsystem and systemd accepts memory limits then silently ignores
+# them (verified on-device, spike vs-0b 2026-07-27: system.slice controllers are
+# `cpu io pids`; an existing unit reads back MemoryMax=infinity). Do NOT add a
+# memory limit here expecting enforcement — enabling it means editing
+# /boot/firmware/cmdline.txt + reboot, which is boot-critical and, per the spike,
+# unnecessary: rclone's peak RSS is a flat 57-64 MB (it streams; RSS does not grow
+# with clip size) against ~200 MB free. The OOM order (SPEC.md §7) is therefore
+# enforced solely by OOMScoreAdjust below — which needs no cgroup — making uploadd
+# the FIRST process killed under pressure, protecting recording.
 #
 # Install: copy to /etc/systemd/system/uploadd.service, then daemon-reload
 #   (enable only once the upload live wiring — Task 2.6 — lands).

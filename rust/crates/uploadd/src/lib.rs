@@ -16,12 +16,15 @@
 //! The orchestration in [`engine`] is generic over I/O **seams**, each a trait:
 //! [`source::ArchiveSource`] (archive reads), [`transfer::Uploader`] (the
 //! transfer backend), [`lease::LeaseClient`] (acquire/renew/release via
-//! `indexd`), [`queue::QueueStore`] (durable queue persistence via `indexd`,
-//! the sole `SQLite` writer), [`durability::DurabilityClient`] (the
-//! `UPLOADED_VERIFIED` flag via `indexd`), [`throttle::ThrottleSource`] (the
+//! `indexd`), [`queue::QueueStore`] (durable queue persistence **and** the
+//! commit of backend verification evidence via `indexd`, the sole `SQLite`
+//! writer), [`throttle::ThrottleSource`] (the
 //! `wifid` cap + storage backpressure), and [`time::Clock`] / [`time::Waiter`]
 //! (boot-scoped monotonic time + self-pacing). Tests drive deterministic mocks
 //! for all of them.
+//!
+//! There is deliberately **no durability seam**: `uploadd` commits evidence and
+//! `indexd` alone concludes durability (see [`durability`]).
 //!
 //! # Hard invariants this crate upholds ([`docs/specs/uploadd.md`] §3, §6)
 //!

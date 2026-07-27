@@ -40,8 +40,8 @@
 //! # Live wiring (gated, not built here)
 //!
 //! The live `serve` binary path composes a [`Scheduler`] with the real `indexd`
-//! [`crate::queue::QueueStore`] / [`crate::lease::LeaseClient`] /
-//! [`crate::durability::DurabilityClient`] clients, the `wifid`
+//! [`crate::queue::QueueStore`] / [`crate::lease::LeaseClient`] clients, the
+//! `wifid`
 //! [`crate::throttle::ThrottleSource`] subscription, the `rclone`
 //! [`crate::rclone::CommandRunner`], a real [`crate::time::Clock`] /
 //! [`crate::time::Waiter`], and a stop flag. That wiring is hardware/IPC-gated and
@@ -484,6 +484,17 @@ mod tests {
 
         fn persist(&self, _item: &QueueItem) -> Result<(), crate::error::IndexError> {
             Ok(())
+        }
+
+        fn commit(
+            &self,
+            _item: &QueueItem,
+            _evidence: &crate::queue::CommitEvidence,
+        ) -> Result<(), crate::error::IndexError> {
+            // The scheduler drives a mocked `UploadProcessor`, so no commit ever
+            // reaches this store; engine-level commit behaviour is asserted in
+            // `engine.rs` and `rclone.rs`.
+            unreachable!("scheduler tests never commit through the store")
         }
     }
 

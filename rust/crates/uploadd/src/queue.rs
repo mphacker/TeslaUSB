@@ -335,14 +335,15 @@ pub trait QueueStore {
     /// path that durably records a row as done. Parent durability remains
     /// independent and is conferred only by `cloud_finalize_parent_upload`.
     ///
+    /// Deliberately has no default implementation: [`Self::persist`] cannot carry
+    /// the observed hash, size or attempt id that `cloud_upload_commit` requires,
+    /// so delegating to it would record a row done while leaving `indexd`'s
+    /// attempts ledger empty. Requiring the method turns that omission into a
+    /// compile error instead of a silent loss of the evidence trail.
+    ///
     /// # Errors
     /// Propagates an [`IndexError`] if the commit RPC/transaction fails.
-    fn commit(&self, item: &QueueItem, evidence: &CommitEvidence) -> Result<(), IndexError> {
-        let mut done = item.clone();
-        done.complete();
-        let _ = evidence;
-        self.persist(&done)
-    }
+    fn commit(&self, item: &QueueItem, evidence: &CommitEvidence) -> Result<(), IndexError>;
 }
 
 #[cfg(test)]

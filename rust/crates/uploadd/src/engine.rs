@@ -1,9 +1,9 @@
 //! The orchestration **engine**: process one queued item end-to-end —
 //! throttle-gate, acquire an upload lease, drive a paced + resumable +
-//! integrity-checked transfer (renewing the lease by heartbeat), flag durability
-//! on success, and always release the lease.
+//! integrity-checked transfer (renewing the lease by heartbeat), commit verified
+//! evidence on success, and always release the lease.
 //!
-//! This is where the queue, lease, throttle, transfer, and durability seams come
+//! This is where the queue, lease, throttle, and transfer seams come
 //! together. It is pure over those traits, so every branch — happy path, resume,
 //! mid-transfer failure, integrity mismatch, a lost lease, a throttle pause, a
 //! denied lease — is host-unit-tested with deterministic mocks and a synthetic
@@ -15,18 +15,16 @@
 //!   produced by [`crate::source::ArchiveRoot::resolve`]; a rejected path fails
 //!   the item (retryable) and **never** reaches the uploader — the live LUN is
 //!   unreachable.
-//! - **Never delete.** There is no delete call anywhere in this flow; on success
-//!   `uploadd` only flags `UPLOADED_VERIFIED`.
+//! - **Never delete.** There is no delete call anywhere in this flow.
 //! - **Never exceed the cap.** Every chunk is gated by the [`Pacer`] before it is
 //!   read or sent.
 //! - **Never evict mid-read.** The upload lease is held for the whole transfer
 //!   and renewed on the configured cadence; a `Stale` renew stops the transfer.
 
 use crate::config::UploaddConfig;
-use crate::durability::DurabilityClient;
 use crate::error::{EngineError, IndexError, SourceError, TransferError};
 use crate::lease::{LeaseClient, LeaseGen, LeaseGrant, LeaseId, LeaseKind, RenewResult};
-use crate::queue::{QueueItem, QueueStore};
+use crate::queue::{CommitEvidence, QueueItem, QueueStore, attempt_id_for};
 use crate::source::{ArchiveItemId, ArchiveRoot, ArchiveSource, ContentHash};
 use crate::throttle::{GateReason, Pacer, PauseAction, ThrottleSource, UploadGate};
 use crate::time::{Clock, MonoMs, Waiter};
@@ -46,8 +44,6 @@ pub struct UploadEngine<'a> {
     pub uploader: &'a dyn Uploader,
     /// Lease acquire/renew/release seam (`indexd`).
     pub lease: &'a dyn LeaseClient,
-    /// Durability-flag seam (`indexd`).
-    pub durability: &'a dyn DurabilityClient,
     /// Durable queue persistence seam (`indexd`).
     pub queue_store: &'a dyn QueueStore,
     /// Combined `wifid` + `retentiond` throttle source.
@@ -61,7 +57,7 @@ pub struct UploadEngine<'a> {
 /// The outcome of processing one item.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepOutcome {
-    /// The item uploaded, verified, and was flagged durable. Terminal success.
+    /// The item uploaded and was durably committed as verified. Terminal success.
     Uploaded {
         /// The item.
         item: ArchiveItemId,
@@ -146,7 +142,7 @@ impl UploadEngine<'_> {
     ///
     /// # Errors
     /// Returns [`EngineError`] only on an infrastructure failure (a queue-store
-    /// or durability RPC error). Transfer/integrity/lease failures are *not*
+    /// RPC error). Transfer/integrity/lease failures are *not*
     /// errors — they are reported as [`StepOutcome::Retry`] /
     /// [`StepOutcome::Exhausted`] so the durable queue retries them.
     pub fn process(&self, item: &mut QueueItem) -> Result<StepOutcome, EngineError> {
@@ -360,8 +356,9 @@ impl UploadEngine<'_> {
         }
     }
 
-    /// A transfer produced a digest: verify integrity, then on success flag
-    /// durability and complete; on a mismatch, fail (resetting the checkpoint).
+    /// A transfer produced a digest: verify integrity, then on success commit
+    /// backend evidence and complete; on a mismatch, fail (resetting the
+    /// checkpoint).
     fn finish_verified(
         &self,
         item: &mut QueueItem,
@@ -381,18 +378,38 @@ impl UploadEngine<'_> {
                     true,
                 )
             }
-            Integrity::Verified => {
-                // Durability is the ONLY authority uploadd asserts over the file;
-                // it never deletes. The mark is idempotent, so a crash before the
-                // queue persist below simply re-marks on resume.
-                self.durability.mark_uploaded_verified(item.archive_item_id)?;
-                item.complete();
-                self.queue_store.persist(item)?;
-                Ok(StepOutcome::Uploaded {
-                    item: item.archive_item_id,
-                    bytes: item.total_bytes,
-                })
-            }
+            Integrity::Verified => match remote {
+                RemoteVerify::Native { alg, value } => {
+                    let evidence = CommitEvidence {
+                        attempt_id: attempt_id_for(&item.key, item.attempts),
+                        hash: value,
+                        hash_alg: alg.as_str().to_owned(),
+                        size: item.total_bytes,
+                        upload_set_id: None,
+                    };
+                    self.queue_store.commit(item, &evidence)?;
+                    item.complete();
+                    Ok(StepOutcome::Uploaded {
+                        item: item.archive_item_id,
+                        bytes: item.total_bytes,
+                    })
+                }
+                RemoteVerify::CopyIntegrity { .. } => {
+                    let evidence = CommitEvidence {
+                        attempt_id: attempt_id_for(&item.key, item.attempts),
+                        hash: String::new(),
+                        hash_alg: "none".to_owned(),
+                        size: item.total_bytes,
+                        upload_set_id: None,
+                    };
+                    self.queue_store.commit(item, &evidence)?;
+                    item.complete();
+                    Ok(StepOutcome::Uploaded {
+                        item: item.archive_item_id,
+                        bytes: item.total_bytes,
+                    })
+                }
+            },
         }
     }
 
@@ -455,13 +472,12 @@ mod tests {
 
     use super::{StepOutcome, UploadEngine};
     use crate::config::UploaddConfig;
-    use crate::durability::DurabilityClient;
     use crate::error::{IndexError, SourceError, TransferError};
     use crate::lease::{
         LeaseClient, LeaseGen, LeaseGrant, LeaseId, LeaseKind, ReleaseResult, RenewResult,
     };
     use crate::priority::UploadCategory;
-    use crate::queue::{QueueItem, QueueKey, QueueStore};
+    use crate::queue::{CommitEvidence, QueueItem, QueueKey, QueueStore, attempt_id_for};
     use crate::source::{ArchiveItemId, ArchivePath, ArchiveRoot, ArchiveSource, ContentHash};
     use crate::throttle::{
         LinkMode, PauseAction, PauseReason, StoragePressure, ThrottleSnapshot, ThrottleSource,
@@ -682,37 +698,25 @@ mod tests {
         }
     }
 
-    /// Mock durability sink.
-    struct MockDurability {
-        marked: RefCell<Vec<ArchiveItemId>>,
-    }
-    impl MockDurability {
-        fn new() -> Self {
-            Self {
-                marked: RefCell::new(Vec::new()),
-            }
-        }
-    }
-    impl DurabilityClient for MockDurability {
-        fn mark_uploaded_verified(&self, item: ArchiveItemId) -> Result<(), IndexError> {
-            self.marked.borrow_mut().push(item);
-            Ok(())
-        }
-    }
-
     /// Mock durable queue store (records every persisted snapshot). Can be told
     /// to fail a specific persist call (1-indexed) to exercise infra-error paths.
     struct MockQueueStore {
         persisted: RefCell<Vec<QueueItem>>,
-        calls: Cell<u32>,
+        persist_calls: Cell<u32>,
+        commit_calls: Cell<u32>,
         fail_on_call: Option<u32>,
+        commit_evidence: RefCell<Vec<CommitEvidence>>,
+        op_order: RefCell<Vec<&'static str>>,
     }
     impl MockQueueStore {
         fn new() -> Self {
             Self {
                 persisted: RefCell::new(Vec::new()),
-                calls: Cell::new(0),
+                persist_calls: Cell::new(0),
+                commit_calls: Cell::new(0),
                 fail_on_call: None,
+                commit_evidence: RefCell::new(Vec::new()),
+                op_order: RefCell::new(Vec::new()),
             }
         }
         fn failing_on(call: u32) -> Self {
@@ -726,8 +730,9 @@ mod tests {
             Ok(self.persisted.borrow().clone())
         }
         fn persist(&self, item: &QueueItem) -> Result<(), IndexError> {
-            let n = self.calls.get() + 1;
-            self.calls.set(n);
+            let n = self.persist_calls.get() + 1;
+            self.persist_calls.set(n);
+            self.op_order.borrow_mut().push("persist");
             if self.fail_on_call == Some(n) {
                 return Err(IndexError::new("persist", "injected persist failure"));
             }
@@ -736,6 +741,21 @@ mod tests {
                 *slot = item.clone();
             } else {
                 p.push(item.clone());
+            }
+            Ok(())
+        }
+
+        fn commit(&self, item: &QueueItem, evidence: &CommitEvidence) -> Result<(), IndexError> {
+            self.commit_calls.set(self.commit_calls.get() + 1);
+            self.op_order.borrow_mut().push("commit");
+            self.commit_evidence.borrow_mut().push(evidence.clone());
+            let mut done = item.clone();
+            done.complete();
+            let mut p = self.persisted.borrow_mut();
+            if let Some(slot) = p.iter_mut().find(|i| i.key == done.key) {
+                *slot = done;
+            } else {
+                p.push(done);
             }
             Ok(())
         }
@@ -814,14 +834,13 @@ mod tests {
     }
 
     #[test]
-    fn happy_path_uploads_verifies_marks_durable_and_releases_lease() {
+    fn happy_path_uploads_verifies_commits_and_releases_lease() {
         let data: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
         let cfg = UploaddConfig::default();
         let root = root();
         let source = MockSource::new(data.clone());
         let uploader = MockUploader::new();
         let lease = MockLease::granting();
-        let durability = MockDurability::new();
         let store = MockQueueStore::new();
         let throttle = FixedThrottle {
             snap: running(1_000_000, 4096),
@@ -833,7 +852,6 @@ mod tests {
             source: &source,
             uploader: &uploader,
             lease: &lease,
-            durability: &durability,
             queue_store: &store,
             throttle: &throttle,
             clock: &timeline,
@@ -851,7 +869,27 @@ mod tests {
         );
         assert_eq!(item.state, crate::queue::UploadState::Done);
         assert_eq!(uploader.received_bytes(), 1000, "all bytes sent");
-        assert_eq!(durability.marked.borrow().as_slice(), &[ArchiveItemId(42)]);
+        assert_eq!(store.commit_calls.get(), 1, "commit called once");
+        let expected_hash = hash_hex(digest(&data));
+        assert_eq!(
+            store.commit_evidence.borrow().as_slice(),
+            &[CommitEvidence {
+                attempt_id: attempt_id_for(&item.key, item.attempts),
+                hash: expected_hash,
+                hash_alg: VerifyAlg::Sha256.as_str().to_owned(),
+                size: item.total_bytes,
+                upload_set_id: None,
+            }]
+        );
+        let ops = store.op_order.borrow();
+        let commit_index = ops
+            .iter()
+            .position(|op| *op == "commit")
+            .expect("commit op recorded");
+        assert!(
+            !ops[commit_index + 1..].iter().any(|op| *op == "persist"),
+            "verified path does not persist after commit"
+        );
         assert_eq!(lease.acquire_calls.get(), 1);
         assert_eq!(*lease.acquire_kind.borrow(), Some(LeaseKind::Upload));
         assert_eq!(lease.acquire_ttl.get(), cfg.lease.ttl_ms);
@@ -868,6 +906,52 @@ mod tests {
     }
 
     #[test]
+    fn copy_integrity_commits_with_none_hash_and_empty_value() {
+        let data: Vec<u8> = (0..500u32).map(|i| (i % 251) as u8).collect();
+        let cfg = UploaddConfig::default();
+        let root = root();
+        let source = MockSource::new(data.clone());
+        let uploader = MockUploader::new();
+        let lease = MockLease::granting();
+        let store = MockQueueStore::new();
+        let throttle = FixedThrottle {
+            snap: running(1_000_000, 4096),
+        };
+        let timeline = Timeline::new();
+        let engine = UploadEngine {
+            cfg: &cfg,
+            archive_root: &root,
+            source: &source,
+            uploader: &uploader,
+            lease: &lease,
+            queue_store: &store,
+            throttle: &throttle,
+            clock: &timeline,
+            waiter: &timeline,
+        };
+        let mut item = test_item(data.len() as u64, digest(&data));
+        item.verify = VerifySpec::CopyIntegrity;
+
+        let outcome = engine.process(&mut item).expect("no infra error");
+        assert!(matches!(outcome, StepOutcome::Uploaded { .. }));
+        assert_eq!(
+            store.commit_evidence.borrow().as_slice(),
+            &[CommitEvidence {
+                attempt_id: attempt_id_for(&item.key, item.attempts),
+                hash: String::new(),
+                hash_alg: "none".to_owned(),
+                size: item.total_bytes,
+                upload_set_id: None,
+            }]
+        );
+        assert_eq!(
+            store.commit_evidence.borrow()[0].hash,
+            "",
+            "hash must be empty when hash_alg is none"
+        );
+    }
+
+    #[test]
     fn mid_transfer_failure_retries_and_keeps_checkpoint() {
         let data: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
         let cfg = UploaddConfig::default();
@@ -876,7 +960,6 @@ mod tests {
         let mut uploader = MockUploader::new();
         uploader.fail_at = Some(500); // fail once we pass halfway
         let lease = MockLease::granting();
-        let durability = MockDurability::new();
         let store = MockQueueStore::new();
         let throttle = FixedThrottle {
             snap: running(1_000_000, 200),
@@ -888,7 +971,6 @@ mod tests {
             source: &source,
             uploader: &uploader,
             lease: &lease,
-            durability: &durability,
             queue_store: &store,
             throttle: &throttle,
             clock: &timeline,
@@ -908,15 +990,12 @@ mod tests {
             "checkpoint retained mid-file: {}",
             item.bytes_uploaded
         );
-        assert!(
-            durability.marked.borrow().is_empty(),
-            "never durable on failure"
-        );
+        assert_eq!(store.commit_calls.get(), 0, "no commit on failure");
         assert_eq!(lease.release_calls.get(), 1, "lease released on failure");
     }
 
     #[test]
-    fn integrity_mismatch_resets_checkpoint_and_is_not_durable() {
+    fn integrity_mismatch_resets_checkpoint_and_is_not_committed() {
         let data: Vec<u8> = (0..400u32).map(|i| (i % 251) as u8).collect();
         let cfg = UploaddConfig::default();
         let root = root();
@@ -924,7 +1003,6 @@ mod tests {
         let mut uploader = MockUploader::new();
         uploader.force_digest = Some(ContentHash::new([0xff; 32])); // wrong
         let lease = MockLease::granting();
-        let durability = MockDurability::new();
         let store = MockQueueStore::new();
         let throttle = FixedThrottle {
             snap: running(1_000_000, 4096),
@@ -936,7 +1014,6 @@ mod tests {
             source: &source,
             uploader: &uploader,
             lease: &lease,
-            durability: &durability,
             queue_store: &store,
             throttle: &throttle,
             clock: &timeline,
@@ -951,10 +1028,7 @@ mod tests {
             item.bytes_uploaded, 0,
             "integrity failure resets checkpoint"
         );
-        assert!(
-            durability.marked.borrow().is_empty(),
-            "corrupt ⇒ not durable"
-        );
+        assert_eq!(store.commit_calls.get(), 0, "corrupt ⇒ not committed");
     }
 
     #[test]
@@ -964,7 +1038,6 @@ mod tests {
         let source = MockSource::new(vec![1, 2, 3]);
         let uploader = MockUploader::new();
         let lease = MockLease::granting();
-        let durability = MockDurability::new();
         let store = MockQueueStore::new();
         let throttle = FixedThrottle {
             snap: ThrottleSnapshot {
@@ -979,7 +1052,6 @@ mod tests {
             source: &source,
             uploader: &uploader,
             lease: &lease,
-            durability: &durability,
             queue_store: &store,
             throttle: &throttle,
             clock: &timeline,
@@ -1009,7 +1081,6 @@ mod tests {
         let uploader = MockUploader::new();
         let mut lease = MockLease::granting();
         lease.deny = true;
-        let durability = MockDurability::new();
         let store = MockQueueStore::new();
         let throttle = FixedThrottle {
             snap: running(1_000_000, 4096),
@@ -1021,7 +1092,6 @@ mod tests {
             source: &source,
             uploader: &uploader,
             lease: &lease,
-            durability: &durability,
             queue_store: &store,
             throttle: &throttle,
             clock: &timeline,
@@ -1048,7 +1118,6 @@ mod tests {
         let uploader = MockUploader::new();
         let mut lease = MockLease::granting();
         lease.stale_on_call = Some(1); // first renew → Stale
-        let durability = MockDurability::new();
         let store = MockQueueStore::new();
         let throttle = FixedThrottle {
             snap: running(100, 100), // 100 B/s, 100-byte chunks ⇒ waits between chunks
@@ -1060,7 +1129,6 @@ mod tests {
             source: &source,
             uploader: &uploader,
             lease: &lease,
-            durability: &durability,
             queue_store: &store,
             throttle: &throttle,
             clock: &timeline,
@@ -1072,7 +1140,7 @@ mod tests {
         assert!(matches!(outcome, StepOutcome::Retry { .. }));
         assert!(lease.renew_calls.get() >= 1, "renew was attempted");
         assert_eq!(item.state, crate::queue::UploadState::Failed);
-        assert!(durability.marked.borrow().is_empty());
+        assert_eq!(store.commit_calls.get(), 0, "lease loss does not commit");
         assert_eq!(lease.release_calls.get(), 1, "lease still released");
     }
 
@@ -1088,7 +1156,6 @@ mod tests {
         let source = MockSource::new(data.clone());
         let uploader = MockUploader::new();
         let lease = MockLease::granting();
-        let durability = MockDurability::new();
         let store = MockQueueStore::new();
         let throttle = FixedThrottle {
             snap: running(cap, 100),
@@ -1101,7 +1168,6 @@ mod tests {
             source: &source,
             uploader: &uploader,
             lease: &lease,
-            durability: &durability,
             queue_store: &store,
             throttle: &throttle,
             clock: &timeline,
@@ -1132,7 +1198,6 @@ mod tests {
         let source = MockSource::new(vec![9; 100]);
         let uploader = MockUploader::new();
         let lease = MockLease::granting();
-        let durability = MockDurability::new();
         let store = MockQueueStore::new();
         let throttle = FixedThrottle {
             snap: running(1_000_000, 4096),
@@ -1144,7 +1209,6 @@ mod tests {
             source: &source,
             uploader: &uploader,
             lease: &lease,
-            durability: &durability,
             queue_store: &store,
             throttle: &throttle,
             clock: &timeline,
@@ -1168,7 +1232,7 @@ mod tests {
         assert!(matches!(outcome, StepOutcome::Retry { .. }));
         assert_eq!(uploader.received_bytes(), 0, "no bytes left the box");
         assert!(source.read_paths.borrow().is_empty(), "no read was issued");
-        assert!(durability.marked.borrow().is_empty());
+        assert_eq!(store.commit_calls.get(), 0, "bad path never commits");
     }
 
     #[test]
@@ -1181,7 +1245,6 @@ mod tests {
         let source = MockSource::new(data.clone());
         let uploader = MockUploader::new();
         let lease = MockLease::granting();
-        let durability = MockDurability::new();
         let store = MockQueueStore::new();
         let throttle = SwitchingThrottle {
             calls: Cell::new(0),
@@ -1196,7 +1259,6 @@ mod tests {
             source: &source,
             uploader: &uploader,
             lease: &lease,
-            durability: &durability,
             queue_store: &store,
             throttle: &throttle,
             clock: &timeline,
@@ -1213,7 +1275,7 @@ mod tests {
         );
         assert_eq!(item.attempts, 0, "a pause is not a failed attempt");
         assert_eq!(uploader.received_bytes(), 200, "exactly one chunk sent");
-        assert!(durability.marked.borrow().is_empty());
+        assert_eq!(store.commit_calls.get(), 0, "pause does not commit");
         assert_eq!(lease.release_calls.get(), 1, "lease released on pause");
     }
 
@@ -1224,7 +1286,6 @@ mod tests {
         let source = MockSource::new(vec![1, 2, 3]);
         let uploader = MockUploader::new();
         let lease = MockLease::granting();
-        let durability = MockDurability::new();
         let store = MockQueueStore::failing_on(1); // the begin() persist fails
         let throttle = FixedThrottle {
             snap: running(1_000_000, 4096),
@@ -1236,7 +1297,6 @@ mod tests {
             source: &source,
             uploader: &uploader,
             lease: &lease,
-            durability: &durability,
             queue_store: &store,
             throttle: &throttle,
             clock: &timeline,
@@ -1266,7 +1326,6 @@ mod tests {
         let source = MockSource::new(data.clone());
         let uploader = MockUploader::new();
         let lease = MockLease::granting();
-        let durability = MockDurability::new();
         let store = MockQueueStore::failing_on(2);
         let throttle = FixedThrottle {
             snap: running(1_000_000, 200),
@@ -1278,7 +1337,6 @@ mod tests {
             source: &source,
             uploader: &uploader,
             lease: &lease,
-            durability: &durability,
             queue_store: &store,
             throttle: &throttle,
             clock: &timeline,
@@ -1293,7 +1351,7 @@ mod tests {
         );
         assert_eq!(item.attempts, 0, "infra error must not charge an attempt");
         assert_eq!(item.state, crate::queue::UploadState::InProgress);
-        assert!(durability.marked.borrow().is_empty());
+        assert_eq!(store.commit_calls.get(), 0, "infra error before commit");
         assert_eq!(
             lease.release_calls.get(),
             1,
@@ -1312,7 +1370,6 @@ mod tests {
         source.eof_at = Some(400);
         let uploader = MockUploader::new();
         let lease = MockLease::granting();
-        let durability = MockDurability::new();
         let store = MockQueueStore::new();
         let throttle = FixedThrottle {
             snap: running(1_000_000, 200),
@@ -1324,7 +1381,6 @@ mod tests {
             source: &source,
             uploader: &uploader,
             lease: &lease,
-            durability: &durability,
             queue_store: &store,
             throttle: &throttle,
             clock: &timeline,
@@ -1340,9 +1396,6 @@ mod tests {
             400,
             "only pre-EOF bytes were sent"
         );
-        assert!(
-            durability.marked.borrow().is_empty(),
-            "short upload not durable"
-        );
+        assert_eq!(store.commit_calls.get(), 0, "short upload not committed");
     }
 }

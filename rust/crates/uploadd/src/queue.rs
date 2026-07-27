@@ -32,6 +32,10 @@
 //!
 //! [`uploadd.md`]: ../../../../docs/specs/uploadd.md
 
+use std::fmt::Write as _;
+
+use sha2::{Digest, Sha256};
+
 use crate::error::IndexError;
 use crate::priority::{PriorityKey, PriorityPolicy, UploadCategory};
 use crate::source::ArchiveItemId;
@@ -104,6 +108,48 @@ pub struct QueueItem {
     pub not_before: Option<i64>,
     /// Last failure reason, for `/api/cloud` diagnostics.
     pub last_error: Option<String>,
+}
+
+/// Evidence captured from one backend-verified upload attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitEvidence {
+    /// Deterministic idempotency key derived from queue identity + attempt index.
+    pub attempt_id: String,
+    /// Backend-observed hash value for the uploaded object.
+    pub hash: String,
+    /// Backend hash algorithm (`sha256`, `md5`, ...).
+    pub hash_alg: String,
+    /// Bytes committed for this upload.
+    pub size: u64,
+    /// Optional sealed upload-set fence.
+    pub upload_set_id: Option<String>,
+}
+
+/// Deterministic per-attempt idempotency key from queue identity + attempt index.
+///
+/// `indexd` stores `attempt_id` as the global primary key of
+/// `cloud_upload_attempts` and rejects reuse against a different queue row, so
+/// this must be unique across `(destination_id, remote_key, attempts)`. It also
+/// caps the column at 128 bytes while `remote_key` alone may be 1024, so the
+/// identity is folded into a fixed-width digest rather than interpolated: a
+/// longer key would otherwise produce an over-long id that `indexd` rejects
+/// identically on every retry, wedging the item in a permanent retry loop.
+///
+/// The digest is length-prefixed so `(dest, key)` splits cannot alias, and is
+/// derived only from stable identity, so it survives a restart unchanged and
+/// keeps commit replay idempotent.
+#[must_use]
+pub fn attempt_id_for(key: &QueueKey, attempts: u32) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update((key.destination_id.len() as u64).to_le_bytes());
+    hasher.update(key.destination_id.as_bytes());
+    hasher.update(key.remote_key.as_bytes());
+    let digest: [u8; 32] = hasher.finalize().into();
+    let mut out = format!("{attempts}:");
+    for byte in digest {
+        write!(out, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    out
 }
 
 impl QueueItem {
@@ -281,12 +327,28 @@ pub trait QueueStore {
     /// # Errors
     /// Propagates an [`IndexError`] if the persist RPC/transaction fails.
     fn persist(&self, item: &QueueItem) -> Result<(), IndexError>;
+
+    /// Durably commit one backend-verified upload attempt.
+    ///
+    /// Idempotency is keyed by [`CommitEvidence::attempt_id`]: replaying the same
+    /// logical attempt with the same evidence must be safe. This is the **only**
+    /// path that durably records a row as done. Parent durability remains
+    /// independent and is conferred only by `cloud_finalize_parent_upload`.
+    ///
+    /// # Errors
+    /// Propagates an [`IndexError`] if the commit RPC/transaction fails.
+    fn commit(&self, item: &QueueItem, evidence: &CommitEvidence) -> Result<(), IndexError> {
+        let mut done = item.clone();
+        done.complete();
+        let _ = evidence;
+        self.persist(&done)
+    }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::{QueueItem, QueueKey, QueueStore, UploadQueue, UploadState};
+    use super::{CommitEvidence, QueueItem, QueueKey, QueueStore, UploadQueue, UploadState};
     use crate::error::IndexError;
     use crate::priority::{PriorityPolicy, UploadCategory};
     use crate::source::ArchiveItemId;
@@ -437,6 +499,13 @@ mod tests {
             }
             Ok(())
         }
+
+        fn commit(&self, item: &QueueItem, evidence: &CommitEvidence) -> Result<(), IndexError> {
+            let _ = evidence;
+            let mut committed = item.clone();
+            committed.complete();
+            self.persist(&committed)
+        }
     }
 
     #[test]
@@ -454,5 +523,52 @@ mod tests {
 
         let loaded = store.load().unwrap();
         assert_eq!(loaded, vec![update]);
+    }
+
+    #[test]
+    fn attempt_id_is_stable_for_same_key_and_attempt_index() {
+        let key = QueueKey::new("dest-a", "remote/clip.mp4");
+        let one = super::attempt_id_for(&key, 3);
+        let two = super::attempt_id_for(&key, 3);
+        let changed = super::attempt_id_for(&key, 4);
+        assert_eq!(one, two);
+        assert_ne!(one, changed);
+    }
+
+    /// `indexd` caps `attempt_id` at 128 bytes but accepts a `remote_key` up to
+    /// 1024 and a `destination_id` up to 128. An id derived by interpolating
+    /// those would overflow the cap and be rejected identically on every retry,
+    /// wedging the item forever, so the width must not track input length.
+    #[test]
+    fn attempt_id_stays_within_the_indexd_length_cap_at_maximum_input_sizes() {
+        const INDEXD_ATTEMPT_ID_MAX: usize = 128;
+        let key = QueueKey::new("d".repeat(128), "k".repeat(1024));
+        let id = super::attempt_id_for(&key, u32::MAX);
+        assert!(
+            id.len() <= INDEXD_ATTEMPT_ID_MAX,
+            "attempt_id {} bytes exceeds the indexd cap of {INDEXD_ATTEMPT_ID_MAX}",
+            id.len()
+        );
+        assert!(!id.is_empty(), "attempt_id must be non-empty");
+    }
+
+    /// The id is the global primary key of `cloud_upload_attempts`, so distinct
+    /// queue rows must not collide — including splits that would alias under a
+    /// naive concatenation of the two identity fields.
+    #[test]
+    fn attempt_id_distinguishes_queue_rows_including_ambiguous_field_splits() {
+        let same_attempt = 1;
+        let a = super::attempt_id_for(&QueueKey::new("dest-a", "remote/clip.mp4"), same_attempt);
+        let b = super::attempt_id_for(&QueueKey::new("dest-b", "remote/clip.mp4"), same_attempt);
+        let c = super::attempt_id_for(&QueueKey::new("dest-a", "remote/other.mp4"), same_attempt);
+        assert_ne!(a, b, "differing destination_id must not collide");
+        assert_ne!(a, c, "differing remote_key must not collide");
+
+        let split_left = super::attempt_id_for(&QueueKey::new("ab", "c"), same_attempt);
+        let split_right = super::attempt_id_for(&QueueKey::new("a", "bc"), same_attempt);
+        assert_ne!(
+            split_left, split_right,
+            "field boundary must not be ambiguous"
+        );
     }
 }

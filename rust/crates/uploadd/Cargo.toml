@@ -15,10 +15,12 @@ workspace = true
 # typed lease/queue/throttle shapes shared (via indexd/wifid IPC) with the rest
 # of the workspace. thiserror gives typed error boundaries per SPEC.md §7. The
 # host-tested core has no I/O dependency; the real backend/DB/socket clients live
-# in the gated binary.
+# in the gated binary. sha2 bounds the commit `attempt_id` to a fixed width
+# (indexd caps it at 128 bytes while `remote_key` may be up to 1024).
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 thiserror = "2"
 
 [[bin]]

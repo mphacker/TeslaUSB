@@ -18,8 +18,8 @@
 //! Every `rclone` invocation goes through [`CommandRunner`], a tiny "run a
 //! program, capture its output" trait. The live impl spawns the real `rclone`
 //! binary (under `nice`/`ionice` in the gated wiring); tests inject a fake runner
-//! that returns scripted output, so the whole flow — copy, hash, verify, mark
-//! durable, retry, lease denial, throttle pause — is host-unit-tested with **no
+//! that returns scripted output, so the whole flow — copy, hash, verify, commit,
+//! retry, lease denial, throttle pause — is host-unit-tested with **no
 //! subprocess and no network**.
 //!
 //! # Invariants upheld (identical to [`crate::engine`])
@@ -27,8 +27,7 @@
 //! - **Source only from the archive.** The source path is resolved through
 //!   [`crate::source::ArchiveRoot::resolve`]; a rejected path fails the item
 //!   (retryable) and `rclone` is never invoked — the live car LUN is unreachable.
-//! - **Never delete.** There is no remove path; on a verified upload the engine
-//!   only flags `UPLOADED_VERIFIED` via [`crate::durability`].
+//! - **Never delete.** There is no remove path.
 //! - **Never exceed the cap.** `rclone` is invoked with `--bwlimit` seeded from
 //!   the `wifid`-published `max_tx_bytes_per_s`; if the gate says pause, `rclone`
 //!   is never spawned.
@@ -46,11 +45,10 @@
 //! such.
 
 use crate::config::UploaddConfig;
-use crate::durability::DurabilityClient;
 use crate::engine::StepOutcome;
 use crate::error::EngineError;
 use crate::lease::{LeaseClient, LeaseGen, LeaseGrant, LeaseId, LeaseKind, RenewResult};
-use crate::queue::{QueueItem, QueueStore};
+use crate::queue::{CommitEvidence, QueueItem, QueueStore, attempt_id_for};
 use crate::serve::UploadProcessor;
 use crate::source::{ArchiveItemId, ArchivePath, ArchiveRoot};
 use crate::throttle::{ThrottleSource, UploadGate};
@@ -130,8 +128,6 @@ pub struct RcloneUploadEngine<'a> {
     pub runner: &'a dyn CommandRunner,
     /// Lease acquire/renew/release seam (`indexd`).
     pub lease: &'a dyn LeaseClient,
-    /// Durability-flag seam (`indexd`).
-    pub durability: &'a dyn DurabilityClient,
     /// Durable queue persistence seam (`indexd`).
     pub queue_store: &'a dyn QueueStore,
     /// Combined `wifid` + `retentiond` throttle source.
@@ -147,12 +143,12 @@ impl UploadProcessor for RcloneUploadEngine<'_> {
 impl RcloneUploadEngine<'_> {
     /// Process a single item end-to-end via `rclone`: throttle-gate, resolve the
     /// archive path, acquire an upload lease, `rclone copyto` (paced by
-    /// `--bwlimit`), verify the remote digest, flag durability, and always
+    /// `--bwlimit`), verify the remote digest, commit evidence, and always
     /// release the lease.
     ///
     /// # Errors
     /// Returns an [`EngineError`] only on an infrastructure failure (a queue-store
-    /// or durability RPC error). Transfer / integrity / lease failures are
+    /// RPC error). Transfer / integrity / lease failures are
     /// reported as [`StepOutcome::Retry`] / [`StepOutcome::Exhausted`] /
     /// [`StepOutcome::SkippedLeaseDenied`], never as errors.
     pub fn process(&self, item: &mut QueueItem) -> Result<StepOutcome, EngineError> {
@@ -196,7 +192,7 @@ impl RcloneUploadEngine<'_> {
         let _ = self.lease.release(held.lease_id, held.gen_token);
 
         match result {
-            Ok(()) => self.finish_verified(item),
+            Ok((hash, hash_alg)) => self.finish_verified(item, hash, hash_alg),
             Err(RcloneStop::Corrupt(reason)) => self.fail(item, &reason, true),
             Err(RcloneStop::Recoverable(reason) | RcloneStop::LeaseLost(reason)) => {
                 self.fail(item, &reason, false)
@@ -231,7 +227,7 @@ impl RcloneUploadEngine<'_> {
         item: &QueueItem,
         held: &HeldLease,
         max_tx: u64,
-    ) -> Result<(), RcloneStop> {
+    ) -> Result<(String, String), RcloneStop> {
         self.run_copy(path, item, max_tx)?;
         // Renew once between the (potentially long) copy and the (also slow)
         // hashsum so a single TTL covers both halves. See the module-level note
@@ -239,7 +235,10 @@ impl RcloneUploadEngine<'_> {
         self.renew(held)?;
         let remote_verify = self.remote_verify(item)?;
         match verify_digest(&item.verify, &remote_verify, item.total_bytes) {
-            Integrity::Verified => Ok(()),
+            Integrity::Verified => match remote_verify {
+                RemoteVerify::Native { alg, value } => Ok((value, alg.as_str().to_owned())),
+                RemoteVerify::CopyIntegrity { .. } => Ok((String::new(), "none".to_owned())),
+            },
             Integrity::Corrupt => Err(RcloneStop::Corrupt(
                 "integrity check failed: remote verification did not match expected spec"
                     .to_owned(),
@@ -352,13 +351,22 @@ impl RcloneUploadEngine<'_> {
         }
     }
 
-    /// On a verified upload, flag durability then complete the item.
-    fn finish_verified(&self, item: &mut QueueItem) -> Result<StepOutcome, EngineError> {
-        // Durability is the only authority `uploadd` asserts; it never deletes.
-        // The mark is idempotent, so a crash before the persist re-marks safely.
-        self.durability.mark_uploaded_verified(item.archive_item_id)?;
+    /// On a verified upload, durably commit backend evidence then complete.
+    fn finish_verified(
+        &self,
+        item: &mut QueueItem,
+        hash: String,
+        hash_alg: String,
+    ) -> Result<StepOutcome, EngineError> {
+        let evidence = CommitEvidence {
+            attempt_id: attempt_id_for(&item.key, item.attempts),
+            hash,
+            hash_alg,
+            size: item.total_bytes,
+            upload_set_id: None,
+        };
+        self.queue_store.commit(item, &evidence)?;
         item.complete();
-        self.queue_store.persist(item)?;
         Ok(StepOutcome::Uploaded {
             item: item.archive_item_id,
             bytes: item.total_bytes,
@@ -435,14 +443,13 @@ mod tests {
 
     use super::{CommandOutput, CommandRunner, RcloneRemote, RcloneUploadEngine};
     use crate::config::UploaddConfig;
-    use crate::durability::DurabilityClient;
     use crate::engine::StepOutcome;
     use crate::error::IndexError;
     use crate::lease::{
         LeaseClient, LeaseGen, LeaseGrant, LeaseId, LeaseKind, ReleaseResult, RenewResult,
     };
     use crate::priority::UploadCategory;
-    use crate::queue::{QueueItem, QueueKey, QueueStore, UploadState};
+    use crate::queue::{CommitEvidence, QueueItem, QueueKey, QueueStore, UploadState, attempt_id_for};
     use crate::source::{ArchiveItemId, ArchiveRoot};
     use crate::throttle::{
         LinkMode, PauseAction, PauseReason, StoragePressure, ThrottleSnapshot, ThrottleSource,
@@ -569,20 +576,10 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct FakeDurability {
-        marked: RefCell<Vec<i64>>,
-    }
-
-    impl DurabilityClient for FakeDurability {
-        fn mark_uploaded_verified(&self, item: ArchiveItemId) -> Result<(), IndexError> {
-            self.marked.borrow_mut().push(item.0);
-            Ok(())
-        }
-    }
-
-    #[derive(Default)]
     struct FakeStore {
         persists: RefCell<u32>,
+        commits: RefCell<Vec<CommitEvidence>>,
+        op_order: RefCell<Vec<&'static str>>,
     }
 
     impl QueueStore for FakeStore {
@@ -592,6 +589,13 @@ mod tests {
 
         fn persist(&self, _item: &QueueItem) -> Result<(), IndexError> {
             *self.persists.borrow_mut() += 1;
+            self.op_order.borrow_mut().push("persist");
+            Ok(())
+        }
+
+        fn commit(&self, _item: &QueueItem, evidence: &CommitEvidence) -> Result<(), IndexError> {
+            self.commits.borrow_mut().push(evidence.clone());
+            self.op_order.borrow_mut().push("commit");
             Ok(())
         }
     }
@@ -657,13 +661,12 @@ mod tests {
     }
 
     #[test]
-    fn verified_upload_marks_durable_and_completes() {
+    fn verified_upload_commits_and_completes() {
         let cfg = UploaddConfig::default();
         let root = ArchiveRoot::new("/mnt/archive");
         let remote = remote();
         let runner = FakeRunner::ok(&expected_sha256(), 1_000);
         let lease = FakeLease::granting();
-        let durability = FakeDurability::default();
         let store = FakeStore::default();
         let throttle = FakeThrottle::running();
         let engine = RcloneUploadEngine {
@@ -672,7 +675,6 @@ mod tests {
             remote: &remote,
             runner: &runner,
             lease: &lease,
-            durability: &durability,
             queue_store: &store,
             throttle: &throttle,
         };
@@ -686,7 +688,25 @@ mod tests {
             }
         );
         assert_eq!(it.state, UploadState::Done);
-        assert_eq!(durability.marked.borrow().as_slice(), &[7]);
+        assert_eq!(
+            store.commits.borrow().as_slice(),
+            &[CommitEvidence {
+                attempt_id: attempt_id_for(&it.key, it.attempts),
+                hash: expected_sha256(),
+                hash_alg: VerifyAlg::Sha256.as_str().to_owned(),
+                size: it.total_bytes,
+                upload_set_id: None,
+            }]
+        );
+        let ops = store.op_order.borrow();
+        let commit_index = ops
+            .iter()
+            .position(|op| *op == "commit")
+            .expect("commit op recorded");
+        assert!(
+            !ops[commit_index + 1..].iter().any(|op| *op == "persist"),
+            "verified path does not persist after commit"
+        );
         assert_eq!(*lease.released.borrow(), 1, "lease always released");
     }
 
@@ -697,7 +717,6 @@ mod tests {
         let remote = remote();
         let runner = FakeRunner::ok(&expected_sha256(), 1_000);
         let lease = FakeLease::granting();
-        let durability = FakeDurability::default();
         let store = FakeStore::default();
         let throttle = FakeThrottle::running();
         let engine = RcloneUploadEngine {
@@ -706,7 +725,6 @@ mod tests {
             remote: &remote,
             runner: &runner,
             lease: &lease,
-            durability: &durability,
             queue_store: &store,
             throttle: &throttle,
         };
@@ -736,7 +754,6 @@ mod tests {
             renew_stale: false,
             released: RefCell::new(0),
         };
-        let durability = FakeDurability::default();
         let store = FakeStore::default();
         let throttle = FakeThrottle::running();
         let engine = RcloneUploadEngine {
@@ -745,7 +762,6 @@ mod tests {
             remote: &remote,
             runner: &runner,
             lease: &lease,
-            durability: &durability,
             queue_store: &store,
             throttle: &throttle,
         };
@@ -763,7 +779,6 @@ mod tests {
         let remote = remote();
         let runner = FakeRunner::ok(&expected_sha256(), 1_000);
         let lease = FakeLease::granting();
-        let durability = FakeDurability::default();
         let store = FakeStore::default();
         let throttle = FakeThrottle::paused();
         let engine = RcloneUploadEngine {
@@ -772,7 +787,6 @@ mod tests {
             remote: &remote,
             runner: &runner,
             lease: &lease,
-            durability: &durability,
             queue_store: &store,
             throttle: &throttle,
         };
@@ -795,7 +809,6 @@ mod tests {
             stderr: "Failed to copy: connection reset\n".to_owned(),
         };
         let lease = FakeLease::granting();
-        let durability = FakeDurability::default();
         let store = FakeStore::default();
         let throttle = FakeThrottle::running();
         let engine = RcloneUploadEngine {
@@ -804,7 +817,6 @@ mod tests {
             remote: &remote,
             runner: &runner,
             lease: &lease,
-            durability: &durability,
             queue_store: &store,
             throttle: &throttle,
         };
@@ -815,10 +827,7 @@ mod tests {
         }
         assert_eq!(it.state, UploadState::Failed);
         assert_eq!(it.attempts, 1);
-        assert!(
-            durability.marked.borrow().is_empty(),
-            "never flagged durable"
-        );
+        assert!(store.commits.borrow().is_empty(), "never committed");
         assert_eq!(*lease.released.borrow(), 1, "lease released on failure");
     }
 
@@ -830,7 +839,6 @@ mod tests {
         // Hash of all-zeroes does not match the expected 0x07 digest.
         let runner = FakeRunner::ok(&"00".repeat(32), 1_000);
         let lease = FakeLease::granting();
-        let durability = FakeDurability::default();
         let store = FakeStore::default();
         let throttle = FakeThrottle::running();
         let engine = RcloneUploadEngine {
@@ -839,7 +847,6 @@ mod tests {
             remote: &remote,
             runner: &runner,
             lease: &lease,
-            durability: &durability,
             queue_store: &store,
             throttle: &throttle,
         };
@@ -848,7 +855,7 @@ mod tests {
             StepOutcome::Retry { reason, .. } => assert!(reason.contains("integrity")),
             other => panic!("expected retry, got {other:?}"),
         }
-        assert!(durability.marked.borrow().is_empty());
+        assert!(store.commits.borrow().is_empty(), "corrupt upload not committed");
     }
 
     #[test]
@@ -862,7 +869,6 @@ mod tests {
             renew_stale: true,
             released: RefCell::new(0),
         };
-        let durability = FakeDurability::default();
         let store = FakeStore::default();
         let throttle = FakeThrottle::running();
         let engine = RcloneUploadEngine {
@@ -871,7 +877,6 @@ mod tests {
             remote: &remote,
             runner: &runner,
             lease: &lease,
-            durability: &durability,
             queue_store: &store,
             throttle: &throttle,
         };
@@ -898,7 +903,6 @@ mod tests {
         let remote = remote();
         let runner = FakeRunner::ok(&expected_sha256(), 1_000);
         let lease = FakeLease::granting();
-        let durability = FakeDurability::default();
         let store = FakeStore::default();
         let throttle = FakeThrottle::running();
         let engine = RcloneUploadEngine {
@@ -907,7 +911,6 @@ mod tests {
             remote: &remote,
             runner: &runner,
             lease: &lease,
-            durability: &durability,
             queue_store: &store,
             throttle: &throttle,
         };
@@ -942,7 +945,6 @@ mod tests {
             stderr: "boom\n".to_owned(),
         };
         let lease = FakeLease::granting();
-        let durability = FakeDurability::default();
         let store = FakeStore::default();
         let throttle = FakeThrottle::running();
         let engine = RcloneUploadEngine {
@@ -951,7 +953,6 @@ mod tests {
             remote: &remote,
             runner: &runner,
             lease: &lease,
-            durability: &durability,
             queue_store: &store,
             throttle: &throttle,
         };
@@ -974,7 +975,6 @@ mod tests {
             stderr: String::new(),
         };
         let lease = FakeLease::granting();
-        let durability = FakeDurability::default();
         let store = FakeStore::default();
         let throttle = FakeThrottle::running();
         let engine = RcloneUploadEngine {
@@ -983,7 +983,6 @@ mod tests {
             remote: &remote,
             runner: &runner,
             lease: &lease,
-            durability: &durability,
             queue_store: &store,
             throttle: &throttle,
         };
@@ -992,6 +991,7 @@ mod tests {
             StepOutcome::Retry { reason, .. } => assert!(reason.contains("hashsum")),
             other => panic!("expected retry, got {other:?}"),
         }
+        assert!(store.commits.borrow().is_empty(), "missing hash does not commit");
     }
 
     #[test]
@@ -1002,13 +1002,12 @@ mod tests {
     }
 
     #[test]
-    fn copy_integrity_uses_remote_size() {
+    fn copy_integrity_commits_with_none_hash_evidence() {
         let cfg = UploaddConfig::default();
         let root = ArchiveRoot::new("/mnt/archive");
         let remote = remote();
         let runner = FakeRunner::ok("ignored", 1_000);
         let lease = FakeLease::granting();
-        let durability = FakeDurability::default();
         let store = FakeStore::default();
         let throttle = FakeThrottle::running();
         let engine = RcloneUploadEngine {
@@ -1017,7 +1016,6 @@ mod tests {
             remote: &remote,
             runner: &runner,
             lease: &lease,
-            durability: &durability,
             queue_store: &store,
             throttle: &throttle,
         };
@@ -1029,5 +1027,20 @@ mod tests {
         let calls = runner.calls.borrow();
         assert!(calls.iter().any(|args| args.contains(&"size".to_owned())));
         assert!(!calls.iter().any(|args| args.contains(&"hashsum".to_owned())));
+        assert_eq!(
+            store.commits.borrow().as_slice(),
+            &[CommitEvidence {
+                attempt_id: attempt_id_for(&it.key, it.attempts),
+                hash: String::new(),
+                hash_alg: "none".to_owned(),
+                size: it.total_bytes,
+                upload_set_id: None,
+            }]
+        );
+        assert_eq!(
+            store.commits.borrow()[0].hash,
+            "",
+            "hash must be empty when hash_alg is none"
+        );
     }
 }

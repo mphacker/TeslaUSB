@@ -55,6 +55,8 @@ pub mod config;
 pub mod durability;
 pub mod engine;
 pub mod error;
+/// `indexd` transport client for cloud queue/discovery RPCs.
+pub mod indexd_client;
 pub mod lease;
 pub mod priority;
 pub mod queue;

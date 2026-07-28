@@ -38,6 +38,12 @@ const RENDER_REMOTE_NAME: &str = "teslausb";
 const ONEDRIVE_GRAPH_DRIVE_URL: &str = "https://graph.microsoft.com/v1.0/me/drive";
 const ONEDRIVE_DISCOVERY_TIMEOUT_SECS: u64 = 20;
 const ONEDRIVE_HTTP_STATUS_MARKER: &str = "\n__TESLAUSB_HTTP_STATUS__:";
+/// The marker as written *into* the curl config. curl's config parser turns the
+/// two-character escape `\n` inside a quoted value into a real newline in the
+/// emitted output. A raw newline here instead terminates the quoted value, and
+/// curl then rejects the whole config with exit 26 without making the request
+/// (verified on device).
+const ONEDRIVE_HTTP_STATUS_WRITE_OUT: &str = "\\n__TESLAUSB_HTTP_STATUS__:";
 /// Cap on the bytes read from curl during drive discovery. The real
 /// `/me/drive` response is ~700 bytes; this bounds webd's memory on a
 /// 512 MB device if the response is ever pathologically large.
@@ -382,16 +388,20 @@ fn extract_onedrive_access_token(token_json: &str) -> Result<String, ApiError> {
     Ok(token)
 }
 
-fn discover_onedrive_drive_info_via_curl(
-    access_token: &str,
-) -> Result<OnedriveDriveInfo, ApiError> {
+fn build_onedrive_curl_config(access_token: &str) -> String {
     let mut auth_header = String::from("Authorization: ");
     auth_header.push_str("Bearer ");
     auth_header.push_str(access_token);
     let escaped_auth = escape_curl_config_value(&auth_header);
-    let curl_config = format!(
-        "url = \"{ONEDRIVE_GRAPH_DRIVE_URL}\"\nheader = \"{escaped_auth}\"\nsilent\nshow-error\nmax-time = {ONEDRIVE_DISCOVERY_TIMEOUT_SECS}\nmax-filesize = {ONEDRIVE_DISCOVERY_OUTPUT_LIMIT}\nwrite-out = \"{ONEDRIVE_HTTP_STATUS_MARKER}%{{http_code}}\"\n",
-    );
+    format!(
+        "url = \"{ONEDRIVE_GRAPH_DRIVE_URL}\"\nheader = \"{escaped_auth}\"\nsilent\nshow-error\nmax-time = {ONEDRIVE_DISCOVERY_TIMEOUT_SECS}\nmax-filesize = {ONEDRIVE_DISCOVERY_OUTPUT_LIMIT}\nwrite-out = \"{ONEDRIVE_HTTP_STATUS_WRITE_OUT}%{{http_code}}\"\n",
+    )
+}
+
+fn discover_onedrive_drive_info_via_curl(
+    access_token: &str,
+) -> Result<OnedriveDriveInfo, ApiError> {
+    let curl_config = build_onedrive_curl_config(access_token);
     let mut child = Command::new("curl")
         .arg("--config")
         .arg("-")
@@ -646,6 +656,41 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::{Catalog, MediaConfig};
+
+    /// Regression: the write-out marker constant starts with a real newline for
+    /// *parsing* curl's output. Emitting that raw newline into the curl config
+    /// terminated the quoted `write-out` value, and curl then rejected the whole
+    /// config with exit 26 and never made the request -- discovery could not work
+    /// for any token. The seam-injected unit tests never exercised the real curl
+    /// path, so only a live device probe caught it. Every config line must be a
+    /// complete directive with balanced quotes.
+    #[test]
+    fn onedrive_curl_config_lines_are_complete_directives() {
+        let config = build_onedrive_curl_config("tok");
+        for line in config.lines() {
+            assert_eq!(
+                line.matches('"').count() % 2,
+                0,
+                "unbalanced quotes (value broken across lines): {line:?}"
+            );
+        }
+        let Some(write_out) = config.lines().find(|line| line.starts_with("write-out")) else {
+            panic!("config must carry a write-out directive");
+        };
+        assert!(
+            write_out.ends_with("%{http_code}\""),
+            "write-out directive was truncated: {write_out:?}"
+        );
+    }
+
+    #[test]
+    fn onedrive_status_marker_config_form_decodes_to_parse_form() {
+        assert_eq!(
+            ONEDRIVE_HTTP_STATUS_WRITE_OUT.replace("\\n", "\n"),
+            ONEDRIVE_HTTP_STATUS_MARKER,
+            "config-side and parse-side markers drifted"
+        );
+    }
 
     #[test]
     fn read_capped_accepts_output_exactly_at_the_limit() {

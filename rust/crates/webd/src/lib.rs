@@ -110,6 +110,7 @@ struct AppState {
     wifi_mutation: Arc<tokio::sync::Mutex<()>>,
     cloud_creds_dir: PathBuf,
     cloud_creds_mutation: Arc<tokio::sync::Mutex<()>>,
+    onedrive_discoverer: cloud_creds::OnedriveDiscoverer,
     /// The `schedulerd`-owned chime library directory (`/data/teslausb/chimes`),
     /// kept for compatibility with the legacy scheduler proxy path.
     #[allow(dead_code)]
@@ -366,6 +367,7 @@ fn router_with_all_clients_and_read_client_and_probe(
         chime_library_dir,
         default_cloud_creds_dir(),
         probe,
+        cloud_creds::default_onedrive_discoverer(),
     )
 }
 
@@ -383,6 +385,7 @@ fn router_with_all_clients_and_read_client_and_probe_and_cloud_creds(
     chime_library_dir: PathBuf,
     cloud_creds_dir: PathBuf,
     probe: Arc<dyn sysinfo::SystemProbe>,
+    onedrive_discoverer: cloud_creds::OnedriveDiscoverer,
 ) -> Router {
     let sys = SysHandle {
         probe,
@@ -420,6 +423,7 @@ fn router_with_all_clients_and_read_client_and_probe_and_cloud_creds(
         wifi_mutation: Arc::new(tokio::sync::Mutex::new(())),
         cloud_creds_dir,
         cloud_creds_mutation: Arc::new(tokio::sync::Mutex::new(())),
+        onedrive_discoverer,
         chime_library_dir,
     };
     if std::env::var_os("WEBD_CHIME_ENFORCER").is_some() {
@@ -429,11 +433,12 @@ fn router_with_all_clients_and_read_client_and_probe_and_cloud_creds(
 }
 
 #[cfg(test)]
-fn router_with_cloud_creds_dir(
+fn router_with_cloud_creds_dir_and_onedrive_discoverer(
     catalog: Catalog,
     static_dir: PathBuf,
     media: MediaConfig,
     cloud_creds_dir: PathBuf,
+    onedrive_discoverer: cloud_creds::OnedriveDiscoverer,
 ) -> Router {
     let gadget = default_gadget_client(PathBuf::from("/nonexistent/gadgetd.sock"));
     router_with_all_clients_and_read_client_and_probe_and_cloud_creds(
@@ -449,6 +454,7 @@ fn router_with_cloud_creds_dir(
         default_chime_library_dir(),
         cloud_creds_dir,
         Arc::new(sysinfo::LinuxProbe),
+        onedrive_discoverer,
     )
 }
 

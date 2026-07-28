@@ -6,6 +6,24 @@ export interface ApiErrorBody {
   };
 }
 
+export type CloudCredentialProvider = "drive" | "onedrive" | "dropbox";
+
+export type CloudCredentialState =
+  | "not_configured"
+  | "configured"
+  | "unreadable";
+
+export interface CloudCredentialsResponse {
+  state: CloudCredentialState;
+  provider: CloudCredentialProvider | null;
+  updated_at: number | null;
+}
+
+export interface SaveCloudCredentialsRequest {
+  provider: CloudCredentialProvider;
+  token: string;
+}
+
 /**
  * Wire DTO types for the webd read API (contract D2).
  *

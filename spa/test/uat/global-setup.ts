@@ -7,6 +7,7 @@ import {
   existsSync,
   openSync,
   copyFileSync,
+  rmSync,
 } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,6 +33,10 @@ const CACHE_DIR = resolve(ART, "cache");
 // entries via page.route and lets the real read path serve these).
 const MEDIA_RO_ROOT = resolve(ART, "media-ro");
 const ZONEINFO_DIR = resolve(ART, "zoneinfo");
+// Cloud provider credential store. Pinned into the artifacts tree so the
+// credentials endpoint is hermetic and starts empty (webd would otherwise
+// default to the on-device /var/lib/teslausb).
+const CLOUD_CREDS_DIR = resolve(ART, "cloud-creds");
 const FIXTURE_MP4 = resolve(SPA, "test", "fixtures", "clip.mp4");
 const FIXTURE_PNG = resolve(SPA, "test", "fixtures", "thumb.png");
 // Mirrors only the original six archive-backed clip keys from build-db.mjs.
@@ -174,6 +179,10 @@ function populateZoneinfo() {
 
 export default async function globalSetup() {
   mkdirSync(ART, { recursive: true });
+  // Start every run from an empty credential store so the credentials endpoint
+  // deterministically reports not_configured.
+  rmSync(CLOUD_CREDS_DIR, { recursive: true, force: true });
+  mkdirSync(CLOUD_CREDS_DIR, { recursive: true });
 
   if (!FAST) {
     // 1. Seed a fresh read-only catalog (3 trips / 30 clips / 3 events).
@@ -231,6 +240,7 @@ export default async function globalSetup() {
       WEBD_CACHE_DIR: CACHE_DIR,
       WEBD_MEDIA_RO_ROOT: MEDIA_RO_ROOT,
       WEBD_ZONEINFO_DIR: ZONEINFO_DIR,
+      WEBD_CLOUD_CREDS_DIR: CLOUD_CREDS_DIR,
       RUST_LOG: process.env.RUST_LOG ?? "warn",
     },
     stdio: ["ignore", logFd, logFd],

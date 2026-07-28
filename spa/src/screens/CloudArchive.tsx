@@ -1,5 +1,11 @@
 import { Icon } from "../components/Icon";
 import { useScreenHook } from "../components/screenHook";
+import { useEffect, useState } from "preact/hooks";
+import { ApiError, api } from "../api/client";
+import type {
+  CloudCredentialProvider,
+  CloudCredentialsResponse,
+} from "../api/types";
 import "../styles/cloud-archive.css";
 
 /**
@@ -11,17 +17,119 @@ import "../styles/cloud-archive.css";
  * sync-settings form (folders, priority, reserve, retry, cleanup toggles), and
  * a sync queue + history.
  *
- * B-1 reality: uploadd owns cloud sync, but webd exposes NO cloud
- * read/config/queue endpoint yet (the `be-cloud-config` lane is still pending),
- * and connecting a provider / editing sync policy are privileged operator
- * actions. So this screen reproduces the v1 LOOK faithfully but is strictly
- * READ-ONLY: live counters degrade to an honest "—" pending state, the provider
- * and settings controls render inert (disabled, no `<form>`, no submit — zero
- * mutation surface), and the queue + history render their v1 empty-states. It
- * makes NO API calls.
+ * B-1 reality: only cloud-provider credentials are live today. This page now
+ * calls `GET/POST/DELETE /api/cloud/credentials` for Section 2 (provider + token
+ * paste), while sections 1/3/4/5 remain inert v1-parity scaffolding until their
+ * backend lanes land.
  */
 export function CloudArchive() {
   useScreenHook("cloud-archive");
+  const [provider, setProvider] = useState<CloudCredentialProvider>("drive");
+  const [token, setToken] = useState("");
+  const [creds, setCreds] = useState<CloudCredentialsResponse | null>(null);
+  const [saveBusy, setSaveBusy] = useState(false);
+  const [removeBusy, setRemoveBusy] = useState(false);
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  const [message, setMessage] = useState<
+    { kind: "info" | "success" | "error"; text: string } | null
+  >({ kind: "info", text: "Loading cloud provider status…" });
+
+  const providerLabel = (value: CloudCredentialProvider): string =>
+    value === "drive"
+      ? "Google Drive"
+      : value === "onedrive"
+        ? "OneDrive"
+        : "Dropbox";
+
+  const formatSavedAt = (epoch: number | null | undefined): string => {
+    if (epoch == null || !Number.isFinite(epoch)) return "—";
+    return new Date(epoch * 1000).toLocaleString();
+  };
+
+  const statusText = (state: CloudCredentialsResponse): string => {
+    if (state.state === "not_configured") return "No cloud provider configured.";
+    if (state.state === "configured" && state.provider) {
+      return `Connected to ${providerLabel(state.provider)} — saved ${formatSavedAt(state.updated_at)}.`;
+    }
+    return "Stored cloud credentials cannot be decrypted on this hardware (the SD card was moved). Re-paste credentials to continue syncing.";
+  };
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    api
+      .cloudCredentials(ctrl.signal)
+      .then((loaded) => {
+        if (ctrl.signal.aborted) return;
+        setCreds(loaded);
+        if (loaded.provider) setProvider(loaded.provider);
+        setConfirmRemove(false);
+        setMessage({ kind: "info", text: statusText(loaded) });
+      })
+      .catch((err) => {
+        if (ctrl.signal.aborted) return;
+        setMessage({
+          kind: "error",
+          text:
+            err instanceof ApiError
+              ? err.message
+              : "Could not load cloud credentials.",
+        });
+      });
+    return () => ctrl.abort();
+  }, []);
+
+  const onSaveCredentials = async () => {
+    if (saveBusy || token.trim().length === 0) return;
+    setSaveBusy(true);
+    setConfirmRemove(false);
+    setMessage({ kind: "info", text: "Saving cloud credentials…" });
+    try {
+      const next = await api.saveCloudCredentials({ provider, token });
+      setCreds(next);
+      if (next.provider) setProvider(next.provider);
+      setToken("");
+      setMessage({ kind: "success", text: statusText(next) });
+    } catch (err) {
+      setMessage({
+        kind: "error",
+        text:
+          err instanceof ApiError
+            ? err.message
+            : "Could not save cloud credentials.",
+      });
+    } finally {
+      setSaveBusy(false);
+    }
+  };
+
+  const onRemoveCredentials = async () => {
+    if (removeBusy) return;
+    if (!confirmRemove) {
+      setConfirmRemove(true);
+      return;
+    }
+    setRemoveBusy(true);
+    setMessage({ kind: "info", text: "Removing cloud credentials…" });
+    try {
+      const next = await api.deleteCloudCredentials();
+      setCreds(next);
+      setConfirmRemove(false);
+      setMessage({ kind: "success", text: statusText(next) });
+    } catch (err) {
+      setMessage({
+        kind: "error",
+        text:
+          err instanceof ApiError
+            ? err.message
+            : "Could not remove cloud credentials.",
+      });
+    } finally {
+      setRemoveBusy(false);
+    }
+  };
+
+  const canRemove =
+    creds?.state === "configured" || creds?.state === "unreadable";
 
   return (
     <div class="container" data-page="cloud-archive" data-screen="cloud-archive">
@@ -90,7 +198,7 @@ export function CloudArchive() {
         </button>
       </div>
 
-      {/* ── Section 2: Cloud Provider (not connected) ── */}
+      {/* ── Section 2: Cloud Provider ── */}
       <details class="settings-section" open>
         <summary>
           <Icon name="cloud" class="nav-icon" />
@@ -99,33 +207,132 @@ export function CloudArchive() {
         <div class="section-content">
           <p style="margin: 0 0 var(--space-3); color: var(--text-secondary);">
             Set up a cloud storage provider to automatically archive dashcam
-            footage. Provider setup runs on the device once webd exposes the
-            uploadd configuration API.
+            footage.
           </p>
-          <div style="margin-bottom: var(--space-3);">
-            <label
-              for="providerSelect"
-              style="display: block; margin-bottom: var(--space-2); font-weight: 500; color: var(--text-primary);"
-            >
-              Provider:
+          <div class="form-group" style="margin-bottom: var(--space-3);">
+            <label for="providerSelect">
+              <strong>Provider</strong>
             </label>
             <select
               id="providerSelect"
-              disabled
-              aria-disabled="true"
-              style="width: 100%; max-width: 360px; padding: 10px; border-radius: 6px; border: 1px solid var(--border-input); font-size: 15px; background-color: var(--form-input-bg); color: var(--text-primary);"
+              class="settings-form-input"
+              value={provider}
+              disabled={saveBusy || removeBusy}
+              onChange={(e) =>
+                setProvider(
+                  (e.currentTarget as HTMLSelectElement)
+                    .value as CloudCredentialProvider,
+                )
+              }
+              style="max-width: 360px;"
             >
-              <option value="">-- Select Provider --</option>
-              <option value="google-drive">Google Drive</option>
+              <option value="drive">Google Drive</option>
               <option value="onedrive">OneDrive</option>
               <option value="dropbox">Dropbox</option>
-              <option value="s3">Amazon S3</option>
-              <option value="b2">Backblaze B2</option>
-              <option value="wasabi">Wasabi</option>
-              <option value="generic">
-                NAS / Custom rclone (SFTP, WebDAV, SMB, FTP, ...)
+              <option value="s3" disabled>
+                Amazon S3 (not yet supported)
+              </option>
+              <option value="b2" disabled>
+                Backblaze B2 (not yet supported)
+              </option>
+              <option value="wasabi" disabled>
+                Wasabi (not yet supported)
+              </option>
+              <option value="generic" disabled>
+                NAS / Custom rclone (SFTP, WebDAV, SMB, FTP, ...) (not yet
+                supported)
               </option>
             </select>
+          </div>
+          <div class="info-box" style="margin: 0 0 var(--space-3);">
+            <p style="margin: 0 0 var(--space-2); color: var(--text-secondary);">
+              On your PC, run:
+            </p>
+            <code>{`rclone authorize "${provider}"`}</code>
+            <p style="margin: var(--space-2) 0 0; color: var(--text-secondary);">
+              Paste the full output below, including the marker lines
+              (&ldquo;Paste the following into your remote machine ---&gt;&rdquo;
+              and &ldquo;&lt;---End paste&rdquo;). No manual edits needed.
+            </p>
+          </div>
+          <div class="form-group" style="margin-bottom: var(--space-3);">
+            <label for="cloudTokenInput">
+              <strong>Authorization token output</strong>
+            </label>
+            <textarea
+              id="cloudTokenInput"
+              class="settings-form-input"
+              value={token}
+              disabled={saveBusy || removeBusy}
+              onInput={(e) =>
+                setToken((e.currentTarget as HTMLTextAreaElement).value)
+              }
+              rows={6}
+              placeholder='Paste the full `rclone authorize` output here'
+              style="width: 100%; min-height: 120px; resize: vertical;"
+            />
+          </div>
+          <div
+            id="cloudCredStatus"
+            role="status"
+            aria-live="polite"
+            style={`font-size:0.85em;margin:0 0 var(--space-3);color:${
+              message?.kind === "error"
+                ? "var(--accent-error, #e53935)"
+                : message?.kind === "success"
+                  ? "var(--accent-success, #4caf50)"
+                  : "var(--text-secondary)"
+            }`}
+          >
+            {message?.text}
+          </div>
+          <div style="display:flex; gap: var(--space-2); align-items:center; flex-wrap: wrap;">
+            <button
+              type="button"
+              id="cloudSaveBtn"
+              class="edit-btn"
+              disabled={saveBusy || removeBusy || token.trim().length === 0}
+              onClick={onSaveCredentials}
+              style="padding: 8px 16px; font-size: 14px;"
+            >
+              {saveBusy ? "Saving…" : "Save"}
+            </button>
+            {canRemove ? (
+              confirmRemove ? (
+                <>
+                  <button
+                    type="button"
+                    id="cloudRemoveBtn"
+                    class="edit-btn"
+                    disabled={saveBusy || removeBusy}
+                    onClick={onRemoveCredentials}
+                    style="padding: 8px 16px; font-size: 14px; border-color: var(--accent-error, #e53935); color: var(--accent-error, #e53935);"
+                  >
+                    {removeBusy ? "Removing…" : "Confirm remove"}
+                  </button>
+                  <button
+                    type="button"
+                    class="edit-btn"
+                    disabled={saveBusy || removeBusy}
+                    onClick={() => setConfirmRemove(false)}
+                    style="padding: 8px 16px; font-size: 14px;"
+                  >
+                    Cancel
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  id="cloudRemoveBtn"
+                  class="edit-btn"
+                  disabled={saveBusy || removeBusy}
+                  onClick={onRemoveCredentials}
+                  style="padding: 8px 16px; font-size: 14px;"
+                >
+                  Remove
+                </button>
+              )
+            ) : null}
           </div>
         </div>
       </details>

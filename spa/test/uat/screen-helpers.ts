@@ -96,6 +96,7 @@ export async function assertReadOnly(
   page: Page,
   probe: Probe,
   sockets: string[],
+  extraGetPaths: ReadonlySet<string> = new Set(),
 ) {
   const origin = new URL(loadState().baseURL).origin;
   const mutating = probe.requests.filter((r) =>
@@ -109,7 +110,9 @@ export async function assertReadOnly(
     const u = new URL(req.url);
     expect(u.origin, `off-origin request to ${req.url}`).toBe(origin);
     expect(
-      u.pathname.startsWith("/api/") && !SHELL_POLL_ALLOWLIST.has(u.pathname),
+      u.pathname.startsWith("/api/") &&
+        !SHELL_POLL_ALLOWLIST.has(u.pathname) &&
+        !extraGetPaths.has(u.pathname),
       `unexpected API call ${req.method} ${u.pathname}`,
     ).toBe(false);
   }

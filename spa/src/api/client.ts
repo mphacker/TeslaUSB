@@ -18,6 +18,7 @@ import type {
   Chimes,
   Clip,
   ClipsParams,
+  CloudCredentialsResponse,
   DaySummary,
   EncryptionStatus,
   EventItem,
@@ -31,6 +32,7 @@ import type {
   RandomMode,
   ScheduleInput,
   SavedWifiResponse,
+  SaveCloudCredentialsRequest,
   SchedulerSnapshot,
   StorageHealth,
   StorageInfo,
@@ -256,6 +258,24 @@ export const api = {
       JSON.stringify({ key, value }),
       "application/json",
     ),
+
+  cloudCredentials: (signal?: AbortSignal) =>
+    getJson<CloudCredentialsResponse>("/api/cloud/credentials", signal),
+
+  saveCloudCredentials: (
+    body: SaveCloudCredentialsRequest,
+    signal?: AbortSignal,
+  ) =>
+    request<CloudCredentialsResponse>(
+      "POST",
+      "/api/cloud/credentials",
+      signal,
+      JSON.stringify(body),
+      "application/json",
+    ),
+
+  deleteCloudCredentials: (signal?: AbortSignal) =>
+    request<CloudCredentialsResponse>("DELETE", "/api/cloud/credentials", signal),
 
   // Device-status reads (webd 5.1d). All read-only; handlers never 5xx and
   // degrade to unknown/null when a subsystem can't be probed honestly.

@@ -531,6 +531,41 @@ fn effective_rclone_remote_name(parsed: &ServeArgs, rendered_runtime_config: boo
     }
 }
 
+/// The destination id the upload ledger is keyed by.
+///
+/// An explicit `--destination-id` always wins. Otherwise it is derived from the
+/// stored credential's provider, so the id always matches the provider the
+/// operator picked in the web UI and switching provider correctly re-uploads.
+/// `None` means no destination could be determined (no credential, no flag) —
+/// the caller must not enqueue anything under a placeholder id, because
+/// `(destination_id, remote_key)` is the ledger's primary key.
+fn effective_destination_id(
+    parsed: &ServeArgs,
+    rendered: Option<&RenderedRuntimeConfig>,
+) -> Option<String> {
+    if !parsed.destination_id.trim().is_empty() {
+        return Some(parsed.destination_id.clone());
+    }
+    rendered
+        .and_then(|config| config.oauth_baseline.as_ref())
+        .map(|baseline| oauth_provider_backend_type(&baseline.document).to_owned())
+}
+
+/// Block until SIGTERM/SIGINT, doing no queue work.
+///
+/// Used when no upload destination can be determined. Idling (rather than
+/// exiting non-zero) keeps a fresh device's `uploadd` from turning
+/// `Restart=on-failure` into a permanent restart loop, and enqueuing under a
+/// placeholder destination id is not an option because `(destination_id,
+/// remote_key)` is the upload ledger's primary key — those rows would be
+/// stranded the moment a real credential arrives under a different id.
+fn idle_until_shutdown() {
+    let waiter = LiveWaiter;
+    while !SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
+        waiter.wait_ms(WAIT_SLICE_MS);
+    }
+}
+
 fn parse_serve_args(args: &[String]) -> Result<ServeArgs, String> {
     let mut parsed = ServeArgs::default();
     let mut iter = args.iter();
@@ -592,8 +627,11 @@ fn parse_serve_args(args: &[String]) -> Result<ServeArgs, String> {
     if parsed.runtime_dir.trim().is_empty() {
         return Err("uploadd serve: --runtime-dir must be non-empty.".to_owned());
     }
-    if parsed.destination_id.is_empty() || parsed.destination_id.len() > 128 {
-        return Err("uploadd serve: --destination-id must be 1..=128 bytes.".to_owned());
+    // An empty destination id means "derive it from the stored credential's
+    // provider" (see `effective_destination_id`). Only the length cap can be
+    // enforced here, because the credential has not been decrypted yet.
+    if parsed.destination_id.len() > 128 {
+        return Err("uploadd serve: --destination-id must be at most 128 bytes.".to_owned());
     }
     if parsed.rclone_remote.trim().is_empty() {
         return Err("uploadd serve: --rclone-remote must be non-empty.".to_owned());
@@ -637,66 +675,15 @@ fn install_shutdown_handlers() {
     }
 }
 
-/// Parse `uploadd serve` args, wire live adapters, and run the serve loop.
-#[must_use]
-pub fn run_serve(args: &[String]) -> ExitCode {
-    let parsed = match parse_serve_args(args) {
-        Ok(value) => value,
-        Err(err) => {
-            write_stderr_line(&err);
-            return ExitCode::FAILURE;
-        }
-    };
-    let cfg = UploaddConfig::default();
-    if let Err(reason) = cfg.validate() {
-        write_stderr_line(&format!("uploadd serve: invalid config: {reason}"));
-        return ExitCode::FAILURE;
-    }
-    let rendered_runtime_config =
-        resolve_runtime_rclone_config(&parsed, &ProcHardwareRoot, write_stderr_line);
-    let rclone_config = parsed
-        .rclone_config
-        .clone()
-        .or_else(|| {
-            rendered_runtime_config
-                .as_ref()
-                .map(|config| config.path.to_string_lossy().into_owned())
-        });
-    let rclone_remote = effective_rclone_remote_name(&parsed, rendered_runtime_config.is_some());
-    let parsed_for_sync = parsed.clone();
-
-    install_shutdown_handlers();
-
-    let indexd_client = UnixIndexdClient::new(parsed.indexd_socket.clone());
-    let queue_store = LiveQueueStore::new(indexd_client.clone(), cfg.retry.max_attempts);
-    let lease_client = LiveLeaseClient::new(indexd_client.clone());
-    let archive_root = ArchiveRoot::new(parsed.archive_root.clone());
-    let throttle_source = LiveThrottleSource::with_paths(parsed.wifid_socket, DEFAULT_GOVERNOR_FILE);
-    let child_source = LiveChildSource::new(archive_root.clone());
-    let enqueuer = match DiscoverEnqueuer::new(
-        &indexd_client,
-        &child_source,
-        parsed.destination_id.clone(),
-        parsed.remote_prefix.clone(),
-    ) {
-        Ok(value) => match parsed.max_parents_per_pass {
-            Some(budget) => value.with_max_parents_per_pass(budget),
-            None => value,
-        },
-        Err(err) => {
-            write_stderr_line(&format!("uploadd serve: startup config error: {err}"));
-            return ExitCode::FAILURE;
-        }
-    };
-    let remote = RcloneRemote {
-        binary: parsed.rclone_binary,
-        name: rclone_remote,
-        config_path: rclone_config,
-    };
+/// Build the rclone command runner, attaching the OAuth token read-back hook
+/// when the rendered runtime config carries a baseline.
+fn build_command_runner(
+    rendered_runtime_config: Option<&RenderedRuntimeConfig>,
+    parsed_for_sync: ServeArgs,
+) -> LiveCommandRunner {
     let mut runner = LiveCommandRunner::new();
-    if let Some(baseline) = rendered_runtime_config
-        .as_ref()
-        .and_then(|config| config.oauth_baseline.clone())
+    if let Some(baseline) =
+        rendered_runtime_config.and_then(|config| config.oauth_baseline.clone())
     {
         let baseline_cell = RefCell::new(baseline);
         // TIMING: this hook runs synchronously inside `runner.run()`, so after a
@@ -726,6 +713,78 @@ pub fn run_serve(args: &[String]) -> ExitCode {
             }
         });
     }
+    runner
+}
+
+/// Parse `uploadd serve` args, wire live adapters, and run the serve loop.
+#[must_use]
+pub fn run_serve(args: &[String]) -> ExitCode {
+    let parsed = match parse_serve_args(args) {
+        Ok(value) => value,
+        Err(err) => {
+            write_stderr_line(&err);
+            return ExitCode::FAILURE;
+        }
+    };
+    let cfg = UploaddConfig::default();
+    if let Err(reason) = cfg.validate() {
+        write_stderr_line(&format!("uploadd serve: invalid config: {reason}"));
+        return ExitCode::FAILURE;
+    }
+    let rendered_runtime_config =
+        resolve_runtime_rclone_config(&parsed, &ProcHardwareRoot, write_stderr_line);
+    let rclone_config = parsed
+        .rclone_config
+        .clone()
+        .or_else(|| {
+            rendered_runtime_config
+                .as_ref()
+                .map(|config| config.path.to_string_lossy().into_owned())
+        });
+    let rclone_remote = effective_rclone_remote_name(&parsed, rendered_runtime_config.is_some());
+    let destination_id = effective_destination_id(&parsed, rendered_runtime_config.as_ref());
+    let parsed_for_sync = parsed.clone();
+
+    install_shutdown_handlers();
+
+    // With no credential and no explicit id there is no destination to key the
+    // upload ledger by; see `idle_until_shutdown` for why we idle rather than exit.
+    let Some(destination_id) = destination_id else {
+        write_stderr_line(
+            "uploadd serve: no cloud credential configured and no --destination-id given; \
+             idling. Save a credential in the web UI, then restart uploadd.",
+        );
+        idle_until_shutdown();
+        return ExitCode::SUCCESS;
+    };
+
+    let indexd_client = UnixIndexdClient::new(parsed.indexd_socket.clone());
+    let queue_store = LiveQueueStore::new(indexd_client.clone(), cfg.retry.max_attempts);
+    let lease_client = LiveLeaseClient::new(indexd_client.clone());
+    let archive_root = ArchiveRoot::new(parsed.archive_root.clone());
+    let throttle_source = LiveThrottleSource::with_paths(parsed.wifid_socket, DEFAULT_GOVERNOR_FILE);
+    let child_source = LiveChildSource::new(archive_root.clone());
+    let enqueuer = match DiscoverEnqueuer::new(
+        &indexd_client,
+        &child_source,
+        destination_id,
+        parsed.remote_prefix.clone(),
+    ) {
+        Ok(value) => match parsed.max_parents_per_pass {
+            Some(budget) => value.with_max_parents_per_pass(budget),
+            None => value,
+        },
+        Err(err) => {
+            write_stderr_line(&format!("uploadd serve: startup config error: {err}"));
+            return ExitCode::FAILURE;
+        }
+    };
+    let remote = RcloneRemote {
+        binary: parsed.rclone_binary,
+        name: rclone_remote,
+        config_path: rclone_config,
+    };
+    let runner = build_command_runner(rendered_runtime_config.as_ref(), parsed_for_sync);
     let waiter = LiveWaiter;
     let engine = RcloneUploadEngine {
         cfg: &cfg,
@@ -1464,17 +1523,104 @@ mod tests {
     }
 
     #[test]
-    fn parse_serve_args_rejects_missing_or_invalid_destination_id() {
-        let parsed_missing = parse_serve_args(&[
-            "--destination-id".to_owned(),
-            String::new(),
-        ]);
-        assert!(parsed_missing.is_err());
-
+    fn parse_serve_args_rejects_oversized_destination_id() {
         let parsed_invalid = parse_serve_args(&[
             "--destination-id".to_owned(),
             "x".repeat(129),
         ]);
         assert!(parsed_invalid.is_err());
+    }
+
+    #[test]
+    fn empty_destination_id_is_accepted_and_means_derive_from_credential() {
+        let parsed = parse_serve_args(&["--destination-id".to_owned(), String::new()])
+            .expect("empty destination id is allowed; it is derived from the credential");
+        assert!(parsed.destination_id.is_empty());
+    }
+
+    fn rendered_with_provider(provider: teslausb_creds::OAuthProvider) -> RenderedRuntimeConfig {
+        let document = CredentialDocument::new(CredentialFlow::OAuth {
+            provider,
+            token: normalize_oauth_token(r#"{"access_token":"tok-a","refresh_token":"ref-a"}"#)
+                .expect("normalize token"),
+        });
+        RenderedRuntimeConfig {
+            path: PathBuf::from("/run/teslausb/rclone.conf"),
+            oauth_baseline: oauth_readback_baseline(&document).expect("baseline"),
+        }
+    }
+
+    #[test]
+    fn destination_id_is_derived_from_the_credential_provider() {
+        let parsed = ServeArgs::default();
+        assert!(parsed.destination_id.is_empty());
+        let rendered = rendered_with_provider(teslausb_creds::OAuthProvider::Onedrive);
+        assert_eq!(
+            effective_destination_id(&parsed, Some(&rendered)),
+            Some("onedrive".to_owned())
+        );
+
+        let rendered_drive = rendered_with_provider(teslausb_creds::OAuthProvider::Drive);
+        assert_eq!(
+            effective_destination_id(&parsed, Some(&rendered_drive)),
+            Some("drive".to_owned()),
+            "switching provider must change the ledger destination so clips re-upload"
+        );
+    }
+
+    #[test]
+    fn explicit_destination_id_overrides_the_credential_provider() {
+        let parsed = ServeArgs {
+            destination_id: "custom-dest".to_owned(),
+            ..ServeArgs::default()
+        };
+        let rendered = rendered_with_provider(teslausb_creds::OAuthProvider::Onedrive);
+        assert_eq!(
+            effective_destination_id(&parsed, Some(&rendered)),
+            Some("custom-dest".to_owned())
+        );
+    }
+
+    #[test]
+    fn deployed_unit_command_line_parses() {
+        // The shipped unit file is the source of truth: parse its ExecStart line
+        // and feed those exact arguments to the parser, so the two cannot drift.
+        // Before destination_id became derivable this returned Err, which made
+        // `serve` exit non-zero and turned Restart=on-failure into a permanent
+        // 5-second crash loop on a car battery.
+        let unit_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../deploy/systemd/uploadd.service");
+        let unit = std::fs::read_to_string(&unit_path)
+            .unwrap_or_else(|err| panic!("read {}: {err}", unit_path.display()));
+        let exec_start = unit
+            .lines()
+            .find_map(|line| line.strip_prefix("ExecStart="))
+            .expect("uploadd.service must define ExecStart");
+        let mut fields = exec_start.split_whitespace();
+        let binary = fields.next().expect("ExecStart must name a binary");
+        assert!(
+            binary.ends_with("/uploadd"),
+            "unexpected ExecStart binary: {binary}"
+        );
+        let subcommand = fields.next().expect("ExecStart must name a subcommand");
+        assert_eq!(subcommand, "serve");
+        let args: Vec<String> = fields.map(str::to_owned).collect();
+
+        let parsed =
+            parse_serve_args(&args).expect("uploadd.service ExecStart arguments must parse");        assert_eq!(
+            parsed.archive_root, "/data/teslausb/archive",
+            "the unit must pass the real archive root, not uploadd's /srv default"
+        );
+        assert!(parsed.destination_id.is_empty());
+    }
+
+    #[test]
+    fn destination_id_is_none_without_a_credential_or_flag() {
+        let parsed = ServeArgs::default();
+        assert_eq!(
+            effective_destination_id(&parsed, None),
+            None,
+            "no destination means uploadd must idle, never enqueue under a placeholder id"
+        );
     }
 }

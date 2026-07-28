@@ -53,7 +53,15 @@ Type=simple
 RuntimeDirectory=teslausb
 RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=yes
-ExecStart=/usr/local/bin/uploadd serve
+# Archive root is passed EXPLICITLY: uploadd's built-in default is
+# /srv/teslausb/archive, but this system keeps the archive at
+# /data/teslausb/archive (see retentiond.service and WEBD_ARCHIVE_ROOT in
+# webd.service, and the RequiresMountsFor above). Relying on the default would
+# start a perfectly healthy-looking uploadd that silently finds nothing to
+# upload. No --destination-id is passed on purpose: uploadd derives it from the
+# stored credential's provider, so the upload ledger always agrees with the
+# provider chosen in the web UI. With no credential saved, uploadd idles.
+ExecStart=/usr/local/bin/uploadd serve --archive-root /data/teslausb/archive
 # `panic=abort` and SIGKILL bypass Rust `Drop`; enforce runtime-secret cleanup
 # in systemd on every stop path.
 ExecStopPost=/usr/bin/rm -f /run/teslausb/rclone.conf

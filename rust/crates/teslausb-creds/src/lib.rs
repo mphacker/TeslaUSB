@@ -24,7 +24,7 @@ pub use schema::{
 };
 pub use storage::{
     CLOUD_PROVIDER_CREDS_FILENAME, TESLA_SALT_FILENAME, read_blob, read_or_create_salt, read_salt,
-    write_blob_atomic,
+    with_creds_lock, write_blob_atomic,
 };
 pub use validate::{
     ALLOWED_BACKEND_TYPES, ValidatedRemote, normalize_oauth_token, parse_single_remote_conf,

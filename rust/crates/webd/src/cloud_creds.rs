@@ -11,7 +11,7 @@ use teslausb_creds::{
     BlobKeyMaterial, CLOUD_PROVIDER_CREDS_FILENAME, CredentialDocument, CredentialFlow,
     OAuthProvider, TESLA_SALT_FILENAME, decrypt, derive_key, encrypt, normalize_oauth_token,
     read_blob, read_or_create_salt, read_salt, render_rclone_conf, validate_document,
-    write_blob_atomic,
+    with_creds_lock, write_blob_atomic,
 };
 #[cfg(not(test))]
 use teslausb_creds::ProcHardwareRoot;
@@ -140,12 +140,15 @@ async fn delete_cloud_credentials(
     let creds_dir = state.cloud_creds_dir.clone();
     let status = tokio::task::spawn_blocking(move || {
         let _guard = guard;
-        let blob_path = creds_blob_path(&creds_dir);
-        match std::fs::remove_file(blob_path) {
-            Ok(()) => Ok(not_configured_state()),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(not_configured_state()),
-            Err(_) => Err(storage_error()),
-        }
+        with_creds_lock(&creds_dir, || {
+            let blob_path = creds_blob_path(&creds_dir);
+            match std::fs::remove_file(blob_path) {
+                Ok(()) => Ok(not_configured_state()),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(not_configured_state()),
+                Err(_) => Err(storage_error()),
+            }
+        })
+        .map_err(|_| storage_error())?
     })
     .await
     .map_err(|_| ApiError::Internal)??;
@@ -156,45 +159,48 @@ fn persist_cloud_credentials(
     creds_dir: &Path,
     req: &SaveCloudCredentialsReq,
 ) -> Result<CloudCredentialsResp, ApiError> {
-    let provider = parse_provider(&req.provider)?;
-    let token =
-        normalize_oauth_token(req.token.expose()).map_err(|err| normalize_token_error(&err))?;
-    let document = CredentialDocument::new(CredentialFlow::OAuth { provider, token });
-    let validated = validate_document(&document).map_err(|_| {
-        ApiError::bad_request(
-            "invalid_token",
-            "token is not valid JSON from `rclone authorize`",
-        )
-    })?;
-    // The allow-list accepts characters the renderer later refuses (`[`, `]`),
-    // so dry-run the render uploadd will perform. Without this the save would
-    // report `configured` and uploads would fail silently days later.
-    render_rclone_conf(RENDER_REMOTE_NAME, &validated).map_err(|_| {
-        ApiError::bad_request(
-            "invalid_token",
-            "token contains characters that cannot be written to an rclone config",
-        )
-    })?;
+    with_creds_lock(creds_dir, || {
+        let provider = parse_provider(&req.provider)?;
+        let token =
+            normalize_oauth_token(req.token.expose()).map_err(|err| normalize_token_error(&err))?;
+        let document = CredentialDocument::new(CredentialFlow::OAuth { provider, token });
+        let validated = validate_document(&document).map_err(|_| {
+            ApiError::bad_request(
+                "invalid_token",
+                "token is not valid JSON from `rclone authorize`",
+            )
+        })?;
+        // The allow-list accepts characters the renderer later refuses (`[`, `]`),
+        // so dry-run the render uploadd will perform. Without this the save would
+        // report `configured` and uploads would fail silently days later.
+        render_rclone_conf(RENDER_REMOTE_NAME, &validated).map_err(|_| {
+            ApiError::bad_request(
+                "invalid_token",
+                "token contains characters that cannot be written to an rclone config",
+            )
+        })?;
 
-    std::fs::create_dir_all(creds_dir).map_err(|_| storage_error())?;
-    let salt_path = salt_path(creds_dir);
-    let blob_path = creds_blob_path(creds_dir);
-    let salt = read_or_create_salt(&salt_path).map_err(|_| storage_error())?;
-    let key = derive_key(
-        &active_hardware_root(),
-        &salt,
-        teslausb_creds::DEFAULT_KDF_ITERS,
-    )
-    .map_err(|_| storage_error())?;
-    let material = BlobKeyMaterial {
-        key,
-        salt,
-        kdf_iters: teslausb_creds::DEFAULT_KDF_ITERS,
-    };
-    let plaintext = document.to_canonical_bytes().map_err(|_| storage_error())?;
-    let blob = encrypt(&plaintext, &material).map_err(|_| storage_error())?;
-    write_blob_atomic(&blob_path, &blob).map_err(|_| storage_error())?;
-    read_cloud_credentials_state(creds_dir)
+        std::fs::create_dir_all(creds_dir).map_err(|_| storage_error())?;
+        let salt_path = salt_path(creds_dir);
+        let blob_path = creds_blob_path(creds_dir);
+        let salt = read_or_create_salt(&salt_path).map_err(|_| storage_error())?;
+        let key = derive_key(
+            &active_hardware_root(),
+            &salt,
+            teslausb_creds::DEFAULT_KDF_ITERS,
+        )
+        .map_err(|_| storage_error())?;
+        let material = BlobKeyMaterial {
+            key,
+            salt,
+            kdf_iters: teslausb_creds::DEFAULT_KDF_ITERS,
+        };
+        let plaintext = document.to_canonical_bytes().map_err(|_| storage_error())?;
+        let blob = encrypt(&plaintext, &material).map_err(|_| storage_error())?;
+        write_blob_atomic(&blob_path, &blob).map_err(|_| storage_error())?;
+        read_cloud_credentials_state(creds_dir)
+    })
+    .map_err(|_| storage_error())?
 }
 
 fn read_cloud_credentials_state(creds_dir: &Path) -> Result<CloudCredentialsResp, ApiError> {

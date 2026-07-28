@@ -1060,6 +1060,7 @@ dependencies = [
  "aes-gcm",
  "getrandom 0.2.17",
  "hmac",
+ "libc",
  "pbkdf2",
  "serde",
  "serde_json",

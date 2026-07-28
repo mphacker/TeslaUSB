@@ -1,6 +1,8 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 
 use crate::{CredsError, SALT_LEN};
 
@@ -68,6 +70,81 @@ pub fn read_blob(path: &Path) -> Result<Vec<u8>, CredsError> {
 /// Returns [`CredsError`] if any write/sync/rename step fails.
 pub fn write_blob_atomic(path: &Path, blob: &[u8]) -> Result<(), CredsError> {
     write_atomic(path, blob)
+}
+
+/// Run `action` while holding an exclusive credential lock for `creds_dir`.
+///
+/// On Unix, this acquires an exclusive `flock` on `<creds_dir>/.creds.lock`,
+/// creating the lock file with mode `0600` when absent. On non-Unix build
+/// hosts, this is a no-op lock used only so Windows builds still compile.
+///
+/// # Errors
+///
+/// Returns [`CredsError`] if lock setup or acquisition fails.
+pub fn with_creds_lock<T>(creds_dir: &Path, action: impl FnOnce() -> T) -> Result<T, CredsError> {
+    #[cfg(unix)]
+    let _lock = CredsLockGuard::acquire(creds_dir)?;
+    #[cfg(not(unix))]
+    let _ = creds_dir;
+
+    let result = action();
+    Ok(result)
+}
+
+#[cfg(unix)]
+struct CredsLockGuard {
+    file: File,
+}
+
+#[cfg(unix)]
+impl CredsLockGuard {
+    fn acquire(creds_dir: &Path) -> Result<Self, CredsError> {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        std::fs::create_dir_all(creds_dir)?;
+        let lock_path = creds_dir.join(".creds.lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(lock_path)?;
+        lock_file_exclusive(&file)?;
+        Ok(Self { file })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for CredsLockGuard {
+    fn drop(&mut self) {
+        let _ = unlock_file(&self.file);
+    }
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn lock_file_exclusive(file: &File) -> Result<(), CredsError> {
+    // SAFETY: `flock` is called with a valid fd owned by `file`; operation is
+    // synchronous and does not outlive the file handle.
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(CredsError::Io(std::io::Error::last_os_error()))
+    }
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn unlock_file(file: &File) -> Result<(), CredsError> {
+    // SAFETY: same fd validity guarantees as lock acquisition.
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(CredsError::Io(std::io::Error::last_os_error()))
+    }
 }
 
 fn create_salt_file(path: &Path) -> Result<[u8; SALT_LEN], CredsError> {

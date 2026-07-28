@@ -238,7 +238,30 @@ impl Waiter for LiveWaiter {
 }
 
 /// Live subprocess runner used by the rclone backend.
-pub struct LiveCommandRunner;
+pub struct LiveCommandRunner {
+    after_run: Option<Box<dyn Fn()>>,
+}
+
+impl LiveCommandRunner {
+    /// Create a runner that performs no work after each subprocess.
+    #[must_use]
+    pub fn new() -> Self {
+        Self { after_run: None }
+    }
+
+    /// Run `after_run` once after every completed subprocess invocation.
+    #[must_use]
+    pub fn with_after_run(mut self, after_run: impl Fn() + 'static) -> Self {
+        self.after_run = Some(Box::new(after_run));
+        self
+    }
+}
+
+impl Default for LiveCommandRunner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl CommandRunner for LiveCommandRunner {
     fn run(&self, program: &str, args: &[String]) -> Result<CommandOutput, String> {
@@ -246,6 +269,9 @@ impl CommandRunner for LiveCommandRunner {
         command.args(args);
         command.process_group(0);
         let output = command.output().map_err(|err| format!("spawn failed: {err}"))?;
+        if let Some(after_run) = &self.after_run {
+            after_run();
+        }
         Ok(CommandOutput {
             status: output.status.code().unwrap_or(-1),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -450,5 +476,36 @@ mod tests {
         assert!(!second.wifi.uploads_allowed);
         let _ = fs::remove_file(governor);
         let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn after_run_hook_fires_after_every_subprocess() {
+        let calls = std::sync::Arc::new(AtomicU64::new(0));
+        let seen = std::sync::Arc::clone(&calls);
+        let runner = LiveCommandRunner::new().with_after_run(move || {
+            seen.fetch_add(1, Ordering::Relaxed);
+        });
+
+        let first = runner.run("/bin/true", &[]).expect("spawn /bin/true");
+        assert_eq!(first.status, 0);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+        // A failing rclone may still have refreshed the token before exiting, so
+        // the hook must fire on non-zero exits too.
+        let second = runner.run("/bin/false", &[]).expect("spawn /bin/false");
+        assert_ne!(second.status, 0);
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn after_run_hook_does_not_fire_when_spawn_fails() {
+        let calls = std::sync::Arc::new(AtomicU64::new(0));
+        let seen = std::sync::Arc::clone(&calls);
+        let runner = LiveCommandRunner::new().with_after_run(move || {
+            seen.fetch_add(1, Ordering::Relaxed);
+        });
+
+        assert!(runner.run("/nonexistent/teslausb-missing-binary", &[]).is_err());
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
     }
 }

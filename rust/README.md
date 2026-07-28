@@ -40,6 +40,22 @@ Release builds for the Pi Zero 2 W are cross-compiled on the host
 (`--target aarch64-unknown-linux-gnu`); the device is never built on
 (`SPEC.md` §5, `setup.md` §5).
 
+## Integration tests
+
+`cargo test` runs unit tests against in-process fakes. A fake cannot enforce a
+contract it does not know about, so cross-process wire behaviour is covered
+separately by scripted tests under `tests/`, which drive real daemon processes
+over their real sockets:
+
+| Script | Covers |
+| --- | --- |
+| `tests/cloud-bridge.test.sh` | archive → indexd queue → uploadd drain → rclone → remote |
+
+Each script documents its own invocation in its header, exits non-zero on
+failure, and is run in a Linux container (Unix sockets cannot be created on a
+Windows bind mount). These are not wired into `cargo test`; run them directly
+when changing the daemons or the contracts between them.
+
 ## Lint policy
 
 `[workspace.lints.rust]` and `[workspace.lints.clippy]` in

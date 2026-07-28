@@ -111,6 +111,8 @@ pub struct CloudQueueRow {
     pub archive_item_id: i64,
     /// Child key.
     pub child_key: String,
+    /// Source archive-root-relative path.
+    pub source_rel: String,
     /// Destination id.
     pub destination_id: String,
     /// Destination key.
@@ -522,6 +524,7 @@ fn cloud_discover_row_estimated_size(row: &CloudDiscoverRow) -> usize {
 
 fn cloud_queue_row_estimated_size(row: &CloudQueueRow) -> usize {
     json_escaped_len(&row.child_key)
+        + json_escaped_len(&row.source_rel)
         + json_escaped_len(&row.destination_id)
         + json_escaped_len(&row.remote_key)
         + json_escaped_len(&row.category)
@@ -532,7 +535,7 @@ fn cloud_queue_row_estimated_size(row: &CloudQueueRow) -> usize {
         + row.not_before.map_or(0, |_| 16)
         + row.last_error.as_deref().map_or(0, json_escaped_len)
         + row.upload_set_id.as_deref().map_or(0, json_escaped_len)
-        + 384
+        + 400
 }
 
 fn cloud_pending_upload_set_estimated_size(row: &CloudPendingUploadSet) -> usize {
@@ -891,16 +894,37 @@ pub fn cloud_queue_load(
     });
 
     let mut stmt = conn.prepare(
-        "SELECT archive_item_id, child_key, destination_id, remote_key, category, seq,
-                total_bytes, bytes_uploaded, expected_hash, verify_alg, content_sha256, state,
-               attempts, not_before, last_error, upload_set_id
-           FROM cloud_upload_queue
+        "SELECT q.archive_item_id,
+               q.child_key,
+               COALESCE(
+                   CASE
+                       WHEN q.child_key = '.' THEN a.path
+                       ELSE a.path || '/' || q.child_key
+                   END,
+                   ''
+               ) AS source_rel,
+               q.destination_id,
+               q.remote_key,
+               q.category,
+               q.seq,
+               q.total_bytes,
+               q.bytes_uploaded,
+               q.expected_hash,
+               q.verify_alg,
+               q.content_sha256,
+               q.state,
+               q.attempts,
+               q.not_before,
+               q.last_error,
+               q.upload_set_id
+          FROM cloud_upload_queue q
+      LEFT JOIN archive_items a ON a.id = q.archive_item_id
           WHERE (?1 IS NULL
-                 OR seq > ?1
-                 OR (seq = ?1 AND destination_id > ?2)
-                 OR (seq = ?1 AND destination_id = ?2 AND remote_key > ?3))
-            AND (?4 IS NULL OR upload_set_id = ?4)
-          ORDER BY seq ASC, destination_id ASC, remote_key ASC
+                OR q.seq > ?1
+                OR (q.seq = ?1 AND q.destination_id > ?2)
+                OR (q.seq = ?1 AND q.destination_id = ?2 AND q.remote_key > ?3))
+           AND (?4 IS NULL OR q.upload_set_id = ?4)
+          ORDER BY q.seq ASC, q.destination_id ASC, q.remote_key ASC
           LIMIT ?5",
     )?;
     let rows = stmt.query_map(
@@ -915,20 +939,21 @@ pub fn cloud_queue_load(
             Ok(CloudQueueRow {
                 archive_item_id: row.get(0)?,
                 child_key: row.get(1)?,
-                destination_id: row.get(2)?,
-                remote_key: row.get(3)?,
-                category: row.get(4)?,
-                seq: row.get(5)?,
-                total_bytes: row.get(6)?,
-                bytes_uploaded: row.get(7)?,
-                expected_hash: row.get(8)?,
-                verify_alg: row.get(9)?,
-                content_sha256: row.get(10)?,
-                state: row.get(11)?,
-                attempts: row.get(12)?,
-                not_before: row.get(13)?,
-                last_error: row.get(14)?,
-                upload_set_id: row.get(15)?,
+                source_rel: row.get(2)?,
+                destination_id: row.get(3)?,
+                remote_key: row.get(4)?,
+                category: row.get(5)?,
+                seq: row.get(6)?,
+                total_bytes: row.get(7)?,
+                bytes_uploaded: row.get(8)?,
+                expected_hash: row.get(9)?,
+                verify_alg: row.get(10)?,
+                content_sha256: row.get(11)?,
+                state: row.get(12)?,
+                attempts: row.get(13)?,
+                not_before: row.get(14)?,
+                last_error: row.get(15)?,
+                upload_set_id: row.get(16)?,
             })
         },
     )?;
@@ -2649,6 +2674,7 @@ mod tests {
         let queue = CloudQueueRow {
             archive_item_id: i64::MAX,
             child_key: big.clone(),
+            source_rel: big.clone(),
             destination_id: big.clone(),
             remote_key: big.clone(),
             category: big.clone(),
@@ -2940,6 +2966,47 @@ mod tests {
             .unwrap();
         assert_eq!(no_expected.expected_hash, None);
         assert_eq!(no_expected.verify_alg, "none");
+    }
+
+    #[test]
+    fn cloud_queue_load_source_rel_matches_cloud_candidates_for_child_and_parent_rows() {
+        let conn = open_in_memory().unwrap();
+        let parent = insert_archive_item(&conn, "archive/source-rel");
+        let hash_child = "3030303030303030303030303030303030303030303030303030303030303030";
+        let hash_parent = "4040404040404040404040404040404040404040404040404040404040404040";
+        upsert_item(&conn, parent, "dest", "rk/child", "segment-a", 1, 10, hash_child);
+        upsert_item(&conn, parent, "dest", "rk/parent", ".", 2, 10, hash_parent);
+
+        let candidates = cloud_candidates(&conn, &["RecentClips".to_owned()], None, 10).unwrap();
+        let queue = cloud_queue_load(&conn, None, 10, None).unwrap();
+        assert_eq!(candidates.items.len(), 2);
+        assert_eq!(queue.items.len(), 2);
+
+        let child_queue = queue
+            .items
+            .iter()
+            .find(|row| row.remote_key == "rk/child")
+            .unwrap();
+        let child_candidate = candidates
+            .items
+            .iter()
+            .find(|row| row.remote_key == "rk/child")
+            .unwrap();
+        assert_eq!(child_queue.source_rel, "archive/source-rel/segment-a");
+        assert_eq!(child_queue.source_rel, child_candidate.source_rel);
+
+        let parent_queue = queue
+            .items
+            .iter()
+            .find(|row| row.remote_key == "rk/parent")
+            .unwrap();
+        let parent_candidate = candidates
+            .items
+            .iter()
+            .find(|row| row.remote_key == "rk/parent")
+            .unwrap();
+        assert_eq!(parent_queue.source_rel, "archive/source-rel");
+        assert_eq!(parent_queue.source_rel, parent_candidate.source_rel);
     }
 
     #[test]

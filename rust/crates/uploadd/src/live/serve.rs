@@ -76,6 +76,8 @@ impl Default for ServeArgs {
 struct CycleDrainReport {
     hydrate_error: Option<String>,
     drain_error: Option<String>,
+    exhausted: u32,
+    skipped_missing_source_rel: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -84,6 +86,8 @@ struct CycleReport {
     producer_failure: Option<String>,
     hydrate_failure: Option<String>,
     drain_failure: Option<String>,
+    exhausted: u32,
+    skipped_missing_source_rel: u32,
 }
 
 trait ProducerPass {
@@ -145,6 +149,8 @@ impl<C: crate::indexd_client::IndexdCloudClient> DrainPass for LiveDrainer<'_, C
         CycleDrainReport {
             hydrate_error,
             drain_error,
+            exhausted: drain_report.exhausted,
+            skipped_missing_source_rel: self.queue_store.take_skipped_missing_source_rel(),
         }
     }
 }
@@ -167,6 +173,8 @@ fn orchestrate_cycle(producer: &dyn ProducerPass, drainer: &mut dyn DrainPass) -
         producer_failure,
         hydrate_failure: drain_report.hydrate_error,
         drain_failure: drain_report.drain_error,
+        exhausted: drain_report.exhausted,
+        skipped_missing_source_rel: drain_report.skipped_missing_source_rel,
     }
 }
 
@@ -213,6 +221,18 @@ fn log_cycle_report(cycle: u64, report: &CycleReport) {
     }
     if let Some(reason) = &report.drain_failure {
         write_stderr_line(&format!("uploadd serve: cycle {cycle} drain infra error: {reason}"));
+    }
+    if report.exhausted > 0 {
+        write_stderr_line(&format!(
+            "uploadd serve: cycle {cycle} parked {} item(s) after exhausting retries",
+            report.exhausted
+        ));
+    }
+    if report.skipped_missing_source_rel > 0 {
+        write_stderr_line(&format!(
+            "uploadd serve: cycle {cycle} skipped {} queue row(s) with no source path",
+            report.skipped_missing_source_rel
+        ));
     }
 }
 
@@ -507,6 +527,8 @@ mod tests {
                 CycleDrainReport {
                     hydrate_error: None,
                     drain_error: Some("index hiccup".to_owned()),
+                    exhausted: 0,
+                    skipped_missing_source_rel: 0,
                 },
                 CycleDrainReport::default(),
             ]),

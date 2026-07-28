@@ -651,6 +651,7 @@ fn handle_cloud_queue_load(
             .map(|row| CloudQueueRowWire {
                 archive_item_id: row.archive_item_id,
                 child_key: row.child_key,
+                source_rel: row.source_rel,
                 destination_id: row.destination_id,
                 remote_key: row.remote_key,
                 category: row.category,

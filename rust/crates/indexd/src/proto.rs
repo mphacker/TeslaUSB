@@ -376,6 +376,9 @@ pub struct CloudQueueRowWire {
     pub archive_item_id: i64,
     /// Child key.
     pub child_key: String,
+    /// Source archive-root-relative path.
+    #[serde(default)]
+    pub source_rel: String,
     /// Destination id.
     pub destination_id: String,
     /// Destination key.
@@ -1360,6 +1363,7 @@ mod tests {
                     items: vec![CloudQueueRowWire {
                         archive_item_id: 1,
                         child_key: "child".to_owned(),
+                        source_rel: "archive/a/child".to_owned(),
                         destination_id: "dest".to_owned(),
                         remote_key: "rk".to_owned(),
                         category: "bulk".to_owned(),
@@ -1566,6 +1570,7 @@ mod tests {
         let row = CloudQueueRowWire {
             archive_item_id: 1,
             child_key: "child".to_owned(),
+            source_rel: "archive/a/child".to_owned(),
             destination_id: "dest".to_owned(),
             remote_key: "rk".to_owned(),
             category: "bulk".to_owned(),

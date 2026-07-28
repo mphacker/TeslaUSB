@@ -136,6 +136,8 @@ pub struct DrainReport {
     pub steps: u32,
     /// How many items reached terminal verified success this pass.
     pub uploaded: u32,
+    /// How many items exhausted retries and were parked this pass.
+    pub exhausted: u32,
     /// Why the pass ended.
     pub stopped: DrainStop,
 }
@@ -314,11 +316,13 @@ impl<P: UploadProcessor> Scheduler<P> {
     ) -> DrainReport {
         let mut steps = 0;
         let mut uploaded = 0;
+        let mut exhausted = 0;
         loop {
             if steps >= max_steps {
                 return DrainReport {
                     steps,
                     uploaded,
+                    exhausted,
                     stopped: DrainStop::Budget,
                 };
             }
@@ -328,11 +332,15 @@ impl<P: UploadProcessor> Scheduler<P> {
                 SchedulerStep::Processed(StepOutcome::Uploaded { .. }) => {
                     uploaded = uploaded.saturating_add(1);
                 }
+                SchedulerStep::Processed(StepOutcome::Exhausted { .. }) => {
+                    exhausted = exhausted.saturating_add(1);
+                }
                 SchedulerStep::Processed(_) => {}
                 SchedulerStep::Idle => {
                     return DrainReport {
                         steps,
                         uploaded,
+                        exhausted,
                         stopped: DrainStop::Idle,
                     };
                 }
@@ -340,6 +348,7 @@ impl<P: UploadProcessor> Scheduler<P> {
                     return DrainReport {
                         steps,
                         uploaded,
+                        exhausted,
                         stopped: DrainStop::Paused { reason, action },
                     };
                 }
@@ -347,6 +356,7 @@ impl<P: UploadProcessor> Scheduler<P> {
                     return DrainReport {
                         steps,
                         uploaded,
+                        exhausted,
                         stopped: DrainStop::Infra(reason),
                     };
                 }
@@ -560,6 +570,7 @@ mod tests {
         let report = sched.drain_ready(&waiter, &timings(), 100);
 
         assert_eq!(report.uploaded, 4);
+        assert_eq!(report.exhausted, 0);
         assert_eq!(report.stopped, DrainStop::Idle);
         // Events first (older event 3 before 4), then trip, then bulk.
         // The processor records the order it was called in.
@@ -661,6 +672,7 @@ mod tests {
         let waiter = RecordingWaiter::default();
         let report = sched.drain_ready(&waiter, &timings(), 100);
         assert_eq!(report.uploaded, 0);
+        assert_eq!(report.exhausted, 0);
         assert!(matches!(report.stopped, DrainStop::Paused { .. }));
         // The pause backoff was applied once.
         assert_eq!(waiter.waits.borrow().as_slice(), &[timings().pause_wait_ms]);
@@ -676,6 +688,7 @@ mod tests {
         let waiter = RecordingWaiter::default();
         let report = sched.drain_ready(&waiter, &timings(), 100);
         assert_eq!(report.uploaded, 0);
+        assert_eq!(report.exhausted, 0);
         match report.stopped {
             DrainStop::Infra(reason) => assert!(reason.contains("indexd down")),
             other => panic!("expected infra stop, got {other:?}"),
@@ -709,6 +722,21 @@ mod tests {
             sched.queue().get(&key(1)).unwrap().state,
             UploadState::Failed
         );
+    }
+
+    #[test]
+    fn drain_reports_exhausted_items() {
+        let mut cfg = UploaddConfig::default();
+        cfg.retry.max_attempts = 1;
+        let proc = FakeProcessor::new(Act::Fail("net".to_owned()), 1);
+        let mut sched = Scheduler::new(proc, &cfg);
+        sched.enqueue(item(1, UploadCategory::Bulk, 0));
+
+        let waiter = RecordingWaiter::default();
+        let report = sched.drain_ready(&waiter, &timings(), 100);
+        assert_eq!(report.uploaded, 0);
+        assert_eq!(report.exhausted, 1);
+        assert_eq!(report.stopped, DrainStop::Idle);
     }
 
     #[test]
@@ -751,6 +779,7 @@ mod tests {
         let waiter = RecordingWaiter::default();
         let report = sched.drain_ready(&waiter, &timings(), 100);
         assert_eq!(report.uploaded, 2);
+        assert_eq!(report.exhausted, 0);
         assert_eq!(report.stopped, DrainStop::Idle);
     }
 }

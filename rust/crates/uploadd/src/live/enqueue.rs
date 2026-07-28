@@ -505,6 +505,7 @@ mod tests {
         CloudQueueRow {
             archive_item_id: id,
             child_key: "child".to_owned(),
+            source_rel: format!("archive/{id}/child"),
             destination_id: "dest".to_owned(),
             remote_key: "rk".to_owned(),
             category: "bulk".to_owned(),

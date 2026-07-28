@@ -2,6 +2,7 @@
 
 use std::str::FromStr;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::error::IndexError;
 use crate::indexd_client::{
@@ -31,6 +32,10 @@ const ERROR_CLASS_UPLOAD_FAILED: &str = "upload_failed";
 pub struct LiveQueueStore<C: IndexdCloudClient> {
     client: C,
     max_attempts: u32,
+    /// Rows dropped this hydrate because `indexd` returned no `source_rel` for
+    /// them. Counted rather than raised so one unusable row cannot block the
+    /// queue that is the only path footage takes off the device.
+    skipped_missing_source_rel: AtomicU32,
 }
 
 impl<C: IndexdCloudClient> LiveQueueStore<C> {
@@ -44,10 +49,17 @@ impl<C: IndexdCloudClient> LiveQueueStore<C> {
         Self {
             client,
             max_attempts,
+            skipped_missing_source_rel: AtomicU32::new(0),
         }
     }
 
-    fn map_row(row: CloudQueueRow) -> Result<Option<QueueItem>, IndexError> {
+    /// Take and clear the count of rows skipped for a missing `source_rel`, so
+    /// the serve loop can report the anomaly once per cycle.
+    pub fn take_skipped_missing_source_rel(&self) -> u32 {
+        self.skipped_missing_source_rel.swap(0, Ordering::Relaxed)
+    }
+
+    fn map_row(&self, row: CloudQueueRow) -> Result<Option<QueueItem>, IndexError> {
         let state = match row.state.as_str() {
             "queued" => UploadState::Queued,
             "in_progress" => UploadState::InProgress,
@@ -60,6 +72,16 @@ impl<C: IndexdCloudClient> LiveQueueStore<C> {
                 ))
             }
         };
+        // A `done` row (returned above) needs no source path. For any row we
+        // would actually work, an empty `source_rel` means `indexd` found no
+        // parent `archive_items` row — impossible while the FK cascade holds.
+        // Drop just this row: raising here would fail the whole hydrate and
+        // halt every upload for as long as the row existed.
+        if row.source_rel.is_empty() {
+            self.skipped_missing_source_rel
+                .fetch_add(1, Ordering::Relaxed);
+            return Ok(None);
+        }
         let category = match row.category.as_str() {
             "event_sentry" => UploadCategory::EventSentry,
             "trip" => UploadCategory::Trip,
@@ -107,7 +129,7 @@ impl<C: IndexdCloudClient> LiveQueueStore<C> {
             key: QueueKey::new(row.destination_id, row.remote_key),
             archive_item_id: ArchiveItemId(row.archive_item_id),
             child_key: row.child_key,
-            source_rel: String::new(),
+            source_rel: row.source_rel,
             category,
             seq,
             total_bytes,
@@ -158,7 +180,7 @@ impl<C: IndexdCloudClient> QueueStore for LiveQueueStore<C> {
             if row.upload_set_id.is_some() {
                 continue;
             }
-            if let Some(item) = Self::map_row(row)? {
+            if let Some(item) = self.map_row(row)? {
                 items.push(item);
             }
         }
@@ -583,10 +605,56 @@ mod tests {
         );
     }
 
+    #[test]
+    fn row_with_empty_source_rel_is_skipped_without_blocking_other_rows() {
+        // Regression guard: raising on the bad row would fail the whole hydrate
+        // and stop every upload. The good row must still load, and the anomaly
+        // must be counted so the serve loop can report it.
+        let mut bad = row(10, "queued", None);
+        bad.source_rel.clear();
+        let good = row(11, "queued", None);
+        let store = LiveQueueStore::new(
+            FakeClient::with_pages(vec![Page {
+                items: vec![bad, good],
+                next_cursor: None,
+            }]),
+            MAX_ATTEMPTS,
+        );
+        let items = store.load().expect("a bad row must not fail the hydrate");
+        assert_eq!(
+            items.iter().map(|i| i.archive_item_id.0).collect::<Vec<_>>(),
+            vec![11],
+            "the good row must still be worked"
+        );
+        assert_eq!(store.take_skipped_missing_source_rel(), 1);
+        assert_eq!(
+            store.take_skipped_missing_source_rel(),
+            0,
+            "taking the count must clear it so it is reported once"
+        );
+    }
+
+    #[test]
+    fn done_row_with_empty_source_rel_is_not_counted_as_an_anomaly() {
+        // A committed row keeps no source path; it must not look like corruption.
+        let mut done = row(12, "done", None);
+        done.source_rel.clear();
+        let store = LiveQueueStore::new(
+            FakeClient::with_pages(vec![Page {
+                items: vec![done],
+                next_cursor: None,
+            }]),
+            MAX_ATTEMPTS,
+        );
+        assert!(store.load().expect("done rows load cleanly").is_empty());
+        assert_eq!(store.take_skipped_missing_source_rel(), 0);
+    }
+
     fn row(parent: i64, state: &str, upload_set_id: Option<&str>) -> CloudQueueRow {
         CloudQueueRow {
             archive_item_id: parent,
             child_key: format!("child-{parent}"),
+            source_rel: format!("archive/parent-{parent}/child-{parent}"),
             destination_id: "dest-a".to_owned(),
             remote_key: format!("remote-{parent}.mp4"),
             category: "bulk".to_owned(),

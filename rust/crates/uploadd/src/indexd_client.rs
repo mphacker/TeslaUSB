@@ -215,6 +215,9 @@ pub struct CloudQueueRow {
     pub archive_item_id: i64,
     /// Child key.
     pub child_key: String,
+    /// Source archive-root-relative path.
+    #[serde(default)]
+    pub source_rel: String,
     /// Destination id.
     pub destination_id: String,
     /// Destination key.
@@ -1075,6 +1078,7 @@ mod tests {
             items: vec![CloudQueueRow {
                 archive_item_id: 1,
                 child_key: "front".to_owned(),
+                source_rel: "archive/a/front".to_owned(),
                 destination_id: "dest-a".to_owned(),
                 remote_key: "remote/front.mp4".to_owned(),
                 category: "trip".to_owned(),

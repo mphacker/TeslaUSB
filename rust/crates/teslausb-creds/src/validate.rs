@@ -43,7 +43,7 @@ const B2_ALLOWED_KEYS: &[&str] = &["account", "key", "endpoint"];
 const AZUREBLOB_ALLOWED_KEYS: &[&str] = &["account", "key", "endpoint", "sas_url"];
 const SWIFT_ALLOWED_KEYS: &[&str] = &["user", "key", "auth", "tenant", "region"];
 const DRIVE_ALLOWED_KEYS: &[&str] = &["token"];
-const ONEDRIVE_ALLOWED_KEYS: &[&str] = &["token"];
+const ONEDRIVE_ALLOWED_KEYS: &[&str] = &["token", "drive_id", "drive_type"];
 const DROPBOX_ALLOWED_KEYS: &[&str] = &["token"];
 
 /// Sanitized single-remote output used by P3 render logic.
@@ -151,15 +151,25 @@ pub fn render_rclone_conf(
 /// Returns [`CredsError`] when type/key allow-lists reject any value.
 pub fn validate_document(document: &CredentialDocument) -> Result<ValidatedRemote, CredsError> {
     match &document.flow {
-        CredentialFlow::OAuth { provider, token } => {
+        CredentialFlow::OAuth {
+            provider,
+            token,
+            options,
+        } => {
             let backend_type = match provider {
                 OAuthProvider::Drive => "drive",
                 OAuthProvider::Onedrive => "onedrive",
                 OAuthProvider::Dropbox => "dropbox",
             };
-            let mut options = BTreeMap::new();
-            options.insert("token".to_owned(), token.clone());
-            validate_options_map(backend_type, &options)
+            let mut rendered_options = BTreeMap::new();
+            rendered_options.insert("token".to_owned(), token.clone());
+            for (key, value) in options {
+                if key.trim().eq_ignore_ascii_case("token") {
+                    return Err(CredsError::ReservedOauthOptionKey);
+                }
+                rendered_options.insert(key.clone(), value.clone());
+            }
+            validate_options_map(backend_type, &rendered_options)
         }
         CredentialFlow::S3Style {
             provider,
@@ -386,6 +396,27 @@ fn sanitize_option_value(key: &str, raw_value: &str) -> Result<String, CredsErro
         return Err(CredsError::IllegalValueChar {
             key: key.to_owned(),
         });
+    }
+    if key == "drive_type"
+        && value != "personal"
+        && value != "business"
+        && value != "documentLibrary"
+    {
+        return Err(CredsError::InvalidOnedriveDriveType);
+    }
+    if key == "drive_id" {
+        if value.is_empty() {
+            return Err(CredsError::EmptyOnedriveDriveId);
+        }
+        if value.len() > 256 {
+            return Err(CredsError::OnedriveDriveIdTooLong);
+        }
+        if value
+            .bytes()
+            .any(|byte| !(0x21..=0x7e).contains(&byte) || byte == b'[' || byte == b']')
+        {
+            return Err(CredsError::IllegalOnedriveDriveId);
+        }
     }
     Ok(value)
 }

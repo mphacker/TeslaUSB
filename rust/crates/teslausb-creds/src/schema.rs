@@ -54,6 +54,11 @@ pub enum CredentialFlow {
         provider: OAuthProvider,
         /// Opaque token JSON/string from `rclone authorize`.
         token: String,
+        /// Provider-specific rclone options required to build a working remote
+        /// (`OneDrive` needs `drive_id` + `drive_type`). Empty for providers
+        /// needing none.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        options: BTreeMap<String, String>,
     },
     /// S3-style key/secret credentials (S3, B2, Wasabi).
     S3Style {

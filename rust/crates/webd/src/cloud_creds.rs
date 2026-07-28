@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -163,7 +164,11 @@ fn persist_cloud_credentials(
         let provider = parse_provider(&req.provider)?;
         let token =
             normalize_oauth_token(req.token.expose()).map_err(|err| normalize_token_error(&err))?;
-        let document = CredentialDocument::new(CredentialFlow::OAuth { provider, token });
+        let document = CredentialDocument::new(CredentialFlow::OAuth {
+            provider,
+            token,
+            options: BTreeMap::new(),
+        });
         let validated = validate_document(&document).map_err(|_| {
             ApiError::bad_request(
                 "invalid_token",

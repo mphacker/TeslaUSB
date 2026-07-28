@@ -60,6 +60,22 @@ pub enum CredsError {
         /// Option key whose value contained illegal control data.
         key: String,
     },
+    /// `OneDrive` `drive_type` has an unsupported value.
+    #[error("onedrive drive_type must be one of: personal, business, documentLibrary")]
+    InvalidOnedriveDriveType,
+    /// `OneDrive` `drive_id` is empty.
+    #[error("onedrive drive_id must not be empty")]
+    EmptyOnedriveDriveId,
+    /// `OneDrive` `drive_id` exceeds the size limit.
+    #[error("onedrive drive_id exceeds 256-byte limit")]
+    OnedriveDriveIdTooLong,
+    /// `OneDrive` `drive_id` contains forbidden bytes.
+    #[error("onedrive drive_id contains illegal characters")]
+    IllegalOnedriveDriveId,
+    /// An OAuth `options` map tried to carry the reserved `token` key, which
+    /// would shadow the normalized top-level token at render time.
+    #[error("oauth options must not contain the reserved `token` key")]
+    ReservedOauthOptionKey,
     /// A pasted config had more than one section.
     #[error("pasted rclone config must contain exactly one section")]
     MultipleRemoteSections,

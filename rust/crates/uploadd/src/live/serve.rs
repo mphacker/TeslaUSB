@@ -410,6 +410,7 @@ fn readback_runtime_oauth_token(
 
     let teslausb_creds::CredentialFlow::OAuth {
         provider: baseline_provider,
+        options: baseline_options,
         ..
     } = &baseline.document.flow
     else {
@@ -418,6 +419,7 @@ fn readback_runtime_oauth_token(
     let candidate_doc = CredentialDocument::new(teslausb_creds::CredentialFlow::OAuth {
         provider: *baseline_provider,
         token: normalized_new.clone(),
+        options: baseline_options.clone(),
     });
     let Ok(validated) = validate_document(&candidate_doc) else {
         log("uploadd serve: refreshed token failed validation; skipping token read-back");
@@ -837,6 +839,7 @@ UPLOADD_MAX_PARENTS_PER_PASS"
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use std::cell::{Cell, RefCell};
+    use std::collections::BTreeMap;
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
@@ -941,6 +944,7 @@ mod tests {
         let doc = CredentialDocument::new(CredentialFlow::OAuth {
             provider,
             token: normalize_oauth_token(token).expect("normalize token"),
+            options: BTreeMap::new(),
         });
         let plaintext = doc.to_canonical_bytes().expect("serialize doc");
         let blob = encrypt(&plaintext, &material).expect("encrypt blob");
@@ -1170,6 +1174,62 @@ mod tests {
             read_oauth_token_from_blob(&cloud_state_dir, &root),
             normalize_oauth_token(r#"{"access_token":"tok-b","refresh_token":"ref-b"}"#).unwrap()
         );
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn oauth_options_survive_token_refresh_readback() {
+        let base = unique_path("uploadd-readback-options");
+        let cloud_state_dir = base.join("state");
+        let runtime_dir = base.join("run");
+        let root = StaticHardwareRoot::new("00000000deadbeef", "uploadd-test-machine");
+        let token = normalize_oauth_token(r#"{"access_token":"tok-a","refresh_token":"ref-a"}"#).unwrap();
+        let options = BTreeMap::from([
+            ("drive_id".to_owned(), "drive-123".to_owned()),
+            ("drive_type".to_owned(), "personal".to_owned()),
+        ]);
+        let document = CredentialDocument::new(CredentialFlow::OAuth {
+            provider: OAuthProvider::Onedrive,
+            token,
+            options: options.clone(),
+        });
+        fs::create_dir_all(&cloud_state_dir).expect("create cloud dir");
+        let salt = read_or_create_salt(&cloud_state_dir.join(TESLA_SALT_FILENAME)).expect("create salt");
+        let key = derive_key(&root, &salt, teslausb_creds::DEFAULT_KDF_ITERS).expect("derive key");
+        let material = BlobKeyMaterial {
+            key,
+            salt,
+            kdf_iters: teslausb_creds::DEFAULT_KDF_ITERS,
+        };
+        let plaintext = document.to_canonical_bytes().expect("serialize doc");
+        let blob = encrypt(&plaintext, &material).expect("encrypt blob");
+        write_blob_atomic(&cloud_state_dir.join(CLOUD_PROVIDER_CREDS_FILENAME), &blob).expect("write blob");
+
+        let mut baseline = oauth_baseline(&document);
+        write_runtime_token_conf(
+            &runtime_dir,
+            "onedrive",
+            r#"{"access_token":"tok-b","refresh_token":"ref-b"}"#,
+        );
+        let parsed = ServeArgs {
+            cloud_state_dir: cloud_state_dir.to_string_lossy().into_owned(),
+            runtime_dir: runtime_dir.to_string_lossy().into_owned(),
+            ..ServeArgs::default()
+        };
+        let logs = sync_readback_once(&parsed, &mut baseline, &root);
+        assert!(logs.is_empty(), "unexpected logs: {logs:?}");
+        let stored = read_blob_document(&cloud_state_dir, &root);
+        let CredentialFlow::OAuth { token, options, .. } = stored.flow else {
+            panic!("expected oauth flow");
+        };
+        assert_eq!(
+            token,
+            normalize_oauth_token(r#"{"access_token":"tok-b","refresh_token":"ref-b"}"#).unwrap()
+        );
+        assert_eq!(options, BTreeMap::from([
+            ("drive_id".to_owned(), "drive-123".to_owned()),
+            ("drive_type".to_owned(), "personal".to_owned()),
+        ]));
         let _ = fs::remove_dir_all(base);
     }
 
@@ -1543,6 +1603,7 @@ mod tests {
             provider,
             token: normalize_oauth_token(r#"{"access_token":"tok-a","refresh_token":"ref-a"}"#)
                 .expect("normalize token"),
+            options: BTreeMap::new(),
         });
         RenderedRuntimeConfig {
             path: PathBuf::from("/run/teslausb/rclone.conf"),

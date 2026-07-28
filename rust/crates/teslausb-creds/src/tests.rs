@@ -79,6 +79,7 @@ fn kat_vector_matches_committed_blob_hex() {
     let doc = CredentialDocument::new(CredentialFlow::OAuth {
         provider: crate::schema::OAuthProvider::Drive,
         token: "{\"access_token\":\"abc\",\"expiry\":\"2026-01-01T00:00:00Z\"}".to_owned(),
+        options: BTreeMap::new(),
     });
     let plaintext = doc.to_canonical_bytes().unwrap();
     let blob = encrypt_with_nonce_for_test(&plaintext, &blob_key, TEST_NONCE).unwrap();
@@ -202,6 +203,7 @@ fn option_values_reject_control_char_injection() {
     let oauth_doc = CredentialDocument::new(CredentialFlow::OAuth {
         provider: crate::schema::OAuthProvider::Drive,
         token: "{\"access_token\":\"abc\"}\nbearer_token_command = sh -c 'echo pwned'".to_owned(),
+        options: BTreeMap::new(),
     });
     let oauth_err = validate_document(&oauth_doc).unwrap_err();
     assert!(matches!(
@@ -307,6 +309,7 @@ fn oauth_token_normalization_and_rendering_block_ini_injection() {
         let document = CredentialDocument::new(CredentialFlow::OAuth {
             provider: OAuthProvider::Onedrive,
             token,
+            options: BTreeMap::new(),
         });
         let validated = validate_document(&document).unwrap();
         let rendered = render_rclone_conf("teslausb", &validated).unwrap();
@@ -330,6 +333,7 @@ fn multiline_valid_json_token_is_compacted_before_rendering() {
     let document = CredentialDocument::new(CredentialFlow::OAuth {
         provider: OAuthProvider::Onedrive,
         token,
+        options: BTreeMap::new(),
     });
     let validated = validate_document(&document).unwrap();
     let rendered = render_rclone_conf("teslausb", &validated).unwrap();
@@ -346,6 +350,158 @@ fn multiline_valid_json_token_is_compacted_before_rendering() {
 }
 
 #[test]
+fn onedrive_credential_renders_drive_id_and_drive_type() {
+    let token = normalize_oauth_token(r#"{"access_token":"x","refresh_token":"r"}"#).unwrap();
+    let document = CredentialDocument::new(CredentialFlow::OAuth {
+        provider: OAuthProvider::Onedrive,
+        token,
+        options: BTreeMap::from([
+            ("drive_id".to_owned(), "drive-123".to_owned()),
+            ("drive_type".to_owned(), "personal".to_owned()),
+        ]),
+    });
+    let validated = validate_document(&document).unwrap();
+    let rendered = render_rclone_conf("teslausb", &validated).unwrap();
+    assert!(rendered.contains("type = onedrive"));
+    assert!(rendered.contains("token = "));
+    assert!(rendered.contains("drive_id = drive-123"));
+    assert!(rendered.contains("drive_type = personal"));
+}
+
+#[test]
+fn credential_without_options_field_still_deserializes() {
+    let legacy = br#"{"version":1,"flow":"o_auth","provider":"onedrive","token":"{\"access_token\":\"legacy\"}"}"#;
+    let parsed = CredentialDocument::from_bytes(legacy).unwrap();
+    let CredentialFlow::OAuth {
+        provider,
+        token,
+        options,
+    } = parsed.flow
+    else {
+        panic!("expected oauth flow");
+    };
+    assert_eq!(provider, OAuthProvider::Onedrive);
+    assert_eq!(token, r#"{"access_token":"legacy"}"#);
+    assert!(options.is_empty());
+}
+
+#[test]
+fn drive_type_rejects_unknown_value() {
+    let token = normalize_oauth_token(r#"{"access_token":"x"}"#).unwrap();
+    for rejected in ["Personal", "consumer", ""] {
+        let document = CredentialDocument::new(CredentialFlow::OAuth {
+            provider: OAuthProvider::Onedrive,
+            token: token.clone(),
+            options: BTreeMap::from([("drive_type".to_owned(), rejected.to_owned())]),
+        });
+        let err = validate_document(&document).unwrap_err();
+        assert!(matches!(err, CredsError::InvalidOnedriveDriveType));
+    }
+    for accepted in ["personal", "business", "documentLibrary"] {
+        let document = CredentialDocument::new(CredentialFlow::OAuth {
+            provider: OAuthProvider::Onedrive,
+            token: token.clone(),
+            options: BTreeMap::from([("drive_type".to_owned(), accepted.to_owned())]),
+        });
+        let validated = validate_document(&document).unwrap();
+        assert_eq!(
+            validated.options.get("drive_type").map(String::as_str),
+            Some(accepted)
+        );
+    }
+}
+
+#[test]
+fn drive_id_rejects_illegal_values() {
+    let token = normalize_oauth_token(r#"{"access_token":"x"}"#).unwrap();
+    let empty = CredentialDocument::new(CredentialFlow::OAuth {
+        provider: OAuthProvider::Onedrive,
+        token: token.clone(),
+        options: BTreeMap::from([("drive_id".to_owned(), "   ".to_owned())]),
+    });
+    assert!(matches!(
+        validate_document(&empty).unwrap_err(),
+        CredsError::EmptyOnedriveDriveId
+    ));
+
+    let too_long = CredentialDocument::new(CredentialFlow::OAuth {
+        provider: OAuthProvider::Onedrive,
+        token: token.clone(),
+        options: BTreeMap::from([("drive_id".to_owned(), "a".repeat(257))]),
+    });
+    assert!(matches!(
+        validate_document(&too_long).unwrap_err(),
+        CredsError::OnedriveDriveIdTooLong
+    ));
+
+    for illegal in ["has space", "with[bracket", "with]bracket", "bad\u{0007}char"] {
+        let document = CredentialDocument::new(CredentialFlow::OAuth {
+            provider: OAuthProvider::Onedrive,
+            token: token.clone(),
+            options: BTreeMap::from([("drive_id".to_owned(), illegal.to_owned())]),
+        });
+        assert!(matches!(
+            validate_document(&document).unwrap_err(),
+            CredsError::IllegalOnedriveDriveId | CredsError::IllegalValueChar { .. }
+        ));
+    }
+}
+
+#[test]
+fn dropbox_and_drive_still_reject_onedrive_only_keys() {
+    let token = normalize_oauth_token(r#"{"access_token":"x"}"#).unwrap();
+    for provider in [OAuthProvider::Drive, OAuthProvider::Dropbox] {
+        for (key, value) in [("drive_id", "drive-123"), ("drive_type", "personal")] {
+            let document = CredentialDocument::new(CredentialFlow::OAuth {
+                provider,
+                token: token.clone(),
+                options: BTreeMap::from([(key.to_owned(), value.to_owned())]),
+            });
+            let err = validate_document(&document).unwrap_err();
+            assert!(
+                matches!(err, CredsError::UnknownOptionKey { .. }),
+                "{provider:?} accepted {key}: {err:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn oauth_options_cannot_shadow_the_canonical_token() {
+    let token = normalize_oauth_token(r#"{"access_token":"real","refresh_token":"r"}"#).unwrap();
+    for shadow_key in ["token", "Token", " token "] {
+        let document = CredentialDocument::new(CredentialFlow::OAuth {
+            provider: OAuthProvider::Onedrive,
+            token: token.clone(),
+            options: BTreeMap::from([(
+                shadow_key.to_owned(),
+                r#"{"access_token":"stale"}"#.to_owned(),
+            )]),
+        });
+        let err = validate_document(&document).unwrap_err();
+        assert!(
+            matches!(err, CredsError::ReservedOauthOptionKey),
+            "options key {shadow_key:?} shadowed the canonical token: {err:?}"
+        );
+    }
+}
+
+#[test]
+fn oauth_with_options_round_trips_canonical_bytes() {
+    let original = CredentialDocument::new(CredentialFlow::OAuth {
+        provider: OAuthProvider::Onedrive,
+        token: normalize_oauth_token(r#"{"access_token":"x","refresh_token":"r"}"#).unwrap(),
+        options: BTreeMap::from([
+            ("drive_id".to_owned(), "drive-123".to_owned()),
+            ("drive_type".to_owned(), "personal".to_owned()),
+        ]),
+    });
+    let bytes = original.to_canonical_bytes().unwrap();
+    let reparsed = CredentialDocument::from_bytes(&bytes).unwrap();
+    assert_eq!(reparsed, original);
+}
+
+#[test]
 fn token_containing_brackets_is_refused_at_render_time() {
     // A JSON array inside the token would put `[...]` into the config, which
     // reads back as a second remote section. The allow-list lets it through
@@ -356,6 +512,7 @@ fn token_containing_brackets_is_refused_at_render_time() {
     let document = CredentialDocument::new(CredentialFlow::OAuth {
         provider: OAuthProvider::Onedrive,
         token,
+        options: BTreeMap::new(),
     });
 
     let validated = validate_document(&document).unwrap();

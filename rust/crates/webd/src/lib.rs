@@ -35,6 +35,7 @@ mod chime_enforcer;
 mod chime_library;
 mod chime_scheduler;
 mod chimes;
+mod cloud_creds;
 mod daybucket;
 mod dto;
 mod error;
@@ -107,6 +108,8 @@ struct AppState {
     /// each tick to browsers so media lists refresh in real time (no polling).
     media_events: media_events::MediaEvents,
     wifi_mutation: Arc<tokio::sync::Mutex<()>>,
+    cloud_creds_dir: PathBuf,
+    cloud_creds_mutation: Arc<tokio::sync::Mutex<()>>,
     /// The `schedulerd`-owned chime library directory (`/data/teslausb/chimes`),
     /// kept for compatibility with the legacy scheduler proxy path.
     #[allow(dead_code)]
@@ -258,6 +261,13 @@ fn default_chime_library_dir() -> PathBuf {
         .map_or_else(|| PathBuf::from("/data/teslausb/chimes"), PathBuf::from)
 }
 
+/// The default cloud-credential directory (overridable via
+/// `WEBD_CLOUD_CREDS_DIR`).
+fn default_cloud_creds_dir() -> PathBuf {
+    std::env::var_os("WEBD_CLOUD_CREDS_DIR")
+        .map_or_else(|| PathBuf::from("/var/lib/teslausb"), PathBuf::from)
+}
+
 /// Assemble the router over explicit `gadgetd` AND `schedulerd` clients — the
 /// injection seam used by the chime-scheduler handler tests.
 fn router_with_clients(
@@ -343,6 +353,37 @@ fn router_with_all_clients_and_read_client_and_probe(
     chime_library_dir: PathBuf,
     probe: Arc<dyn sysinfo::SystemProbe>,
 ) -> Router {
+    router_with_all_clients_and_read_client_and_probe_and_cloud_creds(
+        catalog,
+        static_dir,
+        media,
+        gadget,
+        scheduler,
+        indexd,
+        read_client,
+        stats_client,
+        wifid,
+        chime_library_dir,
+        default_cloud_creds_dir(),
+        probe,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn router_with_all_clients_and_read_client_and_probe_and_cloud_creds(
+    catalog: Catalog,
+    static_dir: PathBuf,
+    media: MediaConfig,
+    gadget: Arc<dyn gadget::GadgetClient>,
+    scheduler: Arc<dyn scheduler::SchedulerClient>,
+    indexd: Arc<dyn indexd_client::IndexdClient>,
+    read_client: Arc<dyn read_client::ReadFileClient + Send + Sync>,
+    stats_client: Arc<dyn stats_client::VolumeStatsClient + Send + Sync>,
+    wifid: Arc<dyn wifid_client::WifidClient>,
+    chime_library_dir: PathBuf,
+    cloud_creds_dir: PathBuf,
+    probe: Arc<dyn sysinfo::SystemProbe>,
+) -> Router {
     let sys = SysHandle {
         probe,
         paths: Arc::new(sysinfo::SysPaths {
@@ -377,12 +418,38 @@ fn router_with_all_clients_and_read_client_and_probe(
         jobs: jobs::JobHub::new(),
         media_events,
         wifi_mutation: Arc::new(tokio::sync::Mutex::new(())),
+        cloud_creds_dir,
+        cloud_creds_mutation: Arc::new(tokio::sync::Mutex::new(())),
         chime_library_dir,
     };
     if std::env::var_os("WEBD_CHIME_ENFORCER").is_some() {
         chime_enforcer::spawn(state.clone());
     }
     route::router(state, static_dir)
+}
+
+#[cfg(test)]
+fn router_with_cloud_creds_dir(
+    catalog: Catalog,
+    static_dir: PathBuf,
+    media: MediaConfig,
+    cloud_creds_dir: PathBuf,
+) -> Router {
+    let gadget = default_gadget_client(PathBuf::from("/nonexistent/gadgetd.sock"));
+    router_with_all_clients_and_read_client_and_probe_and_cloud_creds(
+        catalog,
+        static_dir,
+        media,
+        gadget,
+        scheduler::default_client(default_scheduler_sock()),
+        indexd_client::default_client(default_indexd_sock()),
+        default_read_client(),
+        default_stats_client(),
+        wifid_client::default_client(default_wifid_sock()),
+        default_chime_library_dir(),
+        cloud_creds_dir,
+        Arc::new(sysinfo::LinuxProbe),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]

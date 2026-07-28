@@ -37,6 +37,7 @@ thiserror = "1"
 jiff = "0.2"
 scannerd = { path = "../scannerd" }
 teslausb-core = { path = "../teslausb-core" }
+teslausb-creds = { path = "../teslausb-creds" }
 # STORED-only zip writer for the clip export endpoint (Task 5.1b). mp4 is
 # already H.264-compressed, so no deflate feature is pulled in.
 zip = { version = "7", default-features = false }

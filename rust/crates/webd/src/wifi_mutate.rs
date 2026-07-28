@@ -777,7 +777,7 @@ fn render_keyfile(spec: &ProfileSpec, uuid: &str) -> String {
     out
 }
 
-fn same_origin_ok(headers: &HeaderMap) -> bool {
+pub(crate) fn same_origin_ok(headers: &HeaderMap) -> bool {
     if let Some(fetch_site) = headers.get("sec-fetch-site") {
         let Ok(value) = fetch_site.to_str() else {
             return false;

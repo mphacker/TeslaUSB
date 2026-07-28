@@ -1368,6 +1368,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "teslausb-core",
+ "teslausb-creds",
  "thiserror 1.0.69",
  "tokio",
  "tokio-stream",

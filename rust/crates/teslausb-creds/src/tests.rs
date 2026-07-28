@@ -4,9 +4,12 @@ use std::path::PathBuf;
 use crate::blob::BlobKeyMaterial;
 use crate::error::CredsError;
 use crate::hardware_root::{StaticHardwareRoot, derive_key, parse_cpuinfo_serial};
-use crate::schema::{CredentialDocument, CredentialFlow, CredentialValue, NasCredentials};
-use crate::storage::file_mode;
-use crate::validate::{parse_single_remote_conf, validate_document, validate_options_map};
+use crate::schema::{CredentialDocument, CredentialFlow, CredentialValue, NasCredentials, OAuthProvider};
+use crate::storage::{CLOUD_PROVIDER_CREDS_FILENAME, TESLA_SALT_FILENAME, file_mode};
+use crate::validate::{
+    normalize_oauth_token, parse_single_remote_conf, render_rclone_conf, validate_document,
+    validate_options_map,
+};
 use crate::{DEFAULT_KDF_ITERS, decrypt, encrypt, encrypt_with_nonce_for_test, read_blob, read_or_create_salt, write_blob_atomic};
 use zeroize::Zeroizing;
 
@@ -229,6 +232,147 @@ fn option_values_reject_control_char_injection() {
 }
 
 #[test]
+fn normalize_oauth_token_strips_markers_and_compacts_json() {
+    let wrapped = r#"
+Paste the following into your remote machine --->
+{"access_token":"ya29.token","token_type":"Bearer","refresh_token":"refresh-token","expiry":"2026-01-01T00:00:00Z"}
+<---End paste
+"#;
+    let normalized = normalize_oauth_token(wrapped).unwrap();
+    assert_eq!(
+        normalized,
+        normalize_oauth_token(
+            r#"{"access_token":"ya29.token","token_type":"Bearer","refresh_token":"refresh-token","expiry":"2026-01-01T00:00:00Z"}"#
+        )
+        .unwrap()
+    );
+}
+
+#[test]
+fn normalize_oauth_token_round_trips_bare_json() {
+    let bare =
+        r#"{"access_token":"abc","token_type":"Bearer","refresh_token":"def","expiry":"2026-01-01T00:00:00Z"}"#;
+    let expected = serde_json::to_string(&serde_json::from_str::<serde_json::Value>(bare).unwrap())
+        .unwrap();
+    assert_eq!(normalize_oauth_token(bare).unwrap(), expected);
+}
+
+#[test]
+fn normalize_oauth_token_rejects_missing_access_token_and_non_objects() {
+    let missing_access = r#"{"token_type":"Bearer"}"#;
+    let err = normalize_oauth_token(missing_access).unwrap_err();
+    assert!(matches!(err, CredsError::OauthTokenMissingAccessToken));
+
+    let array_err = normalize_oauth_token("[1,2,3]").unwrap_err();
+    assert!(matches!(array_err, CredsError::OauthTokenNotObject));
+
+    let string_err = normalize_oauth_token("\"hello\"").unwrap_err();
+    assert!(matches!(string_err, CredsError::OauthTokenNotObject));
+}
+
+#[test]
+fn normalize_oauth_token_rejects_empty_and_oversized_input() {
+    let empty_err = normalize_oauth_token(" \n\t ").unwrap_err();
+    assert!(matches!(empty_err, CredsError::EmptyOauthToken));
+
+    let oversized = format!(r#"{{"access_token":"{}"}}"#, "x".repeat(9_000));
+    let oversize_err = normalize_oauth_token(&oversized).unwrap_err();
+    assert!(matches!(oversize_err, CredsError::OauthTokenTooLong));
+}
+
+#[test]
+fn oauth_token_normalization_and_rendering_block_ini_injection() {
+    let injected_multiline = "{\"access_token\":\"x\"}\n[evil]\ntype = local\n";
+    let injected_in_string =
+        "{\"access_token\":\"x\n[evil]\ntype = local\n\",\"token_type\":\"Bearer\"}";
+
+    let multiline_err = normalize_oauth_token(injected_multiline).unwrap_err();
+    assert!(matches!(multiline_err, CredsError::Serde(_)));
+    let string_err = normalize_oauth_token(injected_in_string).unwrap_err();
+    assert!(matches!(string_err, CredsError::Serde(_)));
+
+    let accepted_tokens = [
+        r#"{"access_token":"x","token_type":"Bearer","refresh_token":"r"}"#,
+        r#"{"access_token":"x","token_type":"Bearer","scope":"Files.ReadWrite"}"#,
+        "Paste the following into your remote machine --->\n{\"access_token\":\"x\",\"token_type\":\"Bearer\"}\n<---End paste",
+    ];
+
+    for raw in accepted_tokens {
+        let token = normalize_oauth_token(raw).unwrap();
+        let document = CredentialDocument::new(CredentialFlow::OAuth {
+            provider: OAuthProvider::Onedrive,
+            token,
+        });
+        let validated = validate_document(&document).unwrap();
+        let rendered = render_rclone_conf("teslausb", &validated).unwrap();
+        let parsed = parse_single_remote_conf(&rendered).unwrap();
+        let reparsed = validate_options_map(&parsed.backend_type, &parsed.options).unwrap();
+        assert_eq!(reparsed, validated);
+    }
+}
+
+#[test]
+fn multiline_valid_json_token_is_compacted_before_rendering() {
+    // JSON allows raw newlines *between* tokens, so a pasted token can be valid
+    // JSON and still span several lines (pretty-printed, or copied out of a
+    // file). Emitted verbatim those newlines would start new config lines.
+    // Compact re-serialization in `normalize_oauth_token` is what prevents it.
+    let pretty = "{\n  \"access_token\": \"x\",\n  \"token_type\": \"Bearer\"\n}";
+
+    let token = normalize_oauth_token(pretty).unwrap();
+    assert!(!token.contains('\n'), "normalized token still spans lines");
+
+    let document = CredentialDocument::new(CredentialFlow::OAuth {
+        provider: OAuthProvider::Onedrive,
+        token,
+    });
+    let validated = validate_document(&document).unwrap();
+    let rendered = render_rclone_conf("teslausb", &validated).unwrap();
+
+    let section_lines = rendered
+        .lines()
+        .filter(|line| line.starts_with('['))
+        .count();
+    assert_eq!(section_lines, 1, "rendered config has {section_lines} sections");
+
+    let parsed = parse_single_remote_conf(&rendered).unwrap();
+    let reparsed = validate_options_map(&parsed.backend_type, &parsed.options).unwrap();
+    assert_eq!(reparsed, validated);
+}
+
+#[test]
+fn token_containing_brackets_is_refused_at_render_time() {
+    // A JSON array inside the token would put `[...]` into the config, which
+    // reads back as a second remote section. The allow-list lets it through
+    // (brackets are not control characters), so the renderer is the layer that
+    // refuses it — it fails closed rather than emitting the line. Real rclone
+    // OAuth tokens are flat string maps, so this rejects nothing legitimate.
+    let token = normalize_oauth_token("{\"access_token\":\"x\",\"a\":\n[\"evil\"]}").unwrap();
+    let document = CredentialDocument::new(CredentialFlow::OAuth {
+        provider: OAuthProvider::Onedrive,
+        token,
+    });
+
+    let validated = validate_document(&document).unwrap();
+    let err = render_rclone_conf("teslausb", &validated).unwrap_err();
+    assert!(matches!(err, CredsError::IllegalRenderedValue { .. }));
+}
+
+#[test]
+fn render_rclone_conf_rejects_invalid_remote_name() {
+    let validated = validate_options_map(
+        "onedrive",
+        &BTreeMap::from([(
+            "token".to_owned(),
+            normalize_oauth_token(r#"{"access_token":"abc"}"#).unwrap(),
+        )]),
+    )
+    .unwrap();
+    let err = render_rclone_conf("teslausb bad", &validated).unwrap_err();
+    assert!(matches!(err, CredsError::InvalidRemoteName));
+}
+
+#[test]
 fn option_values_trim_and_accept_safe_values() {
     let mut options = BTreeMap::new();
     options.insert("url".to_owned(), "https://dav.example".to_owned());
@@ -268,8 +412,8 @@ fn typed_map_is_canonical_and_stable() {
 fn salt_create_once_and_blob_atomic_io() {
     let base = test_data_path("storage");
     std::fs::create_dir_all(&base).unwrap();
-    let salt_path = base.join("tesla_salt.bin");
-    let blob_path = base.join("cloud_provider_creds.bin");
+    let salt_path = base.join(TESLA_SALT_FILENAME);
+    let blob_path = base.join(CLOUD_PROVIDER_CREDS_FILENAME);
 
     let salt1 = read_or_create_salt(&salt_path).unwrap();
     let salt2 = read_or_create_salt(&salt_path).unwrap();
@@ -291,7 +435,7 @@ fn read_salt_rejects_insecure_permissions() {
 
     let base = test_data_path("salt-perms");
     std::fs::create_dir_all(&base).unwrap();
-    let salt_path = base.join("tesla_salt.bin");
+    let salt_path = base.join(TESLA_SALT_FILENAME);
     let salt = read_or_create_salt(&salt_path).unwrap();
     std::fs::write(&salt_path, salt).unwrap();
 

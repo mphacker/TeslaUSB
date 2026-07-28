@@ -84,4 +84,28 @@ pub enum CredsError {
         /// File mode bits (lowest 9 bits).
         mode: u32,
     },
+    /// OAuth token text is empty after normalization.
+    #[error("oauth token is empty")]
+    EmptyOauthToken,
+    /// OAuth token text is unexpectedly large.
+    #[error("oauth token exceeds size limit")]
+    OauthTokenTooLong,
+    /// OAuth token must be a JSON object.
+    #[error("oauth token must be a JSON object")]
+    OauthTokenNotObject,
+    /// OAuth token object is missing `access_token`.
+    #[error("oauth token must contain non-empty `access_token`")]
+    OauthTokenMissingAccessToken,
+    /// Render target remote name is invalid.
+    #[error("remote name must match [A-Za-z0-9_-]+")]
+    InvalidRemoteName,
+    /// Render target contains an invalid option key.
+    #[error("rclone config key contains illegal characters: {0}")]
+    IllegalRenderedKey(String),
+    /// Render target contains an invalid value.
+    #[error("rclone config value contains illegal characters: {key}")]
+    IllegalRenderedValue {
+        /// Key whose value was rejected.
+        key: String,
+    },
 }

@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use serde_json::Value;
+
 use crate::error::CredsError;
 use crate::schema::{
     CredentialDocument, CredentialFlow, CredentialValue, NasCredentials, OAuthProvider,
@@ -60,6 +62,86 @@ pub struct ParsedRemoteConfig {
     pub backend_type: String,
     /// Parsed option keys/values (excluding `type`).
     pub options: BTreeMap<String, String>,
+}
+
+/// Normalize pasted `rclone authorize` output to a compact JSON token string.
+///
+/// The returned JSON is serialized by `serde_json::to_string`, which escapes
+/// control characters in string values. This guarantees the token cannot contain
+/// literal newlines or raw `[`/`]` section markers that could inject extra INI
+/// sections when later rendered into an `rclone.conf` entry.
+///
+/// # Errors
+///
+/// Returns [`CredsError`] when the token is empty, too large, not a JSON object,
+/// or missing a non-empty `access_token`.
+pub fn normalize_oauth_token(raw: &str) -> Result<String, CredsError> {
+    let mut text = raw.trim();
+    if let Some((_, rest)) = text.rsplit_once("--->") {
+        text = rest;
+    }
+    if let Some((before, _)) = text.split_once("<---") {
+        text = before;
+    }
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err(CredsError::EmptyOauthToken);
+    }
+    if trimmed.len() > 8_192 {
+        return Err(CredsError::OauthTokenTooLong);
+    }
+    let value = serde_json::from_str::<Value>(trimmed)?;
+    let Some(object) = value.as_object() else {
+        return Err(CredsError::OauthTokenNotObject);
+    };
+    let has_access_token = object
+        .get("access_token")
+        .and_then(Value::as_str)
+        .is_some_and(|token| !token.is_empty());
+    if !has_access_token {
+        return Err(CredsError::OauthTokenMissingAccessToken);
+    }
+    Ok(serde_json::to_string(&value)?)
+}
+
+/// Render a single `rclone.conf` remote section from a validated remote.
+///
+/// # Errors
+///
+/// Returns [`CredsError`] if `remote_name` is invalid, or if any rendered key or
+/// value contains illegal bytes for INI emission.
+pub fn render_rclone_conf(
+    remote_name: &str,
+    remote: &ValidatedRemote,
+) -> Result<String, CredsError> {
+    if !is_valid_remote_name(remote_name) {
+        return Err(CredsError::InvalidRemoteName);
+    }
+    if has_illegal_render_bytes(&remote.backend_type) {
+        return Err(CredsError::IllegalRenderedValue {
+            key: "type".to_owned(),
+        });
+    }
+    let mut out = String::new();
+    out.push('[');
+    out.push_str(remote_name);
+    out.push_str("]\n");
+    out.push_str("type = ");
+    out.push_str(&remote.backend_type);
+    out.push('\n');
+    for (key, value) in &remote.options {
+        if !is_valid_render_key(key) {
+            return Err(CredsError::IllegalRenderedKey(key.clone()));
+        }
+        if has_illegal_render_bytes(value) {
+            return Err(CredsError::IllegalRenderedValue { key: key.clone() });
+        }
+        out.push_str(key);
+        out.push_str(" = ");
+        out.push_str(value);
+        out.push('\n');
+    }
+    Ok(out)
 }
 
 /// Validate a credential document and emit a sanitized in-memory remote.
@@ -313,4 +395,24 @@ fn normalize_non_empty(value: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|text| !text.is_empty())
         .map(str::to_owned)
+}
+
+fn is_valid_remote_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn is_valid_render_key(key: &str) -> bool {
+    !key.is_empty()
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+fn has_illegal_render_bytes(value: &str) -> bool {
+    value
+        .bytes()
+        .any(|byte| byte <= 0x1f || byte == 0x7f || byte == b'[' || byte == b']')
 }

@@ -22,10 +22,13 @@ pub use schema::{
     CredentialDocument, CredentialFlow, CredentialValue, NasCredentials, OAuthProvider,
     S3StyleProvider,
 };
-pub use storage::{read_blob, read_or_create_salt, read_salt, write_blob_atomic};
+pub use storage::{
+    CLOUD_PROVIDER_CREDS_FILENAME, TESLA_SALT_FILENAME, read_blob, read_or_create_salt, read_salt,
+    write_blob_atomic,
+};
 pub use validate::{
-    ALLOWED_BACKEND_TYPES, ValidatedRemote, parse_single_remote_conf, validate_document,
-    validate_options_map,
+    ALLOWED_BACKEND_TYPES, ValidatedRemote, normalize_oauth_token, parse_single_remote_conf,
+    render_rclone_conf, validate_document, validate_options_map,
 };
 
 /// Current credential schema version.

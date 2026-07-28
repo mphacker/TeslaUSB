@@ -5,6 +5,11 @@ use std::path::{Path, PathBuf};
 
 use crate::{CredsError, SALT_LEN};
 
+/// Filename for the encrypted credential blob.
+pub const CLOUD_PROVIDER_CREDS_FILENAME: &str = "cloud_provider_creds.bin";
+/// Filename for the credential KDF salt.
+pub const TESLA_SALT_FILENAME: &str = "tesla_salt.bin";
+
 /// Read `tesla_salt.bin`, creating it once if absent.
 ///
 /// New files are generated as 32 CSPRNG bytes, mode `0600`.

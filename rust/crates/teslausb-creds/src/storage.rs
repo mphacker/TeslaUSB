@@ -1,6 +1,5 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use crate::{CredsError, SALT_LEN};
@@ -116,7 +115,16 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), CredsError> {
 
 fn open_secure_temp(path: &Path) -> Result<File, CredsError> {
     let mut opts = OpenOptions::new();
-    opts.write(true).create_new(true).mode(0o600);
+    opts.write(true).create_new(true);
+    // The 0600 creation mode is the security control on the real (Linux) target.
+    // Gated only so the crate still COMPILES on a Windows dev host — webd depends
+    // on it, and the SPA UAT harness builds webd natively there.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        opts.mode(0o600);
+    }
     Ok(opts.open(path)?)
 }
 
@@ -148,7 +156,7 @@ fn temp_path(path: &Path) -> Result<PathBuf, CredsError> {
     Ok(path.with_file_name(temp_name))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn file_mode(path: &Path) -> Result<u32, CredsError> {
     use std::os::unix::fs::PermissionsExt;
 

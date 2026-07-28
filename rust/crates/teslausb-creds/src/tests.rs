@@ -5,12 +5,17 @@ use crate::blob::BlobKeyMaterial;
 use crate::error::CredsError;
 use crate::hardware_root::{StaticHardwareRoot, derive_key, parse_cpuinfo_serial};
 use crate::schema::{CredentialDocument, CredentialFlow, CredentialValue, NasCredentials, OAuthProvider};
+// Storage-permission tests are unix-only; the crate itself compiles on Windows so
+// webd (which depends on it) can be built by the SPA UAT harness there.
+#[cfg(unix)]
 use crate::storage::{CLOUD_PROVIDER_CREDS_FILENAME, TESLA_SALT_FILENAME, file_mode};
 use crate::validate::{
     normalize_oauth_token, parse_single_remote_conf, render_rclone_conf, validate_document,
     validate_options_map,
 };
-use crate::{DEFAULT_KDF_ITERS, decrypt, encrypt, encrypt_with_nonce_for_test, read_blob, read_or_create_salt, write_blob_atomic};
+use crate::{DEFAULT_KDF_ITERS, decrypt, encrypt, encrypt_with_nonce_for_test};
+#[cfg(unix)]
+use crate::{read_blob, read_or_create_salt, write_blob_atomic};
 use zeroize::Zeroizing;
 
 const TEST_SALT: [u8; 32] = [
@@ -408,6 +413,7 @@ fn typed_map_is_canonical_and_stable() {
     assert_eq!(bytes1, bytes2);
 }
 
+#[cfg(unix)]
 #[test]
 fn salt_create_once_and_blob_atomic_io() {
     let base = test_data_path("storage");
@@ -429,6 +435,7 @@ fn salt_create_once_and_blob_atomic_io() {
     let _ = std::fs::remove_dir(base);
 }
 
+#[cfg(unix)]
 #[test]
 fn read_salt_rejects_insecure_permissions() {
     use std::os::unix::fs::PermissionsExt;

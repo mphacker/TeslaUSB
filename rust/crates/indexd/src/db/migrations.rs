@@ -929,6 +929,62 @@ mod tests {
     }
 
     #[test]
+    fn migrates_from_v5_with_existing_rows_to_latest() {
+        // The deployed device sits at v5, so the next release applies BOTH v6 and
+        // v7 in a single transaction. Seed real rows first: migrating an empty
+        // table would not show that the ADD COLUMNs and the new partial UNIQUE
+        // index tolerate pre-existing data.
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        conn.execute_batch(V1_SQL).unwrap();
+        conn.execute_batch(V2_SQL).unwrap();
+        conn.execute_batch(V3_SQL).unwrap();
+        conn.execute_batch(V4_SQL).unwrap();
+        conn.execute_batch(V5_SQL).unwrap();
+        for version in 1_i64..=5 {
+            conn.execute(
+                "INSERT INTO schema_version(version, applied_at, note) VALUES(?1, 0, 'seed')",
+                params![version],
+            )
+            .unwrap();
+        }
+        for n in 0..3_i64 {
+            conn.execute(
+                "INSERT INTO archive_items
+                    (folder_class, path, archived_at, created_at, updated_at)
+                 VALUES ('RecentClips', ?1, 1700000000, 1700000000, 1700000000)",
+                params![format!("/data/teslausb/archive/RecentClips/2026-07-27/e{n}")],
+            )
+            .unwrap();
+        }
+
+        assert_eq!(apply_migrations(&mut conn).unwrap(), LATEST_VERSION);
+        assert_eq!(apply_migrations(&mut conn).unwrap(), LATEST_VERSION);
+
+        let (total, keyed): (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), COUNT(source_event_key) FROM archive_items",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(total, 3, "existing archive rows must survive the upgrade");
+        assert_eq!(keyed, 0, "v7 identity columns backfill as NULL");
+
+        // The v6 and v7 cloud tables must both exist after the two-step upgrade.
+        let sets: i64 = conn
+            .query_row("SELECT COUNT(*) FROM cloud_parent_upload_sets", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(sets, 0);
+        let queue: i64 = conn
+            .query_row("SELECT COUNT(*) FROM cloud_upload_queue", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(queue, 0);
+    }
+
+    #[test]
     fn v7_forward_only_guard_rejects_future_schema() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();

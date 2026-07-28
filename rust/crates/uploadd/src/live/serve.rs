@@ -1,9 +1,14 @@
+use std::fs::OpenOptions;
 use std::io::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use libc::c_int;
+use teslausb_creds::{
+    BlobKeyMaterial, CLOUD_PROVIDER_CREDS_FILENAME, CredentialDocument, HardwareRoot, ProcHardwareRoot,
+    TESLA_SALT_FILENAME, decrypt, derive_key, read_blob, read_salt, render_rclone_conf, validate_document,
+};
 
 use crate::config::UploaddConfig;
 use crate::indexd_client::{INDEXD_SOCKET_PATH, UnixIndexdClient};
@@ -18,8 +23,12 @@ use crate::time::Waiter;
 const DEFAULT_WIFID_SOCKET: &str = "/run/teslausb/wifid.sock";
 const DEFAULT_GOVERNOR_FILE: &str = "/run/teslausb/retentiond.governor.json";
 const DEFAULT_ARCHIVE_ROOT: &str = "/srv/teslausb/archive";
+const DEFAULT_CLOUD_STATE_DIR: &str = "/var/lib/teslausb";
+const DEFAULT_RUNTIME_DIR: &str = "/run/teslausb";
 const DEFAULT_RCLONE_BINARY: &str = "rclone";
 const DEFAULT_RCLONE_REMOTE: &str = "teslausb-cloud";
+const RENDERED_REMOTE_NAME: &str = "teslausb";
+const RENDERED_CONFIG_FILENAME: &str = "rclone.conf";
 const DEFAULT_INTERVAL_SECS: u64 = 5;
 const MAX_DRAIN_STEPS: u32 = 4_096;
 const WAIT_SLICE_MS: u64 = 250;
@@ -31,9 +40,12 @@ struct ServeArgs {
     indexd_socket: PathBuf,
     wifid_socket: PathBuf,
     archive_root: String,
+    cloud_state_dir: String,
+    runtime_dir: String,
     destination_id: String,
     remote_prefix: String,
     rclone_remote: String,
+    rclone_remote_is_default: bool,
     rclone_binary: String,
     rclone_config: Option<String>,
     interval_secs: u64,
@@ -53,10 +65,20 @@ impl Default for ServeArgs {
             ),
             archive_root: std::env::var("UPLOADD_ARCHIVE_ROOT")
                 .unwrap_or_else(|_| DEFAULT_ARCHIVE_ROOT.to_owned()),
+            cloud_state_dir: std::env::var("UPLOADD_CLOUD_STATE_DIR")
+                .unwrap_or_else(|_| DEFAULT_CLOUD_STATE_DIR.to_owned()),
+            runtime_dir: std::env::var("UPLOADD_RUNTIME_DIR")
+                .unwrap_or_else(|_| DEFAULT_RUNTIME_DIR.to_owned()),
             destination_id: std::env::var("UPLOADD_DESTINATION_ID").unwrap_or_default(),
             remote_prefix: std::env::var("UPLOADD_REMOTE_PREFIX").unwrap_or_default(),
             rclone_remote: std::env::var("UPLOADD_RCLONE_REMOTE")
-                .unwrap_or_else(|_| DEFAULT_RCLONE_REMOTE.to_owned()),
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or_else(|| DEFAULT_RCLONE_REMOTE.to_owned()),
+            rclone_remote_is_default: std::env::var("UPLOADD_RCLONE_REMOTE")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .is_none(),
             rclone_binary: std::env::var("UPLOADD_RCLONE_BINARY")
                 .unwrap_or_else(|_| DEFAULT_RCLONE_BINARY.to_owned()),
             rclone_config: std::env::var("UPLOADD_RCLONE_CONFIG").ok().filter(|v| !v.is_empty()),
@@ -241,6 +263,104 @@ fn write_stderr_line(line: &str) {
     let _ = writeln!(stderr, "{line}");
 }
 
+fn resolve_runtime_rclone_config(
+    parsed: &ServeArgs,
+    hardware_root: &dyn HardwareRoot,
+    mut log: impl FnMut(&str),
+) -> Option<PathBuf> {
+    let runtime_config = Path::new(&parsed.runtime_dir).join(RENDERED_CONFIG_FILENAME);
+    match std::fs::remove_file(&runtime_config) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => log(&format!(
+            "uploadd serve: failed to remove stale runtime rclone config `{}`: {err}; continuing",
+            runtime_config.display()
+        )),
+    }
+    if parsed.rclone_config.is_some() {
+        return None;
+    }
+    render_runtime_rclone_config(parsed, &runtime_config, hardware_root, &mut log)
+}
+
+fn render_runtime_rclone_config(
+    parsed: &ServeArgs,
+    runtime_config: &Path,
+    hardware_root: &dyn HardwareRoot,
+    mut log: impl FnMut(&str),
+) -> Option<PathBuf> {
+    let blob_path = Path::new(&parsed.cloud_state_dir).join(CLOUD_PROVIDER_CREDS_FILENAME);
+    if !blob_path.exists() {
+        return None;
+    }
+
+    let rendered = (|| -> Result<String, teslausb_creds::CredsError> {
+        let blob = read_blob(&blob_path)?;
+        let salt = read_salt(&Path::new(&parsed.cloud_state_dir).join(TESLA_SALT_FILENAME))?;
+        let key = derive_key(hardware_root, &salt, teslausb_creds::DEFAULT_KDF_ITERS)?;
+        let material = BlobKeyMaterial {
+            key,
+            salt,
+            kdf_iters: teslausb_creds::DEFAULT_KDF_ITERS,
+        };
+        let plaintext = decrypt(&blob, &material)?;
+        let document = CredentialDocument::from_bytes(&plaintext)?;
+        let validated = validate_document(&document)?;
+        render_rclone_conf(RENDERED_REMOTE_NAME, &validated)
+    })();
+
+    match rendered {
+        Ok(contents) => match write_runtime_rclone_config(runtime_config, &contents) {
+            Ok(()) => Some(runtime_config.to_path_buf()),
+            Err(err) => {
+                log(&format!(
+                    "uploadd serve: failed to write runtime rclone config `{}`: {err}; continuing without rendered cloud credentials",
+                    runtime_config.display()
+                ));
+                None
+            }
+        },
+        Err(err) => {
+            log(&format!(
+                "uploadd serve: cloud credentials unreadable ({err}); continuing without cloud upload config. Re-save cloud credentials in the web UI."
+            ));
+            None
+        }
+    }
+}
+
+fn write_runtime_rclone_config(path: &Path, contents: &str) -> Result<(), std::io::Error> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut opts = OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(path)?;
+    file.write_all(contents.as_bytes())?;
+    file.sync_all()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+fn effective_rclone_remote_name(parsed: &ServeArgs, rendered_runtime_config: bool) -> String {
+    if rendered_runtime_config && parsed.rclone_remote_is_default {
+        RENDERED_REMOTE_NAME.to_owned()
+    } else {
+        parsed.rclone_remote.clone()
+    }
+}
+
 fn parse_serve_args(args: &[String]) -> Result<ServeArgs, String> {
     let mut parsed = ServeArgs::default();
     let mut iter = args.iter();
@@ -257,6 +377,12 @@ fn parse_serve_args(args: &[String]) -> Result<ServeArgs, String> {
             "--archive-root" => {
                 parsed.archive_root = next_arg_value(&mut iter, "--archive-root")?;
             }
+            "--cloud-state-dir" => {
+                parsed.cloud_state_dir = next_arg_value(&mut iter, "--cloud-state-dir")?;
+            }
+            "--runtime-dir" => {
+                parsed.runtime_dir = next_arg_value(&mut iter, "--runtime-dir")?;
+            }
             "--destination-id" => {
                 parsed.destination_id = next_arg_value(&mut iter, "--destination-id")?;
             }
@@ -265,6 +391,7 @@ fn parse_serve_args(args: &[String]) -> Result<ServeArgs, String> {
             }
             "--rclone-remote" => {
                 parsed.rclone_remote = next_arg_value(&mut iter, "--rclone-remote")?;
+                parsed.rclone_remote_is_default = false;
             }
             "--rclone-binary" => {
                 parsed.rclone_binary = next_arg_value(&mut iter, "--rclone-binary")?;
@@ -288,6 +415,12 @@ fn parse_serve_args(args: &[String]) -> Result<ServeArgs, String> {
 
     if parsed.archive_root.trim().is_empty() {
         return Err("uploadd serve: --archive-root must be non-empty.".to_owned());
+    }
+    if parsed.cloud_state_dir.trim().is_empty() {
+        return Err("uploadd serve: --cloud-state-dir must be non-empty.".to_owned());
+    }
+    if parsed.runtime_dir.trim().is_empty() {
+        return Err("uploadd serve: --runtime-dir must be non-empty.".to_owned());
     }
     if parsed.destination_id.is_empty() || parsed.destination_id.len() > 128 {
         return Err("uploadd serve: --destination-id must be 1..=128 bytes.".to_owned());
@@ -349,6 +482,13 @@ pub fn run_serve(args: &[String]) -> ExitCode {
         write_stderr_line(&format!("uploadd serve: invalid config: {reason}"));
         return ExitCode::FAILURE;
     }
+    let rendered_runtime_config =
+        resolve_runtime_rclone_config(&parsed, &ProcHardwareRoot, write_stderr_line);
+    let rclone_config = parsed
+        .rclone_config
+        .clone()
+        .or_else(|| rendered_runtime_config.as_ref().map(|path| path.to_string_lossy().into_owned()));
+    let rclone_remote = effective_rclone_remote_name(&parsed, rendered_runtime_config.is_some());
 
     install_shutdown_handlers();
 
@@ -375,8 +515,8 @@ pub fn run_serve(args: &[String]) -> ExitCode {
     };
     let remote = RcloneRemote {
         binary: parsed.rclone_binary,
-        name: parsed.rclone_remote,
-        config_path: parsed.rclone_config,
+        name: rclone_remote,
+        config_path: rclone_config,
     };
     let runner = LiveCommandRunner;
     let waiter = LiveWaiter;
@@ -415,10 +555,12 @@ pub fn run_serve(args: &[String]) -> ExitCode {
 #[must_use]
 pub fn serve_usage() -> String {
     "uploadd serve [--indexd-socket <path>] [--wifid-socket <path>] \
---archive-root <path> --destination-id <id> [--remote-prefix <prefix>] \
+[--archive-root <path>] [--cloud-state-dir <path>] [--runtime-dir <path>] \
+--destination-id <id> [--remote-prefix <prefix>] \
 [--rclone-remote <name>] [--rclone-binary <path>] [--rclone-config <path>] \
 [--interval-secs <u64>] [--max-parents-per-pass <u32>] [--once]\n\
 env fallback: UPLOADD_INDEXD_SOCKET, UPLOADD_WIFID_SOCKET, UPLOADD_ARCHIVE_ROOT, \
+UPLOADD_CLOUD_STATE_DIR, UPLOADD_RUNTIME_DIR, \
 UPLOADD_DESTINATION_ID, UPLOADD_REMOTE_PREFIX, UPLOADD_RCLONE_REMOTE, \
 UPLOADD_RCLONE_BINARY, UPLOADD_RCLONE_CONFIG, UPLOADD_INTERVAL_SECS, \
 UPLOADD_MAX_PARENTS_PER_PASS"
@@ -429,9 +571,18 @@ UPLOADD_MAX_PARENTS_PER_PASS"
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use std::cell::{Cell, RefCell};
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
     use std::rc::Rc;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
+    use teslausb_creds::{
+        BlobKeyMaterial, CredentialDocument, CredentialFlow, OAuthProvider, StaticHardwareRoot, encrypt,
+        read_or_create_salt, write_blob_atomic,
+    };
 
     #[derive(Default)]
     struct FakeProducer {
@@ -495,6 +646,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+
+    fn unique_path(prefix: &str) -> PathBuf {
+        let unique = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("{prefix}-{}-{unique}", std::process::id()))
+    }
+
+    fn write_valid_oauth_blob(cloud_state_dir: &Path, root: &StaticHardwareRoot) {
+        fs::create_dir_all(cloud_state_dir).expect("create cloud dir");
+        let salt_path = cloud_state_dir.join(TESLA_SALT_FILENAME);
+        let blob_path = cloud_state_dir.join(CLOUD_PROVIDER_CREDS_FILENAME);
+        let salt = read_or_create_salt(&salt_path).expect("create salt");
+        let key = derive_key(root, &salt, teslausb_creds::DEFAULT_KDF_ITERS).expect("derive key");
+        let material = BlobKeyMaterial {
+            key,
+            salt,
+            kdf_iters: teslausb_creds::DEFAULT_KDF_ITERS,
+        };
+        let token = r#"{"access_token":"token-123","expiry":"2026-01-01T00:00:00Z"}"#.to_owned();
+        let doc = CredentialDocument::new(CredentialFlow::OAuth {
+            provider: OAuthProvider::Onedrive,
+            token,
+        });
+        let plaintext = doc.to_canonical_bytes().expect("serialize doc");
+        let blob = encrypt(&plaintext, &material).expect("encrypt blob");
+        write_blob_atomic(&blob_path, &blob).expect("write blob");
     }
 
     #[test]
@@ -600,6 +779,145 @@ mod tests {
         assert_eq!(executor.producer.calls.get(), 1);
         assert_eq!(drain_state.borrow().calls, 1);
         assert_eq!(waits.borrow().len(), 1);
+    }
+
+    #[test]
+    fn rendered_config_round_trips_and_has_secure_permissions() {
+        let base = unique_path("uploadd-render-roundtrip");
+        let cloud_state_dir = base.join("state");
+        let runtime_dir = base.join("run");
+        let root = StaticHardwareRoot::new("00000000deadbeef", "uploadd-test-machine");
+        write_valid_oauth_blob(&cloud_state_dir, &root);
+        let parsed = ServeArgs {
+            cloud_state_dir: cloud_state_dir.to_string_lossy().into_owned(),
+            runtime_dir: runtime_dir.to_string_lossy().into_owned(),
+            rclone_config: None,
+            ..ServeArgs::default()
+        };
+        let mut logs = Vec::<String>::new();
+        let rendered = resolve_runtime_rclone_config(&parsed, &root, |line| logs.push(line.to_owned()));
+        let rendered_path = rendered.expect("rendered path");
+        let text = fs::read_to_string(&rendered_path).expect("read rendered config");
+        assert_eq!(text.matches("[teslausb]").count(), 1);
+        assert!(text.contains("type = onedrive"));
+        assert!(text.contains("token = {\"access_token\":\"token-123\",\"expiry\":\"2026-01-01T00:00:00Z\"}"));
+        #[cfg(unix)]
+        assert_eq!(fs::metadata(&rendered_path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert!(logs.is_empty(), "unexpected logs: {logs:?}");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn stale_runtime_config_is_replaced_not_appended() {
+        let base = unique_path("uploadd-render-stale");
+        let cloud_state_dir = base.join("state");
+        let runtime_dir = base.join("run");
+        let root = StaticHardwareRoot::new("00000000deadbeef", "uploadd-test-machine");
+        write_valid_oauth_blob(&cloud_state_dir, &root);
+        fs::create_dir_all(&runtime_dir).expect("create runtime dir");
+        fs::write(runtime_dir.join(RENDERED_CONFIG_FILENAME), "[stale]\nmarker = keep-me\n")
+            .expect("write stale config");
+        let parsed = ServeArgs {
+            cloud_state_dir: cloud_state_dir.to_string_lossy().into_owned(),
+            runtime_dir: runtime_dir.to_string_lossy().into_owned(),
+            rclone_config: None,
+            ..ServeArgs::default()
+        };
+        let rendered = resolve_runtime_rclone_config(&parsed, &root, |_line| {});
+        let rendered_path = rendered.expect("rendered path");
+        let text = fs::read_to_string(&rendered_path).expect("read rendered config");
+        assert_eq!(text.matches("[teslausb]").count(), 1);
+        assert!(!text.contains("[stale]"));
+        assert!(!text.contains("keep-me"));
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn corrupt_blob_keeps_running_and_preserves_blob_file() {
+        let base = unique_path("uploadd-render-corrupt");
+        let cloud_state_dir = base.join("state");
+        let runtime_dir = base.join("run");
+        fs::create_dir_all(&cloud_state_dir).expect("create cloud dir");
+        let _ = read_or_create_salt(&cloud_state_dir.join(TESLA_SALT_FILENAME)).expect("create salt");
+        let blob_path = cloud_state_dir.join(CLOUD_PROVIDER_CREDS_FILENAME);
+        fs::write(&blob_path, b"corrupt").expect("write corrupt blob");
+        let parsed = ServeArgs {
+            cloud_state_dir: cloud_state_dir.to_string_lossy().into_owned(),
+            runtime_dir: runtime_dir.to_string_lossy().into_owned(),
+            rclone_config: None,
+            ..ServeArgs::default()
+        };
+        let root = StaticHardwareRoot::new("00000000deadbeef", "uploadd-test-machine");
+        let mut logs = Vec::<String>::new();
+        let rendered = resolve_runtime_rclone_config(&parsed, &root, |line| logs.push(line.to_owned()));
+        assert!(rendered.is_none());
+        assert!(blob_path.exists());
+        assert!(!runtime_dir.join(RENDERED_CONFIG_FILENAME).exists());
+        assert!(logs.iter().any(|line| line.contains("cloud credentials unreadable")));
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn explicit_rclone_config_override_skips_rendering() {
+        let base = unique_path("uploadd-render-override");
+        let cloud_state_dir = base.join("state");
+        let runtime_dir = base.join("run");
+        let root = StaticHardwareRoot::new("00000000deadbeef", "uploadd-test-machine");
+        write_valid_oauth_blob(&cloud_state_dir, &root);
+        fs::create_dir_all(&runtime_dir).expect("create runtime dir");
+        fs::write(runtime_dir.join(RENDERED_CONFIG_FILENAME), "[stale]\n").expect("write stale config");
+        let parsed = ServeArgs {
+            cloud_state_dir: cloud_state_dir.to_string_lossy().into_owned(),
+            runtime_dir: runtime_dir.to_string_lossy().into_owned(),
+            rclone_config: Some("/explicit-rclone.conf".to_owned()),
+            ..ServeArgs::default()
+        };
+        let rendered = resolve_runtime_rclone_config(&parsed, &root, |_line| {});
+        assert!(rendered.is_none());
+        assert!(!runtime_dir.join(RENDERED_CONFIG_FILENAME).exists());
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn missing_blob_skips_render_without_errors() {
+        let base = unique_path("uploadd-render-missing");
+        let cloud_state_dir = base.join("state");
+        let runtime_dir = base.join("run");
+        let parsed = ServeArgs {
+            cloud_state_dir: cloud_state_dir.to_string_lossy().into_owned(),
+            runtime_dir: runtime_dir.to_string_lossy().into_owned(),
+            rclone_config: None,
+            ..ServeArgs::default()
+        };
+        let root = StaticHardwareRoot::new("00000000deadbeef", "uploadd-test-machine");
+        let mut logs = Vec::<String>::new();
+        let rendered = resolve_runtime_rclone_config(&parsed, &root, |line| logs.push(line.to_owned()));
+        assert!(rendered.is_none());
+        assert!(logs.is_empty(), "unexpected logs: {logs:?}");
+        assert!(!runtime_dir.join(RENDERED_CONFIG_FILENAME).exists());
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn rendered_config_switches_default_remote_name_to_teslausb() {
+        let parsed = ServeArgs {
+            rclone_remote: DEFAULT_RCLONE_REMOTE.to_owned(),
+            rclone_remote_is_default: true,
+            ..ServeArgs::default()
+        };
+        let remote = effective_rclone_remote_name(&parsed, true);
+        assert_eq!(remote, "teslausb");
+    }
+
+    #[test]
+    fn explicit_remote_name_is_preserved_when_rendering() {
+        let parsed = ServeArgs {
+            rclone_remote: "custom-remote".to_owned(),
+            rclone_remote_is_default: false,
+            ..ServeArgs::default()
+        };
+        let remote = effective_rclone_remote_name(&parsed, true);
+        assert_eq!(remote, "custom-remote");
     }
 
     #[test]

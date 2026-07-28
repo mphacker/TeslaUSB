@@ -9,7 +9,15 @@
 # that lands the binary's `serve` exits non-zero by design. So the installer
 # copies this unit FILE but does NOT enable/start it (TESLAUSB_STAGED_SERVICES in
 # setup-lib/common.sh). When the live loop lands: move the name into
-# TESLAUSB_APP_SERVICES and add the cloud credential via LoadCredential=.
+# TESLAUSB_APP_SERVICES.
+#
+# NOTE on LoadCredential=: the contract (cloud-provider-creds.md §5) wants the
+# credential blob passed via systemd's $CREDENTIALS_DIRECTORY. Deliberately NOT
+# wired yet, for two reasons: uploadd currently opens the blob straight from
+# --cloud-state-dir and never reads $CREDENTIALS_DIRECTORY (so the directive would
+# be dead weight), and LoadCredential= with a missing source is a start-time
+# hazard on a fresh device that has no credential yet — where uploadd must start
+# normally and simply skip cloud upload. Wire both halves together, or not at all.
 #
 # Hardening note: **`MemoryMax=`/`MemoryHigh=` DO NOT WORK on this target.** The
 # Raspberry Pi OS kernel cmdline ships `cgroup_disable=memory`, so /proc/cgroups
@@ -35,7 +43,20 @@ Wants=indexd.service wifid.service network-online.target
 
 [Service]
 Type=simple
+# Runtime secrets (the rendered rclone.conf) live on tmpfs under /run/teslausb.
+# PRESERVE: /run/teslausb is SHARED with gadgetd-control, scannerd, schedulerd,
+# indexd and wifid (they all bind sockets / drop status files here). systemd does
+# NOT reference-count RuntimeDirectory across units, so without Preserve=yes a
+# `systemctl stop uploadd` — or an on-failure restart — tears down /run/teslausb
+# and unlinks those peers' LIVE sockets, silently killing the webd->gadgetd write
+# path. Mode 0750 matches the peers so the dir's mode does not flip on us.
+RuntimeDirectory=teslausb
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
 ExecStart=/usr/local/bin/uploadd serve
+# `panic=abort` and SIGKILL bypass Rust `Drop`; enforce runtime-secret cleanup
+# in systemd on every stop path.
+ExecStopPost=/usr/bin/rm -f /run/teslausb/rclone.conf
 Restart=on-failure
 RestartSec=5s
 OOMScoreAdjust=900

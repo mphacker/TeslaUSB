@@ -21,6 +21,7 @@ use crate::live::system::{LiveCommandRunner, LiveThrottleSource, LiveWaiter};
 use crate::rclone::{RcloneRemote, RcloneUploadEngine};
 use crate::serve::{DrainStop, Scheduler, SchedulerTimings};
 use crate::source::ArchiveRoot;
+use crate::throttle::{GateReason, PauseAction};
 use crate::time::Waiter;
 
 const DEFAULT_WIFID_SOCKET: &str = "/run/teslausb/wifid.sock";
@@ -30,6 +31,10 @@ const DEFAULT_CLOUD_STATE_DIR: &str = "/var/lib/teslausb";
 const DEFAULT_RUNTIME_DIR: &str = "/run/teslausb";
 const DEFAULT_RCLONE_BINARY: &str = "rclone";
 const DEFAULT_RCLONE_REMOTE: &str = "teslausb-cloud";
+/// Remote-side folder every upload is nested under. Without this the composed
+/// `remote_key` is relative to the account root, which scatters clip folders
+/// across the user's personal drive instead of keeping them in one place.
+const DEFAULT_REMOTE_PREFIX: &str = "TeslaUSB";
 const RENDERED_REMOTE_NAME: &str = "teslausb";
 const RENDERED_CONFIG_FILENAME: &str = "rclone.conf";
 const DEFAULT_INTERVAL_SECS: u64 = 5;
@@ -73,7 +78,8 @@ impl Default for ServeArgs {
             runtime_dir: std::env::var("UPLOADD_RUNTIME_DIR")
                 .unwrap_or_else(|_| DEFAULT_RUNTIME_DIR.to_owned()),
             destination_id: std::env::var("UPLOADD_DESTINATION_ID").unwrap_or_default(),
-            remote_prefix: std::env::var("UPLOADD_REMOTE_PREFIX").unwrap_or_default(),
+            remote_prefix: std::env::var("UPLOADD_REMOTE_PREFIX")
+                .unwrap_or_else(|_| DEFAULT_REMOTE_PREFIX.to_owned()),
             rclone_remote: std::env::var("UPLOADD_RCLONE_REMOTE")
                 .ok()
                 .filter(|v| !v.trim().is_empty())
@@ -113,16 +119,46 @@ struct RenderedRuntimeConfig {
 struct CycleDrainReport {
     hydrate_error: Option<String>,
     drain_error: Option<String>,
+    pause: Option<CyclePause>,
     exhausted: u32,
     skipped_missing_source_rel: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CyclePause {
+    reason: GateReason,
+    action: PauseAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct EnqueueSummary {
+    discovered_parents: u64,
+    skipped_existing_parents: u64,
+    enqueued_children: u64,
+    skipped_remote_key_too_long: u64,
+    stopped_at_parent_budget: bool,
+}
+
+impl From<&EnqueueReport> for EnqueueSummary {
+    fn from(value: &EnqueueReport) -> Self {
+        Self {
+            discovered_parents: value.discovered_parents,
+            skipped_existing_parents: value.skipped_existing_parents,
+            enqueued_children: value.enqueued_children,
+            skipped_remote_key_too_long: value.skipped_remote_key_too_long,
+            stopped_at_parent_budget: value.stopped_at_parent_budget,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[allow(clippy::struct_field_names)]
 struct CycleReport {
     producer_failure: Option<String>,
+    enqueue_summary: Option<EnqueueSummary>,
     hydrate_failure: Option<String>,
     drain_failure: Option<String>,
+    pause: Option<CyclePause>,
     exhausted: u32,
     skipped_missing_source_rel: u32,
 }
@@ -179,6 +215,10 @@ impl<C: crate::indexd_client::IndexdCloudClient> DrainPass for LiveDrainer<'_, C
         let drain_report = self
             .scheduler
             .drain_ready(self.waiter, &self.timings, self.max_steps);
+        let pause = match drain_report.stopped {
+            DrainStop::Paused { reason, action } => Some(CyclePause { reason, action }),
+            DrainStop::Idle | DrainStop::Infra(_) | DrainStop::Budget => None,
+        };
         let drain_error = match drain_report.stopped {
             DrainStop::Infra(reason) => Some(reason),
             DrainStop::Idle | DrainStop::Paused { .. } | DrainStop::Budget => None,
@@ -186,6 +226,7 @@ impl<C: crate::indexd_client::IndexdCloudClient> DrainPass for LiveDrainer<'_, C
         CycleDrainReport {
             hydrate_error,
             drain_error,
+            pause,
             exhausted: drain_report.exhausted,
             skipped_missing_source_rel: self.queue_store.take_skipped_missing_source_rel(),
         }
@@ -204,12 +245,16 @@ impl<P: ProducerPass, D: DrainPass> CycleExecutor for LoopExecutor<P, D> {
 }
 
 fn orchestrate_cycle(producer: &dyn ProducerPass, drainer: &mut dyn DrainPass) -> CycleReport {
-    let producer_failure = producer.run_pass().err();
+    let producer_result = producer.run_pass();
+    let producer_failure = producer_result.as_ref().err().cloned();
+    let enqueue_summary = producer_result.as_ref().ok().map(EnqueueSummary::from);
     let drain_report = drainer.run_pass();
     CycleReport {
         producer_failure,
+        enqueue_summary,
         hydrate_failure: drain_report.hydrate_error,
         drain_failure: drain_report.drain_error,
+        pause: drain_report.pause,
         exhausted: drain_report.exhausted,
         skipped_missing_source_rel: drain_report.skipped_missing_source_rel,
     }
@@ -223,12 +268,13 @@ fn run_loop(
     once: bool,
 ) -> u64 {
     let mut cycles: u64 = 0;
+    let mut log_state = CycleLogState::default();
     loop {
         if shutdown.is_shutdown_requested() {
             break;
         }
         let report = executor.run_cycle();
-        log_cycle_report(cycles.saturating_add(1), &report);
+        log_cycle_report(cycles.saturating_add(1), &report, &mut log_state);
         cycles = cycles.saturating_add(1);
         if once || shutdown.is_shutdown_requested() {
             break;
@@ -249,7 +295,12 @@ fn wait_between_cycles(waiter: &dyn Waiter, shutdown: &dyn ShutdownSignal, mut r
     }
 }
 
-fn log_cycle_report(cycle: u64, report: &CycleReport) {
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct CycleLogState {
+    pause: Option<CyclePause>,
+}
+
+fn log_cycle_report(cycle: u64, report: &CycleReport, state: &mut CycleLogState) {
     if let Some(reason) = &report.producer_failure {
         write_stderr_line(&format!("uploadd serve: cycle {cycle} producer error: {reason}"));
     }
@@ -270,6 +321,55 @@ fn log_cycle_report(cycle: u64, report: &CycleReport) {
             "uploadd serve: cycle {cycle} skipped {} queue row(s) with no source path",
             report.skipped_missing_source_rel
         ));
+    }
+    for line in pause_transition_lines(cycle, report, state) {
+        write_stderr_line(&line);
+    }
+}
+
+fn pause_transition_lines(
+    cycle: u64,
+    report: &CycleReport,
+    state: &mut CycleLogState,
+) -> Vec<String> {
+    if report.pause == state.pause {
+        return Vec::new();
+    }
+    let enqueue = format_enqueue_summary(report.enqueue_summary.as_ref());
+    let line = match (state.pause, report.pause) {
+        (None, Some(next)) => format!(
+            "uploadd serve: cycle {cycle} uploads paused ({:?}/{:?}); {enqueue}",
+            next.reason, next.action
+        ),
+        (Some(previous), Some(next)) => format!(
+            "uploadd serve: cycle {cycle} uploads pause changed ({:?}/{:?} -> {:?}/{:?}); {enqueue}",
+            previous.reason, previous.action, next.reason, next.action
+        ),
+        (Some(previous), None) => format!(
+            "uploadd serve: cycle {cycle} uploads resumed (was {:?}/{:?}); {enqueue}",
+            previous.reason, previous.action
+        ),
+        (None, None) => String::new(),
+    };
+    state.pause = report.pause;
+    if line.is_empty() {
+        Vec::new()
+    } else {
+        vec![line]
+    }
+}
+
+fn format_enqueue_summary(summary: Option<&EnqueueSummary>) -> String {
+    match summary {
+        Some(value) => format!(
+            "enqueue discovered={} enqueued={} skipped_existing={} skipped_key_too_long={} budget_stop={}",
+            value.discovered_parents,
+            value.enqueued_children,
+            value.skipped_existing_parents,
+            value.skipped_remote_key_too_long,
+            value.stopped_at_parent_budget
+        ),
+        None => "enqueue unavailable (producer failed)".to_owned(),
     }
 }
 
@@ -689,15 +789,14 @@ fn build_command_runner(
     {
         let baseline_cell = RefCell::new(baseline);
         // TIMING: this hook runs synchronously inside `runner.run()`, so after a
-        // `copyto` it delays the lease renewal that `transfer_and_verify` performs
-        // immediately afterwards (rclone.rs). Accepted deliberately:
+        // `copyto` it extends that subprocess call. Accepted deliberately:
         //   - the common path (token unchanged) only reads a small tmpfs file,
         //     parses it and compares two strings — sub-millisecond, no crypto;
         //   - the expensive path (PBKDF2 at DEFAULT_KDF_ITERS = 600k, ~1-3 s on
         //     this target) runs only when rclone actually rotated the token,
         //     roughly hourly, against a 60 s lease TTL;
-        //   - losing the lease costs one redundant re-upload (TransferStop::
-        //     LeaseLost -> re-acquire and retry), never a clip and never data.
+        //   - lease renewal runs in a scoped background thread during copy+verify,
+        //     so this synchronous hook does not create a renewal gap.
         // Deferring the persist to a lease-free point would need extra state in a
         // credential path where complexity is the larger risk, so we take the
         // occasional retry instead. Note a copy exceeding the TTL already loses
@@ -1038,6 +1137,7 @@ mod tests {
                 CycleDrainReport {
                     hydrate_error: None,
                     drain_error: Some("index hiccup".to_owned()),
+                    pause: None,
                     exhausted: 0,
                     skipped_missing_source_rel: 0,
                 },
@@ -1111,6 +1211,49 @@ mod tests {
         assert_eq!(executor.producer.calls.get(), 1);
         assert_eq!(drain_state.borrow().calls, 1);
         assert_eq!(waits.borrow().len(), 1);
+    }
+
+    #[test]
+    fn pause_reason_transitions_log_once_per_change() {
+        let mut state = CycleLogState::default();
+        let enqueue_summary = Some(EnqueueSummary {
+            discovered_parents: 3,
+            skipped_existing_parents: 2,
+            enqueued_children: 1,
+            skipped_remote_key_too_long: 0,
+            stopped_at_parent_budget: false,
+        });
+        let paused_report = CycleReport {
+            enqueue_summary: enqueue_summary.clone(),
+            pause: Some(CyclePause {
+                reason: GateReason::Storage,
+                action: PauseAction::DrainNoNew,
+            }),
+            ..CycleReport::default()
+        };
+        let first = pause_transition_lines(1, &paused_report, &mut state);
+        assert_eq!(first.len(), 1, "entering paused must log once");
+        let second = pause_transition_lines(2, &paused_report, &mut state);
+        assert!(second.is_empty(), "unchanged paused reason must not spam");
+
+        let changed_report = CycleReport {
+            enqueue_summary: enqueue_summary.clone(),
+            pause: Some(CyclePause {
+                reason: GateReason::Link(crate::throttle::PauseReason::LinkDown),
+                action: PauseAction::PauseAtCheckpoint,
+            }),
+            ..CycleReport::default()
+        };
+        let changed = pause_transition_lines(3, &changed_report, &mut state);
+        assert_eq!(changed.len(), 1, "changed pause reason must be logged");
+
+        let resumed_report = CycleReport {
+            enqueue_summary,
+            pause: None,
+            ..CycleReport::default()
+        };
+        let resumed = pause_transition_lines(4, &resumed_report, &mut state);
+        assert_eq!(resumed.len(), 1, "leaving paused must be logged once");
     }
 
     #[test]

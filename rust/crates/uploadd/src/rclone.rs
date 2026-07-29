@@ -34,19 +34,22 @@
 //! - **Never evict mid-read.** An upload lease is held across the whole
 //!   invocation and released on every exit path.
 //!
-//! # Lease renewal limitation (flagged for the live lane)
+//! # Lease renewal while `rclone` blocks
 //!
-//! `rclone copyto` is a single blocking subprocess, so a multi-minute transfer
-//! cannot renew its lease *mid-copy* from this single-threaded core. The engine
-//! renews once between the copy and the (separate, also potentially slow) hashsum
-//! invocation, which covers the common case; a transfer longer than the lease TTL
-//! needs a background renewal thread (or `rclone --progress` parsing) in the live
-//! wiring. This is a wiring concern, not a core-logic one, and is recorded as
-//! such.
+//! `rclone copyto` and the follow-up remote verify calls are blocking subprocess
+//! invocations. The engine therefore runs a scoped renewal thread alongside the
+//! transfer so the upload lease is renewed for the full copy+verify window.
+//! A stale renew is recorded and surfaced *after* verification: once the remote
+//! object is fully transferred and verified, the item is committed rather than
+//! failed to avoid redundant re-uploads and attempt-ledger wedges.
+
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use crate::config::UploaddConfig;
 use crate::engine::StepOutcome;
-use crate::error::EngineError;
+use crate::error::{EngineError, IndexError};
 use crate::lease::{LeaseClient, LeaseGen, LeaseGrant, LeaseId, LeaseKind, RenewResult};
 use crate::queue::{CommitEvidence, QueueItem, QueueStore, attempt_id_for};
 use crate::serve::UploadProcessor;
@@ -112,6 +115,18 @@ enum RcloneStop {
     Corrupt(String),
 }
 
+/// Fully transferred + verified upload metadata.
+struct VerifiedTransfer {
+    hash: String,
+    hash_alg: String,
+    size_only_verify: bool,
+    lease_lost_reason: Option<String>,
+}
+
+const RENEW_SLICE_MS: u64 = 250;
+const ATTEMPT_ID_OUTCOME_REJECT_REASON: &str =
+    "attempt_id already used with a different upload outcome";
+
 /// The `rclone`-backed, whole-file upload engine.
 ///
 /// Fields are public so the engine is assembled with a struct literal (avoiding a
@@ -127,7 +142,7 @@ pub struct RcloneUploadEngine<'a> {
     /// The subprocess seam used to invoke `rclone`.
     pub runner: &'a dyn CommandRunner,
     /// Lease acquire/renew/release seam (`indexd`).
-    pub lease: &'a dyn LeaseClient,
+    pub lease: &'a (dyn LeaseClient + Sync),
     /// Durable queue persistence seam (`indexd`).
     pub queue_store: &'a dyn QueueStore,
     /// Combined `wifid` + `retentiond` throttle source.
@@ -192,7 +207,22 @@ impl RcloneUploadEngine<'_> {
         let _ = self.lease.release(held.lease_id, held.gen_token);
 
         match result {
-            Ok((hash, hash_alg)) => self.finish_verified(item, hash, hash_alg),
+            Ok(verified) => {
+                if let Some(reason) = verified.lease_lost_reason.as_deref() {
+                    // The lease guards source-file eviction during reads. Once the
+                    // copy+remote verify succeeded, failing here would only force a
+                    // redundant re-upload and can wedge the attempts ledger.
+                    let verify_note = if verified.size_only_verify {
+                        " (size-only verify; verify_alg=none)"
+                    } else {
+                        ""
+                    };
+                    write_stderr_line(&format!(
+                        "uploadd rclone: lease lapsed during transfer ({reason}); committing verified upload{verify_note}"
+                    ));
+                }
+                self.finish_verified(item, verified.hash, verified.hash_alg)
+            }
             Err(RcloneStop::Corrupt(reason)) => self.fail(item, &reason, true),
             Err(RcloneStop::Recoverable(reason) | RcloneStop::LeaseLost(reason)) => {
                 self.fail(item, &reason, false)
@@ -220,30 +250,85 @@ impl RcloneUploadEngine<'_> {
         }
     }
 
-    /// Run `rclone copyto`, renew the lease, fetch + verify the remote digest.
+    /// Run `rclone copyto` and remote verify while a scoped thread renews the
+    /// lease in the background.
     fn transfer_and_verify(
         &self,
         path: &ArchivePath,
         item: &QueueItem,
         held: &HeldLease,
         max_tx: u64,
-    ) -> Result<(String, String), RcloneStop> {
-        self.run_copy(path, item, max_tx)?;
-        // Renew once between the (potentially long) copy and the (also slow)
-        // hashsum so a single TTL covers both halves. See the module-level note
-        // on the mid-copy renewal limitation.
-        self.renew(held)?;
-        let remote_verify = self.remote_verify(item)?;
-        match verify_digest(&item.verify, &remote_verify, item.total_bytes) {
-            Integrity::Verified => match remote_verify {
-                RemoteVerify::Native { alg, value } => Ok((value, alg.as_str().to_owned())),
-                RemoteVerify::CopyIntegrity { .. } => Ok((String::new(), "none".to_owned())),
-            },
-            Integrity::Corrupt => Err(RcloneStop::Corrupt(
-                "integrity check failed: remote verification did not match expected spec"
-                    .to_owned(),
-            )),
-        }
+    ) -> Result<VerifiedTransfer, RcloneStop> {
+        let stop_renew = AtomicBool::new(false);
+        let lease_lost = AtomicBool::new(false);
+        let lease_lost_reason = Mutex::new(None::<String>);
+        let renew_interval_ms = u64::try_from(self.cfg.lease.renew_interval_ms).unwrap_or(0);
+
+        let result = std::thread::scope(|scope| {
+            let lease = self.lease;
+            let ttl_ms = self.cfg.lease.ttl_ms;
+            let lease_id = held.lease_id;
+            let gen_token = held.gen_token;
+            let stop = &stop_renew;
+            let lost = &lease_lost;
+            let lost_reason = &lease_lost_reason;
+            scope.spawn(move || {
+                let mut slept_ms = 0_u64;
+                while !stop.load(Ordering::Relaxed) && !lost.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(RENEW_SLICE_MS));
+                    slept_ms = slept_ms.saturating_add(RENEW_SLICE_MS);
+                    if slept_ms < renew_interval_ms {
+                        continue;
+                    }
+                    slept_ms = 0;
+                    if let Err(RcloneStop::LeaseLost(reason)) =
+                        Self::renew_held(lease, ttl_ms, lease_id, gen_token)
+                    {
+                        // The current command seam is `Command::output()` with no
+                        // cancellation path, so a stale renew can only be recorded
+                        // and handled after the running subprocess exits.
+                        lost.store(true, Ordering::Relaxed);
+                        if let Ok(mut guard) = lost_reason.lock() {
+                            *guard = Some(reason);
+                        }
+                        break;
+                    }
+                }
+            });
+
+            let transfer_result = (|| {
+                self.run_copy(path, item, max_tx)?;
+                let remote_verify = self.remote_verify(item)?;
+                match verify_digest(&item.verify, &remote_verify, item.total_bytes) {
+                    Integrity::Verified => {
+                        let (hash, hash_alg, size_only_verify) = match remote_verify {
+                            RemoteVerify::Native { alg, value } => {
+                                (value, alg.as_str().to_owned(), false)
+                            }
+                            RemoteVerify::CopyIntegrity { .. } => {
+                                (String::new(), "none".to_owned(), true)
+                            }
+                        };
+                        let lease_lost_reason =
+                            lease_lost_reason.lock().ok().and_then(|guard| guard.clone());
+                        Ok(VerifiedTransfer {
+                            hash,
+                            hash_alg,
+                            size_only_verify,
+                            lease_lost_reason,
+                        })
+                    }
+                    Integrity::Corrupt => Err(RcloneStop::Corrupt(
+                        "integrity check failed: remote verification did not match expected spec"
+                            .to_owned(),
+                    )),
+                }
+            })();
+            stop_renew.store(true, Ordering::Relaxed);
+            transfer_result
+        });
+
+        result
     }
 
     /// `rclone [--config C] copyto <src> <remote:key> --bwlimit <max_tx>B
@@ -351,12 +436,13 @@ impl RcloneUploadEngine<'_> {
         })
     }
 
-    /// Renew the held lease for a further TTL; a `Stale` result loses the lease.
-    fn renew(&self, held: &HeldLease) -> Result<(), RcloneStop> {
-        match self
-            .lease
-            .renew(held.lease_id, held.gen_token, self.cfg.lease.ttl_ms)
-        {
+    fn renew_held(
+        lease: &(dyn LeaseClient + Sync),
+        ttl_ms: i64,
+        lease_id: LeaseId,
+        gen_token: LeaseGen,
+    ) -> Result<(), RcloneStop> {
+        match lease.renew(lease_id, gen_token, ttl_ms) {
             RenewResult::Renewed { expires_mono_ms: _ } => Ok(()),
             RenewResult::Stale { reason } => Err(RcloneStop::LeaseLost(reason)),
         }
@@ -376,7 +462,17 @@ impl RcloneUploadEngine<'_> {
             size: item.total_bytes,
             upload_set_id: None,
         };
-        self.queue_store.commit(item, &evidence)?;
+        match self.queue_store.commit(item, &evidence) {
+            Ok(()) => {}
+            Err(err) if is_attempt_id_outcome_rejection(&err) => {
+                return self.fail(
+                    item,
+                    &format!("commit rejected: {}", err.reason),
+                    false,
+                );
+            }
+            Err(err) => return Err(EngineError::Index(err)),
+        }
         item.complete();
         Ok(StepOutcome::Uploaded {
             item: item.archive_item_id,
@@ -427,6 +523,18 @@ fn first_line(s: &str) -> String {
     s.lines().next().unwrap_or("").trim().to_owned()
 }
 
+fn write_stderr_line(line: &str) {
+    let mut stderr = std::io::stderr().lock();
+    let _ = std::io::Write::write_all(&mut stderr, line.as_bytes());
+    let _ = std::io::Write::write_all(&mut stderr, b"\n");
+}
+
+fn is_attempt_id_outcome_rejection(err: &IndexError) -> bool {
+    err.op == "commit"
+        && err.reason.starts_with("rejected:")
+        && err.reason.contains(ATTEMPT_ID_OUTCOME_REJECT_REASON)
+}
+
 /// Parse the leading hashsum token from one `rclone hashsum` output line
 /// (`"<hash>  <path>"`).
 fn parse_hashsum_value(stdout: &str) -> Option<String> {
@@ -451,6 +559,9 @@ fn parse_size_bytes(stdout: &str) -> Option<u64> {
 )]
 mod tests {
     use std::cell::RefCell;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::Duration;
 
     use super::{CommandOutput, CommandRunner, RcloneRemote, RcloneUploadEngine};
     use crate::config::UploaddConfig;
@@ -486,6 +597,7 @@ mod tests {
         hashsum: CommandOutput,
         size: CommandOutput,
         spawn_err: Option<String>,
+        copyto_delay_ms: u64,
         calls: RefCell<Vec<Vec<String>>>,
     }
 
@@ -508,6 +620,7 @@ mod tests {
                     stderr: String::new(),
                 },
                 spawn_err: None,
+                copyto_delay_ms: 0,
                 calls: RefCell::new(Vec::new()),
             }
         }
@@ -520,6 +633,9 @@ mod tests {
                 return Err(err.clone());
             }
             if args.iter().any(|a| a == "copyto") {
+                if self.copyto_delay_ms > 0 {
+                    std::thread::sleep(Duration::from_millis(self.copyto_delay_ms));
+                }
                 Ok(self.copyto.clone())
             } else if args.iter().any(|a| a == "hashsum") {
                 Ok(self.hashsum.clone())
@@ -534,16 +650,18 @@ mod tests {
     /// Configurable lease client: grant or deny, and renew or go stale.
     struct FakeLease {
         deny: Option<String>,
-        renew_stale: bool,
-        released: RefCell<u32>,
+        stale_on_call: Option<u32>,
+        renew_calls: AtomicU32,
+        released: Mutex<u32>,
     }
 
     impl FakeLease {
         fn granting() -> Self {
             Self {
                 deny: None,
-                renew_stale: false,
-                released: RefCell::new(0),
+                stale_on_call: None,
+                renew_calls: AtomicU32::new(0),
+                released: Mutex::new(0),
             }
         }
     }
@@ -569,7 +687,8 @@ mod tests {
         }
 
         fn renew(&self, _lease_id: LeaseId, _gen_token: LeaseGen, _ttl_ms: i64) -> RenewResult {
-            if self.renew_stale {
+            let call = self.renew_calls.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+            if self.stale_on_call == Some(call) {
                 RenewResult::Stale {
                     reason: "gen mismatch".to_owned(),
                 }
@@ -581,7 +700,9 @@ mod tests {
         }
 
         fn release(&self, _lease_id: LeaseId, _gen_token: LeaseGen) -> ReleaseResult {
-            *self.released.borrow_mut() += 1;
+            if let Ok(mut guard) = self.released.lock() {
+                *guard = guard.saturating_add(1);
+            }
             ReleaseResult::Released
         }
     }
@@ -591,6 +712,7 @@ mod tests {
         persists: RefCell<u32>,
         commits: RefCell<Vec<CommitEvidence>>,
         op_order: RefCell<Vec<&'static str>>,
+        commit_error: RefCell<Option<IndexError>>,
     }
 
     impl QueueStore for FakeStore {
@@ -605,6 +727,9 @@ mod tests {
         }
 
         fn commit(&self, _item: &QueueItem, evidence: &CommitEvidence) -> Result<(), IndexError> {
+            if let Some(err) = self.commit_error.borrow_mut().take() {
+                return Err(err);
+            }
             self.commits.borrow_mut().push(evidence.clone());
             self.op_order.borrow_mut().push("commit");
             Ok(())
@@ -718,7 +843,14 @@ mod tests {
             !ops[commit_index + 1..].iter().any(|op| *op == "persist"),
             "verified path does not persist after commit"
         );
-        assert_eq!(*lease.released.borrow(), 1, "lease always released");
+        assert_eq!(
+            *lease
+                .released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            1,
+            "lease always released"
+        );
     }
 
     #[test]
@@ -811,8 +943,9 @@ mod tests {
         let runner = FakeRunner::ok(&expected_sha256(), 1_000);
         let lease = FakeLease {
             deny: Some("delete claimed".to_owned()),
-            renew_stale: false,
-            released: RefCell::new(0),
+            stale_on_call: None,
+            renew_calls: AtomicU32::new(0),
+            released: Mutex::new(0),
         };
         let store = FakeStore::default();
         let throttle = FakeThrottle::running();
@@ -854,7 +987,14 @@ mod tests {
         let outcome = engine.process(&mut it).unwrap();
         assert!(matches!(outcome, StepOutcome::Paused { .. }));
         assert!(runner.calls.borrow().is_empty());
-        assert_eq!(*lease.released.borrow(), 0, "no lease taken");
+        assert_eq!(
+            *lease
+                .released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            0,
+            "no lease taken"
+        );
     }
 
     #[test]
@@ -888,7 +1028,14 @@ mod tests {
         assert_eq!(it.state, UploadState::Failed);
         assert_eq!(it.attempts, 1);
         assert!(store.commits.borrow().is_empty(), "never committed");
-        assert_eq!(*lease.released.borrow(), 1, "lease released on failure");
+        assert_eq!(
+            *lease
+                .released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            1,
+            "lease released on failure"
+        );
     }
 
     #[test]
@@ -919,15 +1066,18 @@ mod tests {
     }
 
     #[test]
-    fn lease_lost_midway_is_retry() {
-        let cfg = UploaddConfig::default();
+    fn lease_lost_midway_still_commits_verified_upload() {
+        let mut cfg = UploaddConfig::default();
+        cfg.lease.renew_interval_ms = 100;
         let root = ArchiveRoot::new("/mnt/archive");
         let remote = remote();
-        let runner = FakeRunner::ok(&expected_sha256(), 1_000);
+        let mut runner = FakeRunner::ok(&expected_sha256(), 1_000);
+        runner.copyto_delay_ms = 400;
         let lease = FakeLease {
             deny: None,
-            renew_stale: true,
-            released: RefCell::new(0),
+            stale_on_call: Some(1),
+            renew_calls: AtomicU32::new(0),
+            released: Mutex::new(0),
         };
         let store = FakeStore::default();
         let throttle = FakeThrottle::running();
@@ -941,19 +1091,114 @@ mod tests {
             throttle: &throttle,
         };
         let mut it = item();
-        match engine.process(&mut it).unwrap() {
-            StepOutcome::Retry { reason, .. } => assert!(reason.contains("gen mismatch")),
-            other => panic!("expected retry from lost lease, got {other:?}"),
-        }
-        // hashsum must not have run after the stale renew.
+        let outcome = engine.process(&mut it).unwrap();
+        assert!(matches!(outcome, StepOutcome::Uploaded { .. }));
+        assert_eq!(it.state, UploadState::Done);
+        assert_eq!(store.commits.borrow().len(), 1);
         assert!(
-            !runner
+            runner
                 .calls
                 .borrow()
                 .iter()
                 .any(|a| a.contains(&"hashsum".to_owned())),
-            "hashsum should not run after lease loss"
+            "hashsum still runs; stale lease no longer blocks verified commit"
         );
+    }
+
+    #[test]
+    fn lease_is_renewed_multiple_times_during_slow_copy() {
+        let mut cfg = UploaddConfig::default();
+        cfg.lease.renew_interval_ms = 100;
+        let root = ArchiveRoot::new("/mnt/archive");
+        let remote = remote();
+        let mut runner = FakeRunner::ok(&expected_sha256(), 1_000);
+        runner.copyto_delay_ms = 900;
+        let lease = FakeLease::granting();
+        let store = FakeStore::default();
+        let throttle = FakeThrottle::running();
+        let engine = RcloneUploadEngine {
+            cfg: &cfg,
+            archive_root: &root,
+            remote: &remote,
+            runner: &runner,
+            lease: &lease,
+            queue_store: &store,
+            throttle: &throttle,
+        };
+        let mut it = item();
+        let outcome = engine.process(&mut it).unwrap();
+        assert!(matches!(outcome, StepOutcome::Uploaded { .. }));
+        assert!(
+            lease.renew_calls.load(Ordering::Relaxed) > 1,
+            "renew should happen multiple times while copyto is in flight"
+        );
+    }
+
+    #[test]
+    fn commit_attempt_id_outcome_rejection_is_not_scheduler_infra() {
+        use crate::serve::{Scheduler, SchedulerStep};
+
+        let cfg = UploaddConfig::default();
+        let root = ArchiveRoot::new("/mnt/archive");
+        let remote = remote();
+        let runner = FakeRunner::ok(&expected_sha256(), 1_000);
+        let lease = FakeLease::granting();
+        let store = FakeStore {
+            commit_error: RefCell::new(Some(IndexError::new(
+                "commit",
+                "rejected: attempt_id already used with a different upload outcome",
+            ))),
+            ..FakeStore::default()
+        };
+        let throttle = FakeThrottle::running();
+        let engine = RcloneUploadEngine {
+            cfg: &cfg,
+            archive_root: &root,
+            remote: &remote,
+            runner: &runner,
+            lease: &lease,
+            queue_store: &store,
+            throttle: &throttle,
+        };
+        let mut scheduler = Scheduler::new(engine, &cfg);
+        assert!(scheduler.enqueue(item()));
+        match scheduler.step() {
+            SchedulerStep::Processed(StepOutcome::Retry { reason, .. }) => {
+                assert!(reason.contains("attempt_id already used with a different upload outcome"));
+            }
+            other => panic!("expected per-item retry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn other_commit_errors_remain_scheduler_infra() {
+        use crate::serve::{Scheduler, SchedulerStep};
+
+        let cfg = UploaddConfig::default();
+        let root = ArchiveRoot::new("/mnt/archive");
+        let remote = remote();
+        let runner = FakeRunner::ok(&expected_sha256(), 1_000);
+        let lease = FakeLease::granting();
+        let store = FakeStore {
+            commit_error: RefCell::new(Some(IndexError::new("commit", "rejected: fence mismatch"))),
+            ..FakeStore::default()
+        };
+        let throttle = FakeThrottle::running();
+        let engine = RcloneUploadEngine {
+            cfg: &cfg,
+            archive_root: &root,
+            remote: &remote,
+            runner: &runner,
+            lease: &lease,
+            queue_store: &store,
+            throttle: &throttle,
+        };
+        let mut scheduler = Scheduler::new(engine, &cfg);
+        assert!(scheduler.enqueue(item()));
+        match scheduler.step() {
+            SchedulerStep::Infra(reason) => assert!(reason.contains("fence mismatch")),
+            other => panic!("expected infra stop, got {other:?}"),
+        }
     }
 
     #[test]
@@ -989,7 +1234,14 @@ mod tests {
             StepOutcome::Retry { .. }
         ));
         assert!(runner.calls.borrow().is_empty(), "rclone never invoked");
-        assert_eq!(*lease.released.borrow(), 0, "no lease taken for bad path");
+        assert_eq!(
+            *lease
+                .released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            0,
+            "no lease taken for bad path"
+        );
     }
 
     #[test]

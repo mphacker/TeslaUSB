@@ -469,6 +469,8 @@ fn stop_from_transfer(err: &TransferError) -> TransferStop {
 )]
 mod tests {
     use std::cell::{Cell, RefCell};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 
     use super::{StepOutcome, UploadEngine};
     use crate::config::UploaddConfig;
@@ -639,22 +641,22 @@ mod tests {
     struct MockLease {
         deny: bool,
         stale_on_call: Option<u32>,
-        acquire_calls: Cell<u32>,
-        renew_calls: Cell<u32>,
-        release_calls: Cell<u32>,
-        acquire_kind: RefCell<Option<LeaseKind>>,
-        acquire_ttl: Cell<i64>,
+        acquire_calls: AtomicU32,
+        renew_calls: AtomicU32,
+        release_calls: AtomicU32,
+        acquire_kind: Mutex<Option<LeaseKind>>,
+        acquire_ttl: AtomicI64,
     }
     impl MockLease {
         fn granting() -> Self {
             Self {
                 deny: false,
                 stale_on_call: None,
-                acquire_calls: Cell::new(0),
-                renew_calls: Cell::new(0),
-                release_calls: Cell::new(0),
-                acquire_kind: RefCell::new(None),
-                acquire_ttl: Cell::new(0),
+                acquire_calls: AtomicU32::new(0),
+                renew_calls: AtomicU32::new(0),
+                release_calls: AtomicU32::new(0),
+                acquire_kind: Mutex::new(None),
+                acquire_ttl: AtomicI64::new(0),
             }
         }
     }
@@ -666,9 +668,11 @@ mod tests {
             _holder: &str,
             ttl_ms: i64,
         ) -> LeaseGrant {
-            self.acquire_calls.set(self.acquire_calls.get() + 1);
-            *self.acquire_kind.borrow_mut() = Some(kind);
-            self.acquire_ttl.set(ttl_ms);
+            self.acquire_calls.fetch_add(1, Ordering::Relaxed);
+            if let Ok(mut guard) = self.acquire_kind.lock() {
+                *guard = Some(kind);
+            }
+            self.acquire_ttl.store(ttl_ms, Ordering::Relaxed);
             if self.deny {
                 return LeaseGrant::Denied {
                     reason: "item DELETE_CLAIMED".to_owned(),
@@ -681,8 +685,10 @@ mod tests {
             }
         }
         fn renew(&self, _id: LeaseId, _g: LeaseGen, ttl_ms: i64) -> RenewResult {
-            let n = self.renew_calls.get() + 1;
-            self.renew_calls.set(n);
+            let n = self
+                .renew_calls
+                .fetch_add(1, Ordering::Relaxed)
+                .saturating_add(1);
             if self.stale_on_call == Some(n) {
                 return RenewResult::Stale {
                     reason: "subject no longer LIVE".to_owned(),
@@ -693,7 +699,7 @@ mod tests {
             }
         }
         fn release(&self, _id: LeaseId, _g: LeaseGen) -> ReleaseResult {
-            self.release_calls.set(self.release_calls.get() + 1);
+            self.release_calls.fetch_add(1, Ordering::Relaxed);
             ReleaseResult::Released
         }
     }
@@ -890,10 +896,20 @@ mod tests {
             !ops[commit_index + 1..].iter().any(|op| *op == "persist"),
             "verified path does not persist after commit"
         );
-        assert_eq!(lease.acquire_calls.get(), 1);
-        assert_eq!(*lease.acquire_kind.borrow(), Some(LeaseKind::Upload));
-        assert_eq!(lease.acquire_ttl.get(), cfg.lease.ttl_ms);
-        assert_eq!(lease.release_calls.get(), 1, "lease released on success");
+        assert_eq!(lease.acquire_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            *lease
+                .acquire_kind
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            Some(LeaseKind::Upload)
+        );
+        assert_eq!(lease.acquire_ttl.load(Ordering::Relaxed), cfg.lease.ttl_ms);
+        assert_eq!(
+            lease.release_calls.load(Ordering::Relaxed),
+            1,
+            "lease released on success"
+        );
         // Invariant: every read was under the archive root (never the LUN).
         assert!(
             source
@@ -991,7 +1007,11 @@ mod tests {
             item.bytes_uploaded
         );
         assert_eq!(store.commit_calls.get(), 0, "no commit on failure");
-        assert_eq!(lease.release_calls.get(), 1, "lease released on failure");
+        assert_eq!(
+            lease.release_calls.load(Ordering::Relaxed),
+            1,
+            "lease released on failure"
+        );
     }
 
     #[test]
@@ -1061,7 +1081,11 @@ mod tests {
 
         let outcome = engine.process(&mut item).expect("no infra error");
         assert!(matches!(outcome, StepOutcome::Paused { .. }));
-        assert_eq!(lease.acquire_calls.get(), 0, "no lease while paused");
+        assert_eq!(
+            lease.acquire_calls.load(Ordering::Relaxed),
+            0,
+            "no lease while paused"
+        );
         assert!(
             source.read_paths.borrow().is_empty(),
             "no read while paused"
@@ -1138,10 +1162,17 @@ mod tests {
 
         let outcome = engine.process(&mut item).expect("no infra error");
         assert!(matches!(outcome, StepOutcome::Retry { .. }));
-        assert!(lease.renew_calls.get() >= 1, "renew was attempted");
+        assert!(
+            lease.renew_calls.load(Ordering::Relaxed) >= 1,
+            "renew was attempted"
+        );
         assert_eq!(item.state, crate::queue::UploadState::Failed);
         assert_eq!(store.commit_calls.get(), 0, "lease loss does not commit");
-        assert_eq!(lease.release_calls.get(), 1, "lease still released");
+        assert_eq!(
+            lease.release_calls.load(Ordering::Relaxed),
+            1,
+            "lease still released"
+        );
     }
 
     #[test]
@@ -1276,7 +1307,11 @@ mod tests {
         assert_eq!(item.attempts, 0, "a pause is not a failed attempt");
         assert_eq!(uploader.received_bytes(), 200, "exactly one chunk sent");
         assert_eq!(store.commit_calls.get(), 0, "pause does not commit");
-        assert_eq!(lease.release_calls.get(), 1, "lease released on pause");
+        assert_eq!(
+            lease.release_calls.load(Ordering::Relaxed),
+            1,
+            "lease released on pause"
+        );
     }
 
     #[test]
@@ -1306,9 +1341,9 @@ mod tests {
 
         let result = engine.process(&mut item);
         assert!(result.is_err(), "initial persist failure is an infra error");
-        assert_eq!(lease.acquire_calls.get(), 1);
+        assert_eq!(lease.acquire_calls.load(Ordering::Relaxed), 1);
         assert_eq!(
-            lease.release_calls.get(),
+            lease.release_calls.load(Ordering::Relaxed),
             1,
             "the acquired lease must be released even when the first persist fails"
         );
@@ -1353,7 +1388,7 @@ mod tests {
         assert_eq!(item.state, crate::queue::UploadState::InProgress);
         assert_eq!(store.commit_calls.get(), 0, "infra error before commit");
         assert_eq!(
-            lease.release_calls.get(),
+            lease.release_calls.load(Ordering::Relaxed),
             1,
             "lease released on infra error"
         );

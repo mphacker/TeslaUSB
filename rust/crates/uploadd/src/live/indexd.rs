@@ -212,7 +212,9 @@ impl<C: IndexdCloudClient> QueueStore for LiveQueueStore<C> {
                         destination_id: item.key.destination_id.clone(),
                         remote_key: item.key.remote_key.clone(),
                     },
-                    attempt_id: attempt_id_for(&item.key, item.attempts),
+                    // `QueueItem::fail` increments `attempts` before this persist.
+                    // The attempt that just failed is therefore `attempts - 1`.
+                    attempt_id: attempt_id_for(&item.key, item.attempts.saturating_sub(1)),
                     upload_set_id: None,
                     error_class: error_class.to_owned(),
                     not_before: item.not_before,
@@ -260,12 +262,12 @@ impl<C: IndexdCloudClient> QueueStore for LiveQueueStore<C> {
 }
 
 /// Live lease client backed by `IndexdCloudClient`.
-pub struct LiveLeaseClient<C: IndexdCloudClient> {
+pub struct LiveLeaseClient<C: IndexdCloudClient + Sync> {
     client: C,
     tokens: Mutex<Vec<(LeaseId, LeaseGen, String)>>,
 }
 
-impl<C: IndexdCloudClient> LiveLeaseClient<C> {
+impl<C: IndexdCloudClient + Sync> LiveLeaseClient<C> {
     #[must_use]
     /// Build a lease client from an indexd client.
     pub fn new(client: C) -> Self {
@@ -326,7 +328,7 @@ impl<C: IndexdCloudClient> LiveLeaseClient<C> {
     }
 }
 
-impl<C: IndexdCloudClient> LeaseClient for LiveLeaseClient<C> {
+impl<C: IndexdCloudClient + Sync> LeaseClient for LiveLeaseClient<C> {
     fn acquire(&self, item: ArchiveItemId, kind: LeaseKind, _holder: &str, ttl_ms: i64) -> LeaseGrant {
         if kind != LeaseKind::Upload {
             return LeaseGrant::Denied {
@@ -414,8 +416,7 @@ impl<C: IndexdCloudClient> LeaseClient for LiveLeaseClient<C> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use std::cell::RefCell;
-    use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
 
     use crate::indexd_client::{
         CloudCandidateRow, CloudDiscoverRow, CloudQueueCommitResult, CloudQueueFailResult, CloudQueueRetryRequest,
@@ -427,9 +428,10 @@ mod tests {
     const MAX_ATTEMPTS: u32 = 5;
 
     struct FakeClient {
-        pages: RefCell<Vec<Page<CloudQueueRow>>>,
-        fail_persist: Rc<RefCell<Option<CloudQueueFailRequest>>>,
-        commit_error: RefCell<Option<IndexdClientError>>,
+        pages: Mutex<Vec<Page<CloudQueueRow>>>,
+        fail_persist: Arc<Mutex<Option<CloudQueueFailRequest>>>,
+        commit_error: Mutex<Option<IndexdClientError>>,
+        commit_request: Arc<Mutex<Option<CloudQueueCommitRequest>>>,
         lease_acquire_error: bool,
         lease_renew_error: bool,
         lease_release_error: bool,
@@ -438,7 +440,7 @@ mod tests {
     impl FakeClient {
         fn with_pages(pages: Vec<Page<CloudQueueRow>>) -> Self {
             Self {
-                pages: RefCell::new(pages),
+                pages: Mutex::new(pages),
                 ..Self::default()
             }
         }
@@ -447,9 +449,10 @@ mod tests {
     impl Default for FakeClient {
         fn default() -> Self {
             Self {
-                pages: RefCell::new(Vec::new()),
-                fail_persist: Rc::new(RefCell::new(None)),
-                commit_error: RefCell::new(None),
+                pages: Mutex::new(Vec::new()),
+                fail_persist: Arc::new(Mutex::new(None)),
+                commit_error: Mutex::new(None),
+                commit_request: Arc::new(Mutex::new(None)),
                 lease_acquire_error: false,
                 lease_renew_error: false,
                 lease_release_error: false,
@@ -476,7 +479,10 @@ mod tests {
             _limit: u32,
             _upload_set_id: Option<String>,
         ) -> Result<Page<CloudQueueRow>, IndexdClientError> {
-            let mut pages = self.pages.borrow_mut();
+            let mut pages = self
+                .pages
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if pages.is_empty() {
                 return Ok(Page {
                     items: Vec::new(),
@@ -488,9 +494,18 @@ mod tests {
 
         fn cloud_queue_commit(
             &self,
-            _request: &CloudQueueCommitRequest,
+            request: &CloudQueueCommitRequest,
         ) -> Result<CloudQueueCommitResult, IndexdClientError> {
-            if let Some(err) = self.commit_error.borrow_mut().take() {
+            *self
+                .commit_request
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(request.clone());
+            if let Some(err) = self
+                .commit_error
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
                 return Err(err);
             }
             Ok(CloudQueueCommitResult {
@@ -544,7 +559,10 @@ mod tests {
             &self,
             request: &CloudQueueFailRequest,
         ) -> Result<CloudQueueFailResult, IndexdClientError> {
-            *self.fail_persist.borrow_mut() = Some(request.clone());
+            *self
+                .fail_persist
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(request.clone());
             Ok(CloudQueueFailResult {
                 ok: true,
                 state: "failed".to_owned(),
@@ -719,7 +737,7 @@ mod tests {
     #[test]
     fn commit_rejected_maps_distinct_reason() {
         let client = FakeClient {
-            commit_error: RefCell::new(Some(IndexdClientError::Rejected {
+            commit_error: Mutex::new(Some(IndexdClientError::Rejected {
                 message: "fence mismatch".to_owned(),
             })),
             ..FakeClient::default()
@@ -752,6 +770,58 @@ mod tests {
     }
 
     #[test]
+    fn failed_attempt_and_next_commit_use_different_attempt_ids() {
+        let fail_capture = Arc::new(Mutex::new(None));
+        let commit_capture = Arc::new(Mutex::new(None));
+        let client = FakeClient {
+            fail_persist: Arc::clone(&fail_capture),
+            commit_request: Arc::clone(&commit_capture),
+            ..FakeClient::default()
+        };
+        let store = LiveQueueStore::new(client, MAX_ATTEMPTS);
+        let mut item = QueueItem {
+            key: QueueKey::new("dest-a", "remote-a"),
+            archive_item_id: ArchiveItemId(1),
+            child_key: "c".to_owned(),
+            source_rel: "archive/clip.mp4".to_owned(),
+            category: UploadCategory::Bulk,
+            seq: 1,
+            total_bytes: 1,
+            verify: VerifySpec::CopyIntegrity,
+            state: UploadState::InProgress,
+            bytes_uploaded: 0,
+            attempts: 0,
+            not_before: None,
+            last_error: None,
+        };
+        item.fail("copy failed", false);
+        store.persist(&item).expect("persist failed attempt");
+        let fail_attempt_id = fail_capture
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|request| request.attempt_id.clone())
+            .expect("captured fail attempt id");
+        let evidence = CommitEvidence {
+            attempt_id: attempt_id_for(&item.key, item.attempts),
+            hash: String::new(),
+            hash_alg: "none".to_owned(),
+            size: item.total_bytes,
+            upload_set_id: None,
+        };
+        store.commit(&item, &evidence).expect("commit");
+        let commit_attempt_id = commit_capture
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|request| request.attempt_id.clone())
+            .expect("captured commit attempt id");
+        assert_eq!(fail_attempt_id, attempt_id_for(&item.key, 0));
+        assert_eq!(commit_attempt_id, attempt_id_for(&item.key, 1));
+        assert_ne!(fail_attempt_id, commit_attempt_id);
+    }
+
+    #[test]
     fn lease_rpc_errors_fail_closed() {
         let client = FakeClient {
             lease_acquire_error: true,
@@ -773,9 +843,9 @@ mod tests {
 
     #[test]
     fn persist_failed_uses_sanitized_bounded_error_class() {
-        let captured = Rc::new(RefCell::new(None));
+        let captured = Arc::new(Mutex::new(None));
         let client = FakeClient {
-            fail_persist: Rc::clone(&captured),
+            fail_persist: Arc::clone(&captured),
             ..FakeClient::default()
         };
         let store = LiveQueueStore::new(client, MAX_ATTEMPTS);
@@ -804,7 +874,8 @@ mod tests {
         };
         store.persist(&item).expect("persist failed state");
         let request = captured
-            .borrow()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
             .cloned()
             .expect("captured fail request");

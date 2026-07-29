@@ -75,6 +75,20 @@ impl WifiStatus {
             ap,
         }
     }
+
+    /// A copy with the radio signal neutralised, for suppressing duplicate log
+    /// lines.
+    ///
+    /// `signal_dbm` drifts by a few dBm on essentially every tick, so comparing
+    /// whole statuses would report a change every time and defeat the
+    /// suppression. Every other field is genuinely event-driven. The live
+    /// signal is always readable over the control socket; the periodic
+    /// heartbeat line keeps a coarse sample of it in the journal.
+    pub(crate) fn log_key(&self) -> Self {
+        let mut key = self.clone();
+        key.link.signal_dbm = None;
+        key
+    }
 }
 
 #[cfg(test)]
@@ -142,5 +156,52 @@ mod tests {
                 "status JSON exposed `{forbidden}`: {json}"
             );
         }
+    }
+
+    fn status_from(obs: &LinkObservation, recovering: bool) -> WifiStatus {
+        let cfg = WifidConfig::default();
+        let mut pub_ = ThrottlePublisher::new(&cfg.throttle);
+        let throttle = pub_.update(ThrottleInputs {
+            link_mode: LinkMode::Sta,
+            sta_link_up: true,
+            chip_recovering: false,
+            near_deadlock: false,
+            tc_applied: true,
+            ap_overlay_active: false,
+            ap_cap_applied: false,
+        });
+        WifiStatus::new(
+            LinkMode::Sta,
+            obs,
+            throttle,
+            recovering,
+            ApStatus {
+                mode: ApMode::ForceOff,
+                active: false,
+                ssid: Some("TeslaUSB".to_owned()),
+                client_count: 0,
+                ip: None,
+            },
+        )
+    }
+
+    #[test]
+    fn log_key_ignores_signal_drift_but_not_real_change() {
+        let base = status_from(&observation(), false);
+
+        // Signal drifts a few dBm on essentially every tick. If that counted as
+        // a change, the serve loop's duplicate suppression would never suppress
+        // anything and the journal flood would be back.
+        let mut drifted = observation();
+        drifted.signal_dbm = Some(-71);
+        assert_eq!(base.log_key(), status_from(&drifted, false).log_key());
+
+        // Real state changes must still be reported, or suppression would hide
+        // the events the journal exists to capture.
+        assert_ne!(base.log_key(), status_from(&observation(), true).log_key());
+
+        let mut gateway_lost = observation();
+        gateway_lost.gateway_reachable = false;
+        assert_ne!(base.log_key(), status_from(&gateway_lost, false).log_key());
     }
 }

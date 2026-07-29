@@ -103,8 +103,11 @@ impl NetworkController for NmcliNetworkController {
         )
         .unwrap_or_default();
         let carrier_up = has_ip(&dev_show);
+        // Quiet: this runs on every tick, and `ping` prints five lines per
+        // invocation. Inheriting that output floods the journal hard enough to
+        // evict every other daemon's history (see `run_ok_quiet`).
         let gateway_reachable = nmcli_field(&dev_show, "IP4.GATEWAY")
-            .is_some_and(|gw| run_ok("ping", &["-c", "1", "-W", "1", &gw]));
+            .is_some_and(|gw| run_ok_quiet("ping", &["-c", "1", "-W", "1", &gw]));
 
         let ap_has_clients = ap_running && {
             let dump = capture("iw", &["dev", iface, "station", "dump"]).unwrap_or_default();

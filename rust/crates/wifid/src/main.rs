@@ -62,6 +62,16 @@ const DEFAULT_CRED_PATH: &str = "/data/teslausb/wifi-credentials";
 const CONTROL_SOCKET: &str = "/run/teslausb/wifid.sock";
 /// Control-loop tick interval.
 const TICK_INTERVAL: Duration = Duration::from_secs(2);
+/// How often the control loop re-logs an *unchanged* status.
+///
+/// The loop otherwise logs only when the status actually changes. Without this
+/// floor a healthy, stable device would go completely silent, making "wifid is
+/// fine" indistinguishable from "wifid is wedged" when reading the journal.
+///
+/// This also sets the sampling resolution for `signal_dbm`, which is
+/// deliberately excluded from change detection (see `WifiStatus::log_key`), so
+/// it is kept well below the flood threshold rather than as long as possible.
+const STATUS_HEARTBEAT: Duration = Duration::from_secs(120);
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -131,11 +141,22 @@ fn cmd_serve(cred_path: &str) -> Result<(), String> {
     let (tx, rx) = std::sync::mpsc::channel::<ipc::IpcJob>();
     ipc::spawn_control_server(PathBuf::from(CONTROL_SOCKET), tx);
     println!("wifid serve: control loop starting (tick {TICK_INTERVAL:?})");
+    // Log the status on change plus a periodic heartbeat, never once per tick:
+    // at a 2s tick that was ~43k lines/day from this daemon alone, which
+    // vacuumed every other unit's history out of the journal.
+    let mut last_key = None;
+    let mut last_emit: Option<Instant> = None;
     loop {
         match daemon.tick() {
             Ok(status) => {
-                if let Ok(json) = serde_json::to_string(&status) {
-                    println!("{json}");
+                let key = status.log_key();
+                let heartbeat_due = last_emit.is_none_or(|at| at.elapsed() >= STATUS_HEARTBEAT);
+                if last_key.as_ref() != Some(&key) || heartbeat_due {
+                    if let Ok(json) = serde_json::to_string(&status) {
+                        println!("{json}");
+                    }
+                    last_key = Some(key);
+                    last_emit = Some(Instant::now());
                 }
             }
             Err(e) => {

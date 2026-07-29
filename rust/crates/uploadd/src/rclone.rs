@@ -45,7 +45,7 @@
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::config::UploaddConfig;
 use crate::engine::StepOutcome;
@@ -100,6 +100,7 @@ pub struct RcloneRemote {
 struct HeldLease {
     lease_id: LeaseId,
     gen_token: LeaseGen,
+    acquired_at: Instant,
 }
 
 /// Why an `rclone` transfer stopped before producing a verified digest.
@@ -108,8 +109,6 @@ enum RcloneStop {
     /// item is parked for retry; `rclone copyto` is itself overwriting, so a
     /// retry simply re-runs the whole copy.
     Recoverable(String),
-    /// The lease was lost (a `Stale` renew) — stop and re-acquire later.
-    LeaseLost(String),
     /// The remote digest did not match the expected hash (corrupt/partial). The
     /// whole file re-uploads on retry.
     Corrupt(String),
@@ -124,6 +123,7 @@ struct VerifiedTransfer {
 }
 
 const RENEW_SLICE_MS: u64 = 250;
+const RENEW_UNAVAILABLE_BACKOFF_MS: u64 = 1_000;
 const ATTEMPT_ID_OUTCOME_REJECT_REASON: &str =
     "attempt_id already used with a different upload outcome";
 
@@ -224,9 +224,7 @@ impl RcloneUploadEngine<'_> {
                 self.finish_verified(item, verified.hash, verified.hash_alg)
             }
             Err(RcloneStop::Corrupt(reason)) => self.fail(item, &reason, true),
-            Err(RcloneStop::Recoverable(reason) | RcloneStop::LeaseLost(reason)) => {
-                self.fail(item, &reason, false)
-            }
+            Err(RcloneStop::Recoverable(reason)) => self.fail(item, &reason, false),
         }
     }
 
@@ -245,6 +243,7 @@ impl RcloneUploadEngine<'_> {
             } => Ok(HeldLease {
                 lease_id,
                 gen_token,
+                acquired_at: Instant::now(),
             }),
             LeaseGrant::Denied { reason } => Err(reason),
         }
@@ -260,43 +259,68 @@ impl RcloneUploadEngine<'_> {
         max_tx: u64,
     ) -> Result<VerifiedTransfer, RcloneStop> {
         let stop_renew = AtomicBool::new(false);
-        let lease_lost = AtomicBool::new(false);
         let lease_lost_reason = Mutex::new(None::<String>);
-        let renew_interval_ms = u64::try_from(self.cfg.lease.renew_interval_ms).unwrap_or(0);
-
-        let result = std::thread::scope(|scope| {
+        let renew_interval =
+            Duration::from_millis(u64::try_from(self.cfg.lease.renew_interval_ms).unwrap_or(0));
+        let ttl = Duration::from_millis(u64::try_from(self.cfg.lease.ttl_ms).unwrap_or(0));
+        let transfer_result = std::thread::scope(|scope| {
             let lease = self.lease;
             let ttl_ms = self.cfg.lease.ttl_ms;
             let lease_id = held.lease_id;
             let gen_token = held.gen_token;
             let stop = &stop_renew;
-            let lost = &lease_lost;
             let lost_reason = &lease_lost_reason;
+            let lease_acquired_at = held.acquired_at;
             scope.spawn(move || {
-                let mut slept_ms = 0_u64;
-                while !stop.load(Ordering::Relaxed) && !lost.load(Ordering::Relaxed) {
+                let mut last_successful_renew = lease_acquired_at;
+                let mut next_renew_attempt = lease_acquired_at + renew_interval;
+                while !stop.load(Ordering::Relaxed) {
                     std::thread::sleep(Duration::from_millis(RENEW_SLICE_MS));
-                    slept_ms = slept_ms.saturating_add(RENEW_SLICE_MS);
-                    if slept_ms < renew_interval_ms {
+                    let attempt_started_at = Instant::now();
+                    if attempt_started_at < next_renew_attempt {
                         continue;
                     }
-                    slept_ms = 0;
-                    if let Err(RcloneStop::LeaseLost(reason)) =
-                        Self::renew_held(lease, ttl_ms, lease_id, gen_token)
-                    {
-                        // The current command seam is `Command::output()` with no
-                        // cancellation path, so a stale renew can only be recorded
-                        // and handled after the running subprocess exits.
-                        lost.store(true, Ordering::Relaxed);
-                        if let Ok(mut guard) = lost_reason.lock() {
-                            *guard = Some(reason);
+                    let renew_result = Self::renew_held(lease, ttl_ms, lease_id, gen_token);
+                    let completed_at = Instant::now();
+                    match renew_result {
+                        RenewResult::Renewed { .. } => {
+                            // Use the pre-RPC instant: indexd stamps expiry at an
+                            // unknown point during the call, so this conservative
+                            // anchor underestimates remaining lease time.
+                            last_successful_renew = attempt_started_at;
+                            next_renew_attempt = attempt_started_at + renew_interval;
                         }
-                        break;
+                        RenewResult::Unavailable { reason } => {
+                            // Never conclude lease loss from transport failure alone:
+                            // only an authoritative `Stale`, or a full TTL with no
+                            // successful renew, can prove the lease lapsed.
+                            if completed_at.saturating_duration_since(last_successful_renew) >= ttl {
+                                let elapsed_ms =
+                                    completed_at.saturating_duration_since(last_successful_renew).as_millis();
+                                if let Ok(mut guard) = lost_reason.lock() {
+                                    *guard = Some(format!(
+                                        "lease renew unavailable until ttl elapsed ({elapsed_ms} ms): {reason}"
+                                    ));
+                                }
+                                break;
+                            }
+                            next_renew_attempt =
+                                completed_at + Duration::from_millis(RENEW_UNAVAILABLE_BACKOFF_MS);
+                        }
+                        RenewResult::Stale { reason } => {
+                            // The command seam is `Command::output()` with no
+                            // cancellation path, so a stale renew can only be
+                            // recorded and handled after the running subprocess exits.
+                            if let Ok(mut guard) = lost_reason.lock() {
+                                *guard = Some(reason);
+                            }
+                            break;
+                        }
                     }
                 }
             });
 
-            let transfer_result = (|| {
+            let result = (|| {
                 self.run_copy(path, item, max_tx)?;
                 let remote_verify = self.remote_verify(item)?;
                 match verify_digest(&item.verify, &remote_verify, item.total_bytes) {
@@ -309,13 +333,11 @@ impl RcloneUploadEngine<'_> {
                                 (String::new(), "none".to_owned(), true)
                             }
                         };
-                        let lease_lost_reason =
-                            lease_lost_reason.lock().ok().and_then(|guard| guard.clone());
                         Ok(VerifiedTransfer {
                             hash,
                             hash_alg,
                             size_only_verify,
-                            lease_lost_reason,
+                            lease_lost_reason: None,
                         })
                     }
                     Integrity::Corrupt => Err(RcloneStop::Corrupt(
@@ -325,10 +347,16 @@ impl RcloneUploadEngine<'_> {
                 }
             })();
             stop_renew.store(true, Ordering::Relaxed);
-            transfer_result
+            result
         });
-
-        result
+        let lease_lost_reason = lease_lost_reason.lock().ok().and_then(|guard| guard.clone());
+        match transfer_result {
+            Ok(mut verified) => {
+                verified.lease_lost_reason = lease_lost_reason;
+                Ok(verified)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     /// `rclone [--config C] copyto <src> <remote:key> --bwlimit <max_tx>B
@@ -441,11 +469,8 @@ impl RcloneUploadEngine<'_> {
         ttl_ms: i64,
         lease_id: LeaseId,
         gen_token: LeaseGen,
-    ) -> Result<(), RcloneStop> {
-        match lease.renew(lease_id, gen_token, ttl_ms) {
-            RenewResult::Renewed { expires_mono_ms: _ } => Ok(()),
-            RenewResult::Stale { reason } => Err(RcloneStop::LeaseLost(reason)),
-        }
+    ) -> RenewResult {
+        lease.renew(lease_id, gen_token, ttl_ms)
     }
 
     /// On a verified upload, durably commit backend evidence then complete.
@@ -651,6 +676,9 @@ mod tests {
     struct FakeLease {
         deny: Option<String>,
         stale_on_call: Option<u32>,
+        unavailable_on_call: Option<u32>,
+        always_unavailable: bool,
+        sleep_ms_on_call: Option<(u32, u64)>,
         renew_calls: AtomicU32,
         released: Mutex<u32>,
     }
@@ -660,6 +688,9 @@ mod tests {
             Self {
                 deny: None,
                 stale_on_call: None,
+                unavailable_on_call: None,
+                always_unavailable: false,
+                sleep_ms_on_call: None,
                 renew_calls: AtomicU32::new(0),
                 released: Mutex::new(0),
             }
@@ -688,9 +719,19 @@ mod tests {
 
         fn renew(&self, _lease_id: LeaseId, _gen_token: LeaseGen, _ttl_ms: i64) -> RenewResult {
             let call = self.renew_calls.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+            if let Some((target, sleep_ms)) = self.sleep_ms_on_call {
+                if call == target {
+                    std::thread::sleep(Duration::from_millis(sleep_ms));
+                }
+            }
             if self.stale_on_call == Some(call) {
                 RenewResult::Stale {
                     reason: "gen mismatch".to_owned(),
+                }
+            } else if self.always_unavailable || self.unavailable_on_call == Some(call) {
+                RenewResult::Unavailable {
+                    reason: "i/o error: Resource temporarily unavailable (os error 11)"
+                        .to_owned(),
                 }
             } else {
                 RenewResult::Renewed {
@@ -944,6 +985,9 @@ mod tests {
         let lease = FakeLease {
             deny: Some("delete claimed".to_owned()),
             stale_on_call: None,
+            unavailable_on_call: None,
+            always_unavailable: false,
+            sleep_ms_on_call: None,
             renew_calls: AtomicU32::new(0),
             released: Mutex::new(0),
         };
@@ -1066,16 +1110,19 @@ mod tests {
     }
 
     #[test]
-    fn lease_lost_midway_still_commits_verified_upload() {
+    fn authoritative_stale_marks_lease_lost_immediately() {
         let mut cfg = UploaddConfig::default();
         cfg.lease.renew_interval_ms = 100;
         let root = ArchiveRoot::new("/mnt/archive");
         let remote = remote();
         let mut runner = FakeRunner::ok(&expected_sha256(), 1_000);
-        runner.copyto_delay_ms = 400;
+        runner.copyto_delay_ms = 1_200;
         let lease = FakeLease {
             deny: None,
             stale_on_call: Some(1),
+            unavailable_on_call: None,
+            always_unavailable: false,
+            sleep_ms_on_call: None,
             renew_calls: AtomicU32::new(0),
             released: Mutex::new(0),
         };
@@ -1095,6 +1142,11 @@ mod tests {
         assert!(matches!(outcome, StepOutcome::Uploaded { .. }));
         assert_eq!(it.state, UploadState::Done);
         assert_eq!(store.commits.borrow().len(), 1);
+        assert_eq!(
+            lease.renew_calls.load(Ordering::Relaxed),
+            1,
+            "authoritative stale must mark lease lost immediately"
+        );
         assert!(
             runner
                 .calls
@@ -1131,6 +1183,163 @@ mod tests {
         assert!(
             lease.renew_calls.load(Ordering::Relaxed) > 1,
             "renew should happen multiple times while copyto is in flight"
+        );
+    }
+
+    #[test]
+    fn unavailable_renew_does_not_mark_lease_lost() {
+        let mut cfg = UploaddConfig::default();
+        cfg.lease.renew_interval_ms = 100;
+        cfg.lease.ttl_ms = 3_000;
+        let root = ArchiveRoot::new("/mnt/archive");
+        let remote = remote();
+        let mut runner = FakeRunner::ok(&expected_sha256(), 1_000);
+        runner.copyto_delay_ms = 1_200;
+        let lease = FakeLease {
+            deny: None,
+            stale_on_call: None,
+            unavailable_on_call: Some(1),
+            always_unavailable: false,
+            sleep_ms_on_call: None,
+            renew_calls: AtomicU32::new(0),
+            released: Mutex::new(0),
+        };
+        let store = FakeStore::default();
+        let throttle = FakeThrottle::running();
+        let engine = RcloneUploadEngine {
+            cfg: &cfg,
+            archive_root: &root,
+            remote: &remote,
+            runner: &runner,
+            lease: &lease,
+            queue_store: &store,
+            throttle: &throttle,
+        };
+        let mut it = item();
+        let outcome = engine.process(&mut it).unwrap();
+        assert!(matches!(outcome, StepOutcome::Uploaded { .. }));
+        assert_eq!(it.state, UploadState::Done);
+        assert!(
+            lease.renew_calls.load(Ordering::Relaxed) > 1,
+            "transient unavailable renew must not stop the renewal thread"
+        );
+    }
+
+    #[test]
+    fn repeated_unavailable_past_ttl_marks_lease_lost() {
+        let mut cfg = UploaddConfig::default();
+        cfg.lease.renew_interval_ms = 200;
+        cfg.lease.ttl_ms = 700;
+        let root = ArchiveRoot::new("/mnt/archive");
+        let remote = remote();
+        let mut runner = FakeRunner::ok(&expected_sha256(), 1_000);
+        runner.copyto_delay_ms = 1_600;
+        let lease = FakeLease {
+            deny: None,
+            stale_on_call: None,
+            unavailable_on_call: None,
+            always_unavailable: true,
+            sleep_ms_on_call: None,
+            renew_calls: AtomicU32::new(0),
+            released: Mutex::new(0),
+        };
+        let store = FakeStore::default();
+        let throttle = FakeThrottle::running();
+        let engine = RcloneUploadEngine {
+            cfg: &cfg,
+            archive_root: &root,
+            remote: &remote,
+            runner: &runner,
+            lease: &lease,
+            queue_store: &store,
+            throttle: &throttle,
+        };
+        let mut it = item();
+        let outcome = engine.process(&mut it).unwrap();
+        assert!(matches!(outcome, StepOutcome::Uploaded { .. }));
+        assert_eq!(it.state, UploadState::Done);
+        assert_eq!(
+            lease.renew_calls.load(Ordering::Relaxed),
+            2,
+            "repeated unavailable renews must eventually age out the lease"
+        );
+    }
+
+    #[test]
+    fn ttl_expiring_during_blocking_unavailable_marks_lease_lost() {
+        let mut cfg = UploaddConfig::default();
+        cfg.lease.renew_interval_ms = 100;
+        cfg.lease.ttl_ms = 700;
+        let root = ArchiveRoot::new("/mnt/archive");
+        let remote = remote();
+        let mut runner = FakeRunner::ok(&expected_sha256(), 1_000);
+        runner.copyto_delay_ms = 2_500;
+        let lease = FakeLease {
+            deny: None,
+            stale_on_call: None,
+            unavailable_on_call: Some(1),
+            always_unavailable: false,
+            sleep_ms_on_call: Some((1, 1_200)),
+            renew_calls: AtomicU32::new(0),
+            released: Mutex::new(0),
+        };
+        let store = FakeStore::default();
+        let throttle = FakeThrottle::running();
+        let engine = RcloneUploadEngine {
+            cfg: &cfg,
+            archive_root: &root,
+            remote: &remote,
+            runner: &runner,
+            lease: &lease,
+            queue_store: &store,
+            throttle: &throttle,
+        };
+        let mut it = item();
+        let outcome = engine.process(&mut it).unwrap();
+        assert!(matches!(outcome, StepOutcome::Uploaded { .. }));
+        assert_eq!(
+            lease.renew_calls.load(Ordering::Relaxed),
+            1,
+            "a slow unavailable renew that spans ttl must end renewal immediately"
+        );
+    }
+
+    #[test]
+    fn slow_unavailable_honors_backoff_before_retry() {
+        let mut cfg = UploaddConfig::default();
+        cfg.lease.renew_interval_ms = 100;
+        cfg.lease.ttl_ms = 10_000;
+        let root = ArchiveRoot::new("/mnt/archive");
+        let remote = remote();
+        let mut runner = FakeRunner::ok(&expected_sha256(), 1_000);
+        runner.copyto_delay_ms = 1_700;
+        let lease = FakeLease {
+            deny: None,
+            stale_on_call: None,
+            unavailable_on_call: Some(1),
+            always_unavailable: false,
+            sleep_ms_on_call: Some((1, 1_200)),
+            renew_calls: AtomicU32::new(0),
+            released: Mutex::new(0),
+        };
+        let store = FakeStore::default();
+        let throttle = FakeThrottle::running();
+        let engine = RcloneUploadEngine {
+            cfg: &cfg,
+            archive_root: &root,
+            remote: &remote,
+            runner: &runner,
+            lease: &lease,
+            queue_store: &store,
+            throttle: &throttle,
+        };
+        let mut it = item();
+        let outcome = engine.process(&mut it).unwrap();
+        assert!(matches!(outcome, StepOutcome::Uploaded { .. }));
+        assert_eq!(
+            lease.renew_calls.load(Ordering::Relaxed),
+            1,
+            "slow unavailable renew must not trigger an immediate retry on the next 250ms slice"
         );
     }
 

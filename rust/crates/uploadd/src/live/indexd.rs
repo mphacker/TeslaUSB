@@ -394,7 +394,7 @@ impl<C: IndexdCloudClient + Sync> LeaseClient for LiveLeaseClient<C> {
             Ok(_) => RenewResult::Stale {
                 reason: "lease renew response missing expiry".to_owned(),
             },
-            Err(err) => RenewResult::Stale {
+            Err(err) => RenewResult::Unavailable {
                 reason: err.to_string(),
             },
         }
@@ -433,7 +433,7 @@ mod tests {
         commit_error: Mutex<Option<IndexdClientError>>,
         commit_request: Arc<Mutex<Option<CloudQueueCommitRequest>>>,
         lease_acquire_error: bool,
-        lease_renew_error: bool,
+        lease_renew_error_kind: Option<std::io::ErrorKind>,
         lease_release_error: bool,
     }
 
@@ -454,7 +454,7 @@ mod tests {
                 commit_error: Mutex::new(None),
                 commit_request: Arc::new(Mutex::new(None)),
                 lease_acquire_error: false,
-                lease_renew_error: false,
+                lease_renew_error_kind: None,
                 lease_release_error: false,
             }
         }
@@ -539,8 +539,8 @@ mod tests {
             _token: &str,
             _ttl_ms: u32,
         ) -> Result<UploadLeaseRenewResult, IndexdClientError> {
-            if self.lease_renew_error {
-                return Err(IndexdClientError::Io(std::io::Error::other("offline")));
+            if let Some(kind) = self.lease_renew_error_kind {
+                return Err(IndexdClientError::Io(std::io::Error::from(kind)));
             }
             Ok(UploadLeaseRenewResult {
                 ok: true,
@@ -825,7 +825,7 @@ mod tests {
     fn lease_rpc_errors_fail_closed() {
         let client = FakeClient {
             lease_acquire_error: true,
-            lease_renew_error: true,
+            lease_renew_error_kind: Some(std::io::ErrorKind::Other),
             lease_release_error: true,
             ..FakeClient::default()
         };
@@ -836,9 +836,29 @@ mod tests {
         ));
         assert!(matches!(
             lease.renew(LeaseId(1), LeaseGen(1), 1000),
-            RenewResult::Stale { .. }
+            RenewResult::Unavailable { .. }
         ));
         assert_eq!(lease.release(LeaseId(1), LeaseGen(1)), ReleaseResult::NoOp);
+    }
+
+    #[test]
+    fn renew_would_block_maps_to_unavailable_not_stale() {
+        let lease = LiveLeaseClient::new(FakeClient {
+            lease_renew_error_kind: Some(std::io::ErrorKind::WouldBlock),
+            ..FakeClient::default()
+        });
+        match lease.renew(LeaseId(1), LeaseGen(1), 1000) {
+            RenewResult::Unavailable { reason } => {
+                let lowered = reason.to_lowercase();
+                assert!(
+                    lowered.contains("would block")
+                        || lowered.contains("temporarily unavailable")
+                        || lowered.contains("os error 11"),
+                    "reason should carry the EAGAIN transport failure: {reason}"
+                );
+            }
+            other => panic!("expected unavailable renew result, got {other:?}"),
+        }
     }
 
     #[test]

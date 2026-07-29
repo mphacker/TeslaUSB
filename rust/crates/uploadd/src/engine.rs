@@ -337,22 +337,35 @@ impl UploadEngine<'_> {
         }
     }
 
-    /// Renew the lease if the renew interval has elapsed. A `Stale` result stops
-    /// the transfer.
+    /// Renew the lease if the renew interval has elapsed.
+    ///
+    /// Transport failures do not immediately imply lease loss: only an
+    /// authoritative deny (`Stale`) or a full TTL with no successful renew can
+    /// conclude the lease has lapsed.
     fn maybe_renew(&self, held: &HeldLease, last_renew: &mut MonoMs) -> Result<(), TransferStop> {
         let now = self.clock.mono_now();
         if now.saturating_elapsed_since(*last_renew) < self.cfg.lease.renew_interval_ms {
             return Ok(());
         }
-        match self
+        let renew_result = self
             .lease
-            .renew(held.lease_id, held.gen_token, self.cfg.lease.ttl_ms)
-        {
+            .renew(held.lease_id, held.gen_token, self.cfg.lease.ttl_ms);
+        let completed_at = self.clock.mono_now();
+        match renew_result {
             RenewResult::Renewed { expires_mono_ms: _ } => {
                 *last_renew = now;
                 Ok(())
             }
             RenewResult::Stale { reason } => Err(TransferStop::LeaseLost(reason)),
+            RenewResult::Unavailable { reason } => {
+                if completed_at.saturating_elapsed_since(*last_renew) >= self.cfg.lease.ttl_ms {
+                    Err(TransferStop::LeaseLost(format!(
+                        "lease renew unavailable until ttl elapsed: {reason}"
+                    )))
+                } else {
+                    Ok(())
+                }
+            }
         }
     }
 
@@ -641,6 +654,8 @@ mod tests {
     struct MockLease {
         deny: bool,
         stale_on_call: Option<u32>,
+        unavailable_on_call: Option<u32>,
+        always_unavailable: bool,
         acquire_calls: AtomicU32,
         renew_calls: AtomicU32,
         release_calls: AtomicU32,
@@ -652,6 +667,8 @@ mod tests {
             Self {
                 deny: false,
                 stale_on_call: None,
+                unavailable_on_call: None,
+                always_unavailable: false,
                 acquire_calls: AtomicU32::new(0),
                 renew_calls: AtomicU32::new(0),
                 release_calls: AtomicU32::new(0),
@@ -692,6 +709,11 @@ mod tests {
             if self.stale_on_call == Some(n) {
                 return RenewResult::Stale {
                     reason: "subject no longer LIVE".to_owned(),
+                };
+            }
+            if self.always_unavailable || self.unavailable_on_call == Some(n) {
+                return RenewResult::Unavailable {
+                    reason: "i/o error: operation would block (os error 11)".to_owned(),
                 };
             }
             RenewResult::Renewed {
@@ -1173,6 +1195,81 @@ mod tests {
             1,
             "lease still released"
         );
+    }
+
+    #[test]
+    fn transient_unavailable_renew_does_not_mark_lease_lost() {
+        let data: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
+        let mut cfg = UploaddConfig::default();
+        cfg.lease.renew_interval_ms = 1_000;
+        cfg.lease.ttl_ms = 3_000;
+        let root = root();
+        let source = MockSource::new(data.clone());
+        let uploader = MockUploader::new();
+        let mut lease = MockLease::granting();
+        lease.unavailable_on_call = Some(1);
+        let store = MockQueueStore::new();
+        let throttle = FixedThrottle {
+            snap: running(100, 100),
+        };
+        let timeline = Timeline::new();
+        let engine = UploadEngine {
+            cfg: &cfg,
+            archive_root: &root,
+            source: &source,
+            uploader: &uploader,
+            lease: &lease,
+            queue_store: &store,
+            throttle: &throttle,
+            clock: &timeline,
+            waiter: &timeline,
+        };
+        let mut item = test_item(data.len() as u64, digest(&data));
+
+        let outcome = engine.process(&mut item).expect("no infra error");
+        assert!(matches!(outcome, StepOutcome::Uploaded { .. }));
+        assert_eq!(item.state, crate::queue::UploadState::Done);
+        assert!(
+            lease.renew_calls.load(Ordering::Relaxed) > 1,
+            "engine should continue renewing after transient transport failure"
+        );
+    }
+
+    #[test]
+    fn prolonged_unavailable_renew_until_ttl_marks_lease_lost() {
+        let data: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
+        let mut cfg = UploaddConfig::default();
+        cfg.lease.renew_interval_ms = 1_000;
+        cfg.lease.ttl_ms = 2_500;
+        let root = root();
+        let source = MockSource::new(data.clone());
+        let uploader = MockUploader::new();
+        let mut lease = MockLease::granting();
+        lease.always_unavailable = true;
+        let store = MockQueueStore::new();
+        let throttle = FixedThrottle {
+            snap: running(100, 100),
+        };
+        let timeline = Timeline::new();
+        let engine = UploadEngine {
+            cfg: &cfg,
+            archive_root: &root,
+            source: &source,
+            uploader: &uploader,
+            lease: &lease,
+            queue_store: &store,
+            throttle: &throttle,
+            clock: &timeline,
+            waiter: &timeline,
+        };
+        let mut item = test_item(data.len() as u64, digest(&data));
+
+        let outcome = engine.process(&mut item).expect("no infra error");
+        assert!(matches!(outcome, StepOutcome::Retry { .. }));
+        assert_eq!(item.state, crate::queue::UploadState::Failed);
+        assert_eq!(store.commit_calls.get(), 0);
+        let last_error = item.last_error.clone().unwrap_or_default();
+        assert!(last_error.contains("ttl elapsed"));
     }
 
     #[test]

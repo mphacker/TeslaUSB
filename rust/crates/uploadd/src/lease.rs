@@ -113,6 +113,14 @@ pub enum RenewResult {
         /// Human-readable reason for diagnostics.
         reason: String,
     },
+    /// The holder could not complete the renew RPC (transport/system failure),
+    /// so lease state is unknown. This is deliberately distinct from
+    /// [`Self::Stale`]: unreachable `indexd` is not authoritative evidence the
+    /// lease was denied or gone.
+    Unavailable {
+        /// Human-readable transport/system failure reason.
+        reason: String,
+    },
 }
 
 /// Result of a `release` RPC (contract §2.1).

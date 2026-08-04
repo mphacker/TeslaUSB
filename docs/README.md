@@ -42,3 +42,15 @@ M1–M7). Two review outcomes changed scope and are called out where they land:
 the unit of work is a **parent event + child objects** (not one file per event),
 and **webd gains an authenticated-operator + CSRF layer** as a hard prerequisite
 for the cloud mutation routes (`webd-cloud-api.md` §0) — webd has no auth today.
+
+## Retention
+
+| Doc | Owns |
+|-----|------|
+| [`specs/retention-eviction.md`](specs/retention-eviction.md) | What actually deletes archived footage: the drop-in that arms `retentiond` eviction, mode resolution, why deletion is **not** gated on cloud durability, the surviving safety gates, and the reimage hazard. |
+
+> **Read this before making any durability or safety argument.** The shipped
+> `retentiond.service` says `--no-delete`, but production overrides it and runs
+> eviction **armed, with permanent loss allowed and the durability gate
+> bypassed**. Earlier notes in this repo claimed the opposite.
+

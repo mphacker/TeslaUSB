@@ -3,6 +3,14 @@
 # on startup races where the archive/image appears after boot. I/O is explicitly
 # idle/low weight so clip archiving yields to foreground workloads and car-write
 # pressure.
+#
+# !! The --no-delete below is NOT necessarily what production runs. !!
+# A drop-in (retentiond.service.d/10-eviction.conf) may clear this ExecStart and
+# re-launch with --enable-eviction --allow-permanent-loss, which ARMS permanent
+# deletion of archived footage. The reference drop-in is checked in beside this
+# file; see docs/specs/retention-eviction.md. Always confirm the EFFECTIVE command
+# with `systemctl show retentiond -p ExecStart` before reasoning about durability
+# — reading this line alone has already produced wrong safety conclusions.
 [Unit]
 Description=TeslaUSB retentiond (archiving + retention + space governor)
 Documentation=https://github.com/mphacker/TeslaUSB

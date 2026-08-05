@@ -328,7 +328,10 @@ pub fn recovery_action(db: DeleteState, fs: FsPresence) -> RecoveryAction {
         (D::DeleteFailed, F::TrashPresent) => RecoveryAction::ContinueDelete,
         (D::DeleteFailed, F::Neither) => RecoveryAction::MarkDeleted,
 
-        // Already quarantined → leave for the operator.
+        // Quarantined but the bytes are already gone: stale bookkeeping, not an
+        // anomaly to investigate. Reconcile it like the LIVE/Neither case.
+        (D::Quarantined, F::Neither) => RecoveryAction::MarkDeleted,
+        // Still quarantined with bytes on disk → leave for the operator.
         (D::Quarantined, _) => RecoveryAction::NoOp,
     }
 }
@@ -633,7 +636,10 @@ mod tests {
         // Healthy no-ops.
         assert_eq!(recovery_action(D::Live, F::OriginalPresent), R::NoOp);
         assert_eq!(recovery_action(D::Deleted, F::Neither), R::NoOp);
-        // Quarantined stays quarantined.
+        // Quarantined rows with missing bytes are stale and are reconciled.
+        assert_eq!(recovery_action(D::Quarantined, F::Neither), R::MarkDeleted);
+        // Quarantined rows with bytes still on disk stay quarantined.
         assert_eq!(recovery_action(D::Quarantined, F::TrashPresent), R::NoOp);
+        assert_eq!(recovery_action(D::Quarantined, F::OriginalPresent), R::NoOp);
     }
 }

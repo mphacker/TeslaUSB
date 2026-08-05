@@ -171,6 +171,8 @@ pub struct CycleReport {
     pub partially_archived: usize,
     /// Count of observed candidates skipped because their key is already pending.
     pub skipped_already_pending: usize,
+    /// Count of observed candidates skipped because they are encrypted clips.
+    pub skipped_encrypted: usize,
     /// Count of candidates skipped because their key was deterministically rejected.
     pub skipped_rejected: usize,
     /// Count of pending items dropped (poison or queue-bound eviction).
@@ -251,6 +253,10 @@ pub fn archive_recent_capped(
     for candidate in clips {
         if max_copies.is_some_and(|max| copies_done >= max) {
             break;
+        }
+        if is_encrypted_candidate(&candidate.canonical_key) {
+            report.skipped_encrypted = report.skipped_encrypted.saturating_add(1);
+            continue;
         }
         if state
             .pending
@@ -499,6 +505,13 @@ pub fn archive_recent_capped(
 
     report.pending_len = state.pending.len();
     Ok(report)
+}
+
+/// Tesla writes encrypted clips under `TeslaCam/EncryptedClips/`; those bytes
+/// cannot be decoded or archived, so they are skipped to keep undecodable
+/// payloads off the recording-critical card.
+fn is_encrypted_candidate(canonical_key: &str) -> bool {
+    canonical_key.contains("/EncryptedClips/")
 }
 
 /// Promote every staged angle in order, stopping at the first promote failure.
@@ -1295,6 +1308,14 @@ mod tests {
         candidate
     }
 
+    fn encrypted_candidate(id: usize, started_at: i64) -> Candidate {
+        let mut candidate = unique_candidate(id, started_at);
+        candidate.canonical_key = format!(
+            "0:TeslaCam/EncryptedClips/RecentClips/2026-06-19_10-01-{id:02}"
+        );
+        candidate
+    }
+
     fn replacement_candidate_with_fingerprint(
         candidate: &Candidate,
         fingerprint: &str,
@@ -1660,6 +1681,36 @@ mod tests {
         assert_eq!(reg.duration_s, Some(60));
         assert_eq!(reg.angles.len(), 2);
         assert_eq!(reg.angles[1].offset_ms, 500);
+    }
+
+    #[test]
+    fn encrypted_candidate_is_skipped_while_plain_candidate_still_archives() {
+        let candidates = FakeCandidates::default();
+        let plain = sample_candidate();
+        let encrypted = encrypted_candidate(1, 1_700_000_120);
+        candidates.set(vec![encrypted, plain.clone()]);
+        let store = FakeStore::default();
+        let register = FakeRegister::default();
+        let mut state = DriverState::new();
+
+        let report = archive_recent_once(&candidates, &store, &register, &mut state, 2_000_000_000)
+            .unwrap();
+        assert_eq!(report.skipped_encrypted, 1);
+        assert_eq!(report.registered, 1);
+        assert_eq!(report.quarantined_undecodable, 0);
+        assert_eq!(report.registered_from_pending, 0);
+        assert_eq!(store.copies.borrow().len(), 2);
+        assert_eq!(register.live_calls.borrow().len(), 1);
+        assert_eq!(register.live_calls.borrow()[0].canonical_key, plain.canonical_key);
+        assert_eq!(register.quarantine_calls.borrow().len(), 0);
+        assert!(
+            store
+                .copies
+                .borrow()
+                .iter()
+                .all(|(src, _)| !src.contains("/EncryptedClips/")),
+            "encrypted candidates must not be copied"
+        );
     }
 
     #[test]

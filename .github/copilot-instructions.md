@@ -163,16 +163,16 @@ fails unit tests.**
 
 ## Model division of labor (binding)
 
-The orchestrator is **Claude Opus 4.8**; it owns the session and routes work:
+The orchestrator is **Claude Opus 5**; it owns the session and routes work:
 
-- **Plan / break-down / decide → Opus 4.8 (orchestrator).** Frames problems,
+- **Plan / break-down / decide → Opus 5 (orchestrator).** Frames problems,
   designs the approach, owns `todos`/`todo_deps`/`plan.md`, sequences
   dependencies, and makes the final reconciled call. Opus does not delegate
   planning. **Defaults to medium reasoning effort** for routine orchestration;
   escalate to high/max only for genuinely hard planning or reconciliation.
   Mechanical loop steps (running builds/tests, greps, log capture, status edits)
-  should be delegated to the `task`/Haiku agent rather than run inline at Opus
-  rates.
+  should be delegated to the `task` agent (lightweight model) rather than run
+  inline at Opus rates.
 - **Write code → `gpt-5.3-codex` (background sub-agent).** Substantive
   implementation (features, multi-file changes, porting v1 behavior) is delegated
   with a self-contained prompt: exact files, the contract, the constraints (this
@@ -185,11 +185,18 @@ The orchestrator is **Claude Opus 4.8**; it owns the session and routes work:
   workspace-wide reformatting; do NOT use mai for code.)
 - **Review → tier-scaled.** **GPT-5.5 is the reviewer of record for Tier 3** and
   the escalation target for all tiers — adversarial reviews, second opinions,
-  pre-deploy plan reviews. For **Tier 1–2** diffs a cheaper model
-  (`gpt-5.4-mini` / `gemini-3.5-flash` / `claude-haiku-4.5`) does the first-pass
+  pre-deploy plan reviews. It holds that slot on an **earned track record** on this
+  codebase, not on version number; a newer model (e.g. the `gpt-5.6-*` family)
+  replaces it only after out-scoring it on known-defect diffs from this repo's
+  history, never on release order alone. For **Tier 1–2** diffs a cheaper model
+  (`gpt-5.4-mini` / `gemini-3.6-flash` / `claude-sonnet-4.6`) does the first-pass
   review; escalate to GPT-5.5 only when it flags a real issue or the change is
   Tier 3. **Batch related small changes into one review break** rather than
   reviewing each micro-change.
+
+**Keep this roster honest.** Every model named above must exist in the current
+`task` tool roster. A dangling name silently fails the route it governs — as
+`claude-haiku-4.5` did until 2026-08-05. Re-check when the roster changes.
 
 Delegation routes work, not judgment: Opus verifies the coder's diff (builds/tests/
 reads it) and reconciles review findings against the artifact rather than

@@ -4,13 +4,24 @@
 # idle/low weight so clip archiving yields to foreground workloads and car-write
 # pressure.
 #
-# !! The --no-delete below is NOT necessarily what production runs. !!
-# A drop-in (retentiond.service.d/10-eviction.conf) may clear this ExecStart and
-# re-launch with --enable-eviction --allow-permanent-loss, which ARMS permanent
-# deletion of archived footage. The reference drop-in is checked in beside this
-# file; see docs/specs/retention-eviction.md. Always confirm the EFFECTIVE command
-# with `systemctl show retentiond -p ExecStart` before reasoning about durability
-# — reading this line alone has already produced wrong safety conclusions.
+# !! ExecStart below ARMS PERMANENT DELETION of archived footage. Deliberate. !!
+# The archive directory is the only unbounded-growth consumer on the card
+# (teslacam.img is fixed-size and Tesla ring-buffers it internally), so without a
+# space governor the card fills, writes fail, and the appliance stops recording.
+# An appliance that stops recording to preserve old clips has failed at its job.
+# So the governor ships armed, exactly as Tesla ring-buffers its own RecentClips.
+#
+# Deletion is NOT gated on the clip existing anywhere else: retentiond wires
+# allow_undurable to --enable-eviction, bypassing indexd's PROVEN_DURABLE gate.
+# Accepted tradeoff — backing up before eviction is the owner's responsibility.
+# SavedClips and SentryClips are structurally never evictable; see
+# docs/specs/retention-eviction.md for the full policy and the opt-out.
+#
+# --recency-floor-secs is passed EXPLICITLY even though 3600 is currently the
+# built-in default (config.rs TargetDrainConfig::default). It is the safety floor
+# that keeps just-recorded footage out of the eviction candidate set, so it must
+# not depend on an implicit library default: a future change to that default would
+# silently alter deletion eligibility on every device with no diff to review here.
 [Unit]
 Description=TeslaUSB retentiond (archiving + retention + space governor)
 Documentation=https://github.com/mphacker/TeslaUSB
@@ -19,7 +30,7 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/retentiond serve --archive-recent-only --no-delete --archive-root /data/teslausb/archive --volume-image /data/teslausb/teslacam.img
+ExecStart=/usr/local/bin/retentiond serve --archive-recent-only --enable-eviction --recency-floor-secs 3600 --allow-permanent-loss --archive-root /data/teslausb/archive --volume-image /data/teslausb/teslacam.img
 Restart=always
 RestartSec=5s
 # Catch hangs that do not exit; Restart=always only recovers after failure/exit.

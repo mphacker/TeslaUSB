@@ -47,10 +47,11 @@ for the cloud mutation routes (`webd-cloud-api.md` §0) — webd has no auth tod
 
 | Doc | Owns |
 |-----|------|
-| [`specs/retention-eviction.md`](specs/retention-eviction.md) | What actually deletes archived footage: the drop-in that arms `retentiond` eviction, mode resolution, why deletion is **not** gated on cloud durability, the surviving safety gates, and the reimage hazard. |
+| [`specs/retention-eviction.md`](specs/retention-eviction.md) | What actually deletes archived footage: why eviction ships **armed**, mode resolution, why deletion is **not** gated on cloud durability, the surviving safety gates, and install/upgrade behavior. |
 
-> **Read this before making any durability or safety argument.** The shipped
-> `retentiond.service` says `--no-delete`, but production overrides it and runs
-> eviction **armed, with permanent loss allowed and the durability gate
-> bypassed**. Earlier notes in this repo claimed the opposite.
+> **Read this before making any durability or safety argument.** `retentiond`
+> ships with eviction **armed, permanent loss allowed, and the durability gate
+> bypassed** — deliberately, because the archive is the only unbounded-growth
+> consumer and a full card stops recording. Footage is deleted whether or not it
+> was ever backed up. Earlier notes in this repo claimed eviction was inert.
 

@@ -530,18 +530,20 @@ fn run_serve(args: &[String]) -> ExitCode {
     let publisher_instance = publisher_instance_hex_128();
     let mut governor_seq: u64 = 0;
 
-    match governor.recover() {
-        Ok(report) => {
-            println!(
-                "retentiond governor: recover completed actions={}",
-                report.actions.len()
-            );
-        }
-        Err(err) => eprintln!("retentiond governor: recover error: {err}"),
-    }
+    let mut recovered = false;
+    maybe_retry_recover(
+        || governor.recover().map(|report| report.actions.len()),
+        &mut recovered,
+        false,
+    );
     retentiond::watchdog::pet();
 
     while !SHUTDOWN.load(Ordering::Relaxed) {
+        maybe_retry_recover(
+            || governor.recover().map(|report| report.actions.len()),
+            &mut recovered,
+            true,
+        );
         let cycle_prev_tier = prev_space_tier;
         let mut pre_uploads_unsafe = true;
         let mut pre_status_bytes: Option<(u64, u64)> = None;
@@ -990,7 +992,7 @@ struct ServeArgs {
     drain_only: bool,
     /// Operator override for `TargetDrainConfig::recency_floor_secs` (protect
     /// anything recorded within this many seconds). `None` = use the config
-    /// default (7 days). Must be > 0 when set.
+    /// default (1 hour / 3600 seconds). Must be > 0 when set.
     recency_floor_secs: Option<i64>,
     archive_root: Option<PathBuf>,
     volume_image: PathBuf,
@@ -1082,6 +1084,31 @@ fn parse_serve_args(args: &[String]) -> Result<ServeArgs, String> {
 }
 
 #[cfg(unix)]
+fn maybe_retry_recover<E: std::fmt::Display>(
+    recover: impl FnOnce() -> Result<usize, E>,
+    recovered: &mut bool,
+    deferred: bool,
+) {
+    if *recovered {
+        return;
+    }
+    match recover() {
+        Ok(actions) => {
+            if deferred {
+                println!(
+                    "retentiond governor: recover completed (deferred) actions={}",
+                    actions
+                );
+            } else {
+                println!("retentiond governor: recover completed actions={}", actions);
+            }
+            *recovered = true;
+        }
+        Err(err) => eprintln!("retentiond governor: recover error: {err}"),
+    }
+}
+
+#[cfg(unix)]
 fn next_arg_value(iter: &mut std::slice::Iter<'_, String>, flag: &str) -> Result<String, String> {
     iter.next()
         .cloned()
@@ -1130,6 +1157,7 @@ mod tests {
         LiveStatfs, NoCarHandoff, Seams, cumulative_evict_budget, drain_stop_tag, parse_serve_args,
         publisher_instance_hex_128, render_health, resolve_eviction_mode, validate_phase1_mode,
         DrainStop, EvictBudget, EvictionMode, GovernorStatus, RetentionLoop, ServeArgs,
+        maybe_retry_recover,
     };
 
     #[test]
@@ -1675,5 +1703,55 @@ mod tests {
             }),
             "stat_check_failed"
         );
+    }
+
+    #[test]
+    fn maybe_retry_recover_retries_until_success_then_stops() {
+        let calls = std::cell::Cell::new(0_u32);
+        let mut recovered = false;
+
+        maybe_retry_recover(
+            || {
+                calls.set(calls.get().saturating_add(1));
+                Err("first fail")
+            },
+            &mut recovered,
+            false,
+        );
+        assert!(!recovered);
+        assert_eq!(calls.get(), 1);
+
+        maybe_retry_recover(
+            || {
+                calls.set(calls.get().saturating_add(1));
+                Err("second fail")
+            },
+            &mut recovered,
+            true,
+        );
+        assert!(!recovered);
+        assert_eq!(calls.get(), 2);
+
+        maybe_retry_recover(
+            || {
+                calls.set(calls.get().saturating_add(1));
+                Ok::<usize, &'static str>(7)
+            },
+            &mut recovered,
+            true,
+        );
+        assert!(recovered);
+        assert_eq!(calls.get(), 3);
+
+        maybe_retry_recover(
+            || {
+                calls.set(calls.get().saturating_add(1));
+                Ok::<usize, &'static str>(99)
+            },
+            &mut recovered,
+            true,
+        );
+        assert!(recovered);
+        assert_eq!(calls.get(), 3);
     }
 }

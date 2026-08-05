@@ -99,15 +99,20 @@ TESLAUSB_SUDOERS_NOPASSWD="${TESLAUSB_PREFIX}/etc/sudoers.d/010_${TESLAUSB_ADMIN
 # and schedulerd before webd. webd reaches schedulerd's control socket lazily
 # (per-tick, with retry) so there is NO unit-level After= between them — this
 # list order is what starts schedulerd ahead of webd's boot enforcement tick.
-TESLAUSB_APP_SERVICES="scannerd indexd schedulerd webd wifid"
+TESLAUSB_APP_SERVICES="scannerd indexd schedulerd webd wifid retentiond"
+# retentiond is last: it is an indexd IPC consumer (eviction candidates + delete
+# protocol), so indexd must already be up. It graduated from STAGED once the
+# governor was calibrated and armed by default — see
+# docs/specs/retention-eviction.md. It is an app service, not a gadget unit, so
+# restarting it on update cannot interrupt the car's recording; archiving is
+# staged-promote with durable markers (ADR-0006) and resumes on restart.
 # Staged services: their unit FILES are installed (install_unit_files globs
 # units/*.service), but they are NOT enabled/started because their live wiring
 # is not yet landed:
 #   uploadd   — `serve` is gated on Task 2.6 (WiFi TX-cap); exits non-zero until wired.
-#   retentiond — `serve` is gated on Task 2.7 (governor calibration); exits non-zero.
 # When a service's loop lands, move its name from STAGED into APP_SERVICES.
 # (scannerd graduated here once the scannerd->indexd IPC landed — ADR 0001.)
-TESLAUSB_STAGED_SERVICES="uploadd retentiond"
+TESLAUSB_STAGED_SERVICES="uploadd"
 # Gadget units: NEVER restarted by non-bootstrap modes (a restart re-enumerates
 # USB and interrupts the car's recording — contract §2).
 TESLAUSB_GADGET_UNITS="gadgetd gadgetd-control"

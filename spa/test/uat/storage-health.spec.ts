@@ -11,12 +11,12 @@ import { resolve } from "node:path";
 
 // ── Storage screen UAT (fe-storage-health) ────────────────────────────────
 // Each test drives the REAL bundle served by webd against a seeded read-only
-// catalog (global-setup). The screen at /storage is the redesigned, actionable
-// Storage view: a recording-safety banner, an SD-card composition breakdown,
-// the two USB drives Tesla sees (TeslaCam exact-from-bitmap + Media statvfs),
-// and a collapsible "Device health & diagnostics" section folding the legacy
-// health/filesystems/subsystems/resources/retention cards. Unreadable facts
-// degrade to "—" rather than being fabricated.
+// catalog (global-setup). The /storage route now maps to the merged Analytics
+// component, which displays storage sections at the top: a recording-safety
+// banner, an SD-card composition breakdown, the two USB drives Tesla sees
+// (TeslaCam exact-from-bitmap + Media statvfs), and a collapsible "Device
+// health & diagnostics" section. Unreadable facts degrade to "—" rather than
+// being fabricated.
 //
 // The functional + responsive tests intercept the four read-only probes with
 // deterministic fixtures (coherent volumes so the composition path renders) so
@@ -26,14 +26,17 @@ import { resolve } from "node:path";
 // path) to prove they return 2xx with a clean console. Screenshots are captured
 // as artifacts (no pixel-diff).
 
-// The read APIs the storage-health screen is permitted to call. webd is
-// read-only; anything outside this set (or any non-GET) is a hard failure.
+// The read APIs the storage sections of the merged Analytics screen are permitted
+// to call. The merged Analytics component fetches both storage and analytics
+// endpoints. webd is read-only; anything outside this set (or any non-GET) is a
+// hard failure.
 const ALLOWED_API = new Set([
   "/api/storage",
   "/api/storage/health",
   "/api/recording/encryption",
   "/api/system/metrics",
   "/api/system/health",
+  "/api/analytics",
   // The app shell (Shell.tsx) polls gadget status on every page mount to drive
   // the header status dot — a cross-cutting read-only GET, not storage-specific.
   "/api/gadget/status",
@@ -174,8 +177,10 @@ async function routeProbes(page: Page) {
 /** Settle: bundle executed, storage screen structure painted. */
 async function gotoStorage(page: Page) {
   await page.goto("/storage", { waitUntil: "load" });
-  await expect(page.locator("[data-screen=storage-health]")).toBeVisible();
-  await expect(page.locator(".storage-header .storage-title")).toBeVisible();
+  // The /storage route now maps to the merged Analytics component (data-screen="analytics")
+  // which includes storage sections at the top.
+  await expect(page.locator("[data-screen=analytics]")).toBeVisible();
+  await expect(page.locator("#analyticsDashboard")).toBeVisible();
 }
 
 function assertCleanConsole(probe: Probe) {
@@ -203,17 +208,21 @@ test.describe("storage health UAT", () => {
     await expect(page.locator(".top-bar .top-bar-title")).toHaveText("TeslaUSB");
     await expect(page.locator("#toast-container")).toHaveCount(1);
 
-    // Active nav is Settings (no dedicated storage nav key). Assert against the
-    // nav actually visible at this breakpoint (rail >=1024px else bottom tabs).
+    // Active nav is Analytics (the /storage route now maps to the merged Analytics
+    // component). Assert against the nav actually visible at this breakpoint
+    // (rail >=1024px else bottom tabs).
     const isMobile = testInfo.project.name.includes("375");
     const activeNav = page.locator(
       isMobile ? ".bottom-tabs .tab-item.active" : ".sidebar-rail .nav-item.active",
     );
     await expect(activeNav).toBeVisible();
     await expect(activeNav).toHaveAttribute("aria-current", "page");
-    await expect(activeNav).toContainText("Settings");
+    await expect(activeNav).toContainText("Analytics");
 
-    await expect(page.locator(".storage-title")).toHaveText("Storage");
+    // The storage section title is "Storage Analytics Dashboard"
+    await expect(page.locator("#analyticsDashboard > h2")).toContainText(
+      "Storage Analytics Dashboard",
+    );
 
     // Recording-safety banner — 94 GB free of 470 GB ⇒ 20% free ⇒ "ok".
     const banner = page.locator("#storage-recording-banner");
@@ -519,7 +528,8 @@ test.describe("storage health UAT", () => {
   }, testInfo) => {
     const navStart = Date.now();
     await page.goto("/storage", { waitUntil: "load" });
-    await expect(page.locator("[data-screen=storage-health]")).toBeVisible();
+    // The /storage route now maps to the merged Analytics component
+    await expect(page.locator("[data-screen=analytics]")).toBeVisible();
     const contentVisibleMs = await page.evaluate(() => performance.now());
 
     const timings = await page.evaluate(() => {

@@ -27,7 +27,14 @@ import { resolve } from "node:path";
 const EM_DASH = "\u2014";
 
 /** webd read paths the analytics screen is permitted to call (read-only API). */
-const ANALYTICS_API = new Set(["/api/analytics"]);
+const ANALYTICS_API = new Set([
+  "/api/analytics",
+  "/api/storage",
+  "/api/storage/health",
+  "/api/recording/encryption",
+  "/api/system/metrics",
+  "/api/system/health",
+]);
 
 interface ChartSnapshot {
   type: string;
@@ -150,17 +157,18 @@ test.describe("analytics UAT", () => {
     await expect(activeNav).toContainText("Analytics");
 
     // (a) Legacy dashboard header (verbatim parity copy).
-    await expect(page.locator("#analyticsDashboard h2")).toContainText(
+    await expect(page.locator("#analyticsDashboard > h2")).toContainText(
       "Storage Analytics Dashboard",
     );
 
-    // (b) Storage-analytics half is the legacy DEGRADED state for the metrics
-    //     that genuinely come from the storage probe (drive-usage, partition,
-    //     recording-estimate) — those live on the Storage page, not here.
-    const degraded = page.locator("[data-testid=storage-degraded]");
-    await expect(degraded).toBeVisible();
-    await expect(degraded).toContainText("Storage analytics unavailable");
-    // The genuine-read-failure alert is NOT shown (the read succeeded).
+    // (b) Storage section is present with expected subsections. Since the fixture
+    //     webd doesn't provide storage endpoints, storage data will be unavailable
+    //     (null), but the merged component still renders the storage UI structure.
+    await expect(page.locator("#storage-sdcard-card")).toBeVisible({ timeout: 5000 });
+    await expect(page.locator("#storage-device-health")).toBeVisible({ timeout: 5000 });
+    
+    // The analytics section (live from /api/analytics) loads successfully and
+    // doesn't show an error.
     await expect(page.locator("[data-testid=analytics-unavailable]")).toHaveCount(0);
 
     // (c) Driving Statistics — LIVE from /api/analytics. Seed: 30556.3 m / 3
@@ -398,9 +406,9 @@ test.describe("analytics UAT", () => {
       apiSeen.add(u.pathname);
     }
 
-    // Every same-origin DATA fetch (fetch/xhr) must be exactly /api/analytics —
-    // closes the "fetch a fabricated /something.json" false-green that the
-    // pathname-prefix whitelist alone would miss.
+    // Every same-origin DATA fetch (fetch/xhr) must be to one of the whitelisted
+    // analytics/storage endpoints — closes the "fetch a fabricated /something.json"
+    // false-green that the pathname-prefix whitelist alone would miss.
     const dataPlane = dataReqs.filter(
       (r) => new URL(r.url).origin === origin && ["fetch", "xhr"].includes(r.rtype),
     );
@@ -408,14 +416,14 @@ test.describe("analytics UAT", () => {
       const u = new URL(r.url);
       if (SHELL_POLL_ALLOWLIST.has(u.pathname)) continue;
       expect(
-        u.pathname === "/api/analytics" && u.search === "",
+        ANALYTICS_API.has(u.pathname) && u.search === "",
         `unexpected data fetch (${r.rtype}) ${u.pathname}${u.search}`,
       ).toBe(true);
       expect(r.method.toUpperCase(), `${r.method} ${u.pathname}`).toBe("GET");
     }
-    expect(dataPlane.length, "the screen must make its one /api/analytics fetch").toBeGreaterThan(0);
+    expect(dataPlane.length, "the screen must make its data fetches").toBeGreaterThan(0);
 
-    // The one required endpoint was actually hit (defends against partial wiring).
+    // The required endpoints were actually hit (defends against partial wiring).
     expect(apiSeen.has("/api/analytics"), "/api/analytics was never requested").toBe(true);
 
     // No mutation surface in the DOM (read-only screen has no POST form / submit).

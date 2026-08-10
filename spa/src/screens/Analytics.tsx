@@ -678,12 +678,12 @@ export function Analytics() {
 
   return (
     <div
-      class="container"
+      class="storage-page"
       id="analyticsDashboard"
       data-page="analytics"
       data-screen="analytics"
     >
-      <h2>
+      <h2 class="storage-title">
         <Icon name="bar-chart-2" /> Storage Analytics Dashboard
       </h2>
 

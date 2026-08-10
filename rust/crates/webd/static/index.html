@@ -3,17 +3,24 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>TeslaUSB</title>
+    <title>Tesla USB Gadget Control</title>
+    <script>
+      // Apply theme before paint to avoid a flash (parity with legacy base.html).
+      (function () {
+        const saved = localStorage.getItem("theme");
+        const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+        const theme = saved || (prefersDark ? "dark" : "light");
+        if (theme === "dark") {
+          document.documentElement.setAttribute("data-theme", "dark");
+        }
+      })();
+    </script>
+    <link rel="stylesheet" href="/static/css/bootstrap-icons-subset.css" />
+    <link rel="stylesheet" href="/static/css/style.css" />
+    <script type="module" crossorigin src="/assets/index-DNd3Y-r9.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-B_AlFc4O.css">
   </head>
   <body>
-    <!--
-      Placeholder SPA shell served by webd (Task 5.1a). The real hashed
-      SPA bundle is produced by Task 5.2 and dropped into this directory;
-      this file only proves the static host + SPA-fallback routing works.
-    -->
-    <main id="app">
-      <h1>TeslaUSB</h1>
-      <p>The web UI bundle has not been installed yet.</p>
-    </main>
+    <div id="app"></div>
   </body>
 </html>

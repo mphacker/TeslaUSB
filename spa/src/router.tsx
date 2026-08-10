@@ -61,7 +61,6 @@ export const ROUTES: Route[] = [
   { path: "/cloud", active: "cloud", screen: CloudArchive, title: "Cloud" },
   { path: "/captive-portal", active: "settings", screen: CaptivePortal, title: "Wi-Fi setup" },
   { path: "/settings", active: "settings", screen: MediaHub, title: "Settings" },
-  { path: "/storage", active: "analytics", screen: Analytics, title: "Analytics" },
   { path: "/failed-jobs", active: "settings", screen: FailedJobs, title: "Failed jobs" },
   // Legacy v1 direct routes kept as aliases so old bookmarks / deep links don't
   // dead-end: /lock_chimes → the Media (lock-chimes) screen, /jobs → Failed jobs.

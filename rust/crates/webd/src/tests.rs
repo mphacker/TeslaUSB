@@ -22,6 +22,7 @@ use axum::response::IntoResponse;
 use http_body_util::BodyExt;
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -1686,6 +1687,394 @@ async fn jobs_failed_uploads_maps_rejected_cursor_to_bad_request() {
     let (status, body) = get_json(&fx.app, "/api/jobs/failed/uploads?cursor=not-a-cursor").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"]["code"], "invalid_cursor");
+}
+
+#[tokio::test]
+async fn cloud_failed_upload_retry_rejects_missing_origin_without_forwarding() {
+    let fx = settings_fixture(
+        json!({
+            "status": "cloud_failed_upload_retry_accepted",
+            "job_id": "m-501",
+            "request_id": "req-501",
+            "state": "queued"
+        }),
+        false,
+    );
+    let (status, body) = post_json_with_headers(
+        &fx.app,
+        "/api/cloud/queue/77/retry",
+        json!({
+            "archive_item_id": 77,
+            "child_key": "front",
+            "requestId": "req-retry-0001",
+            "idempotencyKey": "idem-retry-0001",
+            "requestHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }),
+        &[("host", "cybertruckusb.local"), ("sec-fetch-site", "same-origin")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"]["code"], "forbidden_origin");
+    assert!(fx.indexd_last.lock().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn cloud_failed_upload_retry_rejects_cross_site_without_forwarding() {
+    let fx = settings_fixture(
+        json!({
+            "status": "cloud_failed_upload_retry_accepted",
+            "job_id": "m-501",
+            "request_id": "req-501",
+            "state": "queued"
+        }),
+        false,
+    );
+    let (status, body) = post_json_with_headers(
+        &fx.app,
+        "/api/cloud/queue/77/retry",
+        json!({
+            "archive_item_id": 77,
+            "child_key": "front",
+            "requestId": "req-retry-0001",
+            "idempotencyKey": "idem-retry-0001",
+            "requestHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }),
+        &[
+            ("host", "cybertruckusb.local"),
+            ("origin", "https://evil.example"),
+            ("sec-fetch-site", "cross-site"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"]["code"], "forbidden_origin");
+    assert!(fx.indexd_last.lock().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn cloud_failed_upload_retry_rejects_malformed_payload_without_forwarding() {
+    let fx = settings_fixture(
+        json!({
+            "status": "cloud_failed_upload_retry_accepted",
+            "job_id": "m-501",
+            "request_id": "req-501",
+            "state": "queued"
+        }),
+        false,
+    );
+    let (status, body) = post_json_with_headers(
+        &fx.app,
+        "/api/cloud/queue/77/retry",
+        json!({
+            "archive_item_id": 88,
+            "child_key": "front",
+            "requestId": "req-retry-0001",
+            "idempotencyKey": "idem-retry-0001",
+            "requestHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }),
+        &[
+            ("host", "cybertruckusb.local"),
+            ("origin", "http://cybertruckusb.local"),
+            ("sec-fetch-site", "same-origin"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "archive_item_id_mismatch");
+    assert!(fx.indexd_last.lock().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn cloud_failed_upload_retry_maps_indexd_accepted() {
+    let fx = settings_fixture(
+        json!({
+            "status": "cloud_failed_upload_retry_accepted",
+            "job_id": "m-501",
+            "request_id": "req-501",
+            "state": "queued"
+        }),
+        false,
+    );
+    let (status, body) = post_json_with_headers(
+        &fx.app,
+        "/api/cloud/queue/77/retry",
+        json!({
+            "archive_item_id": 77,
+            "child_key": "front",
+            "requestId": "req-retry-0001",
+            "idempotencyKey": "idem-retry-0001",
+            "requestHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }),
+        &[
+            ("host", "cybertruckusb.local"),
+            ("origin", "http://cybertruckusb.local"),
+            ("sec-fetch-site", "same-origin"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(body["status"], "accepted");
+    assert_eq!(body["jobId"], "m-501");
+    assert_eq!(body["requestId"], "req-501");
+    assert_eq!(body["state"], "queued");
+    let req = fx.indexd_last.lock().unwrap().clone().unwrap();
+    assert_eq!(req["cmd"], "cloud_failed_upload_retry");
+    assert_eq!(req["archive_item_id"], 77);
+    assert_eq!(req["child_key"], "front");
+    assert_eq!(req["request_id"], "req-retry-0001");
+    assert_eq!(req["idempotency_key"], "idem-retry-0001");
+    assert_eq!(
+        req["request_hash"].as_str().unwrap(),
+        canonical_failed_upload_retry_hash_for_test(
+            77,
+            "front",
+            None,
+            "req-retry-0001",
+            "idem-retry-0001"
+        )
+    );
+}
+
+#[tokio::test]
+async fn cloud_failed_upload_retry_accepts_missing_request_hash_for_compatibility() {
+    let fx = settings_fixture(
+        json!({
+            "status": "cloud_failed_upload_retry_accepted",
+            "job_id": "m-501",
+            "request_id": "req-501",
+            "state": "queued"
+        }),
+        false,
+    );
+    let (status, body) = post_json_with_headers(
+        &fx.app,
+        "/api/cloud/queue/77/retry",
+        json!({
+            "archive_item_id": 77,
+            "child_key": "front",
+            "requestId": "req-retry-compat",
+            "idempotencyKey": "idem-retry-compat"
+        }),
+        &[
+            ("host", "cybertruckusb.local"),
+            ("origin", "http://cybertruckusb.local"),
+            ("sec-fetch-site", "same-origin"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(body["status"], "accepted");
+    let req = fx.indexd_last.lock().unwrap().clone().unwrap();
+    assert_eq!(req["cmd"], "cloud_failed_upload_retry");
+    assert_eq!(
+        req["request_hash"].as_str().unwrap(),
+        canonical_failed_upload_retry_hash_for_test(
+            77,
+            "front",
+            None,
+            "req-retry-compat",
+            "idem-retry-compat"
+        )
+    );
+}
+
+#[tokio::test]
+async fn cloud_failed_upload_retry_maps_replay_conflict_refused_and_error() {
+    let replay_fx = settings_fixture(
+        json!({
+            "status": "cloud_failed_upload_retry_replay",
+            "job_id": "m-501",
+            "request_id": "req-501",
+            "outcome": "accepted",
+            "response_status": "accepted",
+            "response_code": 202,
+            "detail": "queued"
+        }),
+        false,
+    );
+    let (replay_status, replay_body) = post_json_with_headers(
+        &replay_fx.app,
+        "/api/cloud/queue/77/retry",
+        json!({
+            "archive_item_id": 77,
+            "child_key": "front",
+            "requestId": "req-retry-0001",
+            "idempotencyKey": "idem-retry-0001",
+            "requestHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }),
+        &[
+            ("host", "cybertruckusb.local"),
+            ("origin", "http://cybertruckusb.local"),
+            ("sec-fetch-site", "same-origin"),
+        ],
+    )
+    .await;
+    assert_eq!(replay_status, StatusCode::ACCEPTED);
+    assert_eq!(replay_body["status"], "replay");
+    assert_eq!(replay_body["jobId"], "m-501");
+    assert_eq!(replay_body["requestId"], "req-501");
+    assert_eq!(replay_body["state"], "queued");
+
+    let conflict_fx = settings_fixture(
+        json!({
+            "status": "cloud_failed_upload_retry_conflict",
+            "job_id": "m-501",
+            "request_id": "req-501",
+            "message": "idempotency key conflict"
+        }),
+        false,
+    );
+    let (conflict_status, conflict_body) = post_json_with_headers(
+        &conflict_fx.app,
+        "/api/cloud/queue/77/retry",
+        json!({
+            "archive_item_id": 77,
+            "child_key": "front",
+            "requestId": "req-retry-0001",
+            "idempotencyKey": "idem-retry-0001",
+            "requestHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }),
+        &[
+            ("host", "cybertruckusb.local"),
+            ("origin", "http://cybertruckusb.local"),
+            ("sec-fetch-site", "same-origin"),
+        ],
+    )
+    .await;
+    assert_eq!(conflict_status, StatusCode::CONFLICT);
+    assert_eq!(conflict_body["status"], "conflict");
+    assert_eq!(conflict_body["jobId"], "m-501");
+    assert_eq!(conflict_body["requestId"], "req-501");
+    assert_eq!(conflict_body["state"], "conflict");
+
+    let refused_fx = settings_fixture(
+        json!({
+            "status": "cloud_failed_upload_retry_refused",
+            "job_id": "m-777",
+            "request_id": "req-777",
+            "message": "cannot retry a queued queue row"
+        }),
+        false,
+    );
+    let (refused_status, refused_body) = post_json_with_headers(
+        &refused_fx.app,
+        "/api/cloud/queue/77/retry",
+        json!({
+            "archive_item_id": 77,
+            "child_key": "front",
+            "requestId": "req-retry-0001",
+            "idempotencyKey": "idem-retry-0001",
+            "requestHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }),
+        &[
+            ("host", "cybertruckusb.local"),
+            ("origin", "http://cybertruckusb.local"),
+            ("sec-fetch-site", "same-origin"),
+        ],
+    )
+    .await;
+    assert_eq!(refused_status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(refused_body["status"], "refused");
+    assert_eq!(refused_body["jobId"], "m-777");
+    assert_eq!(refused_body["requestId"], "req-777");
+    assert_eq!(refused_body["state"], "refused");
+
+    let replay_refused_fx = settings_fixture(
+        json!({
+            "status": "cloud_failed_upload_retry_replay",
+            "job_id": "m-888",
+            "request_id": "req-888",
+            "outcome": "refused",
+            "response_status": "rejected",
+            "response_code": 422,
+            "detail": "cannot retry a queued queue row"
+        }),
+        false,
+    );
+    let (replay_refused_status, replay_refused_body) = post_json_with_headers(
+        &replay_refused_fx.app,
+        "/api/cloud/queue/77/retry",
+        json!({
+            "archive_item_id": 77,
+            "child_key": "front",
+            "requestId": "req-retry-0001",
+            "idempotencyKey": "idem-retry-0001",
+            "requestHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }),
+        &[
+            ("host", "cybertruckusb.local"),
+            ("origin", "http://cybertruckusb.local"),
+            ("sec-fetch-site", "same-origin"),
+        ],
+    )
+    .await;
+    assert_eq!(replay_refused_status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(replay_refused_body["status"], "replay");
+    assert_eq!(replay_refused_body["state"], "refused");
+
+    let replay_error_fx = settings_fixture(
+        json!({
+            "status": "cloud_failed_upload_retry_replay",
+            "job_id": "m-999",
+            "request_id": "req-999",
+            "outcome": "error",
+            "response_status": "error",
+            "response_code": 502,
+            "detail": "backend failure"
+        }),
+        false,
+    );
+    let (replay_error_status, replay_error_body) = post_json_with_headers(
+        &replay_error_fx.app,
+        "/api/cloud/queue/77/retry",
+        json!({
+            "archive_item_id": 77,
+            "child_key": "front",
+            "requestId": "req-retry-0001",
+            "idempotencyKey": "idem-retry-0001",
+            "requestHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }),
+        &[
+            ("host", "cybertruckusb.local"),
+            ("origin", "http://cybertruckusb.local"),
+            ("sec-fetch-site", "same-origin"),
+        ],
+    )
+    .await;
+    assert_eq!(replay_error_status, StatusCode::BAD_GATEWAY);
+    assert_eq!(replay_error_body["status"], "replay");
+    assert_eq!(replay_error_body["state"], "failed");
+
+    let error_fx = settings_fixture(
+        json!({
+            "status": "error",
+            "message": "forced failed-upload retry mutation failure"
+        }),
+        false,
+    );
+    let (error_status, error_body) = post_json_with_headers(
+        &error_fx.app,
+        "/api/cloud/queue/77/retry",
+        json!({
+            "archive_item_id": 77,
+            "child_key": "front",
+            "requestId": "req-retry-0001",
+            "idempotencyKey": "idem-retry-0001",
+            "requestHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }),
+        &[
+            ("host", "cybertruckusb.local"),
+            ("origin", "http://cybertruckusb.local"),
+            ("sec-fetch-site", "same-origin"),
+        ],
+    )
+    .await;
+    assert_eq!(error_status, StatusCode::BAD_GATEWAY);
+    assert_eq!(error_body["error"]["code"], "indexd_error");
+    assert_eq!(
+        error_body["error"]["message"],
+        "failed-upload retry request failed in indexd"
+    );
 }
 
 #[tokio::test]
@@ -3774,7 +4163,7 @@ async fn jobs_capabilities_reports_read_only_foundation() {
     assert_eq!(body["jobs_endpoint"], "/api/jobs");
     assert_eq!(body["failed_jobs_endpoint"], "/api/jobs/failed");
     assert_eq!(body["failed_uploads_endpoint"], "/api/jobs/failed/uploads");
-    assert_eq!(body["durable_mutation_routes_enabled"], false);
+    assert_eq!(body["durable_mutation_routes_enabled"], true);
     assert_eq!(body["legacy_destructive_routes_exist"], true);
     assert_eq!(body["durable_job_store"]["kind"], "in_memory");
     assert_eq!(body["idempotency"]["same_key_different_hash"], 409);
@@ -3803,15 +4192,27 @@ async fn jobs_capabilities_reports_read_only_foundation() {
         body["failed_upload_retry_contract"]["rejected_source_states"][3],
         "parked"
     );
-    assert_eq!(body["failed_upload_retry_contract"]["enabled"], false);
+    assert_eq!(body["failed_upload_retry_contract"]["enabled"], true);
+    assert_eq!(
+        body["failed_upload_retry_contract"]["optional_fields"][1],
+        "requestHash"
+    );
+    assert_eq!(
+        body["failed_upload_retry_contract"]["request_hash_semantics"]["computed_by"],
+        "webd"
+    );
     assert_eq!(
         body["failed_upload_retry_contract"]["delete_enabled"],
         false
     );
     assert_eq!(body["csrf_hardening_non_get"]["is_authentication"], false);
     assert_eq!(
-        body["csrf_hardening_non_get"]["current_behavior"]["origin_required"],
+        body["csrf_hardening_non_get"]["current_behavior"]["legacy_wifi_origin_required"],
         false
+    );
+    assert_eq!(
+        body["csrf_hardening_non_get"]["current_behavior"]["durable_retry_origin_required"],
+        true
     );
 }
 
@@ -4299,6 +4700,72 @@ async fn post_json(app: &Router, uri: &str, body: Value) -> (StatusCode, Value) 
                 .method(Method::POST)
                 .uri(uri)
                 .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, value)
+}
+
+fn canonical_failed_upload_retry_hash_for_test(
+    archive_item_id: i64,
+    child_key: &str,
+    upload_set_id: Option<&str>,
+    request_id: &str,
+    idempotency_key: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"teslausb.cloud_failed_upload_retry.v1\0");
+    append_retry_hash_field(&mut hasher, b"archive_item_id", &archive_item_id.to_string());
+    append_retry_hash_field(&mut hasher, b"child_key", child_key);
+    append_retry_hash_field(
+        &mut hasher,
+        b"upload_set_id",
+        upload_set_id.unwrap_or("__none__"),
+    );
+    append_retry_hash_field(&mut hasher, b"request_id", request_id);
+    append_retry_hash_field(&mut hasher, b"idempotency_key", idempotency_key);
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(digest.len() * 2);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for &byte in &digest {
+        out.push(char::from(HEX[(byte >> 4) as usize]));
+        out.push(char::from(HEX[(byte & 0x0f) as usize]));
+    }
+    out
+}
+
+fn append_retry_hash_field(hasher: &mut Sha256, name: &[u8], value: &str) {
+    hasher.update(name);
+    hasher.update([0u8]);
+    let bytes = value.as_bytes();
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
+async fn post_json_with_headers(
+    app: &Router,
+    uri: &str,
+    body: Value,
+    headers: &[(&str, &str)],
+) -> (StatusCode, Value) {
+    let mut builder = Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .header(axum::http::header::CONTENT_TYPE, "application/json");
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    let resp = app
+        .clone()
+        .oneshot(
+            builder
                 .body(Body::from(serde_json::to_vec(&body).unwrap()))
                 .unwrap(),
         )

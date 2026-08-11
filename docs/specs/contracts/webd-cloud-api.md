@@ -85,12 +85,16 @@ state/config/history and an **uploadd control socket** for actions (D6, §4).
   transfer.
 - `POST /api/cloud/reset-counters` → `cloud_stats_reset` (sets the stats baseline
   — M1). Returns the new baseline.
-- `POST /api/cloud/queue/{archive_item_id}/retry` (**planned, still disabled**) →
-  retry exactly one failed child via indexd `cloud_queue_retry`. Path segment is
+- `POST /api/cloud/queue/{archive_item_id}/retry` (**enabled for local-network
+  operators**) → retry exactly one failed child via indexd
+  `cloud_failed_upload_retry`. Path segment is
   the **numeric `archive_item_id`** (M5) — **not** a slash-bearing remote key.
   Body includes a **required** `child_key` plus durable-mutation envelope fields
-  (`requestId`, `idempotencyKey`, `requestHash`) and an **optional**
-  `upload_set_id` fence (`32`-char lowercase hex). For sealed rows
+  (`requestId`, `idempotencyKey`) and an **optional compatibility**
+  `requestHash` field. webd computes the canonical request hash server-side for
+  idempotency persistence; if the client sends `requestHash`, webd validates
+  shape only and ignores it for idempotency decisions. Body also supports the
+  optional `upload_set_id` fence (`32`-char lowercase hex). For sealed rows
   `upload_set_id` must be present and match; for unsealed rows it must be
   omitted. Retry request identity includes `(archive_item_id, child_key,
   upload_set_id)` so a fence change is a deterministic idempotency conflict.
@@ -105,7 +109,7 @@ restart):
 - failed/parked children surface as `JobStatus` entries with a **sanitized**
   `error_class` (no raw stderr — D8),
 - the SSE `upload_queue` topic emits state transitions,
-- the manual-retry action maps to the disabled
+- the manual-retry action maps to the
   `POST /api/cloud/queue/{archive_item_id}/retry` contract above (child-specific,
   failed-only).
 

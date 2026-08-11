@@ -456,6 +456,9 @@ pub struct CloudHistoryRowWire {
     pub at: i64,
     /// Sanitized error class.
     pub error_class: Option<String>,
+    /// Sealed upload set fence, when available.
+    #[serde(default)]
+    pub upload_set_id: Option<String>,
 }
 
 /// Typed non-secret cloud config over the wire.
@@ -751,6 +754,10 @@ pub enum Response {
         request_id: String,
         /// Replayed prior outcome (`accepted`/`refused`/`error`).
         outcome: String,
+        /// Stored prior response status discriminator (`accepted`/`rejected`/`error`...).
+        response_status: Option<String>,
+        /// Stored prior HTTP-ish status code.
+        response_code: Option<i64>,
         /// Optional replay detail.
         detail: Option<String>,
     },
@@ -1500,6 +1507,8 @@ mod tests {
                     job_id: "m-501".to_owned(),
                     request_id: "req-501".to_owned(),
                     outcome: "accepted".to_owned(),
+                    response_status: Some("accepted".to_owned()),
+                    response_code: Some(202),
                     detail: Some("queued".to_owned()),
                 },
             ),
@@ -1599,6 +1608,7 @@ mod tests {
                         size_bytes: 10,
                         at: 100,
                         error_class: None,
+                        upload_set_id: None,
                     }],
                     next_cursor: None,
                 },

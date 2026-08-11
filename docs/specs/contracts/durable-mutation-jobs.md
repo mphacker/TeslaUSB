@@ -1,9 +1,10 @@
 # Contract: shared durable mutation job foundation (B-1)
 
-Status: **Foundational slice only (no new user mutations enabled).**
+Status: **Foundation + failed cloud-upload retry enabled (no delete/destructive mutations).**
 
-This contract defines the shared job/idempotency/error semantics that future
-state-changing APIs must use. It does **not** enable deletion, cloud control,
+This contract defines the shared job/idempotency/error semantics that
+state-changing APIs must use. It enables only the child-specific failed
+cloud-upload retry route; it does **not** enable deletion, cloud control,
 Wi-Fi mutation, gadget mode mutation, or fsck start/cancel endpoints.
 
 ## 0. Security/product boundary (operator decision)
@@ -122,9 +123,11 @@ current `JobHub` retention is in-memory and not restart durable.
 - bounded/sanitized public error coverage;
 - recording/handoff exclusion gate coverage.
 
-## 9. Failed cloud-upload retry groundwork (no route enable yet)
+## 9. Failed cloud-upload retry contract (route enable: retry only)
 
-- Public retry/delete mutation routes remain disabled in this slice.
+- Public delete mutation routes remain disabled in this slice.
+- `POST /api/cloud/queue/{archive_item_id}/retry` is enabled for local-network
+  operators with strict Host/Origin/Sec-Fetch-Site checks.
 - The planned cloud retry command is **child-specific**:
   `(archive_item_id, child_key, upload_set_id?)` identifies one queue row.
 - `upload_set_id` is an optional generation fence with explicit semantics:
@@ -150,3 +153,7 @@ current `JobHub` retention is in-memory and not restart durable.
   `job_id`/`request_id` identities.
 - indexd remains the single writer for queue-state mutations; groundwork here is
   validation/contract/persistence scaffolding only.
+- request hash semantics for this route:
+  - webd computes canonical `request_hash` server-side from target + envelope;
+  - request body `requestHash` is compatibility-only (accepted if present,
+    validated for shape, ignored for idempotency decisions).

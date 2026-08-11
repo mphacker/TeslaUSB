@@ -1379,6 +1379,7 @@ dependencies = [
  "scannerd",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "teslausb-core",
  "teslausb-creds",

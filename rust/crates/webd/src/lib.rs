@@ -49,6 +49,7 @@ mod lightshows;
 mod media;
 mod media_events;
 mod media_upload;
+mod mutation_origin;
 mod music;
 mod plates;
 mod polyline;

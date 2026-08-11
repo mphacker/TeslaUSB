@@ -24,6 +24,8 @@ import type {
   CloudQueuePageResponse,
   CloudStatusResponse,
   CloudCredentialsResponse,
+  FailedUploadRetryRequest,
+  FailedUploadRetryResponse,
   FailedUploadHistoryPageResponse,
   FailedJobsResponse,
   IndexEventChartResponse,
@@ -148,6 +150,50 @@ async function request<T>(
 
 function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   return request<T>("GET", path, signal);
+}
+
+async function requestJsonAllowStatuses<T>(
+  method: string,
+  path: string,
+  allowedStatuses: readonly number[],
+  signal?: AbortSignal,
+  reqBody?: BodyInit,
+  contentType?: string,
+): Promise<T> {
+  let resp: Response;
+  try {
+    resp = await fetch(path, {
+      method,
+      headers: {
+        Accept: "application/json",
+        ...(contentType ? { "Content-Type": contentType } : {}),
+      },
+      credentials: "same-origin",
+      signal,
+      ...(reqBody !== undefined ? { body: reqBody } : {}),
+    });
+  } catch (err) {
+    throw new ApiError(0, "network", (err as Error).message || "network error");
+  }
+  const text = await resp.text();
+  let body: unknown = null;
+  if (text) {
+    try {
+      body = JSON.parse(text);
+    } catch {
+      throw new ApiError(resp.status, "bad_json", "malformed JSON response");
+    }
+  }
+  if (allowedStatuses.includes(resp.status)) return body as T;
+  if (!resp.ok) {
+    const env = body as ApiErrorBody | null;
+    throw new ApiError(
+      resp.status,
+      env?.error?.code ?? "http_error",
+      env?.error?.message ?? `HTTP ${resp.status}`,
+    );
+  }
+  return body as T;
 }
 
 function mediaContentUrl(path: string, version?: string | null): string {
@@ -311,6 +357,20 @@ export const api = {
     getJson<FailedUploadHistoryPageResponse>(
       `/api/jobs/failed/uploads${qs({ ...params })}`,
       signal,
+    ),
+
+  cloudFailedUploadRetry: (
+    archiveItemId: number,
+    body: FailedUploadRetryRequest,
+    signal?: AbortSignal,
+  ) =>
+    requestJsonAllowStatuses<FailedUploadRetryResponse>(
+      "POST",
+      `/api/cloud/queue/${archiveItemId}/retry`,
+      [200, 202, 409, 422],
+      signal,
+      JSON.stringify(body),
+      "application/json",
     ),
 
   failedJobs: (signal?: AbortSignal) =>

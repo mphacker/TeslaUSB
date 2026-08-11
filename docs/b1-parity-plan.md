@@ -207,15 +207,14 @@ deterministic reject for `done|queued|in_progress|parked`, with optional
 `upload_set_id` generation-fence semantics (sealed rows require match;
 unsealed rows require omission).
 
-indexd now also persists failed-upload retry request identity scaffolding
-(migration v9 `cloud_failed_upload_retry_requests`) so future retry mutations
-can reuse stable `job_id`/`request_id`, idempotency replay/conflict behavior,
-target fence identity, and sanitized status metadata without enabling any retry
-or delete route in this slice.
+indexd now also persists failed-upload retry request identity (migration v9
+`cloud_failed_upload_retry_requests`) and carries the generation fence through
+failed history (migration v10). The public retry route is enabled for local
+network users with strict same-origin checks; delete remains disabled.
 
-Next step: add typed webd retry/delete commands by subsystem and job ID, enforce
-ownership/state checks, and expose them in `FailedJobs.tsx`. Retry must create a
-new durable attempt rather than mutating history invisibly.
+Next step: finish the full retry validation/UAT gate, then add typed delete
+commands only after their durable ownership and recovery contract is complete.
+Retry creates a new durable attempt rather than mutating history invisibly.
 
 ### Advanced settings
 

@@ -1431,11 +1431,16 @@ async fn jobs_capabilities() -> Json<Value> {
         },
         "failed_upload_retry_contract": {
             "route": "/api/cloud/queue/{archive_item_id}/retry",
-            "enabled": false,
+            "enabled": true,
             "owner": "indexd",
             "target_scope": "single_child",
-            "required_fields": ["archive_item_id", "child_key", "requestId", "idempotencyKey", "requestHash"],
-            "optional_fields": ["upload_set_id"],
+            "required_fields": ["archive_item_id", "child_key", "requestId", "idempotencyKey"],
+            "optional_fields": ["upload_set_id", "requestHash"],
+            "request_hash_semantics": {
+                "computed_by": "webd",
+                "client_body_compatibility": "accepted_if_present",
+                "client_body_usage": "ignored_for_idempotency"
+            },
             "upload_set_id_fence": {
                 "shape": "32-char lowercase hex",
                 "sealed_row": "required and must match row upload_set_id",
@@ -1445,20 +1450,21 @@ async fn jobs_capabilities() -> Json<Value> {
             "allowed_source_states": ["failed"],
             "rejected_source_states": ["done", "queued", "in_progress", "parked"],
             "delete_enabled": false,
-            "notes": "Route wiring remains disabled; future mutation routes must keep indexd as the single queue writer."
+            "notes": "Route is enabled for local-network retry of failed child rows only. Delete and parked-collision resolution stay disabled."
         },
         "csrf_hardening_non_get": {
             "checks": ["Host", "Origin", "Sec-Fetch-Site"],
             "is_authentication": false,
-            "currently_enforced_on": ["wifi_mutations_legacy"],
+            "currently_enforced_on": ["wifi_mutations_legacy", "cloud_failed_upload_retry"],
             "current_behavior": {
                 "host_required": true,
-                "origin_required": false,
-                "sec_fetch_site_restricted": true
+                "sec_fetch_site_restricted": true,
+                "legacy_wifi_origin_required": false,
+                "durable_retry_origin_required": true
             },
-            "planned_for": ["future durable mutation routes"]
+            "planned_for": []
         },
-        "durable_mutation_routes_enabled": false,
+        "durable_mutation_routes_enabled": true,
         "legacy_destructive_routes_exist": true,
         "owner_durable_queues": ["gadgetd", "indexd", "uploadd", "retentiond"]
     }))

@@ -49,7 +49,8 @@
 
 /* Refresh / Retry buttons — neutral, touch-friendly (>=44px tap target). */
 .failed-jobs-page .fj-refresh,
-.failed-jobs-page .fj-retry {
+.failed-jobs-page .fj-retry,
+.failed-jobs-page .fj-upload-retry {
   display: inline-flex; align-items: center; gap: var(--space-2);
   min-height: 44px;
   padding: var(--space-2) var(--space-4);
@@ -62,10 +63,13 @@
   cursor: pointer;
 }
 .failed-jobs-page .fj-refresh:hover:not(:disabled),
-.failed-jobs-page .fj-retry:hover { border-color: var(--text-secondary); }
-.failed-jobs-page .fj-refresh:disabled { opacity: 0.6; cursor: default; }
+.failed-jobs-page .fj-retry:hover,
+.failed-jobs-page .fj-upload-retry:hover:not(:disabled) { border-color: var(--text-secondary); }
+.failed-jobs-page .fj-refresh:disabled,
+.failed-jobs-page .fj-upload-retry:disabled { opacity: 0.6; cursor: default; }
 .failed-jobs-page .fj-refresh:focus-visible,
-.failed-jobs-page .fj-retry:focus-visible {
+.failed-jobs-page .fj-retry:focus-visible,
+.failed-jobs-page .fj-upload-retry:focus-visible {
   outline: 2px solid var(--accent-primary, #2f81f7);
   outline-offset: 2px;
 }
@@ -150,6 +154,16 @@
   width: 20px; height: 20px; color: var(--accent-error, #f85149); flex-shrink: 0;
 }
 .failed-jobs-page .fj-retry { justify-self: start; }
+.failed-jobs-page .fj-upload-retry { justify-self: start; }
+.failed-jobs-page .fj-upload-retry-state { display: grid; gap: var(--space-1, 4px); }
+.failed-jobs-page .fj-upload-retry-message { margin: 0; }
+.failed-jobs-page .fj-upload-retry-meta { margin: 0; font-size: var(--text-xs, 0.75rem); }
+.failed-jobs-page .fj-upload-retry-accepted,
+.failed-jobs-page .fj-upload-retry-replay { color: var(--accent-success, #2ea043); }
+.failed-jobs-page .fj-upload-retry-conflict,
+.failed-jobs-page .fj-upload-retry-refused,
+.failed-jobs-page .fj-upload-retry-unavailable,
+.failed-jobs-page .fj-upload-retry-error { color: var(--accent-error, #f85149); }
 
 .failed-jobs-page .fj-empty {
   justify-items: center; text-align: center; gap: var(--space-2);

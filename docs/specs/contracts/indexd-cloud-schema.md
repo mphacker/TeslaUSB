@@ -33,14 +33,16 @@ real `proto.rs`/`server.rs` `status`-tagged framing, not invented here.
 indexd is the **single SQLite writer**. Cloud state consolidates here — **no
 separate `cloud_sync.db`**.
 
-> **Addendum (v9 scaffolding, no route enable):** migration v9 adds
+> **Addendum (v9/v10 retry durability):** migration v9 adds
 > `cloud_failed_upload_retry_requests` for failed-upload retry request identity
 > persistence (stable `job_id`/`request_id`, idempotency key/hash, owner/kind/state,
 > target `archive_item_id`/`child_key`/`upload_set_id`, sanitized status metadata,
 > timestamps, scoped uniqueness). indexd additionally has an internal IPC-only
 > child-specific `cloud_failed_upload_retry` verb (`accepted`/`replay`/`conflict`/
-> `refused`) built on this durable storage. Public retry/delete HTTP mutation
-> routes remain disabled.
+> `refused`) built on this durable storage. Migration v10 retains the
+> `upload_set_id` generation fence on history rows so sealed failed uploads can
+> be retried safely. The public retry route is enabled for the local-network
+> deployment; delete remains disabled.
 
 ---
 

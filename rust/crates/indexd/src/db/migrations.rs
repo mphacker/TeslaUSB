@@ -29,7 +29,7 @@ pub const SCHEMA_VERSION_NOTE: &str = "v1 (PROVISIONAL — pre-OP-3 freeze)";
 /// The highest schema version this binary knows how to produce. A DB
 /// reporting a higher version was written by a newer `indexd` and must
 /// not be opened read-write.
-pub const LATEST_VERSION: i64 = 9;
+pub const LATEST_VERSION: i64 = 10;
 
 /// The ordered migration ladder. Index order MUST match ascending
 /// `version`; [`MIGRATIONS`] is validated by a test.
@@ -78,6 +78,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 9,
         note: "v9 — failed-upload retry request persistence scaffold",
         sql: V9_SQL,
+    },
+    Migration {
+        version: 10,
+        note: "v10 — failed-history upload-set fencing",
+        sql: V10_SQL,
     },
 ];
 
@@ -553,6 +558,35 @@ CREATE INDEX idx_cloud_failed_upload_retry_requests_target
     );
 CREATE INDEX idx_cloud_failed_upload_retry_requests_state_updated
     ON cloud_failed_upload_retry_requests(state, updated_at);
+";
+
+/// v10 DDL: retain the upload-set fence with failed history rows.
+const V10_SQL: &str = "
+ALTER TABLE cloud_sync_history ADD COLUMN upload_set_id TEXT
+    CHECK(upload_set_id IS NULL OR (
+        length(upload_set_id) = 32
+        AND upload_set_id = lower(upload_set_id)
+        AND upload_set_id NOT GLOB '*[^0-9a-f]*'
+    ));
+
+UPDATE cloud_sync_history
+   SET upload_set_id = (
+       SELECT q.upload_set_id
+         FROM cloud_upload_queue AS q
+        WHERE q.archive_item_id = cloud_sync_history.archive_item_id
+          AND q.child_key = cloud_sync_history.child_key
+          AND q.destination_id = cloud_sync_history.destination_id
+          AND q.upload_set_id IS NOT NULL
+   )
+ WHERE upload_set_id IS NULL
+   AND (
+       SELECT COUNT(*)
+         FROM cloud_upload_queue AS q
+        WHERE q.archive_item_id = cloud_sync_history.archive_item_id
+          AND q.child_key = cloud_sync_history.child_key
+          AND q.destination_id = cloud_sync_history.destination_id
+          AND q.upload_set_id IS NOT NULL
+   ) = 1;
 ";
 
 /// v1 DDL: contract D1's proposed schema, plus two internal additions

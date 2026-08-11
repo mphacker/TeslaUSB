@@ -916,6 +916,8 @@ fn handle_cloud_failed_upload_retry(
                 job_id: existing.job_id,
                 request_id: existing.request.request_id,
                 outcome: replay_outcome(existing.response_status.as_deref()),
+                response_status: existing.response_status,
+                response_code: existing.response_code,
                 detail: existing.sanitized_response,
             })
         }
@@ -1091,6 +1093,7 @@ fn handle_cloud_history_load(
                 size_bytes: row.size_bytes,
                 at: row.at,
                 error_class: row.error_class,
+                upload_set_id: row.upload_set_id,
             })
             .collect(),
         page.next_cursor,
@@ -1119,6 +1122,7 @@ fn handle_cloud_failed_history_load(
                 size_bytes: row.size_bytes,
                 at: row.at,
                 error_class: row.error_class,
+                upload_set_id: row.upload_set_id,
             })
             .collect(),
         page.next_cursor,
@@ -5749,6 +5753,8 @@ mod tests {
                 job_id: "m-9901".to_owned(),
                 request_id: "req-9901".to_owned(),
                 outcome: "accepted".to_owned(),
+                response_status: Some("accepted".to_owned()),
+                response_code: Some(202),
                 detail: Some("queued".to_owned()),
             }
         );

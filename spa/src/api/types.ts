@@ -74,6 +74,7 @@ export interface FailedUploadHistoryItem {
   size_bytes: number;
   at: number;
   error_class: string | null;
+  upload_set_id?: string | null;
 }
 
 export interface FailedUploadHistoryPageResponse {
@@ -93,6 +94,23 @@ export interface FailedJob {
 
 export interface FailedJobsResponse {
   jobs: FailedJob[];
+}
+
+export interface FailedUploadRetryRequest {
+  archive_item_id: number;
+  child_key: string;
+  upload_set_id?: string | null;
+  requestId: string;
+  idempotencyKey: string;
+  requestHash?: string;
+}
+
+export interface FailedUploadRetryResponse {
+  status: "accepted" | "replay" | "conflict" | "refused";
+  jobId: string;
+  requestId: string;
+  state: string;
+  detail?: string;
 }
 
 /** `GET /api/fsck/status` read-only maintenance snapshot. */

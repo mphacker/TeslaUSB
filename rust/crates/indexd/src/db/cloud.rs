@@ -277,6 +277,8 @@ pub struct CloudHistoryRow {
     pub at: i64,
     /// Sanitized error class on failure.
     pub error_class: Option<String>,
+    /// Sealed upload set fence, when available.
+    pub upload_set_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -556,6 +558,7 @@ fn cloud_history_row_estimated_size(row: &CloudHistoryRow) -> usize {
         + json_escaped_len(&row.destination_id)
         + json_escaped_len(&row.outcome)
         + row.error_class.as_deref().map_or(0, json_escaped_len)
+        + row.upload_set_id.as_deref().map_or(0, json_escaped_len)
         + 256
 }
 
@@ -1239,32 +1242,63 @@ fn failed_upload_retry_target_row(
     tx: &Transaction<'_>,
     target: &CloudQueueRetryTarget,
 ) -> Result<(String, String, String, Option<String>), DbError> {
-    tx.query_row(
-        "SELECT destination_id, remote_key, state, upload_set_id
-           FROM cloud_upload_queue
-          WHERE archive_item_id = ?1
-            AND child_key = ?2
-          ORDER BY (upload_set_id IS ?3) DESC,
-                   seq ASC,
-                   destination_id ASC,
-                   remote_key ASC
-          LIMIT 1",
-        params![
-            target.archive_item_id,
-            target.child_key,
-            target.upload_set_id.as_deref()
-        ],
-        |row| {
+    let mut rows = Vec::new();
+    if let Some(upload_set_id) = target.upload_set_id.as_deref() {
+        let mut stmt = tx.prepare(
+            "SELECT destination_id, remote_key, state, upload_set_id
+               FROM cloud_upload_queue
+              WHERE archive_item_id = ?1
+                AND child_key = ?2
+                AND upload_set_id = ?3
+              ORDER BY seq ASC, destination_id ASC, remote_key ASC
+              LIMIT 2",
+        )?;
+        let mapped = stmt.query_map(
+            params![target.archive_item_id, target.child_key, upload_set_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            },
+        )?;
+        for row in mapped {
+            rows.push(row?);
+        }
+    } else {
+        let mut stmt = tx.prepare(
+            "SELECT destination_id, remote_key, state, upload_set_id
+               FROM cloud_upload_queue
+              WHERE archive_item_id = ?1
+                AND child_key = ?2
+              ORDER BY seq ASC, destination_id ASC, remote_key ASC
+              LIMIT 2",
+        )?;
+        let mapped = stmt.query_map(params![target.archive_item_id, target.child_key], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, Option<String>>(3)?,
             ))
-        },
-    )
-    .optional()?
-    .ok_or_else(|| invalid_input("target queue row not found"))
+        })?;
+        for row in mapped {
+            rows.push(row?);
+        }
+    }
+
+    let mut iter = rows.into_iter();
+    let Some(first) = iter.next() else {
+        return Err(invalid_input("target queue row not found"));
+    };
+    if iter.next().is_some() {
+        return Err(invalid_input(
+            "ambiguous target queue rows; provide upload_set_id fence",
+        ));
+    }
+    Ok(first)
 }
 
 fn validate_failed_upload_retry_target_row(
@@ -1892,15 +1926,16 @@ pub fn cloud_upload_commit(
     )?;
     tx.execute(
         "INSERT INTO cloud_sync_history
-            (completion_seq, archive_item_id, child_key, destination_id, outcome, size_bytes, at, error_class)
-         VALUES (?1, ?2, ?3, ?4, 'uploaded', ?5, ?6, NULL)",
+        (completion_seq, archive_item_id, child_key, destination_id, outcome, size_bytes, at, error_class, upload_set_id)
+     VALUES (?1, ?2, ?3, ?4, 'uploaded', ?5, ?6, NULL, ?7)",
         params![
             completion_seq,
             archive_item_id,
             child_key,
             queue_pk.destination_id,
             size,
-            now
+            now,
+            upload_set_id
         ],
     )?;
     tx.execute(
@@ -2040,8 +2075,8 @@ pub fn cloud_upload_fail(
     )?;
     tx.execute(
         "INSERT INTO cloud_sync_history
-            (completion_seq, archive_item_id, child_key, destination_id, outcome, size_bytes, at, error_class)
-         VALUES (?1, ?2, ?3, ?4, 'failed', ?5, ?6, ?7)",
+            (completion_seq, archive_item_id, child_key, destination_id, outcome, size_bytes, at, error_class, upload_set_id)
+         VALUES (?1, ?2, ?3, ?4, 'failed', ?5, ?6, ?7, ?8)",
         params![
             completion_seq,
             archive_item_id,
@@ -2049,7 +2084,8 @@ pub fn cloud_upload_fail(
             queue_pk.destination_id,
             total_bytes,
             now,
-            error_class
+            error_class,
+            upload_set_id
         ],
     )?;
     tx.execute(
@@ -2201,6 +2237,7 @@ fn map_cloud_history_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CloudHisto
         size_bytes: row.get(6)?,
         at: row.get(7)?,
         error_class: row.get(8)?,
+        upload_set_id: row.get(9)?,
     })
 }
 
@@ -2220,7 +2257,7 @@ fn cloud_history_load_filtered(
     match cursor {
         Some(HistoryCursor { completion_seq, id }) => {
             let sql = if failed_only {
-                "SELECT id, completion_seq, archive_item_id, child_key, destination_id, outcome, size_bytes, at, error_class
+                "SELECT id, completion_seq, archive_item_id, child_key, destination_id, outcome, size_bytes, at, error_class, upload_set_id
                    FROM cloud_sync_history
                   WHERE outcome = 'failed'
                     AND (completion_seq > ?1
@@ -2228,7 +2265,7 @@ fn cloud_history_load_filtered(
                   ORDER BY completion_seq ASC, id ASC
                   LIMIT ?3"
             } else {
-                "SELECT id, completion_seq, archive_item_id, child_key, destination_id, outcome, size_bytes, at, error_class
+                "SELECT id, completion_seq, archive_item_id, child_key, destination_id, outcome, size_bytes, at, error_class, upload_set_id
                    FROM cloud_sync_history
                   WHERE completion_seq > ?1
                      OR (completion_seq = ?1 AND id > ?2)
@@ -2246,13 +2283,13 @@ fn cloud_history_load_filtered(
         }
         None => {
             let sql = if failed_only {
-                "SELECT id, completion_seq, archive_item_id, child_key, destination_id, outcome, size_bytes, at, error_class
+                "SELECT id, completion_seq, archive_item_id, child_key, destination_id, outcome, size_bytes, at, error_class, upload_set_id
                    FROM cloud_sync_history
                   WHERE outcome = 'failed'
                   ORDER BY completion_seq ASC, id ASC
                   LIMIT ?1"
             } else {
-                "SELECT id, completion_seq, archive_item_id, child_key, destination_id, outcome, size_bytes, at, error_class
+                "SELECT id, completion_seq, archive_item_id, child_key, destination_id, outcome, size_bytes, at, error_class, upload_set_id
                    FROM cloud_sync_history
                   ORDER BY completion_seq ASC, id ASC
                   LIMIT ?1"
@@ -2916,6 +2953,7 @@ mod tests {
             size_bytes: i64::MAX,
             at: i64::MIN,
             error_class: Some(big.clone()),
+            upload_set_id: None,
         };
         assert!(
             cloud_history_row_estimated_size(&history)
@@ -3703,6 +3741,57 @@ mod tests {
             .unwrap();
         assert_eq!(state_a, "failed");
         assert_eq!(state_b, "queued");
+    }
+
+    #[test]
+    fn failed_upload_retry_rejects_ambiguous_target_without_upload_set_id() {
+        let conn = open_in_memory().unwrap();
+        let parent = insert_archive_item(&conn, "archive/failed-retry-ambiguous");
+        let hash_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let hash_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        upsert_item(
+            &conn,
+            parent,
+            "dest",
+            "rk/amb-a",
+            "child-amb",
+            1,
+            10,
+            hash_a,
+        );
+        upsert_item(
+            &conn,
+            parent,
+            "dest",
+            "rk/amb-b",
+            "child-amb",
+            2,
+            10,
+            hash_b,
+        );
+        conn.execute(
+            "UPDATE cloud_upload_queue
+                SET state='failed', attempts=2, not_before=123, last_error='timeout'
+              WHERE destination_id='dest' AND remote_key IN ('rk/amb-a', 'rk/amb-b')",
+            [],
+        )
+        .unwrap();
+
+        let target = CloudQueueRetryTarget::new(parent, "child-amb".to_owned(), None).unwrap();
+        let err = cloud_failed_upload_retry(&conn, &target).unwrap_err().to_string();
+        assert!(err.contains("ambiguous target queue rows"));
+        let count_queued: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                   FROM cloud_upload_queue
+                  WHERE destination_id='dest'
+                    AND remote_key IN ('rk/amb-a', 'rk/amb-b')
+                    AND state='queued'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count_queued, 0);
     }
 
     #[test]

@@ -11,11 +11,12 @@ import { resolve } from "node:path";
 import { SHELL_POLL_ALLOWLIST } from "./screen-helpers";
 
 // ── Failed jobs screen UAT (fe-failed-jobs) ───────────────────────────────
-// Each test drives the REAL bundle served by webd against the seeded read-only
-// catalog (global-setup). The screen at /failed-jobs is a read-only snapshot of
-// the jobs webd retained as FAILED (contract D2 webd-api.md §2.1/§3) plus durable
-// failed cloud-upload history: it issues read-only GETs to /api/jobs/failed and
-// /api/jobs/failed/uploads. The jobs endpoint returns a WRAPPED envelope
+// Each test drives the REAL bundle served by webd against the seeded catalog
+// (global-setup). The screen at /failed-jobs is a snapshot of the jobs webd
+// retained as FAILED (contract D2 webd-api.md §2.1/§3) plus durable failed
+// cloud-upload history: it issues GETs to /api/jobs/failed and
+// /api/jobs/failed/uploads and can issue child-specific retry POSTs to
+// /api/cloud/queue/{archive_item_id}/retry. The jobs endpoint returns a WRAPPED envelope
 // { "jobs": JobStatus[] }, a bounded ring (≤100) of failures, OLDEST-first. The
 // screen renders newest-failure-first (reverse of the ring), with states loading /
 // error(+Retry) / empty("No failed jobs") / populated.
@@ -26,8 +27,8 @@ import { SHELL_POLL_ALLOWLIST } from "./screen-helpers";
 // has no failed jobs, so it returns {jobs:[]} → the empty state) to prove it
 // returns 2xx with a clean console. Screenshots are captured as artifacts.
 
-// The only read APIs this screen may call. webd is read-only; anything outside
-// this set (or any non-GET) is a hard failure.
+// On the passive load/refresh path (no retry click), the screen must stay on
+// these read APIs only.
 const ALLOWED_API = new Set(["/api/jobs/failed", "/api/jobs/failed/uploads"]);
 
 // Deterministic fixture — the ring is OLDEST-first on the wire (job_ids
@@ -96,6 +97,22 @@ async function routeFailedUploads(page: Page, body: unknown, status = 200) {
       body: JSON.stringify(body),
     }),
   );
+}
+
+async function routeFailedUploadRetry(
+  page: Page,
+  body: unknown,
+  status = 202,
+  sink?: { seen: unknown[] },
+) {
+  await page.route("**/api/cloud/queue/*/retry", async (r) => {
+    if (sink) sink.seen.push(r.request().postDataJSON());
+    await r.fulfill({
+      status,
+      contentType: "application/json",
+      body: JSON.stringify(body),
+    });
+  });
 }
 
 /** Settle: bundle executed, failed-jobs screen structure painted. */
@@ -232,6 +249,108 @@ test.describe("failed jobs UAT", () => {
     await expect(page.locator('[data-testid="failed-jobs-error"]')).toHaveCount(0);
   });
 
+  test("failed-upload retry wiring — posts deterministic envelope and maps response states", async ({
+    page,
+  }) => {
+    await routeJobs(page, EMPTY_FIXTURE);
+    await routeFailedUploads(page, FAILED_UPLOAD_FIXTURE);
+    const acceptedSink: { seen: unknown[] } = { seen: [] };
+    await routeFailedUploadRetry(
+      page,
+      {
+        status: "accepted",
+        jobId: "m-901",
+        requestId: "req-901",
+        state: "queued",
+      },
+      202,
+      acceptedSink,
+    );
+    await gotoFailedJobs(page);
+    await page.locator('[data-testid="fj-upload-retry"]').click();
+    await expect(page.locator('[data-testid="fj-upload-retry-state"]')).toContainText(
+      "Retry accepted (queued).",
+    );
+    await expect(page.locator('[data-testid="fj-upload-retry-state"]')).toContainText(
+      "job m-901 · request req-901",
+    );
+    expect(acceptedSink.seen).toHaveLength(1);
+    expect(acceptedSink.seen[0]).toMatchObject({
+      archive_item_id: 123,
+      child_key: "front",
+    });
+    const acceptedReq = acceptedSink.seen[0] as {
+      requestId?: string;
+      idempotencyKey?: string;
+      requestHash?: string;
+    };
+    expect(acceptedReq.requestId).toMatch(/^req-fur-[0-9a-f]{24}$/);
+    expect(acceptedReq.idempotencyKey).toMatch(/^idem-fur-[0-9a-f]{24}$/);
+    expect(acceptedReq.requestHash).toMatch(/^[0-9a-f]{64}$/);
+
+    await page.unroute("**/api/cloud/queue/*/retry");
+    await routeFailedUploadRetry(
+      page,
+      {
+        status: "replay",
+        jobId: "m-901",
+        requestId: "req-901",
+        state: "queued",
+      },
+      200,
+    );
+    await page.locator('[data-testid="fj-upload-retry"]').click();
+    await expect(page.locator('[data-testid="fj-upload-retry-state"]')).toContainText(
+      "Replay response (queued).",
+    );
+
+    await page.unroute("**/api/cloud/queue/*/retry");
+    await routeFailedUploadRetry(
+      page,
+      {
+        status: "conflict",
+        jobId: "m-901",
+        requestId: "req-901",
+        state: "conflict",
+        detail: "idempotency conflict",
+      },
+      409,
+    );
+    await page.locator('[data-testid="fj-upload-retry"]').click();
+    await expect(page.locator('[data-testid="fj-upload-retry-state"]')).toContainText(
+      "idempotency conflict",
+    );
+
+    await page.unroute("**/api/cloud/queue/*/retry");
+    await routeFailedUploadRetry(
+      page,
+      {
+        status: "refused",
+        jobId: "m-901",
+        requestId: "req-901",
+        state: "refused",
+        detail: "cannot retry queued row",
+      },
+      422,
+    );
+    await page.locator('[data-testid="fj-upload-retry"]').click();
+    await expect(page.locator('[data-testid="fj-upload-retry-state"]')).toContainText(
+      "cannot retry queued row",
+    );
+
+    await page.unroute("**/api/cloud/queue/*/retry");
+    await routeFailedUploadRetry(
+      page,
+      { error: { code: "unavailable", message: "cloud service unavailable" } },
+      503,
+    );
+    await page.locator('[data-testid="fj-upload-retry"]').click();
+    await expect(page.locator('[data-testid="fj-upload-retry-state"]')).toContainText(
+      "cloud service unavailable",
+    );
+    await expect(page.locator('[data-testid="failed-upload-history-list"] .fj-upload-item')).toHaveCount(1);
+  });
+
   // ── Gate 4: cap note — a full ring surfaces the bounded-snapshot note ────
   test("cap — a ring at capacity surfaces the bounded-snapshot note", async ({ page }) => {
     const full = {
@@ -282,8 +401,8 @@ test.describe("failed jobs UAT", () => {
     }
   });
 
-  // ── Gate 6: read-only — only the whitelisted GETs; no mutation ───────────
-  test("read-only — only failed-jobs and failed-upload-history GETs, no mutation", async ({
+  // ── Gate 6: baseline poll path — GET-only until operator clicks retry ─────
+  test("baseline poll path — only failed-jobs and failed-upload-history GETs before retry clicks", async ({
     page,
     probe,
   }) => {

@@ -29,7 +29,7 @@ use rusqlite::{Connection, OpenFlags};
 /// paging index. `webd` never reads any of them (and opens the catalog read-only,
 /// so the triggers never fire), so v4–v8 are fully read-compatible with the v3
 /// surface this build queries.
-const SUPPORTED_SCHEMA_VERSION: i64 = 9;
+const SUPPORTED_SCHEMA_VERSION: i64 = 10;
 
 /// How long a read-only connection waits on a locked database before erroring.
 /// WAL readers rarely block, but this is cheap insurance against a checkpoint

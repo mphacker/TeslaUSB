@@ -37,8 +37,10 @@ separate `cloud_sync.db`**.
 > `cloud_failed_upload_retry_requests` for failed-upload retry request identity
 > persistence (stable `job_id`/`request_id`, idempotency key/hash, owner/kind/state,
 > target `archive_item_id`/`child_key`/`upload_set_id`, sanitized status metadata,
-> timestamps, scoped uniqueness). This is persistence groundwork only; retry/delete
-> HTTP mutation routes remain disabled.
+> timestamps, scoped uniqueness). indexd additionally has an internal IPC-only
+> child-specific `cloud_failed_upload_retry` verb (`accepted`/`replay`/`conflict`/
+> `refused`) built on this durable storage. Public retry/delete HTTP mutation
+> routes remain disabled.
 
 ---
 

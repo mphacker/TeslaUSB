@@ -144,5 +144,9 @@ current `JobHub` retention is in-memory and not restart durable.
   migration v9) for this idempotency lane: stable `job_id`/`request_id`,
   idempotency scope, owner/kind/state, target fence identity, sanitized
   response/status metadata, and timestamps.
+- indexd now also exposes an **internal IPC-only** `cloud_failed_upload_retry`
+  command that uses that durable envelope/persistence lane and returns explicit
+  `accepted` / `replay` / `conflict` / `refused` outcomes with stable
+  `job_id`/`request_id` identities.
 - indexd remains the single writer for queue-state mutations; groundwork here is
   validation/contract/persistence scaffolding only.

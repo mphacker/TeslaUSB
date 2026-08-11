@@ -11,14 +11,22 @@ use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
+use teslausb_core::durable_mutation::{
+    CloudQueueRetryTarget, DurableMutationState, FailedUploadRetryRequestRecord,
+};
 use teslausb_core::manifest_digest::{ManifestDigestEntry, manifest_digest_v1_hex};
 
 use crate::db::cloud::{
     CloudConfig, CloudQueuePk, CloudQueueRetryResolution, CloudQueueUpsertItem, cloud_candidates,
     cloud_config_get, cloud_config_put, cloud_discover, cloud_failed_history_load,
-    cloud_history_load, cloud_pending_upload_sets_load, cloud_queue_load, cloud_queue_retry,
-    cloud_queue_upsert, cloud_stats_get, cloud_stats_reset, cloud_upload_commit, cloud_upload_fail,
+    cloud_failed_upload_retry_tx, cloud_failed_upload_retry_validate_tx, cloud_history_load,
+    cloud_pending_upload_sets_load, cloud_queue_load, cloud_queue_retry, cloud_queue_upsert,
+    cloud_stats_get, cloud_stats_reset, cloud_upload_commit, cloud_upload_fail,
     upload_lease_acquire, upload_lease_release, upload_lease_renew,
+};
+use crate::db::cloud_retry_requests::{
+    InsertFailedUploadRetryRequestResult, NewFailedUploadRetryRequestRow,
+    cloud_failed_upload_retry_request_insert_or_load_tx,
 };
 use crate::db::ingest::{
     AngleFacts, ArchiveAngleRegistration, ArchiveRegistration, ArchiveUnitRegistration, ClipFacts,
@@ -241,6 +249,28 @@ fn handle_connection(
                 &resolution,
             ) {
                 Ok(state) => Response::CloudQueueState { state },
+                Err(HandlerError::Rejected(message)) => Response::Rejected { message },
+                Err(HandlerError::Internal(message)) => Response::Error { message },
+            },
+            Request::CloudFailedUploadRetry {
+                archive_item_id,
+                child_key,
+                upload_set_id,
+                request_id,
+                idempotency_key,
+                request_hash,
+                job_id,
+            } => match handle_cloud_failed_upload_retry(
+                conn,
+                archive_item_id,
+                &child_key,
+                upload_set_id.as_deref(),
+                &request_id,
+                &idempotency_key,
+                &request_hash,
+                &job_id,
+            ) {
+                Ok(response) => response,
                 Err(HandlerError::Rejected(message)) => Response::Rejected { message },
                 Err(HandlerError::Internal(message)) => Response::Error { message },
             },
@@ -776,6 +806,128 @@ fn handle_cloud_queue_retry(
         &from_retry_resolution_wire(resolution),
     )
     .map_err(map_db_error)
+}
+
+const FAILED_UPLOAD_RETRY_OWNER: &str = "indexd";
+const FAILED_UPLOAD_RETRY_KIND: &str = "cloud_failed_upload_retry";
+const FAILED_UPLOAD_RETRY_CONFLICT_MESSAGE: &str =
+    "idempotency key already used with a different failed-upload retry request";
+
+fn replay_outcome(status: Option<&str>) -> String {
+    match status {
+        Some("accepted") => "accepted",
+        Some("rejected") => "refused",
+        Some("error") => "error",
+        Some("conflict") => "conflict",
+        Some("replay") => "replay",
+        _ => "accepted",
+    }
+    .to_owned()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_cloud_failed_upload_retry(
+    conn: &Arc<Mutex<Connection>>,
+    archive_item_id: i64,
+    child_key: &str,
+    upload_set_id: Option<&str>,
+    request_id: &str,
+    idempotency_key: &str,
+    request_hash: &str,
+    job_id: &str,
+) -> Result<Response, HandlerError> {
+    let target = CloudQueueRetryTarget::new(
+        archive_item_id,
+        child_key.to_owned(),
+        upload_set_id.map(str::to_owned),
+    )
+    .map_err(|reason| HandlerError::Rejected(reason.to_owned()))?;
+    let request = FailedUploadRetryRequestRecord::new(
+        request_id.to_owned(),
+        idempotency_key.to_owned(),
+        request_hash.to_owned(),
+        target.clone(),
+    )
+    .map_err(|reason| HandlerError::Rejected(reason.to_owned()))?;
+
+    let locked = conn
+        .lock()
+        .map_err(|_| HandlerError::Internal("index database mutex is poisoned".to_owned()))?;
+    let tx = locked
+        .unchecked_transaction()
+        .map_err(DbError::from)
+        .map_err(map_db_error)?;
+    let refusal_reason = match cloud_failed_upload_retry_validate_tx(&tx, &target) {
+        Ok(()) => None,
+        Err(DbError::Sqlite(rusqlite::Error::InvalidParameterName(message))) => Some(message),
+        Err(other) => return Err(HandlerError::Internal(other.to_string())),
+    };
+    let (state, response_status, response_code, sanitized_response) =
+        match refusal_reason.as_deref() {
+            Some(reason) => (
+                DurableMutationState::Refused,
+                Some("rejected".to_owned()),
+                Some(422),
+                Some(reason.to_owned()),
+            ),
+            None => (
+                DurableMutationState::Queued,
+                Some("accepted".to_owned()),
+                Some(202),
+                Some("queued".to_owned()),
+            ),
+        };
+    let insert_result = cloud_failed_upload_retry_request_insert_or_load_tx(
+        &tx,
+        &NewFailedUploadRetryRequestRow {
+            job_id: job_id.to_owned(),
+            owner: FAILED_UPLOAD_RETRY_OWNER.to_owned(),
+            kind: FAILED_UPLOAD_RETRY_KIND.to_owned(),
+            state,
+            request,
+            response_status,
+            response_code,
+            sanitized_response,
+        },
+    )
+    .map_err(map_db_error)?;
+
+    match insert_result {
+        InsertFailedUploadRetryRequestResult::Inserted(inserted) => {
+            if let Some(reason) = refusal_reason {
+                tx.commit().map_err(DbError::from).map_err(map_db_error)?;
+                return Ok(Response::CloudFailedUploadRetryRefused {
+                    job_id: inserted.job_id,
+                    request_id: inserted.request.request_id,
+                    message: reason,
+                });
+            }
+            cloud_failed_upload_retry_tx(&tx, &target).map_err(map_db_error)?;
+            tx.commit().map_err(DbError::from).map_err(map_db_error)?;
+            Ok(Response::CloudFailedUploadRetryAccepted {
+                job_id: inserted.job_id,
+                request_id: inserted.request.request_id,
+                state: "queued".to_owned(),
+            })
+        }
+        InsertFailedUploadRetryRequestResult::Replay(existing) => {
+            tx.commit().map_err(DbError::from).map_err(map_db_error)?;
+            Ok(Response::CloudFailedUploadRetryReplay {
+                job_id: existing.job_id,
+                request_id: existing.request.request_id,
+                outcome: replay_outcome(existing.response_status.as_deref()),
+                detail: existing.sanitized_response,
+            })
+        }
+        InsertFailedUploadRetryRequestResult::Conflict409(existing) => {
+            tx.commit().map_err(DbError::from).map_err(map_db_error)?;
+            Ok(Response::CloudFailedUploadRetryConflict {
+                job_id: existing.job_id,
+                request_id: existing.request.request_id,
+                message: FAILED_UPLOAD_RETRY_CONFLICT_MESSAGE.to_owned(),
+            })
+        }
+    }
 }
 
 fn handle_upload_lease_acquire(
@@ -5492,6 +5644,344 @@ mod tests {
                 state: "queued".to_owned()
             }
         );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn socket_cloud_failed_upload_retry_replay_conflict_and_refused() {
+        let conn = open_in_memory().expect("open db");
+        conn.execute(
+            "INSERT INTO archive_items
+                (id, folder_class, path, size_bytes, file_count, archived_at, created_at, updated_at)
+             VALUES (202, 'RecentClips', 'archive/cloud/202', 30, 2, 100, 0, 0)",
+            [],
+        )
+        .expect("insert archive item");
+        let conn = Arc::new(Mutex::new(conn));
+        let boot = Arc::new(BootContext::new());
+        let dir = new_temp_dir();
+        let socket_path = dir.join("indexd.sock");
+        let _server =
+            spawn(&conn, &boot, &socket_path, Duration::from_secs(2)).expect("spawn indexd server");
+
+        let hash = "abababababababababababababababababababababababababababababababab";
+        let request_hash = "1212121212121212121212121212121212121212121212121212121212121212";
+        let conflict_hash = "3434343434343434343434343434343434343434343434343434343434343434";
+        assert_eq!(
+            send(
+                &socket_path,
+                &Request::CloudQueueUpsert {
+                    item: CloudQueueUpsertWire {
+                        archive_item_id: 202,
+                        child_key: "child-retry".to_owned(),
+                        destination_id: "dest".to_owned(),
+                        remote_key: "rk/retry".to_owned(),
+                        category: "bulk".to_owned(),
+                        seq: 1,
+                        total_bytes: 10,
+                        content_sha256: hash.to_owned(),
+                        expected_hash: Some(hash.to_owned()),
+                        verify_alg: "sha256".to_owned(),
+                    },
+                }
+            ),
+            Response::CloudQueueState {
+                state: "queued".to_owned()
+            }
+        );
+        assert_eq!(
+            send(
+                &socket_path,
+                &Request::CloudUploadFail {
+                    queue_pk: CloudQueuePkWire {
+                        destination_id: "dest".to_owned(),
+                        remote_key: "rk/retry".to_owned(),
+                    },
+                    attempt_id: "attempt-retry".to_owned(),
+                    upload_set_id: None,
+                    error_class: "timeout".to_owned(),
+                    not_before: Some(999),
+                    terminal: false,
+                }
+            ),
+            Response::CloudUploadFailed {
+                ok: true,
+                state: "failed".to_owned()
+            }
+        );
+
+        let accepted = send(
+            &socket_path,
+            &Request::CloudFailedUploadRetry {
+                archive_item_id: 202,
+                child_key: "child-retry".to_owned(),
+                upload_set_id: None,
+                request_id: "req-9901".to_owned(),
+                idempotency_key: "idem-9901".to_owned(),
+                request_hash: request_hash.to_owned(),
+                job_id: "m-9901".to_owned(),
+            },
+        );
+        assert_eq!(
+            accepted,
+            Response::CloudFailedUploadRetryAccepted {
+                job_id: "m-9901".to_owned(),
+                request_id: "req-9901".to_owned(),
+                state: "queued".to_owned(),
+            }
+        );
+        let replay = send(
+            &socket_path,
+            &Request::CloudFailedUploadRetry {
+                archive_item_id: 202,
+                child_key: "child-retry".to_owned(),
+                upload_set_id: None,
+                request_id: "req-9902".to_owned(),
+                idempotency_key: "idem-9901".to_owned(),
+                request_hash: request_hash.to_owned(),
+                job_id: "m-9902".to_owned(),
+            },
+        );
+        assert_eq!(
+            replay,
+            Response::CloudFailedUploadRetryReplay {
+                job_id: "m-9901".to_owned(),
+                request_id: "req-9901".to_owned(),
+                outcome: "accepted".to_owned(),
+                detail: Some("queued".to_owned()),
+            }
+        );
+        let conflict = send(
+            &socket_path,
+            &Request::CloudFailedUploadRetry {
+                archive_item_id: 202,
+                child_key: "child-retry".to_owned(),
+                upload_set_id: None,
+                request_id: "req-9903".to_owned(),
+                idempotency_key: "idem-9901".to_owned(),
+                request_hash: conflict_hash.to_owned(),
+                job_id: "m-9903".to_owned(),
+            },
+        );
+        assert_eq!(
+            conflict,
+            Response::CloudFailedUploadRetryConflict {
+                job_id: "m-9901".to_owned(),
+                request_id: "req-9901".to_owned(),
+                message:
+                    "idempotency key already used with a different failed-upload retry request"
+                        .to_owned(),
+            }
+        );
+        let refused = send(
+            &socket_path,
+            &Request::CloudFailedUploadRetry {
+                archive_item_id: 202,
+                child_key: "child-retry".to_owned(),
+                upload_set_id: None,
+                request_id: "req-9904".to_owned(),
+                idempotency_key: "idem-9904".to_owned(),
+                request_hash: "5656565656565656565656565656565656565656565656565656565656565656"
+                    .to_owned(),
+                job_id: "m-9904".to_owned(),
+            },
+        );
+        assert_eq!(
+            refused,
+            Response::CloudFailedUploadRetryRefused {
+                job_id: "m-9904".to_owned(),
+                request_id: "req-9904".to_owned(),
+                message: "cannot retry a queued queue row".to_owned(),
+            }
+        );
+
+        let (state, attempts, not_before): (String, i64, Option<i64>) = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT state, attempts, not_before
+                   FROM cloud_upload_queue
+                  WHERE destination_id='dest' AND remote_key='rk/retry'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("queue state");
+        assert_eq!(state, "queued");
+        assert_eq!(attempts, 0);
+        assert_eq!(not_before, None);
+
+        let request_rows: i64 = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT COUNT(*) FROM cloud_failed_upload_retry_requests",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count retry rows");
+        assert_eq!(request_rows, 2);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn socket_cloud_failed_upload_retry_rolls_back_request_row_when_mutation_fails() {
+        let conn = open_in_memory().expect("open db");
+        let archive_item_id = insert_archive_item(
+            &conn,
+            "archive/failed-retry-atomic",
+            "RecentClips",
+            100,
+            1,
+            0,
+        );
+        let conn = Arc::new(Mutex::new(conn));
+        let boot = Arc::new(BootContext::new());
+        let dir = new_temp_dir();
+        let socket_path = dir.join("indexd.sock");
+        let _server =
+            spawn(&conn, &boot, &socket_path, Duration::from_secs(2)).expect("spawn indexd server");
+
+        let hash = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
+        assert_eq!(
+            send(
+                &socket_path,
+                &Request::CloudQueueUpsert {
+                    item: CloudQueueUpsertWire {
+                        archive_item_id,
+                        child_key: "child-atomic".to_owned(),
+                        destination_id: "dest-atomic".to_owned(),
+                        remote_key: "rk/atomic".to_owned(),
+                        category: "bulk".to_owned(),
+                        seq: 1,
+                        total_bytes: 10,
+                        content_sha256: hash.to_owned(),
+                        expected_hash: Some(hash.to_owned()),
+                        verify_alg: "sha256".to_owned(),
+                    },
+                }
+            ),
+            Response::CloudQueueState {
+                state: "queued".to_owned()
+            }
+        );
+        assert_eq!(
+            send(
+                &socket_path,
+                &Request::CloudUploadFail {
+                    queue_pk: CloudQueuePkWire {
+                        destination_id: "dest-atomic".to_owned(),
+                        remote_key: "rk/atomic".to_owned(),
+                    },
+                    attempt_id: "attempt-atomic".to_owned(),
+                    upload_set_id: None,
+                    error_class: "timeout".to_owned(),
+                    not_before: Some(10),
+                    terminal: false,
+                }
+            ),
+            Response::CloudUploadFailed {
+                ok: true,
+                state: "failed".to_owned()
+            }
+        );
+        conn.lock()
+            .expect("lock db")
+            .execute(
+                "CREATE TRIGGER fail_failed_upload_retry_update
+                 BEFORE UPDATE ON cloud_upload_queue
+                 WHEN OLD.destination_id = 'dest-atomic'
+                  AND OLD.remote_key = 'rk/atomic'
+                  AND OLD.state = 'failed'
+                  AND NEW.state = 'queued'
+                 BEGIN
+                     SELECT RAISE(ABORT, 'forced failed-upload retry mutation failure');
+                 END",
+                [],
+            )
+            .expect("create trigger");
+
+        let failure = send(
+            &socket_path,
+            &Request::CloudFailedUploadRetry {
+                archive_item_id,
+                child_key: "child-atomic".to_owned(),
+                upload_set_id: None,
+                request_id: "req-9001".to_owned(),
+                idempotency_key: "idem-9001".to_owned(),
+                request_hash: "1313131313131313131313131313131313131313131313131313131313131313"
+                    .to_owned(),
+                job_id: "m-9001".to_owned(),
+            },
+        );
+        match failure {
+            Response::Error { message } => {
+                assert!(message.contains("forced failed-upload retry mutation failure"));
+            }
+            other => panic!("expected Response::Error, got {other:?}"),
+        }
+
+        let (state, attempts): (String, i64) = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT state, attempts
+                   FROM cloud_upload_queue
+                  WHERE destination_id='dest-atomic' AND remote_key='rk/atomic'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("queue row");
+        assert_eq!(state, "failed");
+        assert_eq!(attempts, 1);
+        let rows: i64 = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT COUNT(*) FROM cloud_failed_upload_retry_requests",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count retry rows");
+        assert_eq!(rows, 0);
+
+        conn.lock()
+            .expect("lock db")
+            .execute("DROP TRIGGER fail_failed_upload_retry_update", [])
+            .expect("drop trigger");
+        assert_eq!(
+            send(
+                &socket_path,
+                &Request::CloudFailedUploadRetry {
+                    archive_item_id,
+                    child_key: "child-atomic".to_owned(),
+                    upload_set_id: None,
+                    request_id: "req-9001".to_owned(),
+                    idempotency_key: "idem-9001".to_owned(),
+                    request_hash:
+                        "1313131313131313131313131313131313131313131313131313131313131313"
+                            .to_owned(),
+                    job_id: "m-9001".to_owned(),
+                },
+            ),
+            Response::CloudFailedUploadRetryAccepted {
+                job_id: "m-9001".to_owned(),
+                request_id: "req-9001".to_owned(),
+                state: "queued".to_owned(),
+            }
+        );
+
+        let rows_after_success: i64 = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT COUNT(*) FROM cloud_failed_upload_retry_requests",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count retry rows");
+        assert_eq!(rows_after_success, 1);
 
         let _ = std::fs::remove_dir_all(dir);
     }

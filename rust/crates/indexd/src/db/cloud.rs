@@ -13,6 +13,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
+use teslausb_core::durable_mutation::{
+    CloudQueueRetryTarget, CloudQueueState as DurableCloudQueueState,
+    validate_failed_upload_retry_source_state,
+};
 
 use crate::db::mutations::BootContext;
 use crate::db::{DbError, now_epoch_s};
@@ -1231,6 +1235,106 @@ pub fn cloud_queue_upsert(
     Ok(state)
 }
 
+fn failed_upload_retry_target_row(
+    tx: &Transaction<'_>,
+    target: &CloudQueueRetryTarget,
+) -> Result<(String, String, String, Option<String>), DbError> {
+    tx.query_row(
+        "SELECT destination_id, remote_key, state, upload_set_id
+           FROM cloud_upload_queue
+          WHERE archive_item_id = ?1
+            AND child_key = ?2
+          ORDER BY (upload_set_id IS ?3) DESC,
+                   seq ASC,
+                   destination_id ASC,
+                   remote_key ASC
+          LIMIT 1",
+        params![
+            target.archive_item_id,
+            target.child_key,
+            target.upload_set_id.as_deref()
+        ],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        },
+    )
+    .optional()?
+    .ok_or_else(|| invalid_input("target queue row not found"))
+}
+
+fn validate_failed_upload_retry_target_row(
+    tx: &Transaction<'_>,
+    target: &CloudQueueRetryTarget,
+    row_state: &str,
+    row_upload_set_id: Option<&str>,
+) -> Result<(), DbError> {
+    enforce_upload_set_fence(tx, row_upload_set_id, target.upload_set_id.as_deref())?;
+    let queue_state = DurableCloudQueueState::parse(row_state).map_err(invalid_input)?;
+    validate_failed_upload_retry_source_state(queue_state).map_err(invalid_input)?;
+    Ok(())
+}
+
+/// Validate that one child-specific failed-upload retry target is eligible
+/// inside an existing transaction.
+pub fn cloud_failed_upload_retry_validate_tx(
+    tx: &Transaction<'_>,
+    target: &CloudQueueRetryTarget,
+) -> Result<(), DbError> {
+    let (_, _, row_state, row_upload_set_id) = failed_upload_retry_target_row(tx, target)?;
+    validate_failed_upload_retry_target_row(tx, target, &row_state, row_upload_set_id.as_deref())
+}
+
+/// Validate that one child-specific failed-upload retry target is eligible.
+pub fn cloud_failed_upload_retry_validate(
+    conn: &Connection,
+    target: &CloudQueueRetryTarget,
+) -> Result<(), DbError> {
+    let tx = conn.unchecked_transaction()?;
+    cloud_failed_upload_retry_validate_tx(&tx, target)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Retry exactly one failed queue row (`failed -> queued`) inside an existing
+/// transaction using child-specific targeting.
+pub fn cloud_failed_upload_retry_tx(
+    tx: &Transaction<'_>,
+    target: &CloudQueueRetryTarget,
+) -> Result<String, DbError> {
+    let (destination_id, remote_key, row_state, row_upload_set_id) =
+        failed_upload_retry_target_row(tx, target)?;
+    validate_failed_upload_retry_target_row(tx, target, &row_state, row_upload_set_id.as_deref())?;
+    tx.execute(
+        "UPDATE cloud_upload_queue
+            SET state = 'queued',
+                bytes_uploaded = 0,
+                attempts = 0,
+                not_before = NULL,
+                last_error = NULL
+          WHERE destination_id = ?1
+            AND remote_key = ?2
+            AND upload_set_id IS ?3",
+        params![destination_id, remote_key, row_upload_set_id],
+    )?;
+    Ok("queued".to_owned())
+}
+
+/// Retry exactly one failed queue row (`failed -> queued`) using child-specific targeting.
+pub fn cloud_failed_upload_retry(
+    conn: &Connection,
+    target: &CloudQueueRetryTarget,
+) -> Result<String, DbError> {
+    let tx = conn.unchecked_transaction()?;
+    let state = cloud_failed_upload_retry_tx(&tx, target)?;
+    tx.commit()?;
+    Ok(state)
+}
+
 /// Manual retry / collision resolution for one queued child.
 ///
 /// Returns resulting queue state.
@@ -2132,8 +2236,10 @@ fn cloud_history_load_filtered(
                   LIMIT ?3"
             };
             let mut stmt = conn.prepare(sql)?;
-            let rows =
-                stmt.query_map(params![completion_seq, id, page_size_plus_one], map_cloud_history_row)?;
+            let rows = stmt.query_map(
+                params![completion_seq, id, page_size_plus_one],
+                map_cloud_history_row,
+            )?;
             for row in rows {
                 queried.push(row?);
             }
@@ -2210,7 +2316,7 @@ mod tests {
         CloudQueueRetryResolution, CloudQueueRow, CloudQueueUpsertItem,
         cloud_candidate_row_estimated_size, cloud_candidates, cloud_config_get, cloud_config_put,
         cloud_discover, cloud_discover_row_estimated_size, cloud_failed_history_load,
-        cloud_history_load, cloud_history_row_estimated_size,
+        cloud_failed_upload_retry, cloud_history_load, cloud_history_row_estimated_size,
         cloud_pending_upload_set_estimated_size, cloud_pending_upload_sets_load, cloud_queue_load,
         cloud_queue_retry, cloud_queue_row_estimated_size, cloud_queue_upsert, cloud_stats_get,
         cloud_stats_reset, cloud_upload_commit, cloud_upload_fail, json_escaped_len,
@@ -2219,6 +2325,7 @@ mod tests {
     use crate::db::mutations::BootContext;
     use crate::db::open_in_memory;
     use crate::proto::MAX_REQUEST_FRAME;
+    use teslausb_core::durable_mutation::CloudQueueRetryTarget;
 
     fn insert_archive_item(conn: &rusqlite::Connection, path: &str) -> i64 {
         conn.execute(
@@ -3411,6 +3518,191 @@ mod tests {
             )
             .unwrap();
         assert_eq!(attempts, 0);
+    }
+
+    #[test]
+    fn failed_upload_retry_rejects_non_failed_states_without_mutation() {
+        let conn = open_in_memory().unwrap();
+        let parent = insert_archive_item(&conn, "archive/failed-retry-gate");
+        let hash = "6767676767676767676767676767676767676767676767676767676767676767";
+        upsert_item(
+            &conn,
+            parent,
+            "dest",
+            "rk/failed-gate",
+            "child-gate",
+            1,
+            10,
+            hash,
+        );
+        let target = CloudQueueRetryTarget::new(parent, "child-gate".to_owned(), None).unwrap();
+
+        for state in ["queued", "in_progress", "done", "parked"] {
+            conn.execute(
+                "UPDATE cloud_upload_queue
+                    SET state = ?1,
+                        bytes_uploaded = 5,
+                        attempts = 3,
+                        not_before = 42,
+                        last_error = 'stays-put'
+                  WHERE destination_id = 'dest' AND remote_key = 'rk/failed-gate'",
+                params![state],
+            )
+            .unwrap();
+
+            let result = cloud_failed_upload_retry(&conn, &target);
+            assert!(result.is_err(), "{state} must be rejected");
+
+            let row: (String, i64, i64, Option<i64>, Option<String>) = conn
+                .query_row(
+                    "SELECT state, bytes_uploaded, attempts, not_before, last_error
+                       FROM cloud_upload_queue
+                      WHERE destination_id = 'dest' AND remote_key = 'rk/failed-gate'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                )
+                .unwrap();
+            assert_eq!(row.0, state);
+            assert_eq!(row.1, 5);
+            assert_eq!(row.2, 3);
+            assert_eq!(row.3, Some(42));
+            assert_eq!(row.4.as_deref(), Some("stays-put"));
+        }
+    }
+
+    #[test]
+    fn failed_upload_retry_sealed_fence_match_and_mismatch() {
+        let conn = open_in_memory().unwrap();
+        let parent = insert_archive_item(&conn, "archive/failed-retry-fence");
+        let hash = "7878787878787878787878787878787878787878787878787878787878787878";
+        let set_id = "cccccccccccccccccccccccccccccccc";
+        let wrong_set_id = "dddddddddddddddddddddddddddddddd";
+        upsert_item(
+            &conn,
+            parent,
+            "dest",
+            "rk/failed-fence",
+            "child-fence",
+            1,
+            10,
+            hash,
+        );
+        conn.execute(
+            "UPDATE cloud_upload_queue
+                SET state='failed',
+                    bytes_uploaded=5,
+                    attempts=2,
+                    not_before=99,
+                    last_error='timeout'
+              WHERE destination_id='dest' AND remote_key='rk/failed-fence'",
+            [],
+        )
+        .unwrap();
+        seal_queue_row(&conn, parent, "dest", "rk/failed-fence", set_id, None);
+
+        let wrong_target = CloudQueueRetryTarget::new(
+            parent,
+            "child-fence".to_owned(),
+            Some(wrong_set_id.to_owned()),
+        )
+        .unwrap();
+        let wrong = cloud_failed_upload_retry(&conn, &wrong_target);
+        assert!(wrong.is_err());
+        let before: (String, i64, i64) = conn
+            .query_row(
+                "SELECT state, bytes_uploaded, attempts
+                   FROM cloud_upload_queue
+                  WHERE destination_id='dest' AND remote_key='rk/failed-fence'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(before, ("failed".to_owned(), 5, 2));
+
+        let right_target =
+            CloudQueueRetryTarget::new(parent, "child-fence".to_owned(), Some(set_id.to_owned()))
+                .unwrap();
+        let state = cloud_failed_upload_retry(&conn, &right_target).unwrap();
+        assert_eq!(state, "queued");
+        let after: (String, i64, i64, Option<i64>, Option<String>) = conn
+            .query_row(
+                "SELECT state, bytes_uploaded, attempts, not_before, last_error
+                   FROM cloud_upload_queue
+                  WHERE destination_id='dest' AND remote_key='rk/failed-fence'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(after.0, "queued");
+        assert_eq!(after.1, 0);
+        assert_eq!(after.2, 0);
+        assert_eq!(after.3, None);
+        assert_eq!(after.4, None);
+    }
+
+    #[test]
+    fn failed_upload_retry_selects_requested_generation() {
+        let conn = open_in_memory().unwrap();
+        let parent = insert_archive_item(&conn, "archive/failed-retry-generation");
+        let hash_a = "8989898989898989898989898989898989898989898989898989898989898989";
+        let hash_b = "9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a";
+        let set_a = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        let set_b = "ffffffffffffffffffffffffffffffff";
+        upsert_item(
+            &conn,
+            parent,
+            "dest",
+            "rk/gen-a",
+            "child-shared",
+            1,
+            10,
+            hash_a,
+        );
+        upsert_item(
+            &conn,
+            parent,
+            "dest",
+            "rk/gen-b",
+            "child-shared",
+            2,
+            10,
+            hash_b,
+        );
+        conn.execute(
+            "UPDATE cloud_upload_queue
+                SET state='failed', attempts=2, not_before=123, last_error='timeout'
+              WHERE destination_id='dest' AND remote_key IN ('rk/gen-a', 'rk/gen-b')",
+            [],
+        )
+        .unwrap();
+        seal_queue_row(&conn, parent, "dest", "rk/gen-a", set_a, Some(11));
+        seal_queue_row(&conn, parent, "dest", "rk/gen-b", set_b, None);
+
+        let target =
+            CloudQueueRetryTarget::new(parent, "child-shared".to_owned(), Some(set_b.to_owned()))
+                .unwrap();
+        let state = cloud_failed_upload_retry(&conn, &target).unwrap();
+        assert_eq!(state, "queued");
+        let state_a: String = conn
+            .query_row(
+                "SELECT state
+                   FROM cloud_upload_queue
+                  WHERE destination_id='dest' AND remote_key='rk/gen-a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let state_b: String = conn
+            .query_row(
+                "SELECT state
+                   FROM cloud_upload_queue
+                  WHERE destination_id='dest' AND remote_key='rk/gen-b'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(state_a, "failed");
+        assert_eq!(state_b, "queued");
     }
 
     #[test]

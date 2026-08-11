@@ -405,10 +405,10 @@ fn row_by_request_id_tx(
     .map_err(Into::into)
 }
 
-/// Insert one failed-upload retry request row, or load the existing row with the
-/// same `(owner, kind, idempotency_key)` scope.
-pub fn cloud_failed_upload_retry_request_insert_or_load(
-    conn: &Connection,
+/// Insert one failed-upload retry request row inside an existing transaction, or
+/// load the existing row with the same `(owner, kind, idempotency_key)` scope.
+pub fn cloud_failed_upload_retry_request_insert_or_load_tx(
+    tx: &Transaction<'_>,
     new_row: &NewFailedUploadRetryRequestRow,
 ) -> Result<InsertFailedUploadRetryRequestResult, DbError> {
     validate_new_row(new_row)?;
@@ -422,18 +422,16 @@ pub fn cloud_failed_upload_retry_request_insert_or_load(
         .map(sanitize_public_error);
     let completed_at = new_row.state.is_terminal().then_some(now);
 
-    let tx = conn.unchecked_transaction()?;
-    if let Some(existing) = row_by_request_id_tx(&tx, &request.request_id)? {
+    if let Some(existing) = row_by_request_id_tx(tx, &request.request_id)? {
         if existing.owner != new_row.owner
             || existing.kind != new_row.kind
             || existing.request.idempotency_key != request.idempotency_key
         {
-            tx.commit()?;
             return Ok(InsertFailedUploadRetryRequestResult::Conflict409(existing));
         }
     }
     if let Some(existing) = row_by_scope_and_idempotency_key_tx(
-        &tx,
+        tx,
         &new_row.owner,
         &new_row.kind,
         &request.idempotency_key,
@@ -444,7 +442,6 @@ pub fn cloud_failed_upload_retry_request_insert_or_load(
             &request.target,
         )
         .map_err(map_validation_err)?;
-        tx.commit()?;
         return Ok(match replay {
             SameKeyIdempotencyResult::Replay => {
                 InsertFailedUploadRetryRequestResult::Replay(existing)
@@ -485,10 +482,21 @@ pub fn cloud_failed_upload_retry_request_insert_or_load(
             completed_at,
         ],
     )?;
-    let inserted = row_by_job_id_tx(&tx, &new_row.job_id)?
+    let inserted = row_by_job_id_tx(tx, &new_row.job_id)?
         .ok_or_else(|| invalid_input("inserted retry request row not found"))?;
-    tx.commit()?;
     Ok(InsertFailedUploadRetryRequestResult::Inserted(inserted))
+}
+
+/// Insert one failed-upload retry request row, or load the existing row with the
+/// same `(owner, kind, idempotency_key)` scope.
+pub fn cloud_failed_upload_retry_request_insert_or_load(
+    conn: &Connection,
+    new_row: &NewFailedUploadRetryRequestRow,
+) -> Result<InsertFailedUploadRetryRequestResult, DbError> {
+    let tx = conn.unchecked_transaction()?;
+    let result = cloud_failed_upload_retry_request_insert_or_load_tx(&tx, new_row)?;
+    tx.commit()?;
+    Ok(result)
 }
 
 /// Load one failed-upload retry request row by durable job id.

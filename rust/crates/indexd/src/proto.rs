@@ -124,6 +124,24 @@ pub enum Request {
         /// Resolution mode.
         resolution: CloudQueueRetryResolutionWire,
     },
+    /// Child-specific failed-upload retry using durable request identity.
+    CloudFailedUploadRetry {
+        /// Parent archive item id.
+        archive_item_id: i64,
+        /// Child discriminator.
+        child_key: String,
+        /// Optional sealed upload-set fence.
+        #[serde(default)]
+        upload_set_id: Option<String>,
+        /// Logical request id.
+        request_id: String,
+        /// Durable idempotency key.
+        idempotency_key: String,
+        /// Canonical request hash.
+        request_hash: String,
+        /// Stable durable job id.
+        job_id: String,
+    },
     /// Acquire upload lease token.
     UploadLeaseAcquire {
         /// Parent archive item id.
@@ -716,6 +734,44 @@ pub enum Response {
         /// Resulting state.
         state: String,
     },
+    /// Failed-upload retry accepted.
+    CloudFailedUploadRetryAccepted {
+        /// Stable durable job id.
+        job_id: String,
+        /// Logical request id.
+        request_id: String,
+        /// Resulting queue state.
+        state: String,
+    },
+    /// Failed-upload retry idempotent replay.
+    CloudFailedUploadRetryReplay {
+        /// Stable durable job id.
+        job_id: String,
+        /// Logical request id.
+        request_id: String,
+        /// Replayed prior outcome (`accepted`/`refused`/`error`).
+        outcome: String,
+        /// Optional replay detail.
+        detail: Option<String>,
+    },
+    /// Failed-upload retry idempotency conflict.
+    CloudFailedUploadRetryConflict {
+        /// Existing durable job id.
+        job_id: String,
+        /// Existing logical request id.
+        request_id: String,
+        /// Human-readable conflict reason.
+        message: String,
+    },
+    /// Failed-upload retry refused without queue mutation.
+    CloudFailedUploadRetryRefused {
+        /// Stable durable job id.
+        job_id: String,
+        /// Logical request id.
+        request_id: String,
+        /// Deterministic refusal reason.
+        message: String,
+    },
     /// Upload lease acquire response.
     UploadLeaseAcquired {
         /// Lease granted.
@@ -1129,6 +1185,20 @@ mod tests {
                 },
             ),
             (
+                "cloud_failed_upload_retry",
+                Request::CloudFailedUploadRetry {
+                    archive_item_id: 1,
+                    child_key: "child".to_owned(),
+                    upload_set_id: None,
+                    request_id: "req-1abc".to_owned(),
+                    idempotency_key: "idem-1abc".to_owned(),
+                    request_hash:
+                        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                            .to_owned(),
+                    job_id: "m-123".to_owned(),
+                },
+            ),
+            (
                 "upload_lease_acquire",
                 Request::UploadLeaseAcquire {
                     archive_item_id: 1,
@@ -1414,6 +1484,39 @@ mod tests {
                 "cloud_queue_state",
                 Response::CloudQueueState {
                     state: "queued".to_owned(),
+                },
+            ),
+            (
+                "cloud_failed_upload_retry_accepted",
+                Response::CloudFailedUploadRetryAccepted {
+                    job_id: "m-501".to_owned(),
+                    request_id: "req-501".to_owned(),
+                    state: "queued".to_owned(),
+                },
+            ),
+            (
+                "cloud_failed_upload_retry_replay",
+                Response::CloudFailedUploadRetryReplay {
+                    job_id: "m-501".to_owned(),
+                    request_id: "req-501".to_owned(),
+                    outcome: "accepted".to_owned(),
+                    detail: Some("queued".to_owned()),
+                },
+            ),
+            (
+                "cloud_failed_upload_retry_conflict",
+                Response::CloudFailedUploadRetryConflict {
+                    job_id: "m-501".to_owned(),
+                    request_id: "req-501".to_owned(),
+                    message: "idempotency key conflict".to_owned(),
+                },
+            ),
+            (
+                "cloud_failed_upload_retry_refused",
+                Response::CloudFailedUploadRetryRefused {
+                    job_id: "m-502".to_owned(),
+                    request_id: "req-502".to_owned(),
+                    message: "cannot retry a queued queue row".to_owned(),
                 },
             ),
             (

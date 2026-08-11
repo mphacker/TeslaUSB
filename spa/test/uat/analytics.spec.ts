@@ -34,6 +34,7 @@ const ANALYTICS_API = new Set([
   "/api/recording/encryption",
   "/api/system/metrics",
   "/api/system/health",
+  "/api/retention/status",
 ]);
 
 interface ChartSnapshot {

@@ -249,7 +249,7 @@ test.describe("failed jobs UAT", () => {
     await expect(page.locator('[data-testid="failed-jobs-error"]')).toHaveCount(0);
   });
 
-  test("failed-upload retry wiring — posts deterministic envelope and maps response states", async ({
+  test("failed-upload retry wiring — posts validated envelope and maps response states", async ({
     page,
   }) => {
     await routeJobs(page, EMPTY_FIXTURE);
@@ -284,9 +284,9 @@ test.describe("failed jobs UAT", () => {
       idempotencyKey?: string;
       requestHash?: string;
     };
-    expect(acceptedReq.requestId).toMatch(/^req-fur-[0-9a-f]{24}$/);
-    expect(acceptedReq.idempotencyKey).toMatch(/^idem-fur-[0-9a-f]{24}$/);
-    expect(acceptedReq.requestHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(acceptedReq.requestId).toMatch(/^req-fur-[A-Za-z0-9-]{8,128}$/);
+    expect(acceptedReq.idempotencyKey).toMatch(/^idem-fur-[A-Za-z0-9-]{8,128}$/);
+    expect(acceptedReq.requestHash).toBeUndefined();
 
     await page.unroute("**/api/cloud/queue/*/retry");
     await routeFailedUploadRetry(

@@ -89,6 +89,49 @@ export const test = base.extend<{ probe: Probe }>({
         body: JSON.stringify(GADGET_STATUS_OK),
       }),
     );
+    await page.route("**/api/cloud", (r) =>
+      r.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          configured: false,
+          provider_type: null,
+          uploader_state: "unknown",
+          sync_now_state: "unavailable",
+        }),
+      }),
+    );
+    await page.route("**/api/cloud/queue*", (r) =>
+      r.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ items: [], next_cursor: null, limit: 16 }),
+      }),
+    );
+    await page.route("**/api/cloud/history*", (r) =>
+      r.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ items: [], next_cursor: null, limit: 16 }),
+      }),
+    );
+    await page.route("**/api/retention/status", (r) =>
+      r.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          governor: null,
+          candidate_count: 0,
+          candidate_count_truncated: false,
+          estimated_reclaimable_bytes: 0,
+          estimated_reclaimable_bytes_truncated: false,
+          recent_cleanup: [],
+          recent_cleanup_truncated: false,
+          cloud_durability_required: false,
+          cloud_durability_disclosure: "Cloud durability is not required.",
+        }),
+      }),
+    );
     await use(probe);
   },
 });

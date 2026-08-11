@@ -6386,46 +6386,46 @@ async fn move_with_traversal_in_to_is_400() {
 
 #[tokio::test]
 async fn install_music_with_path_builds_subdir_rel_path() {
-    let fx = delete_fixture(Reply::Json(json!({ "job_id": "m-10", "state": "queued" })));
+    let fx = music_fixture_with_media(&[]);
     let body = music_multipart_with_path("track.mp3", b"ID3\x00fake", "Daft Punk");
     let (status, _) = post_music(&fx.app, body).await;
     assert_eq!(status, StatusCode::ACCEPTED);
 
-    let req = fx.last.lock().unwrap().clone().unwrap();
+    let req = fx.calls.lock().unwrap().last().cloned().unwrap();
     assert_eq!(req["mutation"]["op"], "install_file");
     assert_eq!(req["mutation"]["rel_path"], "Music/Daft Punk/track.mp3");
 }
 
 #[tokio::test]
 async fn install_music_with_nested_path_builds_nested_rel_path() {
-    let fx = delete_fixture(Reply::Json(json!({ "job_id": "m-11", "state": "queued" })));
+    let fx = music_fixture_with_media(&[]);
     let body = music_multipart_with_path("track.mp3", b"ID3\x00fake", "Artist/Album");
     let (status, _) = post_music(&fx.app, body).await;
     assert_eq!(status, StatusCode::ACCEPTED);
 
-    let req = fx.last.lock().unwrap().clone().unwrap();
+    let req = fx.calls.lock().unwrap().last().cloned().unwrap();
     assert_eq!(req["mutation"]["rel_path"], "Music/Artist/Album/track.mp3");
 }
 
 #[tokio::test]
 async fn install_music_with_traversal_path_is_400_before_handoff() {
-    let fx = delete_fixture(Reply::Json(json!({ "state": "queued" })));
+    let fx = music_fixture_with_media(&[]);
     let body = music_multipart_with_path("track.mp3", b"ID3\x00fake", "..");
     let (status, resp) = post_music(&fx.app, body).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(resp["error"]["code"], "invalid_path");
-    assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");
+    assert!(fx.calls.lock().unwrap().is_empty(), "gadgetd not contacted");
 }
 
 #[tokio::test]
 async fn install_music_without_path_is_top_level() {
     // No `path` field → existing behaviour: rel_path = "Music/<name>".
-    let fx = delete_fixture(Reply::Json(json!({ "job_id": "m-12", "state": "queued" })));
+    let fx = music_fixture_with_media(&[]);
     let body = multipart_body_with_filename("song.mp3", &[("file", b"ID3\x00fake")]);
     let (status, _) = post_music(&fx.app, body).await;
     assert_eq!(status, StatusCode::ACCEPTED);
 
-    let req = fx.last.lock().unwrap().clone().unwrap();
+    let req = fx.calls.lock().unwrap().last().cloned().unwrap();
     assert_eq!(req["mutation"]["rel_path"], "Music/song.mp3");
 }
 

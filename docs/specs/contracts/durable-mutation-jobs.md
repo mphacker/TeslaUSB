@@ -121,3 +121,24 @@ current `JobHub` retention is in-memory and not restart durable.
 - non-GET same-origin Host/Origin/Sec-Fetch check coverage;
 - bounded/sanitized public error coverage;
 - recording/handoff exclusion gate coverage.
+
+## 9. Failed cloud-upload retry groundwork (no route enable yet)
+
+- Public retry/delete mutation routes remain disabled in this slice.
+- The planned cloud retry command is **child-specific**:
+  `(archive_item_id, child_key, upload_set_id?)` identifies one queue row.
+- `upload_set_id` is an optional generation fence with explicit semantics:
+  - sealed row: `upload_set_id` is required and must match exactly;
+  - unsealed row: `upload_set_id` must be omitted;
+  - shape: 32-char lowercase hex.
+- Eligible source state is **only** `failed`.
+- Deterministic rejects (no queue mutation) for source states:
+  `done`, `queued`, `in_progress`, `parked`.
+- `parked` remains a separate collision-resolution flow (`cloud_queue_retry`
+  resolution modes), not a failed-upload retry.
+- Idempotency persistence for retry commands stores request identity and target
+  shape so same key+same hash can replay deterministically and same key+different
+  hash yields `409`. Target identity includes `upload_set_id`, so retrying with a
+  different fence is a deterministic conflict.
+- indexd remains the single writer for queue-state mutations; groundwork here is
+  validation/contract/persistence scaffolding only.

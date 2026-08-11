@@ -1429,6 +1429,24 @@ async fn jobs_capabilities() -> Json<Value> {
             "same_key_same_hash": "replay",
             "same_key_different_hash": 409
         },
+        "failed_upload_retry_contract": {
+            "route": "/api/cloud/queue/{archive_item_id}/retry",
+            "enabled": false,
+            "owner": "indexd",
+            "target_scope": "single_child",
+            "required_fields": ["archive_item_id", "child_key", "requestId", "idempotencyKey", "requestHash"],
+            "optional_fields": ["upload_set_id"],
+            "upload_set_id_fence": {
+                "shape": "32-char lowercase hex",
+                "sealed_row": "required and must match row upload_set_id",
+                "unsealed_row": "must be omitted"
+            },
+            "idempotency_target_components": ["archive_item_id", "child_key", "upload_set_id"],
+            "allowed_source_states": ["failed"],
+            "rejected_source_states": ["done", "queued", "in_progress", "parked"],
+            "delete_enabled": false,
+            "notes": "Route wiring remains disabled; future mutation routes must keep indexd as the single queue writer."
+        },
         "csrf_hardening_non_get": {
             "checks": ["Host", "Origin", "Sec-Fetch-Site"],
             "is_authentication": false,

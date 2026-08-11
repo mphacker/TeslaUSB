@@ -3779,6 +3779,35 @@ async fn jobs_capabilities_reports_read_only_foundation() {
     assert_eq!(body["durable_job_store"]["kind"], "in_memory");
     assert_eq!(body["idempotency"]["same_key_different_hash"], 409);
     assert_eq!(body["durable_envelope"]["fields"][1], "idempotencyKey");
+    assert_eq!(
+        body["failed_upload_retry_contract"]["target_scope"],
+        "single_child"
+    );
+    assert_eq!(
+        body["failed_upload_retry_contract"]["allowed_source_states"][0],
+        "failed"
+    );
+    assert_eq!(
+        body["failed_upload_retry_contract"]["optional_fields"][0],
+        "upload_set_id"
+    );
+    assert_eq!(
+        body["failed_upload_retry_contract"]["upload_set_id_fence"]["shape"],
+        "32-char lowercase hex"
+    );
+    assert_eq!(
+        body["failed_upload_retry_contract"]["idempotency_target_components"][2],
+        "upload_set_id"
+    );
+    assert_eq!(
+        body["failed_upload_retry_contract"]["rejected_source_states"][3],
+        "parked"
+    );
+    assert_eq!(body["failed_upload_retry_contract"]["enabled"], false);
+    assert_eq!(
+        body["failed_upload_retry_contract"]["delete_enabled"],
+        false
+    );
     assert_eq!(body["csrf_hardening_non_get"]["is_authentication"], false);
     assert_eq!(
         body["csrf_hardening_non_get"]["current_behavior"]["origin_required"],

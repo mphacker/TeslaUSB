@@ -14,6 +14,10 @@ pub const MAX_PUBLIC_ERROR_LEN: usize = 160;
 pub const MAX_MUTATION_JOB_ID_LEN: usize = 32;
 /// Exact request-hash length (sha256 hex).
 pub const REQUEST_HASH_LEN: usize = 64;
+/// Maximum upload child-key length for failed-upload retry targets.
+pub const MAX_RETRY_CHILD_KEY_LEN: usize = 512;
+/// Exact upload-set-id length (lowercase hex).
+pub const UPLOAD_SET_ID_LEN: usize = 32;
 /// Maximum owner name length.
 pub const MAX_OWNER_LEN: usize = 32;
 /// Maximum mutation kind length.
@@ -273,6 +277,216 @@ pub fn evaluate_same_key_idempotency(
     Ok(SameKeyIdempotencyResult::Conflict409)
 }
 
+/// Queue state for one cloud upload row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloudQueueState {
+    /// Enqueued and waiting for upload.
+    Queued,
+    /// Transfer is currently active.
+    InProgress,
+    /// Upload has completed successfully.
+    Done,
+    /// Last transfer attempt failed.
+    Failed,
+    /// Row is blocked on remote-key collision resolution.
+    Parked,
+}
+
+impl CloudQueueState {
+    /// Parse the indexd/uploadd wire state string.
+    ///
+    /// # Errors
+    /// Returns a static reason when the state is unsupported.
+    pub fn parse(raw: &str) -> Result<Self, &'static str> {
+        match raw {
+            "queued" => Ok(Self::Queued),
+            "in_progress" => Ok(Self::InProgress),
+            "done" => Ok(Self::Done),
+            "failed" => Ok(Self::Failed),
+            "parked" => Ok(Self::Parked),
+            _ => Err("unsupported cloud queue state"),
+        }
+    }
+}
+
+/// Validate that a queue row is eligible for failed-upload retry.
+///
+/// Manual failed-upload retry accepts only a `failed` row. It rejects
+/// `queued`/`in_progress` (already pending), `done` (already complete), and
+/// `parked` (collision resolution flow, not failed retry).
+///
+/// # Errors
+/// Returns a static reason when the source state is not retry-eligible.
+pub fn validate_failed_upload_retry_source_state(
+    state: CloudQueueState,
+) -> Result<(), &'static str> {
+    match state {
+        CloudQueueState::Failed => Ok(()),
+        CloudQueueState::Queued => Err("cannot retry a queued queue row"),
+        CloudQueueState::InProgress => Err("cannot retry an in_progress queue row"),
+        CloudQueueState::Done => Err("cannot retry a done queue row"),
+        CloudQueueState::Parked => {
+            Err("cannot retry a parked queue row without collision resolution")
+        }
+    }
+}
+
+/// Validate one optional upload-set-id fence.
+///
+/// # Errors
+/// Returns a static reason when the value shape is invalid.
+pub fn validate_optional_upload_set_id(upload_set_id: Option<&str>) -> Result<(), &'static str> {
+    if let Some(value) = upload_set_id {
+        if value.len() != UPLOAD_SET_ID_LEN {
+            return Err("upload_set_id must be a 32-char lowercase hex hash");
+        }
+        if value.bytes().any(|byte| !byte.is_ascii_hexdigit()) {
+            return Err("upload_set_id must be a 32-char lowercase hex hash");
+        }
+        if value != value.to_ascii_lowercase() {
+            return Err("upload_set_id must be lowercase hex");
+        }
+    }
+    Ok(())
+}
+
+/// Child-specific cloud retry target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CloudQueueRetryTarget {
+    /// Parent archive item id.
+    pub archive_item_id: i64,
+    /// Target child discriminator.
+    pub child_key: String,
+    /// Optional sealed-generation fence.
+    pub upload_set_id: Option<String>,
+}
+
+impl CloudQueueRetryTarget {
+    /// Build a validated failed-upload retry target.
+    ///
+    /// # Errors
+    /// Returns a static reason when the target is invalid.
+    pub fn new(
+        archive_item_id: i64,
+        child_key: String,
+        upload_set_id: Option<String>,
+    ) -> Result<Self, &'static str> {
+        validate_failed_upload_retry_target(archive_item_id, &child_key, upload_set_id.as_deref())?;
+        Ok(Self {
+            archive_item_id,
+            child_key,
+            upload_set_id,
+        })
+    }
+
+    /// Validate requested optional-fence semantics against one queue row's
+    /// sealed-generation marker.
+    ///
+    /// # Errors
+    /// Returns a static reason when the requested fence cannot apply to the row.
+    pub fn validate_optional_fence_for_row(
+        &self,
+        row_upload_set_id: Option<&str>,
+    ) -> Result<(), &'static str> {
+        match row_upload_set_id {
+            None => {
+                if self.upload_set_id.is_some() {
+                    return Err("upload_set_id supplied for an unsealed queue row");
+                }
+                Ok(())
+            }
+            Some(row_id) => match self.upload_set_id.as_deref() {
+                Some(requested) if requested == row_id => Ok(()),
+                _ => Err("upload_set_id does not match sealed queue row"),
+            },
+        }
+    }
+}
+
+/// Validate the child-specific failed-upload retry target shape.
+///
+/// # Errors
+/// Returns a static reason when the target is invalid.
+pub fn validate_failed_upload_retry_target(
+    archive_item_id: i64,
+    child_key: &str,
+    upload_set_id: Option<&str>,
+) -> Result<(), &'static str> {
+    if archive_item_id <= 0 {
+        return Err("archive_item_id must be > 0");
+    }
+    if child_key.is_empty() {
+        return Err("child_key is required");
+    }
+    if child_key.len() > MAX_RETRY_CHILD_KEY_LEN {
+        return Err("child_key is too long");
+    }
+    validate_optional_upload_set_id(upload_set_id)?;
+    Ok(())
+}
+
+/// Persisted idempotency identity for one failed-upload retry command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailedUploadRetryRequestRecord {
+    /// Logical request id.
+    pub request_id: String,
+    /// Idempotency replay key.
+    pub idempotency_key: String,
+    /// Canonical request hash (sha256 hex).
+    pub request_hash: String,
+    /// Child-specific retry target and optional generation fence.
+    pub target: CloudQueueRetryTarget,
+}
+
+impl FailedUploadRetryRequestRecord {
+    /// Build a validated failed-upload retry idempotency record.
+    ///
+    /// # Errors
+    /// Returns a static reason when any field is invalid.
+    pub fn new(
+        request_id: String,
+        idempotency_key: String,
+        request_hash: String,
+        target: CloudQueueRetryTarget,
+    ) -> Result<Self, &'static str> {
+        validate_request_id(&request_id)?;
+        validate_idempotency_key(&idempotency_key)?;
+        validate_request_hash(&request_hash)?;
+        validate_failed_upload_retry_target(
+            target.archive_item_id,
+            &target.child_key,
+            target.upload_set_id.as_deref(),
+        )?;
+        Ok(Self {
+            request_id,
+            idempotency_key,
+            request_hash,
+            target,
+        })
+    }
+}
+
+/// Evaluate idempotency replay for a persisted failed-upload retry record.
+///
+/// # Errors
+/// Returns a static reason when incoming fields are invalid.
+pub fn evaluate_failed_upload_retry_idempotency(
+    existing: &FailedUploadRetryRequestRecord,
+    incoming_request_hash: &str,
+    incoming_target: &CloudQueueRetryTarget,
+) -> Result<SameKeyIdempotencyResult, &'static str> {
+    validate_request_hash(incoming_request_hash)?;
+    validate_failed_upload_retry_target(
+        incoming_target.archive_item_id,
+        &incoming_target.child_key,
+        incoming_target.upload_set_id.as_deref(),
+    )?;
+    if existing.target != *incoming_target {
+        return Ok(SameKeyIdempotencyResult::Conflict409);
+    }
+    evaluate_same_key_idempotency(&existing.request_hash, incoming_request_hash)
+}
+
 /// Validate a mutation job id.
 ///
 /// Accepted formats:
@@ -433,10 +647,13 @@ mod tests {
     #![allow(clippy::panic)]
 
     use super::{
-        DurableMutationEnvelope, DurableMutationState, MAX_IDEMPOTENCY_KEY_LEN, REQUEST_HASH_LEN,
-        SameKeyIdempotencyResult, destructive_mutation_exclusion, evaluate_same_key_idempotency,
-        sanitize_public_error, validate_idempotency_key, validate_mutation_job_id,
-        validate_non_get_same_origin,
+        CloudQueueRetryTarget, CloudQueueState, DurableMutationEnvelope, DurableMutationState,
+        FailedUploadRetryRequestRecord, MAX_IDEMPOTENCY_KEY_LEN, REQUEST_HASH_LEN,
+        SameKeyIdempotencyResult, destructive_mutation_exclusion,
+        evaluate_failed_upload_retry_idempotency, evaluate_same_key_idempotency,
+        sanitize_public_error, validate_failed_upload_retry_source_state,
+        validate_failed_upload_retry_target, validate_idempotency_key, validate_mutation_job_id,
+        validate_non_get_same_origin, validate_optional_upload_set_id,
     };
 
     #[test]
@@ -505,6 +722,152 @@ mod tests {
             Ok(SameKeyIdempotencyResult::Conflict409)
         );
         assert!(evaluate_same_key_idempotency("abc", &hash_a).is_err());
+    }
+
+    #[test]
+    fn parses_cloud_queue_states() {
+        assert_eq!(
+            CloudQueueState::parse("queued"),
+            Ok(CloudQueueState::Queued)
+        );
+        assert_eq!(
+            CloudQueueState::parse("in_progress"),
+            Ok(CloudQueueState::InProgress)
+        );
+        assert_eq!(CloudQueueState::parse("done"), Ok(CloudQueueState::Done));
+        assert_eq!(
+            CloudQueueState::parse("failed"),
+            Ok(CloudQueueState::Failed)
+        );
+        assert_eq!(
+            CloudQueueState::parse("parked"),
+            Ok(CloudQueueState::Parked)
+        );
+        assert!(CloudQueueState::parse("other").is_err());
+    }
+
+    #[test]
+    fn failed_upload_retry_accepts_failed_only() {
+        assert!(validate_failed_upload_retry_source_state(CloudQueueState::Failed).is_ok());
+        assert!(validate_failed_upload_retry_source_state(CloudQueueState::Queued).is_err());
+        assert!(validate_failed_upload_retry_source_state(CloudQueueState::InProgress).is_err());
+        assert!(validate_failed_upload_retry_source_state(CloudQueueState::Done).is_err());
+        assert!(validate_failed_upload_retry_source_state(CloudQueueState::Parked).is_err());
+    }
+
+    #[test]
+    fn failed_upload_retry_target_validation_enforces_child_specific_shape() {
+        assert!(validate_failed_upload_retry_target(42, "cam/front.mp4", None).is_ok());
+        assert!(validate_failed_upload_retry_target(0, "cam/front.mp4", None).is_err());
+        assert!(validate_failed_upload_retry_target(42, "", None).is_err());
+        assert!(
+            validate_failed_upload_retry_target(
+                42,
+                "cam/front.mp4",
+                Some("abcdabcdabcdabcdabcdabcdabcdabcd")
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn failed_upload_retry_upload_set_id_validation_rejects_bad_shape() {
+        assert!(validate_optional_upload_set_id(None).is_ok());
+        assert!(validate_optional_upload_set_id(Some("abcdabcdabcdabcdabcdabcdabcdabcd")).is_ok());
+        assert!(validate_optional_upload_set_id(Some("abcd")).is_err());
+        assert!(validate_optional_upload_set_id(Some("ABCDabcdabcdabcdabcdabcdabcdabcd")).is_err());
+    }
+
+    #[test]
+    fn failed_upload_retry_optional_fence_semantics_are_explicit() {
+        let sealed = CloudQueueRetryTarget::new(
+            7,
+            "cam/front.mp4".to_owned(),
+            Some("abcdabcdabcdabcdabcdabcdabcdabcd".to_owned()),
+        )
+        .expect("sealed target should validate");
+        assert!(
+            sealed
+                .validate_optional_fence_for_row(Some("abcdabcdabcdabcdabcdabcdabcdabcd"))
+                .is_ok()
+        );
+        assert!(
+            sealed
+                .validate_optional_fence_for_row(Some("dcbaabcdabcdabcdabcdabcdabcdabcd"))
+                .is_err()
+        );
+        assert!(sealed.validate_optional_fence_for_row(None).is_err());
+
+        let unsealed =
+            CloudQueueRetryTarget::new(7, "cam/front.mp4".to_owned(), None).expect("valid target");
+        assert!(unsealed.validate_optional_fence_for_row(None).is_ok());
+        assert!(
+            unsealed
+                .validate_optional_fence_for_row(Some("abcdabcdabcdabcdabcdabcdabcdabcd"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn failed_upload_retry_record_and_idempotency_replay_are_validated() {
+        let target = CloudQueueRetryTarget::new(
+            7,
+            "cam/front.mp4".to_owned(),
+            Some("abcdabcdabcdabcdabcdabcdabcdabcd".to_owned()),
+        )
+        .expect("target should validate");
+        let record = FailedUploadRetryRequestRecord::new(
+            "req-12345678".to_owned(),
+            "idem-12345678".to_owned(),
+            "a".repeat(REQUEST_HASH_LEN),
+            target.clone(),
+        )
+        .expect("record should validate");
+
+        assert_eq!(
+            evaluate_failed_upload_retry_idempotency(
+                &record,
+                &"a".repeat(REQUEST_HASH_LEN),
+                &target
+            ),
+            Ok(SameKeyIdempotencyResult::Replay)
+        );
+        assert_eq!(
+            evaluate_failed_upload_retry_idempotency(
+                &record,
+                &"b".repeat(REQUEST_HASH_LEN),
+                &target
+            ),
+            Ok(SameKeyIdempotencyResult::Conflict409)
+        );
+        let target_different_fence = CloudQueueRetryTarget::new(
+            7,
+            "cam/front.mp4".to_owned(),
+            Some("dcbaabcdabcdabcdabcdabcdabcdabcd".to_owned()),
+        )
+        .expect("target should validate");
+        assert_eq!(
+            evaluate_failed_upload_retry_idempotency(
+                &record,
+                &"a".repeat(REQUEST_HASH_LEN),
+                &target_different_fence
+            ),
+            Ok(SameKeyIdempotencyResult::Conflict409)
+        );
+        let target_without_fence =
+            CloudQueueRetryTarget::new(7, "cam/front.mp4".to_owned(), None).expect("valid target");
+        assert_eq!(
+            evaluate_failed_upload_retry_idempotency(
+                &record,
+                &"a".repeat(REQUEST_HASH_LEN),
+                &target_without_fence
+            ),
+            Ok(SameKeyIdempotencyResult::Conflict409)
+        );
+        assert!(
+            evaluate_failed_upload_retry_idempotency(&record, "malformed", &target_without_fence)
+                .is_err()
+        );
     }
 
     #[test]

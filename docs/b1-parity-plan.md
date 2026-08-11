@@ -201,7 +201,11 @@ read-only durable failed-upload history at `GET /api/jobs/failed/uploads`
 (indexd-backed `cloud_sync_history` rows with `outcome='failed'`) so operators
 can triage upload failures without mutating queue state. Retry/delete commands
 remain intentionally disabled pending operator-approved auth/CSRF and daemon
-ownership wiring.
+ownership wiring. The pending retry contract is now explicit: child-specific
+targeting (`archive_item_id` + `child_key`), `failed`-only eligibility, and
+deterministic reject for `done|queued|in_progress|parked`, with optional
+`upload_set_id` generation-fence semantics (sealed rows require match;
+unsealed rows require omission).
 
 Next step: add typed webd retry/delete commands by subsystem and job ID, enforce
 ownership/state checks, and expose them in `FailedJobs.tsx`. Retry must create a

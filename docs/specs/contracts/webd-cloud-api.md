@@ -10,8 +10,10 @@ found the wire contract underspecified. Pinned in P4, not here.
 >   attributes, expiry, CSRF token issuance/rotation, origin policy, exact 401/403
 >   envelopes — so webd and the SPA implement one interoperable scheme (webd has
 >   **no auth today**; §0).
-> - Manual retry maps to the indexd **`cloud_queue_retry`** verb (parent/child +
->   collision resolution), not a plain upsert.
+> - Manual retry maps to the indexd **`cloud_queue_retry`** verb, not a plain
+>   upsert. For the failed-upload parity lane, webd's future route is
+>   **child-specific** and only retries rows currently in `failed`, with an
+>   optional `upload_set_id` generation fence for sealed rows.
 > - Redaction is enforced **before persistence** in the rclone engine, not only at
 >   this edge (see the creds contract).
 
@@ -83,10 +85,17 @@ state/config/history and an **uploadd control socket** for actions (D6, §4).
   transfer.
 - `POST /api/cloud/reset-counters` → `cloud_stats_reset` (sets the stats baseline
   — M1). Returns the new baseline.
-- `POST /api/cloud/queue/{archive_item_id}/retry` → requeue the **parked/failed**
-  children of that event. Path segment is the **numeric `archive_item_id`** (M5)
-  — **not** a slash-bearing remote key (which would break routing/emit ambiguous
-  URLs). Body may carry an optional `child_key` to retry a single child.
+- `POST /api/cloud/queue/{archive_item_id}/retry` (**planned, still disabled**) →
+  retry exactly one failed child via indexd `cloud_queue_retry`. Path segment is
+  the **numeric `archive_item_id`** (M5) — **not** a slash-bearing remote key.
+  Body includes a **required** `child_key` plus durable-mutation envelope fields
+  (`requestId`, `idempotencyKey`, `requestHash`) and an **optional**
+  `upload_set_id` fence (`32`-char lowercase hex). For sealed rows
+  `upload_set_id` must be present and match; for unsealed rows it must be
+  omitted. Retry request identity includes `(archive_item_id, child_key,
+  upload_set_id)` so a fence change is a deterministic idempotency conflict.
+  Route rejects source states `done|queued|in_progress|parked`; delete stays
+  disabled.
 
 ## 3. FailedJobs / JobHub wiring (M5)
 Upload failures already have a home: `JobHub` + `FailedJobs.tsx` + the
@@ -96,7 +105,9 @@ restart):
 - failed/parked children surface as `JobStatus` entries with a **sanitized**
   `error_class` (no raw stderr — D8),
 - the SSE `upload_queue` topic emits state transitions,
-- the manual-retry action maps to `POST /api/cloud/queue/{archive_item_id}/retry`.
+- the manual-retry action maps to the disabled
+  `POST /api/cloud/queue/{archive_item_id}/retry` contract above (child-specific,
+  failed-only).
 
 ## 4. uploadd control socket (D6)
 `sync-now`, `provider/test`, and the provider-reload signal need a **live uploadd

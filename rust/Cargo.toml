@@ -15,6 +15,7 @@
 resolver = "3"
 members = [
     "crates/teslausb-core",
+    "crates/teslausb-migrate",
     "crates/gadgetd",
     "crates/scannerd",
     "crates/indexd",

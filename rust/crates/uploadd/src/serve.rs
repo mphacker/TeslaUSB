@@ -271,7 +271,11 @@ impl<P: UploadProcessor> Scheduler<P> {
 
     /// Fold the per-item outcome into a [`SchedulerStep`], maintaining the
     /// lease-denied skip set and lifting a pause out of the `Processed` case.
-    fn apply_outcome(&mut self, outcome: StepOutcome, selected_key: Option<QueueKey>) -> SchedulerStep {
+    fn apply_outcome(
+        &mut self,
+        outcome: StepOutcome,
+        selected_key: Option<QueueKey>,
+    ) -> SchedulerStep {
         match outcome {
             StepOutcome::Paused { reason, action } => {
                 // A pause is global; the skip set is stale once uploads resume.
@@ -613,10 +617,7 @@ mod tests {
         // Step 3: only the skipped event remains ready → idle (and skip clears).
         assert_eq!(sched.step(), SchedulerStep::Idle);
 
-        assert_eq!(
-            sched.queue().get(&key(2)).unwrap().state,
-            UploadState::Done
-        );
+        assert_eq!(sched.queue().get(&key(2)).unwrap().state, UploadState::Done);
         // The denied item's state was left untouched (retentiond owns it).
         assert_eq!(
             sched.queue().get(&key(3)).unwrap().state,

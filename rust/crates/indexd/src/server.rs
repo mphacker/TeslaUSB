@@ -17,8 +17,8 @@ use crate::db::cloud::{
     CloudConfig, CloudQueuePk, CloudQueueRetryResolution, CloudQueueUpsertItem, cloud_candidates,
     cloud_config_get, cloud_config_put, cloud_discover, cloud_history_load,
     cloud_pending_upload_sets_load, cloud_queue_load, cloud_queue_retry, cloud_queue_upsert,
-    cloud_stats_get, cloud_stats_reset, cloud_upload_commit, cloud_upload_fail, upload_lease_acquire,
-    upload_lease_release, upload_lease_renew,
+    cloud_stats_get, cloud_stats_reset, cloud_upload_commit, cloud_upload_fail,
+    upload_lease_acquire, upload_lease_release, upload_lease_renew,
 };
 use crate::db::ingest::{
     AngleFacts, ArchiveAngleRegistration, ArchiveRegistration, ArchiveUnitRegistration, ClipFacts,
@@ -32,13 +32,13 @@ use crate::db::reads::{list_eviction_candidates, list_recovery_rows};
 use crate::db::{DbError, now_epoch_s};
 use crate::model::FolderClass;
 use crate::proto::{
-    CloudCandidateWire, CloudConfigWire, CloudDiscoverWire, CloudHistoryRowWire,
-    CloudFinalizeParentUploadRequest, CloudFinalizeParentUploadResponse,
-    CloudPendingUploadSetWire,
-    CloudPrepareParentUploadChildWire, CloudPrepareParentUploadRequest, CloudPrepareParentUploadResponse,
-    CloudQueueRetryResolutionWire, CloudQueueRowWire, CloudQueueUpsertWire, EvictionCandidateWire,
-    FinalizeEventArchiveRequest, FinalizeEventArchiveResponse, RecoveryRowWire, RegisterArchivedClip,
-    Request, Response, MAX_REQUEST_FRAME, read_request, write_response,
+    CloudCandidateWire, CloudConfigWire, CloudDiscoverWire, CloudFinalizeParentUploadRequest,
+    CloudFinalizeParentUploadResponse, CloudHistoryRowWire, CloudPendingUploadSetWire,
+    CloudPrepareParentUploadChildWire, CloudPrepareParentUploadRequest,
+    CloudPrepareParentUploadResponse, CloudQueueRetryResolutionWire, CloudQueueRowWire,
+    CloudQueueUpsertWire, EvictionCandidateWire, FinalizeEventArchiveRequest,
+    FinalizeEventArchiveResponse, MAX_REQUEST_FRAME, RecoveryRowWire, RegisterArchivedClip,
+    Request, Response, read_request, write_response,
 };
 
 /// Start the indexd registration server thread.
@@ -211,7 +211,10 @@ fn handle_connection(
                 Err(HandlerError::Rejected(message)) => Response::Rejected { message },
                 Err(HandlerError::Internal(message)) => Response::Error { message },
             },
-            Request::CloudPendingUploadSetsLoad { after_cursor, limit } => {
+            Request::CloudPendingUploadSetsLoad {
+                after_cursor,
+                limit,
+            } => {
                 match handle_cloud_pending_upload_sets_load(conn, after_cursor.as_deref(), limit) {
                     Ok((items, next_cursor)) => {
                         Response::CloudPendingUploadSetsPage { items, next_cursor }
@@ -644,7 +647,8 @@ fn handle_cloud_queue_load(
     let locked = conn
         .lock()
         .map_err(|_| HandlerError::Internal("index database mutex is poisoned".to_owned()))?;
-    let page = cloud_queue_load(&locked, after_cursor, limit, upload_set_id).map_err(map_db_error)?;
+    let page =
+        cloud_queue_load(&locked, after_cursor, limit, upload_set_id).map_err(map_db_error)?;
     Ok((
         page.items
             .into_iter()
@@ -680,7 +684,8 @@ fn handle_cloud_pending_upload_sets_load(
     let locked = conn
         .lock()
         .map_err(|_| HandlerError::Internal("index database mutex is poisoned".to_owned()))?;
-    let page = cloud_pending_upload_sets_load(&locked, after_cursor, limit).map_err(map_db_error)?;
+    let page =
+        cloud_pending_upload_sets_load(&locked, after_cursor, limit).map_err(map_db_error)?;
     Ok((
         page.items
             .into_iter()
@@ -1010,8 +1015,13 @@ fn finalize_parent_upload_in_tx(
         )
         .optional()
         .map_err(|e| HandlerError::Internal(e.to_string()))?;
-    let Some((archive_item_id, source_manifest_digest, _expected_child_count, finalized_at, superseded_at)) =
-        set_row
+    let Some((
+        archive_item_id,
+        source_manifest_digest,
+        _expected_child_count,
+        finalized_at,
+        superseded_at,
+    )) = set_row
     else {
         return Err(HandlerError::Rejected(
             "finalize rejected: unknown upload set".to_owned(),
@@ -1188,9 +1198,8 @@ fn prepare_parent_upload_in_tx(
                 "children.seq must be >= 0".to_owned(),
             ));
         }
-        let size_u64 = u64::try_from(child.total_bytes).map_err(|_| {
-            HandlerError::Rejected("children.total_bytes must be >= 0".to_owned())
-        })?;
+        let size_u64 = u64::try_from(child.total_bytes)
+            .map_err(|_| HandlerError::Rejected("children.total_bytes must be >= 0".to_owned()))?;
         validate_non_empty_without_nul(&child.expected_hash, "children.expected_hash", 256)?;
         validate_prepare_verify_alg(&child.verify_alg)?;
         let content_sha256_bytes = decode_lower_hex_sha256(&child.content_sha256)?;
@@ -1256,7 +1265,8 @@ fn prepare_parent_upload_in_tx(
         ));
     }
 
-    let request_digest = compute_prepare_request_digest(payload.archive_item_id, payload, &prepared_children)?;
+    let request_digest =
+        compute_prepare_request_digest(payload.archive_item_id, payload, &prepared_children)?;
     let current_set = tx
         .query_row(
             "SELECT upload_set_id, request_digest
@@ -1334,7 +1344,8 @@ fn prepare_parent_upload_in_tx(
         .map_err(map_prepare_sqlite_error)?;
     }
 
-    let upload_set_id = compute_prepare_upload_set_id(&request_digest, now, payload.archive_item_id)?;
+    let upload_set_id =
+        compute_prepare_upload_set_id(&request_digest, now, payload.archive_item_id)?;
     let expected_child_count = i64::try_from(prepared_children.len())
         .map_err(|_| HandlerError::Rejected("too many children".to_owned()))?;
     tx.execute(
@@ -1414,7 +1425,11 @@ fn upsert_prepared_queue_row(
                 && verify_value == child.wire.expected_hash
         });
     let state = if dedup_done { "done" } else { "queued" };
-    let bytes_uploaded = if dedup_done { child.wire.total_bytes } else { 0 };
+    let bytes_uploaded = if dedup_done {
+        child.wire.total_bytes
+    } else {
+        0
+    };
     tx.execute(
         "INSERT INTO cloud_upload_queue
             (archive_item_id, child_key, destination_id, remote_key, category, seq, total_bytes,
@@ -1470,15 +1485,22 @@ fn compute_prepare_request_digest(
     hasher.update(archive_item_id.to_le_bytes());
     hash_len_prefixed(&mut hasher, payload.source_manifest_digest.as_bytes())
         .map_err(HandlerError::Rejected)?;
-    hash_len_prefixed(&mut hasher, payload.destination_id.as_bytes()).map_err(HandlerError::Rejected)?;
+    hash_len_prefixed(&mut hasher, payload.destination_id.as_bytes())
+        .map_err(HandlerError::Rejected)?;
     hasher.update(child_count.to_le_bytes());
     for child in &sorted {
-        hash_len_prefixed(&mut hasher, child.wire.child_key.as_bytes()).map_err(HandlerError::Rejected)?;
-        hash_len_prefixed(&mut hasher, child.wire.remote_key.as_bytes()).map_err(HandlerError::Rejected)?;
-        hash_len_prefixed(&mut hasher, child.wire.content_sha256.as_bytes()).map_err(HandlerError::Rejected)?;
-        hash_len_prefixed(&mut hasher, child.wire.verify_alg.as_bytes()).map_err(HandlerError::Rejected)?;
-        hash_len_prefixed(&mut hasher, child.wire.expected_hash.as_bytes()).map_err(HandlerError::Rejected)?;
-        hash_len_prefixed(&mut hasher, child.wire.category.as_bytes()).map_err(HandlerError::Rejected)?;
+        hash_len_prefixed(&mut hasher, child.wire.child_key.as_bytes())
+            .map_err(HandlerError::Rejected)?;
+        hash_len_prefixed(&mut hasher, child.wire.remote_key.as_bytes())
+            .map_err(HandlerError::Rejected)?;
+        hash_len_prefixed(&mut hasher, child.wire.content_sha256.as_bytes())
+            .map_err(HandlerError::Rejected)?;
+        hash_len_prefixed(&mut hasher, child.wire.verify_alg.as_bytes())
+            .map_err(HandlerError::Rejected)?;
+        hash_len_prefixed(&mut hasher, child.wire.expected_hash.as_bytes())
+            .map_err(HandlerError::Rejected)?;
+        hash_len_prefixed(&mut hasher, child.wire.category.as_bytes())
+            .map_err(HandlerError::Rejected)?;
         hash_len_prefixed(&mut hasher, child.wire.destination_id.as_bytes())
             .map_err(HandlerError::Rejected)?;
         hasher.update(child.wire.seq.to_le_bytes());
@@ -1493,8 +1515,11 @@ fn compute_prepare_upload_set_id(
     created_at: i64,
     archive_item_id: i64,
 ) -> Result<String, HandlerError> {
-    let request_digest_bytes =
-        decode_lower_hex_fixed(request_digest, 64, "request_digest must be 64 lowercase hex")?;
+    let request_digest_bytes = decode_lower_hex_fixed(
+        request_digest,
+        64,
+        "request_digest must be 64 lowercase hex",
+    )?;
     let mut hasher = Sha256::new();
     hasher.update(PREPARE_UPLOAD_SET_ID_DOMAIN_TAG);
     hasher.update(&request_digest_bytes);
@@ -1510,7 +1535,11 @@ fn compute_prepare_upload_set_id(
     Ok(upload_set_id)
 }
 
-fn validate_non_empty_without_nul(value: &str, field: &str, max: usize) -> Result<(), HandlerError> {
+fn validate_non_empty_without_nul(
+    value: &str,
+    field: &str,
+    max: usize,
+) -> Result<(), HandlerError> {
     if value.is_empty() || value.len() > max {
         return Err(HandlerError::Rejected(format!(
             "{field} must be 1..={max} bytes"
@@ -1564,8 +1593,7 @@ fn validate_prepare_verify_alg(verify_alg: &str) -> Result<(), HandlerError> {
         return Ok(());
     }
     Err(HandlerError::Rejected(
-        "children.verify_alg must be one of sha256|md5|crc32c|sha1|quickxor|dropbox"
-            .to_owned(),
+        "children.verify_alg must be one of sha256|md5|crc32c|sha1|quickxor|dropbox".to_owned(),
     ))
 }
 
@@ -1579,9 +1607,8 @@ fn decode_lower_hex_fixed(
     }
     let mut out = Vec::with_capacity(expected_len / 2);
     for pair in value.as_bytes().chunks_exact(2) {
-        let hex = std::str::from_utf8(pair).map_err(|_| {
-            HandlerError::Rejected(error_message.to_owned())
-        })?;
+        let hex = std::str::from_utf8(pair)
+            .map_err(|_| HandlerError::Rejected(error_message.to_owned()))?;
         let byte = u8::from_str_radix(hex, 16)
             .map_err(|_| HandlerError::Rejected(error_message.to_owned()))?;
         out.push(byte);
@@ -1683,7 +1710,9 @@ fn finalize_insert_new(
     validated: &FinalizeValidated,
 ) -> Result<FinalizeEventArchiveResponse, HandlerError> {
     if validated.request.expected_prior_manifest_digest.is_some() {
-        return Err(HandlerError::Rejected(FINALIZE_CAS_STALE_MESSAGE.to_owned()));
+        return Err(HandlerError::Rejected(
+            FINALIZE_CAS_STALE_MESSAGE.to_owned(),
+        ));
     }
 
     let now = now_epoch_s();
@@ -1747,7 +1776,9 @@ fn finalize_existing(
 
     let expected_prior = request.expected_prior_manifest_digest.as_deref();
     if expected_prior != existing.manifest_digest.as_deref() {
-        return Err(HandlerError::Rejected(FINALIZE_CAS_STALE_MESSAGE.to_owned()));
+        return Err(HandlerError::Rejected(
+            FINALIZE_CAS_STALE_MESSAGE.to_owned(),
+        ));
     }
     if existing.delete_state != "LIVE" {
         return Err(HandlerError::Rejected(
@@ -1867,7 +1898,11 @@ fn is_exact_finalize_replay(
         return Ok(false);
     }
     let linked = linked_clip_keys(tx, existing.id).map_err(map_finalize_sqlite_error)?;
-    let mut expected: Vec<String> = request.clips.iter().map(|clip| clip.canonical_key.clone()).collect();
+    let mut expected: Vec<String> = request
+        .clips
+        .iter()
+        .map(|clip| clip.canonical_key.clone())
+        .collect();
     expected.sort();
     expected.dedup();
     Ok(linked == expected)
@@ -2021,10 +2056,12 @@ fn replace_archive_item_links(
     Ok(())
 }
 
-fn linked_clip_ids(conn: &Connection, archive_item_id: i64) -> Result<HashSet<i64>, rusqlite::Error> {
-    let mut stmt = conn.prepare(
-        "SELECT clip_id FROM archive_item_clips WHERE archive_item_id = ?1",
-    )?;
+fn linked_clip_ids(
+    conn: &Connection,
+    archive_item_id: i64,
+) -> Result<HashSet<i64>, rusqlite::Error> {
+    let mut stmt =
+        conn.prepare("SELECT clip_id FROM archive_item_clips WHERE archive_item_id = ?1")?;
     let rows = stmt.query_map(params![archive_item_id], |row| row.get::<_, i64>(0))?;
     rows.collect()
 }
@@ -2064,12 +2101,14 @@ fn map_finalize_sqlite_error(error: rusqlite::Error) -> HandlerError {
 }
 
 #[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
-fn validate_finalize_event_archive(payload: &FinalizeEventArchiveRequest) -> Result<FinalizeValidated, String> {
+fn validate_finalize_event_archive(
+    payload: &FinalizeEventArchiveRequest,
+) -> Result<FinalizeValidated, String> {
     if estimate_finalize_payload_bytes(payload) > MAX_REQUEST_FRAME as usize {
         return Err(FINALIZE_EVENT_TOO_LARGE_MESSAGE.to_owned());
     }
-    let segment_count = i64::try_from(payload.segments.len())
-        .map_err(|_| "too many segments".to_owned())?;
+    let segment_count =
+        i64::try_from(payload.segments.len()).map_err(|_| "too many segments".to_owned())?;
     if segment_count != payload.expected_segment_count {
         return Err("expected_segment_count does not match segments".to_owned());
     }
@@ -2106,7 +2145,11 @@ fn validate_finalize_event_archive(payload: &FinalizeEventArchiveRequest) -> Res
     let mut segment_keys = HashSet::with_capacity(payload.segments.len());
     let mut segment_bytes_sum = 0_i64;
     for segment in &payload.segments {
-        validate_prefixed_event_key(&segment.segment_key, &payload.source_event_key, "segments.segment_key")?;
+        validate_prefixed_event_key(
+            &segment.segment_key,
+            &payload.source_event_key,
+            "segments.segment_key",
+        )?;
         if segment.size_bytes < 0 {
             return Err("segments.size_bytes must be >= 0".to_owned());
         }
@@ -2132,7 +2175,11 @@ fn validate_finalize_event_archive(payload: &FinalizeEventArchiveRequest) -> Res
 
     let mut clip_keys = HashSet::with_capacity(payload.clips.len());
     for clip in &payload.clips {
-        validate_prefixed_event_key(&clip.canonical_key, &payload.source_event_key, "clips.canonical_key")?;
+        validate_prefixed_event_key(
+            &clip.canonical_key,
+            &payload.source_event_key,
+            "clips.canonical_key",
+        )?;
         if clip.partition != payload.partition {
             return Err("clips.partition must match request partition".to_owned());
         }
@@ -2143,13 +2190,20 @@ fn validate_finalize_event_archive(payload: &FinalizeEventArchiveRequest) -> Res
             return Err("clips.ended_at must be >= started_at".to_owned());
         }
         if !clip_keys.insert(clip.canonical_key.as_str()) {
-            return Err(format!("duplicate clip canonical_key: {}", clip.canonical_key));
+            return Err(format!(
+                "duplicate clip canonical_key: {}",
+                clip.canonical_key
+            ));
         }
     }
 
     let mut clip_cameras: HashMap<String, HashSet<String>> = HashMap::new();
     for angle in &payload.angles {
-        validate_prefixed_event_key(&angle.canonical_key, &payload.source_event_key, "angles.canonical_key")?;
+        validate_prefixed_event_key(
+            &angle.canonical_key,
+            &payload.source_event_key,
+            "angles.canonical_key",
+        )?;
         validate_rel_path(&angle.file_ref, "angles.file_ref")?;
         if !clip_keys.contains(angle.canonical_key.as_str()) {
             return Err(format!(
@@ -2208,7 +2262,11 @@ fn validate_event_key(key: &str, field: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_prefixed_event_key(key: &str, source_event_key: &str, field: &str) -> Result<(), String> {
+fn validate_prefixed_event_key(
+    key: &str,
+    source_event_key: &str,
+    field: &str,
+) -> Result<(), String> {
     validate_event_key(key, field)?;
     if !has_event_prefix(key, source_event_key) {
         return Err(format!("{field} must use source_event_key prefix"));
@@ -2312,9 +2370,9 @@ fn hash_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) -> Result<(), String> {
 
 fn is_lower_hex(value: &str, expected_len: usize) -> bool {
     value.len() == expected_len
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()))
+        && value.bytes().all(|byte| {
+            byte.is_ascii_digit() || (byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        })
 }
 
 fn estimate_finalize_payload_bytes(payload: &FinalizeEventArchiveRequest) -> usize {
@@ -2332,15 +2390,31 @@ fn estimate_finalize_payload_bytes(payload: &FinalizeEventArchiveRequest) -> usi
             .as_ref()
             .map_or(0, String::len);
     total = total
-        .saturating_add(payload.segments.iter().map(|segment| {
-            segment.segment_key.len() + segment.content_sha256.len() + 32
-        }).sum::<usize>())
-        .saturating_add(payload.clips.iter().map(|clip| {
-            clip.canonical_key.len() + clip.folder_class.len() + clip.partition.len() + 24
-        }).sum::<usize>())
-        .saturating_add(payload.angles.iter().map(|angle| {
-            angle.canonical_key.len() + angle.camera.len() + angle.file_ref.len() + 24
-        }).sum::<usize>());
+        .saturating_add(
+            payload
+                .segments
+                .iter()
+                .map(|segment| segment.segment_key.len() + segment.content_sha256.len() + 32)
+                .sum::<usize>(),
+        )
+        .saturating_add(
+            payload
+                .clips
+                .iter()
+                .map(|clip| {
+                    clip.canonical_key.len() + clip.folder_class.len() + clip.partition.len() + 24
+                })
+                .sum::<usize>(),
+        )
+        .saturating_add(
+            payload
+                .angles
+                .iter()
+                .map(|angle| {
+                    angle.canonical_key.len() + angle.camera.len() + angle.file_ref.len() + 24
+                })
+                .sum::<usize>(),
+        );
     total
 }
 
@@ -2487,17 +2561,16 @@ mod tests {
     use super::{
         FINALIZE_CAS_STALE_MESSAGE, FINALIZE_CONFLICT_SAME_DIGEST_MESSAGE,
         FINALIZE_EVENT_TOO_LARGE_MESSAGE, FINALIZE_SUPERSEDE_PARK_MESSAGE,
-        compute_segment_set_digest,
-        handle_cloud_finalize_parent_upload, handle_cloud_prepare_parent_upload,
-        handle_finalize_event_archive, parse_folder_class, spawn, validate_payload,
+        compute_segment_set_digest, handle_cloud_finalize_parent_upload,
+        handle_cloud_prepare_parent_upload, handle_finalize_event_archive, parse_folder_class,
+        spawn, validate_payload,
     };
     use crate::db::cloud::{CloudQueuePk, cloud_upload_commit, cloud_upload_fail};
     use crate::db::mutations::BootContext;
     use crate::db::open_in_memory;
     use crate::proto::{
-        ArchiveAngle, ArchiveUnit, CloudConfigWire, CloudQueuePkWire,
-        CloudFinalizeParentUploadRequest,
-        CloudPrepareParentUploadChildWire, CloudPrepareParentUploadRequest,
+        ArchiveAngle, ArchiveUnit, CloudConfigWire, CloudFinalizeParentUploadRequest,
+        CloudPrepareParentUploadChildWire, CloudPrepareParentUploadRequest, CloudQueuePkWire,
         CloudQueueRetryResolutionWire, CloudQueueUpsertWire, FinalizeEventArchiveAngleWire,
         FinalizeEventArchiveClipWire, FinalizeEventArchiveRequest, FinalizeEventArchiveSegmentWire,
         MAX_REQUEST_FRAME, RegisterArchivedClip, Request, Response, read_frame, write_frame,
@@ -2603,57 +2676,57 @@ mod tests {
         }
     }
 
-        fn finalize_payload_generation_two() -> FinalizeEventArchiveRequest {
-            let mut request = finalize_payload();
-            request.pass_id = "33333333333333333333333333333333".to_owned();
-            request.expected_prior_manifest_digest = Some(request.manifest_digest.clone());
-            request.manifest_digest = "44444444444444444444444444444444".to_owned();
-            request.source_generation = "boot1:scan18".to_owned();
-            request.generation_dir_path = "archive/events/e1-gen2".to_owned();
-            request.segments = vec![FinalizeEventArchiveSegmentWire {
-                segment_key: format!("{}/2026-06-19_10-02-00-front.mp4", request.source_event_key),
-                size_bytes: 3_072,
-                mtime_ms: 1_718_805_820_000,
-                content_sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-                    .to_owned(),
-            }];
-            request.clips = vec![FinalizeEventArchiveClipWire {
-                canonical_key: format!("{}/2026-06-19_10-02-00", request.source_event_key),
-                started_at: 1_718_805_720,
-                ended_at: 1_718_805_780,
-                folder_class: "SentryClips".to_owned(),
-                partition: "slot0".to_owned(),
-            }];
-            request.angles = vec![FinalizeEventArchiveAngleWire {
-                canonical_key: request.clips[0].canonical_key.clone(),
-                camera: "front".to_owned(),
-                file_ref: "archive/events/e2/front-02.mp4".to_owned(),
-                offset_ms: 0,
-                duration_s: Some(60),
-                size_bytes: 3_072,
-            }];
-            request.segment_set_digest =
-                compute_segment_set_digest(&request.segments).expect("compute segment_set_digest");
-            request.expected_segment_count = 1;
-            request.size_bytes = 5_000;
-            request.file_count = 3;
-            request
-        }
+    fn finalize_payload_generation_two() -> FinalizeEventArchiveRequest {
+        let mut request = finalize_payload();
+        request.pass_id = "33333333333333333333333333333333".to_owned();
+        request.expected_prior_manifest_digest = Some(request.manifest_digest.clone());
+        request.manifest_digest = "44444444444444444444444444444444".to_owned();
+        request.source_generation = "boot1:scan18".to_owned();
+        request.generation_dir_path = "archive/events/e1-gen2".to_owned();
+        request.segments = vec![FinalizeEventArchiveSegmentWire {
+            segment_key: format!("{}/2026-06-19_10-02-00-front.mp4", request.source_event_key),
+            size_bytes: 3_072,
+            mtime_ms: 1_718_805_820_000,
+            content_sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                .to_owned(),
+        }];
+        request.clips = vec![FinalizeEventArchiveClipWire {
+            canonical_key: format!("{}/2026-06-19_10-02-00", request.source_event_key),
+            started_at: 1_718_805_720,
+            ended_at: 1_718_805_780,
+            folder_class: "SentryClips".to_owned(),
+            partition: "slot0".to_owned(),
+        }];
+        request.angles = vec![FinalizeEventArchiveAngleWire {
+            canonical_key: request.clips[0].canonical_key.clone(),
+            camera: "front".to_owned(),
+            file_ref: "archive/events/e2/front-02.mp4".to_owned(),
+            offset_ms: 0,
+            duration_s: Some(60),
+            size_bytes: 3_072,
+        }];
+        request.segment_set_digest =
+            compute_segment_set_digest(&request.segments).expect("compute segment_set_digest");
+        request.expected_segment_count = 1;
+        request.size_bytes = 5_000;
+        request.file_count = 3;
+        request
+    }
 
-        fn call_finalize(
-            conn: &Arc<Mutex<Connection>>,
-            boot: &Arc<BootContext>,
-            request: &FinalizeEventArchiveRequest,
-        ) -> Response {
-            match handle_finalize_event_archive(conn, boot, request) {
-                Ok(response) => Response::FinalizeEventArchive(response),
-                Err(super::HandlerError::Rejected(message)) => Response::Rejected { message },
-                Err(super::HandlerError::Internal(message)) => Response::Error { message },
-            }
+    fn call_finalize(
+        conn: &Arc<Mutex<Connection>>,
+        boot: &Arc<BootContext>,
+        request: &FinalizeEventArchiveRequest,
+    ) -> Response {
+        match handle_finalize_event_archive(conn, boot, request) {
+            Ok(response) => Response::FinalizeEventArchive(response),
+            Err(super::HandlerError::Rejected(message)) => Response::Rejected { message },
+            Err(super::HandlerError::Internal(message)) => Response::Error { message },
         }
+    }
 
-        macro_rules! prepare_child {
-            (
+    macro_rules! prepare_child {
+        (
                 $child_key:expr,
                 $remote_key:expr,
                 $seq:expr,
@@ -2664,1457 +2737,1486 @@ mod tests {
                 $verify_alg:expr
                 $(,)?
             ) => {
-                CloudPrepareParentUploadChildWire {
-                    child_key: $child_key.to_owned(),
-                    destination_id: "dest".to_owned(),
-                    remote_key: $remote_key.to_owned(),
-                    category: "bulk".to_owned(),
-                    seq: $seq,
-                    total_bytes: $total_bytes,
-                    manifest_mtime_ms: $manifest_mtime_ms,
-                    content_sha256: $content_sha256.to_owned(),
-                    expected_hash: $expected_hash.to_owned(),
-                    verify_alg: $verify_alg.to_owned(),
-                }
-            };
-        }
+            CloudPrepareParentUploadChildWire {
+                child_key: $child_key.to_owned(),
+                destination_id: "dest".to_owned(),
+                remote_key: $remote_key.to_owned(),
+                category: "bulk".to_owned(),
+                seq: $seq,
+                total_bytes: $total_bytes,
+                manifest_mtime_ms: $manifest_mtime_ms,
+                content_sha256: $content_sha256.to_owned(),
+                expected_hash: $expected_hash.to_owned(),
+                verify_alg: $verify_alg.to_owned(),
+            }
+        };
+    }
 
-        fn manifest_digest_for_prepare_children(children: &[CloudPrepareParentUploadChildWire]) -> String {
-            let entries: Vec<ManifestDigestEntry<'_>> = children
-                .iter()
-                .map(|child| ManifestDigestEntry {
-                    rel_name: child.child_key.as_str(),
-                    size: u64::try_from(child.total_bytes).expect("child bytes must be non-negative"),
-                    mtime_ms: child.manifest_mtime_ms,
-                    hash: match super::decode_lower_hex_sha256(&child.content_sha256) {
-                        Ok(value) => value,
-                        Err(_) => panic!("decode child sha256"),
-                    },
-                })
-                .collect();
-            manifest_digest_v1_hex(&entries)
-        }
+    fn manifest_digest_for_prepare_children(
+        children: &[CloudPrepareParentUploadChildWire],
+    ) -> String {
+        let entries: Vec<ManifestDigestEntry<'_>> = children
+            .iter()
+            .map(|child| ManifestDigestEntry {
+                rel_name: child.child_key.as_str(),
+                size: u64::try_from(child.total_bytes).expect("child bytes must be non-negative"),
+                mtime_ms: child.manifest_mtime_ms,
+                hash: match super::decode_lower_hex_sha256(&child.content_sha256) {
+                    Ok(value) => value,
+                    Err(_) => panic!("decode child sha256"),
+                },
+            })
+            .collect();
+        manifest_digest_v1_hex(&entries)
+    }
 
-        fn insert_prepare_parent(
-            conn: &Connection,
-            path: &str,
-            delete_state: &str,
-            durable: i64,
-            manifest_digest: Option<&str>,
-        ) -> i64 {
-            conn.execute(
+    fn insert_prepare_parent(
+        conn: &Connection,
+        path: &str,
+        delete_state: &str,
+        durable: i64,
+        manifest_digest: Option<&str>,
+    ) -> i64 {
+        conn.execute(
                 "INSERT INTO archive_items
                     (folder_class, path, size_bytes, file_count, archived_at, durable, delete_state, manifest_digest, created_at, updated_at)
                  VALUES ('RecentClips', ?1, 4_096, 2, 100, ?2, ?3, ?4, 0, 0)",
                 params![path, durable, delete_state, manifest_digest],
             )
             .expect("insert prepare parent");
-            conn.last_insert_rowid()
+        conn.last_insert_rowid()
+    }
+
+    fn call_prepare(
+        conn: &Arc<Mutex<Connection>>,
+        request: &CloudPrepareParentUploadRequest,
+    ) -> Response {
+        match handle_cloud_prepare_parent_upload(conn, request) {
+            Ok(response) => Response::CloudPrepareParentUpload(response),
+            Err(super::HandlerError::Rejected(message)) => Response::Rejected { message },
+            Err(super::HandlerError::Internal(message)) => Response::Error { message },
         }
+    }
 
-        fn call_prepare(
-            conn: &Arc<Mutex<Connection>>,
-            request: &CloudPrepareParentUploadRequest,
-        ) -> Response {
-            match handle_cloud_prepare_parent_upload(conn, request) {
-                Ok(response) => Response::CloudPrepareParentUpload(response),
-                Err(super::HandlerError::Rejected(message)) => Response::Rejected { message },
-                Err(super::HandlerError::Internal(message)) => Response::Error { message },
-            }
+    fn call_finalize_parent(
+        conn: &Arc<Mutex<Connection>>,
+        request: &CloudFinalizeParentUploadRequest,
+    ) -> Response {
+        match handle_cloud_finalize_parent_upload(conn, request) {
+            Ok(response) => Response::CloudFinalizeParentUpload(response),
+            Err(super::HandlerError::Rejected(message)) => Response::Rejected { message },
+            Err(super::HandlerError::Internal(message)) => Response::Error { message },
         }
+    }
 
-        fn call_finalize_parent(
-            conn: &Arc<Mutex<Connection>>,
-            request: &CloudFinalizeParentUploadRequest,
-        ) -> Response {
-            match handle_cloud_finalize_parent_upload(conn, request) {
-                Ok(response) => Response::CloudFinalizeParentUpload(response),
-                Err(super::HandlerError::Rejected(message)) => Response::Rejected { message },
-                Err(super::HandlerError::Internal(message)) => Response::Error { message },
-            }
-        }
-
-        fn prepare_two_child_upload_set(
-            conn: &Arc<Mutex<Connection>>,
-            path: &str,
-        ) -> (i64, String, String) {
-            let children = vec![
-                prepare_child!(
-                    "front.mp4",
-                    "rk/front",
-                    1,
-                    123,
-                    1_718_805_700_000,
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                    "etag-front",
-                    "md5",
-                ),
-                prepare_child!(
-                    "back.mp4",
-                    "rk/back",
-                    2,
-                    456,
-                    1_718_805_701_000,
-                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                    "etag-back",
-                    "md5",
-                ),
-            ];
-            let manifest_digest = manifest_digest_for_prepare_children(&children);
-            let archive_item_id = {
-                let locked = conn.lock().expect("lock db");
-                insert_prepare_parent(&locked, path, "LIVE", 0, Some(manifest_digest.as_str()))
-            };
-            let request = CloudPrepareParentUploadRequest {
-                archive_item_id,
-                destination_id: "dest".to_owned(),
-                source_manifest_digest: manifest_digest.clone(),
-                children,
-            };
-            let Response::CloudPrepareParentUpload(result) = call_prepare(conn, &request) else {
-                panic!("expected prepare response");
-            };
-            (archive_item_id, manifest_digest, result.upload_set_id)
-        }
-
-        #[test]
-        fn prepare_parent_upload_happy_path_seals_set_children_and_queue() {
-            let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
-            let children = vec![
-                prepare_child!(
-                    "front.mp4",
-                    "rk/front",
-                    1,
-                    123,
-                    1_718_805_700_000,
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                    "etag-front",
-                    "md5",
-                ),
-                prepare_child!(
-                    "back.mp4",
-                    "rk/back",
-                    2,
-                    456,
-                    1_718_805_701_000,
-                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                    "etag-back",
-                    "md5",
-                ),
-            ];
-            let manifest_digest = manifest_digest_for_prepare_children(&children);
-            let archive_item_id = {
-                let locked = conn.lock().expect("lock db");
-                insert_prepare_parent(
-                    &locked,
-                    "archive/events/prepare-happy",
-                    "LIVE",
-                    0,
-                    Some(manifest_digest.as_str()),
-                )
-            };
-            let request = CloudPrepareParentUploadRequest {
-                archive_item_id,
-                destination_id: "dest".to_owned(),
-                source_manifest_digest: manifest_digest.clone(),
-                children: children.clone(),
-            };
-
-            let response = call_prepare(&conn, &request);
-            let Response::CloudPrepareParentUpload(result) = response else {
-                panic!("expected prepare response");
-            };
-            assert!(!result.already_prepared);
-            assert!(super::is_lower_hex(&result.upload_set_id, 32));
-
+    fn prepare_two_child_upload_set(
+        conn: &Arc<Mutex<Connection>>,
+        path: &str,
+    ) -> (i64, String, String) {
+        let children = vec![
+            prepare_child!(
+                "front.mp4",
+                "rk/front",
+                1,
+                123,
+                1_718_805_700_000,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "etag-front",
+                "md5",
+            ),
+            prepare_child!(
+                "back.mp4",
+                "rk/back",
+                2,
+                456,
+                1_718_805_701_000,
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "etag-back",
+                "md5",
+            ),
+        ];
+        let manifest_digest = manifest_digest_for_prepare_children(&children);
+        let archive_item_id = {
             let locked = conn.lock().expect("lock db");
-            let row: (String, i64, Option<i64>) = locked
-                .query_row(
-                    "SELECT request_digest, expected_child_count, superseded_at
+            insert_prepare_parent(&locked, path, "LIVE", 0, Some(manifest_digest.as_str()))
+        };
+        let request = CloudPrepareParentUploadRequest {
+            archive_item_id,
+            destination_id: "dest".to_owned(),
+            source_manifest_digest: manifest_digest.clone(),
+            children,
+        };
+        let Response::CloudPrepareParentUpload(result) = call_prepare(conn, &request) else {
+            panic!("expected prepare response");
+        };
+        (archive_item_id, manifest_digest, result.upload_set_id)
+    }
+
+    #[test]
+    fn prepare_parent_upload_happy_path_seals_set_children_and_queue() {
+        let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
+        let children = vec![
+            prepare_child!(
+                "front.mp4",
+                "rk/front",
+                1,
+                123,
+                1_718_805_700_000,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "etag-front",
+                "md5",
+            ),
+            prepare_child!(
+                "back.mp4",
+                "rk/back",
+                2,
+                456,
+                1_718_805_701_000,
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "etag-back",
+                "md5",
+            ),
+        ];
+        let manifest_digest = manifest_digest_for_prepare_children(&children);
+        let archive_item_id = {
+            let locked = conn.lock().expect("lock db");
+            insert_prepare_parent(
+                &locked,
+                "archive/events/prepare-happy",
+                "LIVE",
+                0,
+                Some(manifest_digest.as_str()),
+            )
+        };
+        let request = CloudPrepareParentUploadRequest {
+            archive_item_id,
+            destination_id: "dest".to_owned(),
+            source_manifest_digest: manifest_digest.clone(),
+            children: children.clone(),
+        };
+
+        let response = call_prepare(&conn, &request);
+        let Response::CloudPrepareParentUpload(result) = response else {
+            panic!("expected prepare response");
+        };
+        assert!(!result.already_prepared);
+        assert!(super::is_lower_hex(&result.upload_set_id, 32));
+
+        let locked = conn.lock().expect("lock db");
+        let row: (String, i64, Option<i64>) = locked
+            .query_row(
+                "SELECT request_digest, expected_child_count, superseded_at
                        FROM cloud_parent_upload_sets
                       WHERE upload_set_id = ?1",
-                    params![result.upload_set_id],
-                    |record| Ok((record.get(0)?, record.get(1)?, record.get(2)?)),
-                )
-                .expect("read upload set");
-            assert!(super::is_lower_hex(&row.0, 64));
-            assert_eq!(row.1, i64::try_from(children.len()).expect("children count"));
-            assert_eq!(row.2, None);
+                params![result.upload_set_id],
+                |record| Ok((record.get(0)?, record.get(1)?, record.get(2)?)),
+            )
+            .expect("read upload set");
+        assert!(super::is_lower_hex(&row.0, 64));
+        assert_eq!(
+            row.1,
+            i64::try_from(children.len()).expect("children count")
+        );
+        assert_eq!(row.2, None);
 
-            let child_count: i64 = locked
-                .query_row(
-                    "SELECT COUNT(*) FROM cloud_parent_upload_set_children WHERE upload_set_id = ?1",
-                    params![result.upload_set_id],
-                    |record| record.get(0),
-                )
-                .expect("count set children");
-            assert_eq!(child_count, i64::try_from(children.len()).expect("children count"));
+        let child_count: i64 = locked
+            .query_row(
+                "SELECT COUNT(*) FROM cloud_parent_upload_set_children WHERE upload_set_id = ?1",
+                params![result.upload_set_id],
+                |record| record.get(0),
+            )
+            .expect("count set children");
+        assert_eq!(
+            child_count,
+            i64::try_from(children.len()).expect("children count")
+        );
 
-            let queue_count: i64 = locked
-                .query_row(
-                    "SELECT COUNT(*) FROM cloud_upload_queue WHERE upload_set_id = ?1",
-                    params![result.upload_set_id],
-                    |record| record.get(0),
+        let queue_count: i64 = locked
+            .query_row(
+                "SELECT COUNT(*) FROM cloud_upload_queue WHERE upload_set_id = ?1",
+                params![result.upload_set_id],
+                |record| record.get(0),
+            )
+            .expect("count tagged queue rows");
+        assert_eq!(
+            queue_count,
+            i64::try_from(children.len()).expect("children count")
+        );
+    }
+
+    #[test]
+    fn prepare_parent_upload_rejects_manifest_digest_omission_and_substitution() {
+        let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
+        let full_children = vec![
+            prepare_child!(
+                "front.mp4",
+                "rk/front",
+                1,
+                123,
+                1_718_805_700_000,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "etag-front",
+                "md5",
+            ),
+            prepare_child!(
+                "back.mp4",
+                "rk/back",
+                2,
+                456,
+                1_718_805_701_000,
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "etag-back",
+                "md5",
+            ),
+        ];
+        let stored_digest = manifest_digest_for_prepare_children(&full_children);
+        let archive_item_id = {
+            let locked = conn.lock().expect("lock db");
+            insert_prepare_parent(
+                &locked,
+                "archive/events/prepare-digest",
+                "LIVE",
+                0,
+                Some(stored_digest.as_str()),
+            )
+        };
+
+        let omitted_request = CloudPrepareParentUploadRequest {
+            archive_item_id,
+            destination_id: "dest".to_owned(),
+            source_manifest_digest: stored_digest.clone(),
+            children: vec![full_children[0].clone()],
+        };
+        assert!(matches!(
+            call_prepare(&conn, &omitted_request),
+            Response::Rejected { .. }
+        ));
+
+        let mut substituted_children = full_children.clone();
+        substituted_children[1].content_sha256 =
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned();
+        let substituted_request = CloudPrepareParentUploadRequest {
+            archive_item_id,
+            destination_id: "dest".to_owned(),
+            source_manifest_digest: stored_digest,
+            children: substituted_children,
+        };
+        assert!(matches!(
+            call_prepare(&conn, &substituted_request),
+            Response::Rejected { .. }
+        ));
+
+        let set_count: i64 = conn
+            .lock()
+            .expect("lock db")
+            .query_row("SELECT COUNT(*) FROM cloud_parent_upload_sets", [], |row| {
+                row.get(0)
+            })
+            .expect("count upload sets");
+        assert_eq!(set_count, 0);
+    }
+
+    #[test]
+    fn prepare_parent_upload_is_idempotent_replay() {
+        let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
+        let children = vec![
+            prepare_child!(
+                "front.mp4",
+                "rk/front",
+                1,
+                123,
+                1_718_805_700_000,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "etag-front",
+                "md5",
+            ),
+            prepare_child!(
+                "back.mp4",
+                "rk/back",
+                2,
+                456,
+                1_718_805_701_000,
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "etag-back",
+                "md5",
+            ),
+        ];
+        let manifest_digest = manifest_digest_for_prepare_children(&children);
+        let archive_item_id = {
+            let locked = conn.lock().expect("lock db");
+            insert_prepare_parent(
+                &locked,
+                "archive/events/prepare-idempotent",
+                "LIVE",
+                0,
+                Some(manifest_digest.as_str()),
+            )
+        };
+        let request = CloudPrepareParentUploadRequest {
+            archive_item_id,
+            destination_id: "dest".to_owned(),
+            source_manifest_digest: manifest_digest,
+            children,
+        };
+        let first = call_prepare(&conn, &request);
+        let Response::CloudPrepareParentUpload(first_result) = first else {
+            panic!("expected prepare response");
+        };
+        assert!(!first_result.already_prepared);
+
+        let second = call_prepare(&conn, &request);
+        let Response::CloudPrepareParentUpload(second_result) = second else {
+            panic!("expected idempotent prepare response");
+        };
+        assert!(second_result.already_prepared);
+        assert_eq!(second_result.upload_set_id, first_result.upload_set_id);
+
+        let count: i64 = conn
+            .lock()
+            .expect("lock db")
+            .query_row("SELECT COUNT(*) FROM cloud_parent_upload_sets", [], |row| {
+                row.get(0)
+            })
+            .expect("count upload sets");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn prepare_parent_upload_supersedes_prior_set_and_parks_unfinished_rows() {
+        let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
+        let children_a = vec![
+            prepare_child!(
+                "front-a.mp4",
+                "rk/a/front",
+                1,
+                111,
+                1_718_805_700_000,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "etag-a-front",
+                "md5",
+            ),
+            prepare_child!(
+                "back-a.mp4",
+                "rk/a/back",
+                2,
+                222,
+                1_718_805_701_000,
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "etag-a-back",
+                "md5",
+            ),
+        ];
+        let digest_a = manifest_digest_for_prepare_children(&children_a);
+        let archive_item_id = {
+            let locked = conn.lock().expect("lock db");
+            insert_prepare_parent(
+                &locked,
+                "archive/events/prepare-supersede",
+                "LIVE",
+                0,
+                Some(digest_a.as_str()),
+            )
+        };
+        let prepare_a = CloudPrepareParentUploadRequest {
+            archive_item_id,
+            destination_id: "dest".to_owned(),
+            source_manifest_digest: digest_a.clone(),
+            children: children_a.clone(),
+        };
+        let Response::CloudPrepareParentUpload(first_result) = call_prepare(&conn, &prepare_a)
+        else {
+            panic!("expected first prepare response");
+        };
+
+        {
+            let locked = conn.lock().expect("lock db");
+            locked
+                .execute(
+                    "UPDATE archive_items SET manifest_digest = ?2 WHERE id = ?1",
+                    params![
+                        archive_item_id,
+                        manifest_digest_for_prepare_children(&[
+                            prepare_child!(
+                                "front-b.mp4",
+                                "rk/b/front",
+                                1,
+                                333,
+                                1_718_805_702_000,
+                                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                                "etag-b-front",
+                                "md5",
+                            ),
+                            prepare_child!(
+                                "back-b.mp4",
+                                "rk/b/back",
+                                2,
+                                444,
+                                1_718_805_703_000,
+                                "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                                "etag-b-back",
+                                "md5",
+                            ),
+                        ])
+                    ],
                 )
-                .expect("count tagged queue rows");
-            assert_eq!(queue_count, i64::try_from(children.len()).expect("children count"));
+                .expect("update parent digest");
         }
 
-        #[test]
-        fn prepare_parent_upload_rejects_manifest_digest_omission_and_substitution() {
-            let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
-            let full_children = vec![
-                prepare_child!(
-                    "front.mp4",
-                    "rk/front",
-                    1,
-                    123,
-                    1_718_805_700_000,
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                    "etag-front",
-                    "md5",
-                ),
-                prepare_child!(
-                    "back.mp4",
-                    "rk/back",
-                    2,
-                    456,
-                    1_718_805_701_000,
-                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                    "etag-back",
-                    "md5",
-                ),
-            ];
-            let stored_digest = manifest_digest_for_prepare_children(&full_children);
-            let archive_item_id = {
-                let locked = conn.lock().expect("lock db");
-                insert_prepare_parent(
-                    &locked,
-                    "archive/events/prepare-digest",
-                    "LIVE",
-                    0,
-                    Some(stored_digest.as_str()),
-                )
-            };
+        let children_b = vec![
+            prepare_child!(
+                "front-b.mp4",
+                "rk/b/front",
+                1,
+                333,
+                1_718_805_702_000,
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "etag-b-front",
+                "md5",
+            ),
+            prepare_child!(
+                "back-b.mp4",
+                "rk/b/back",
+                2,
+                444,
+                1_718_805_703_000,
+                "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                "etag-b-back",
+                "md5",
+            ),
+        ];
+        let digest_b = manifest_digest_for_prepare_children(&children_b);
+        let prepare_b = CloudPrepareParentUploadRequest {
+            archive_item_id,
+            destination_id: "dest".to_owned(),
+            source_manifest_digest: digest_b,
+            children: children_b,
+        };
+        let Response::CloudPrepareParentUpload(second_result) = call_prepare(&conn, &prepare_b)
+        else {
+            panic!("expected second prepare response");
+        };
+        assert_ne!(first_result.upload_set_id, second_result.upload_set_id);
 
-            let omitted_request = CloudPrepareParentUploadRequest {
-                archive_item_id,
-                destination_id: "dest".to_owned(),
-                source_manifest_digest: stored_digest.clone(),
-                children: vec![full_children[0].clone()],
-            };
-            assert!(matches!(
-                call_prepare(&conn, &omitted_request),
-                Response::Rejected { .. }
-            ));
-
-            let mut substituted_children = full_children.clone();
-            substituted_children[1].content_sha256 =
-                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned();
-            let substituted_request = CloudPrepareParentUploadRequest {
-                archive_item_id,
-                destination_id: "dest".to_owned(),
-                source_manifest_digest: stored_digest,
-                children: substituted_children,
-            };
-            assert!(matches!(
-                call_prepare(&conn, &substituted_request),
-                Response::Rejected { .. }
-            ));
-
-            let set_count: i64 = conn
-                .lock()
-                .expect("lock db")
-                .query_row("SELECT COUNT(*) FROM cloud_parent_upload_sets", [], |row| row.get(0))
-                .expect("count upload sets");
-            assert_eq!(set_count, 0);
-        }
-
-        #[test]
-        fn prepare_parent_upload_is_idempotent_replay() {
-            let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
-            let children = vec![
-                prepare_child!(
-                    "front.mp4",
-                    "rk/front",
-                    1,
-                    123,
-                    1_718_805_700_000,
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                    "etag-front",
-                    "md5",
-                ),
-                prepare_child!(
-                    "back.mp4",
-                    "rk/back",
-                    2,
-                    456,
-                    1_718_805_701_000,
-                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                    "etag-back",
-                    "md5",
-                ),
-            ];
-            let manifest_digest = manifest_digest_for_prepare_children(&children);
-            let archive_item_id = {
-                let locked = conn.lock().expect("lock db");
-                insert_prepare_parent(
-                    &locked,
-                    "archive/events/prepare-idempotent",
-                    "LIVE",
-                    0,
-                    Some(manifest_digest.as_str()),
-                )
-            };
-            let request = CloudPrepareParentUploadRequest {
-                archive_item_id,
-                destination_id: "dest".to_owned(),
-                source_manifest_digest: manifest_digest,
-                children,
-            };
-            let first = call_prepare(&conn, &request);
-            let Response::CloudPrepareParentUpload(first_result) = first else {
-                panic!("expected prepare response");
-            };
-            assert!(!first_result.already_prepared);
-
-            let second = call_prepare(&conn, &request);
-            let Response::CloudPrepareParentUpload(second_result) = second else {
-                panic!("expected idempotent prepare response");
-            };
-            assert!(second_result.already_prepared);
-            assert_eq!(second_result.upload_set_id, first_result.upload_set_id);
-
-            let count: i64 = conn
-                .lock()
-                .expect("lock db")
-                .query_row("SELECT COUNT(*) FROM cloud_parent_upload_sets", [], |row| row.get(0))
-                .expect("count upload sets");
-            assert_eq!(count, 1);
-        }
-
-        #[test]
-        fn prepare_parent_upload_supersedes_prior_set_and_parks_unfinished_rows() {
-            let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
-            let children_a = vec![
-                prepare_child!(
-                    "front-a.mp4",
-                    "rk/a/front",
-                    1,
-                    111,
-                    1_718_805_700_000,
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                    "etag-a-front",
-                    "md5",
-                ),
-                prepare_child!(
-                    "back-a.mp4",
-                    "rk/a/back",
-                    2,
-                    222,
-                    1_718_805_701_000,
-                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                    "etag-a-back",
-                    "md5",
-                ),
-            ];
-            let digest_a = manifest_digest_for_prepare_children(&children_a);
-            let archive_item_id = {
-                let locked = conn.lock().expect("lock db");
-                insert_prepare_parent(
-                    &locked,
-                    "archive/events/prepare-supersede",
-                    "LIVE",
-                    0,
-                    Some(digest_a.as_str()),
-                )
-            };
-            let prepare_a = CloudPrepareParentUploadRequest {
-                archive_item_id,
-                destination_id: "dest".to_owned(),
-                source_manifest_digest: digest_a.clone(),
-                children: children_a.clone(),
-            };
-            let Response::CloudPrepareParentUpload(first_result) = call_prepare(&conn, &prepare_a) else {
-                panic!("expected first prepare response");
-            };
-
-            {
-                let locked = conn.lock().expect("lock db");
-                locked
-                    .execute(
-                        "UPDATE archive_items SET manifest_digest = ?2 WHERE id = ?1",
-                        params![
-                            archive_item_id,
-                            manifest_digest_for_prepare_children(&[
-                                prepare_child!(
-                                    "front-b.mp4",
-                                    "rk/b/front",
-                                    1,
-                                    333,
-                                    1_718_805_702_000,
-                                    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-                                    "etag-b-front",
-                                    "md5",
-                                ),
-                                prepare_child!(
-                                    "back-b.mp4",
-                                    "rk/b/back",
-                                    2,
-                                    444,
-                                    1_718_805_703_000,
-                                    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-                                    "etag-b-back",
-                                    "md5",
-                                ),
-                            ])
-                        ],
-                    )
-                    .expect("update parent digest");
-            }
-
-            let children_b = vec![
-                prepare_child!(
-                    "front-b.mp4",
-                    "rk/b/front",
-                    1,
-                    333,
-                    1_718_805_702_000,
-                    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-                    "etag-b-front",
-                    "md5",
-                ),
-                prepare_child!(
-                    "back-b.mp4",
-                    "rk/b/back",
-                    2,
-                    444,
-                    1_718_805_703_000,
-                    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-                    "etag-b-back",
-                    "md5",
-                ),
-            ];
-            let digest_b = manifest_digest_for_prepare_children(&children_b);
-            let prepare_b = CloudPrepareParentUploadRequest {
-                archive_item_id,
-                destination_id: "dest".to_owned(),
-                source_manifest_digest: digest_b,
-                children: children_b,
-            };
-            let Response::CloudPrepareParentUpload(second_result) = call_prepare(&conn, &prepare_b) else {
-                panic!("expected second prepare response");
-            };
-            assert_ne!(first_result.upload_set_id, second_result.upload_set_id);
-
-            let mut locked = conn.lock().expect("lock db");
-            let superseded_at: Option<i64> = locked
-                .query_row(
-                    "SELECT superseded_at
+        let mut locked = conn.lock().expect("lock db");
+        let superseded_at: Option<i64> = locked
+            .query_row(
+                "SELECT superseded_at
                        FROM cloud_parent_upload_sets
                       WHERE upload_set_id = ?1",
-                    params![first_result.upload_set_id],
-                    |row| row.get(0),
-                )
-                .expect("read superseded_at");
-            assert!(superseded_at.is_some());
-            let parked_rows: i64 = locked
-                .query_row(
-                    "SELECT COUNT(*)
+                params![first_result.upload_set_id],
+                |row| row.get(0),
+            )
+            .expect("read superseded_at");
+        assert!(superseded_at.is_some());
+        let parked_rows: i64 = locked
+            .query_row(
+                "SELECT COUNT(*)
                        FROM cloud_upload_queue
                       WHERE upload_set_id = ?1
                         AND state = 'parked'",
-                    params![first_result.upload_set_id],
-                    |row| row.get(0),
-                )
-                .expect("count parked rows");
-            assert_eq!(parked_rows, 2);
+                params![first_result.upload_set_id],
+                |row| row.get(0),
+            )
+            .expect("count parked rows");
+        assert_eq!(parked_rows, 2);
 
-            let commit = cloud_upload_commit(
-                &mut locked,
-                &CloudQueuePk {
-                    destination_id: "dest".to_owned(),
-                    remote_key: "rk/a/front".to_owned(),
-                },
-                "attempt-superseded",
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "sha256",
-                111,
-                None,
-            );
-            assert!(commit.is_err());
+        let commit = cloud_upload_commit(
+            &mut locked,
+            &CloudQueuePk {
+                destination_id: "dest".to_owned(),
+                remote_key: "rk/a/front".to_owned(),
+            },
+            "attempt-superseded",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "sha256",
+            111,
+            None,
+        );
+        assert!(commit.is_err());
 
-            let current_set: String = locked
-                .query_row(
-                    "SELECT upload_set_id
+        let current_set: String = locked
+            .query_row(
+                "SELECT upload_set_id
                        FROM cloud_parent_upload_sets
                       WHERE archive_item_id = ?1
                         AND superseded_at IS NULL",
-                    params![archive_item_id],
-                    |row| row.get(0),
-                )
-                .expect("read current set");
-            assert_eq!(current_set, second_result.upload_set_id);
-        }
+                params![archive_item_id],
+                |row| row.get(0),
+            )
+            .expect("read current set");
+        assert_eq!(current_set, second_result.upload_set_id);
+    }
 
-        #[test]
-        fn cloud_prepare_retag_then_late_prior_set_commit_rejected() {
-            let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
-            let children_a = vec![prepare_child!(
+    #[test]
+    fn cloud_prepare_retag_then_late_prior_set_commit_rejected() {
+        let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
+        let children_a = vec![prepare_child!(
+            "front.mp4",
+            "rk/shared",
+            1,
+            111,
+            1_718_805_700_000,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "11111111111111111111111111111111",
+            "md5",
+        )];
+        let digest_a = manifest_digest_for_prepare_children(&children_a);
+        let archive_item_id = {
+            let locked = conn.lock().expect("lock db");
+            insert_prepare_parent(
+                &locked,
+                "archive/events/prepare-retag",
+                "LIVE",
+                0,
+                Some(digest_a.as_str()),
+            )
+        };
+        let prepare_a = CloudPrepareParentUploadRequest {
+            archive_item_id,
+            destination_id: "dest".to_owned(),
+            source_manifest_digest: digest_a,
+            children: children_a,
+        };
+        let Response::CloudPrepareParentUpload(first_result) = call_prepare(&conn, &prepare_a)
+        else {
+            panic!("expected first prepare response");
+        };
+
+        let children_b = vec![prepare_child!(
+            "front.mp4",
+            "rk/shared",
+            1,
+            222,
+            1_718_805_701_000,
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "22222222222222222222222222222222",
+            "md5",
+        )];
+        let digest_b = manifest_digest_for_prepare_children(&children_b);
+        {
+            let locked = conn.lock().expect("lock db");
+            locked
+                .execute(
+                    "UPDATE archive_items SET manifest_digest = ?2 WHERE id = ?1",
+                    params![archive_item_id, digest_b],
+                )
+                .expect("update parent digest");
+        }
+        let prepare_b = CloudPrepareParentUploadRequest {
+            archive_item_id,
+            destination_id: "dest".to_owned(),
+            source_manifest_digest: manifest_digest_for_prepare_children(&children_b),
+            children: children_b,
+        };
+        let Response::CloudPrepareParentUpload(second_result) = call_prepare(&conn, &prepare_b)
+        else {
+            panic!("expected second prepare response");
+        };
+        assert_ne!(first_result.upload_set_id, second_result.upload_set_id);
+
+        let mut locked = conn.lock().expect("lock db");
+        let queue_set_id: Option<String> = locked
+            .query_row(
+                "SELECT upload_set_id
+                       FROM cloud_upload_queue
+                      WHERE destination_id = 'dest' AND remote_key = 'rk/shared'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read queue upload_set_id");
+        assert_eq!(
+            queue_set_id.as_deref(),
+            Some(second_result.upload_set_id.as_str())
+        );
+        let attempts_before: i64 = locked
+            .query_row("SELECT COUNT(*) FROM cloud_upload_attempts", [], |row| {
+                row.get(0)
+            })
+            .expect("count attempts before");
+        let history_before: i64 = locked
+            .query_row("SELECT COUNT(*) FROM cloud_sync_history", [], |row| {
+                row.get(0)
+            })
+            .expect("count history before");
+
+        let late_commit = cloud_upload_commit(
+            &mut locked,
+            &CloudQueuePk {
+                destination_id: "dest".to_owned(),
+                remote_key: "rk/shared".to_owned(),
+            },
+            "attempt-late-commit",
+            "22222222222222222222222222222222",
+            "md5",
+            222,
+            Some(first_result.upload_set_id.as_str()),
+        );
+        assert!(late_commit.is_err());
+        let late_fail = cloud_upload_fail(
+            &mut locked,
+            &CloudQueuePk {
+                destination_id: "dest".to_owned(),
+                remote_key: "rk/shared".to_owned(),
+            },
+            "attempt-late-fail",
+            "timeout",
+            Some(1234),
+            false,
+            Some(first_result.upload_set_id.as_str()),
+        );
+        assert!(late_fail.is_err());
+
+        let attempts_after: i64 = locked
+            .query_row("SELECT COUNT(*) FROM cloud_upload_attempts", [], |row| {
+                row.get(0)
+            })
+            .expect("count attempts after");
+        let history_after: i64 = locked
+            .query_row("SELECT COUNT(*) FROM cloud_sync_history", [], |row| {
+                row.get(0)
+            })
+            .expect("count history after");
+        let queue_state: String = locked
+            .query_row(
+                "SELECT state
+                       FROM cloud_upload_queue
+                      WHERE destination_id = 'dest' AND remote_key = 'rk/shared'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read queue state");
+        assert_eq!(attempts_after, attempts_before);
+        assert_eq!(history_after, history_before);
+        assert_eq!(queue_state, "queued");
+    }
+
+    #[test]
+    fn prepare_parent_upload_rejects_verify_alg_none() {
+        let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
+        let children = vec![prepare_child!(
+            "front.mp4",
+            "rk/front",
+            1,
+            100,
+            1_718_805_700_000,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "etag-front",
+            "none",
+        )];
+        let digest = manifest_digest_for_prepare_children(&children);
+        let archive_item_id = {
+            let locked = conn.lock().expect("lock db");
+            insert_prepare_parent(
+                &locked,
+                "archive/events/prepare-none",
+                "LIVE",
+                0,
+                Some(digest.as_str()),
+            )
+        };
+        let request = CloudPrepareParentUploadRequest {
+            archive_item_id,
+            destination_id: "dest".to_owned(),
+            source_manifest_digest: digest,
+            children,
+        };
+        assert!(matches!(
+            call_prepare(&conn, &request),
+            Response::Rejected { .. }
+        ));
+    }
+
+    #[test]
+    fn prepare_parent_upload_rejects_remote_key_owned_by_another_parent_current_set() {
+        let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
+        let children_a = vec![prepare_child!(
+            "front-a.mp4",
+            "rk/shared",
+            1,
+            100,
+            1_718_805_700_000,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "etag-a",
+            "md5",
+        )];
+        let digest_a = manifest_digest_for_prepare_children(&children_a);
+        let parent_a = {
+            let locked = conn.lock().expect("lock db");
+            insert_prepare_parent(
+                &locked,
+                "archive/events/prepare-remote-a",
+                "LIVE",
+                0,
+                Some(digest_a.as_str()),
+            )
+        };
+        let request_a = CloudPrepareParentUploadRequest {
+            archive_item_id: parent_a,
+            destination_id: "dest".to_owned(),
+            source_manifest_digest: digest_a,
+            children: children_a,
+        };
+        assert!(matches!(
+            call_prepare(&conn, &request_a),
+            Response::CloudPrepareParentUpload(_)
+        ));
+
+        let children_b = vec![prepare_child!(
+            "front-b.mp4",
+            "rk/shared",
+            1,
+            101,
+            1_718_805_701_000,
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "etag-b",
+            "md5",
+        )];
+        let digest_b = manifest_digest_for_prepare_children(&children_b);
+        let parent_b = {
+            let locked = conn.lock().expect("lock db");
+            insert_prepare_parent(
+                &locked,
+                "archive/events/prepare-remote-b",
+                "LIVE",
+                0,
+                Some(digest_b.as_str()),
+            )
+        };
+        let request_b = CloudPrepareParentUploadRequest {
+            archive_item_id: parent_b,
+            destination_id: "dest".to_owned(),
+            source_manifest_digest: digest_b,
+            children: children_b,
+        };
+        assert!(matches!(
+            call_prepare(&conn, &request_b),
+            Response::Rejected { .. }
+        ));
+    }
+
+    #[test]
+    fn prepare_parent_upload_rejects_non_live_or_durable_parent() {
+        let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
+        let live_children = vec![prepare_child!(
+            "front.mp4",
+            "rk/front",
+            1,
+            100,
+            1_718_805_700_000,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "etag-front",
+            "md5",
+        )];
+        let live_digest = manifest_digest_for_prepare_children(&live_children);
+        let (non_live_parent, durable_parent) = {
+            let locked = conn.lock().expect("lock db");
+            (
+                insert_prepare_parent(
+                    &locked,
+                    "archive/events/prepare-non-live",
+                    "DELETE_CLAIMED",
+                    0,
+                    Some(live_digest.as_str()),
+                ),
+                insert_prepare_parent(
+                    &locked,
+                    "archive/events/prepare-durable",
+                    "LIVE",
+                    1,
+                    Some(live_digest.as_str()),
+                ),
+            )
+        };
+
+        let non_live_request = CloudPrepareParentUploadRequest {
+            archive_item_id: non_live_parent,
+            destination_id: "dest".to_owned(),
+            source_manifest_digest: live_digest.clone(),
+            children: live_children.clone(),
+        };
+        assert!(matches!(
+            call_prepare(&conn, &non_live_request),
+            Response::Rejected { .. }
+        ));
+
+        let durable_request = CloudPrepareParentUploadRequest {
+            archive_item_id: durable_parent,
+            destination_id: "dest".to_owned(),
+            source_manifest_digest: live_digest,
+            children: live_children,
+        };
+        assert!(matches!(
+            call_prepare(&conn, &durable_request),
+            Response::Rejected { .. }
+        ));
+    }
+
+    #[test]
+    fn prepare_parent_upload_rejects_negative_bytes_bad_hash_bad_child_keys_and_duplicates() {
+        let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
+        let baseline_children = vec![prepare_child!(
+            "front.mp4",
+            "rk/front",
+            1,
+            100,
+            1_718_805_700_000,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "etag-front",
+            "md5",
+        )];
+        let baseline_digest = manifest_digest_for_prepare_children(&baseline_children);
+        let archive_item_id = {
+            let locked = conn.lock().expect("lock db");
+            insert_prepare_parent(
+                &locked,
+                "archive/events/prepare-byte-exactness",
+                "LIVE",
+                0,
+                Some(baseline_digest.as_str()),
+            )
+        };
+
+        let mut negative_bytes_children = baseline_children.clone();
+        negative_bytes_children[0].total_bytes = -1;
+        let negative_request = CloudPrepareParentUploadRequest {
+            archive_item_id,
+            destination_id: "dest".to_owned(),
+            source_manifest_digest: baseline_digest.clone(),
+            children: negative_bytes_children,
+        };
+        assert!(matches!(
+            call_prepare(&conn, &negative_request),
+            Response::Rejected { .. }
+        ));
+
+        let mut bad_hash_children = baseline_children.clone();
+        bad_hash_children[0].content_sha256 = "AA".repeat(32);
+        let bad_hash_request = CloudPrepareParentUploadRequest {
+            archive_item_id,
+            destination_id: "dest".to_owned(),
+            source_manifest_digest: baseline_digest.clone(),
+            children: bad_hash_children,
+        };
+        assert!(matches!(
+            call_prepare(&conn, &bad_hash_request),
+            Response::Rejected { .. }
+        ));
+
+        let mut dotdot_children = baseline_children.clone();
+        dotdot_children[0].child_key = "../front.mp4".to_owned();
+        let dotdot_request = CloudPrepareParentUploadRequest {
+            archive_item_id,
+            destination_id: "dest".to_owned(),
+            source_manifest_digest: baseline_digest.clone(),
+            children: dotdot_children,
+        };
+        assert!(matches!(
+            call_prepare(&conn, &dotdot_request),
+            Response::Rejected { .. }
+        ));
+
+        let mut backslash_children = baseline_children.clone();
+        backslash_children[0].child_key = "front\\mp4".to_owned();
+        let backslash_request = CloudPrepareParentUploadRequest {
+            archive_item_id,
+            destination_id: "dest".to_owned(),
+            source_manifest_digest: baseline_digest.clone(),
+            children: backslash_children,
+        };
+        assert!(matches!(
+            call_prepare(&conn, &backslash_request),
+            Response::Rejected { .. }
+        ));
+
+        let duplicate_children = vec![
+            baseline_children[0].clone(),
+            prepare_child!(
                 "front.mp4",
-                "rk/shared",
+                "rk/other",
+                2,
+                100,
+                1_718_805_700_001,
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "etag-other",
+                "md5",
+            ),
+        ];
+        let duplicate_request = CloudPrepareParentUploadRequest {
+            archive_item_id,
+            destination_id: "dest".to_owned(),
+            source_manifest_digest: baseline_digest,
+            children: duplicate_children,
+        };
+        assert!(matches!(
+            call_prepare(&conn, &duplicate_request),
+            Response::Rejected { .. }
+        ));
+
+        let set_count: i64 = conn
+            .lock()
+            .expect("lock db")
+            .query_row("SELECT COUNT(*) FROM cloud_parent_upload_sets", [], |row| {
+                row.get(0)
+            })
+            .expect("count upload sets");
+        assert_eq!(set_count, 0);
+    }
+
+    #[test]
+    fn finalize_parent_upload_complete_set_flips_durable() {
+        let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
+        let (archive_item_id, _manifest_digest, upload_set_id) =
+            prepare_two_child_upload_set(&conn, "archive/events/finalize-parent-complete");
+        {
+            let locked = conn.lock().expect("lock db");
+            locked
+                .execute(
+                    "UPDATE cloud_upload_queue
+                            SET state = 'done', bytes_uploaded = total_bytes
+                          WHERE upload_set_id = ?1",
+                    params![upload_set_id],
+                )
+                .expect("mark queue done");
+        }
+        let response = call_finalize_parent(
+            &conn,
+            &CloudFinalizeParentUploadRequest {
+                upload_set_id: upload_set_id.clone(),
+            },
+        );
+        let Response::CloudFinalizeParentUpload(result) = response else {
+            panic!("expected finalize parent response");
+        };
+        assert!(result.ok);
+        assert!(result.durable_parent);
+        assert!(!result.already_finalized);
+        let locked = conn.lock().expect("lock db");
+        let finalized_at: Option<i64> = locked
+            .query_row(
+                "SELECT finalized_at
+                       FROM cloud_parent_upload_sets
+                      WHERE upload_set_id = ?1",
+                params![upload_set_id],
+                |row| row.get(0),
+            )
+            .expect("read finalized_at");
+        assert!(finalized_at.is_some());
+        let durable: i64 = locked
+            .query_row(
+                "SELECT durable FROM archive_items WHERE id = ?1",
+                params![archive_item_id],
+                |row| row.get(0),
+            )
+            .expect("read durable");
+        assert_eq!(durable, 1);
+    }
+
+    #[test]
+    fn finalize_parent_upload_idempotent_replay_after_durable() {
+        let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
+        let (archive_item_id, _manifest_digest, upload_set_id) =
+            prepare_two_child_upload_set(&conn, "archive/events/finalize-parent-replay");
+        {
+            let locked = conn.lock().expect("lock db");
+            locked
+                .execute(
+                    "UPDATE cloud_upload_queue
+                            SET state = 'done', bytes_uploaded = total_bytes
+                          WHERE upload_set_id = ?1",
+                    params![upload_set_id],
+                )
+                .expect("mark queue done");
+        }
+        let first = call_finalize_parent(
+            &conn,
+            &CloudFinalizeParentUploadRequest {
+                upload_set_id: upload_set_id.clone(),
+            },
+        );
+        let Response::CloudFinalizeParentUpload(first_result) = first else {
+            panic!("expected finalize parent response");
+        };
+        assert!(first_result.durable_parent);
+        assert!(!first_result.already_finalized);
+        let finalized_before: i64 = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT finalized_at
+                       FROM cloud_parent_upload_sets
+                      WHERE upload_set_id = ?1",
+                params![upload_set_id],
+                |row| row.get(0),
+            )
+            .expect("read finalized_at before replay");
+
+        let second = call_finalize_parent(
+            &conn,
+            &CloudFinalizeParentUploadRequest {
+                upload_set_id: upload_set_id.clone(),
+            },
+        );
+        let Response::CloudFinalizeParentUpload(second_result) = second else {
+            panic!("expected finalize parent replay response");
+        };
+        assert!(second_result.ok);
+        assert!(second_result.durable_parent);
+        assert!(second_result.already_finalized);
+
+        let locked = conn.lock().expect("lock db");
+        let finalized_after: i64 = locked
+            .query_row(
+                "SELECT finalized_at
+                       FROM cloud_parent_upload_sets
+                      WHERE upload_set_id = ?1",
+                params![upload_set_id],
+                |row| row.get(0),
+            )
+            .expect("read finalized_at after replay");
+        assert_eq!(finalized_after, finalized_before);
+        let durable: i64 = locked
+            .query_row(
+                "SELECT durable FROM archive_items WHERE id = ?1",
+                params![archive_item_id],
+                |row| row.get(0),
+            )
+            .expect("read durable");
+        assert_eq!(durable, 1);
+    }
+
+    #[test]
+    fn finalize_parent_upload_incomplete_does_not_flip() {
+        let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
+        let (archive_item_id, _manifest_digest, upload_set_id) =
+            prepare_two_child_upload_set(&conn, "archive/events/finalize-parent-incomplete");
+        {
+            let locked = conn.lock().expect("lock db");
+            locked
+                .execute(
+                    "UPDATE cloud_upload_queue
+                            SET state = 'done', bytes_uploaded = total_bytes
+                          WHERE upload_set_id = ?1
+                            AND child_key = 'front.mp4'",
+                    params![upload_set_id],
+                )
+                .expect("mark only one queue row done");
+        }
+        let response = call_finalize_parent(
+            &conn,
+            &CloudFinalizeParentUploadRequest {
+                upload_set_id: upload_set_id.clone(),
+            },
+        );
+        let Response::CloudFinalizeParentUpload(result) = response else {
+            panic!("expected finalize parent response");
+        };
+        assert!(result.ok);
+        assert!(!result.durable_parent);
+        assert!(!result.already_finalized);
+
+        let locked = conn.lock().expect("lock db");
+        let durable: i64 = locked
+            .query_row(
+                "SELECT durable FROM archive_items WHERE id = ?1",
+                params![archive_item_id],
+                |row| row.get(0),
+            )
+            .expect("read durable");
+        assert_eq!(durable, 0);
+        let finalized_at: Option<i64> = locked
+            .query_row(
+                "SELECT finalized_at
+                       FROM cloud_parent_upload_sets
+                      WHERE upload_set_id = ?1",
+                params![upload_set_id],
+                |row| row.get(0),
+            )
+            .expect("read finalized_at");
+        assert_eq!(finalized_at, None);
+    }
+
+    #[test]
+    fn finalize_parent_upload_member_mismatch_does_not_flip() {
+        let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
+        let (archive_item_id, _manifest_digest, upload_set_id) =
+            prepare_two_child_upload_set(&conn, "archive/events/finalize-parent-mismatch");
+        {
+            let locked = conn.lock().expect("lock db");
+            locked
+                .execute(
+                    "UPDATE cloud_upload_queue
+                            SET state = 'done', bytes_uploaded = total_bytes
+                          WHERE upload_set_id = ?1",
+                    params![upload_set_id],
+                )
+                .expect("mark queue done");
+            locked
+                .execute(
+                    "UPDATE cloud_upload_queue
+                            SET content_sha256 = ?2
+                          WHERE upload_set_id = ?1
+                            AND child_key = 'front.mp4'",
+                    params![
+                        upload_set_id,
+                        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    ],
+                )
+                .expect("corrupt one queue row hash");
+        }
+        let response = call_finalize_parent(
+            &conn,
+            &CloudFinalizeParentUploadRequest {
+                upload_set_id: upload_set_id.clone(),
+            },
+        );
+        let Response::CloudFinalizeParentUpload(result) = response else {
+            panic!("expected finalize parent response");
+        };
+        assert!(result.ok);
+        assert!(!result.durable_parent);
+        assert!(!result.already_finalized);
+
+        let locked = conn.lock().expect("lock db");
+        let durable: i64 = locked
+            .query_row(
+                "SELECT durable FROM archive_items WHERE id = ?1",
+                params![archive_item_id],
+                |row| row.get(0),
+            )
+            .expect("read durable");
+        assert_eq!(durable, 0);
+        let finalized_at: Option<i64> = locked
+            .query_row(
+                "SELECT finalized_at
+                       FROM cloud_parent_upload_sets
+                      WHERE upload_set_id = ?1",
+                params![upload_set_id],
+                |row| row.get(0),
+            )
+            .expect("read finalized_at");
+        assert_eq!(finalized_at, None);
+    }
+
+    #[test]
+    fn finalize_parent_upload_missing_queue_row_does_not_flip() {
+        let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
+        let (archive_item_id, _manifest_digest, upload_set_id) =
+            prepare_two_child_upload_set(&conn, "archive/events/finalize-parent-missing-row");
+        {
+            let locked = conn.lock().expect("lock db");
+            locked
+                .execute(
+                    "UPDATE cloud_upload_queue
+                            SET state = 'done', bytes_uploaded = total_bytes
+                          WHERE upload_set_id = ?1",
+                    params![upload_set_id],
+                )
+                .expect("mark queue done");
+            locked
+                .execute(
+                    "DELETE FROM cloud_upload_queue
+                          WHERE upload_set_id = ?1
+                            AND child_key = 'back.mp4'",
+                    params![upload_set_id],
+                )
+                .expect("delete one queue row");
+        }
+        let response = call_finalize_parent(
+            &conn,
+            &CloudFinalizeParentUploadRequest {
+                upload_set_id: upload_set_id.clone(),
+            },
+        );
+        let Response::CloudFinalizeParentUpload(result) = response else {
+            panic!("expected finalize parent response");
+        };
+        assert!(result.ok);
+        assert!(!result.durable_parent);
+        assert!(!result.already_finalized);
+        let locked = conn.lock().expect("lock db");
+        let durable: i64 = locked
+            .query_row(
+                "SELECT durable FROM archive_items WHERE id = ?1",
+                params![archive_item_id],
+                |row| row.get(0),
+            )
+            .expect("read durable");
+        assert_eq!(durable, 0);
+    }
+
+    #[test]
+    fn finalize_parent_upload_rejects_superseded_set() {
+        let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
+        let children_a = vec![
+            prepare_child!(
+                "front-a.mp4",
+                "rk/a/front",
                 1,
                 111,
                 1_718_805_700_000,
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "11111111111111111111111111111111",
+                "etag-a-front",
                 "md5",
-            )];
-            let digest_a = manifest_digest_for_prepare_children(&children_a);
-            let archive_item_id = {
-                let locked = conn.lock().expect("lock db");
-                insert_prepare_parent(
-                    &locked,
-                    "archive/events/prepare-retag",
-                    "LIVE",
-                    0,
-                    Some(digest_a.as_str()),
-                )
-            };
-            let prepare_a = CloudPrepareParentUploadRequest {
-                archive_item_id,
-                destination_id: "dest".to_owned(),
-                source_manifest_digest: digest_a,
-                children: children_a,
-            };
-            let Response::CloudPrepareParentUpload(first_result) = call_prepare(&conn, &prepare_a) else {
-                panic!("expected first prepare response");
-            };
-
-            let children_b = vec![prepare_child!(
-                "front.mp4",
-                "rk/shared",
-                1,
+            ),
+            prepare_child!(
+                "back-a.mp4",
+                "rk/a/back",
+                2,
                 222,
                 1_718_805_701_000,
                 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                "22222222222222222222222222222222",
+                "etag-a-back",
                 "md5",
-            )];
-            let digest_b = manifest_digest_for_prepare_children(&children_b);
-            {
-                let locked = conn.lock().expect("lock db");
-                locked
-                    .execute(
-                        "UPDATE archive_items SET manifest_digest = ?2 WHERE id = ?1",
-                        params![archive_item_id, digest_b],
-                    )
-                    .expect("update parent digest");
-            }
-            let prepare_b = CloudPrepareParentUploadRequest {
-                archive_item_id,
-                destination_id: "dest".to_owned(),
-                source_manifest_digest: manifest_digest_for_prepare_children(&children_b),
-                children: children_b,
-            };
-            let Response::CloudPrepareParentUpload(second_result) = call_prepare(&conn, &prepare_b) else {
-                panic!("expected second prepare response");
-            };
-            assert_ne!(first_result.upload_set_id, second_result.upload_set_id);
+            ),
+        ];
+        let digest_a = manifest_digest_for_prepare_children(&children_a);
+        let archive_item_id = {
+            let locked = conn.lock().expect("lock db");
+            insert_prepare_parent(
+                &locked,
+                "archive/events/finalize-parent-superseded",
+                "LIVE",
+                0,
+                Some(digest_a.as_str()),
+            )
+        };
+        let prepare_a = CloudPrepareParentUploadRequest {
+            archive_item_id,
+            destination_id: "dest".to_owned(),
+            source_manifest_digest: digest_a,
+            children: children_a,
+        };
+        let Response::CloudPrepareParentUpload(first_result) = call_prepare(&conn, &prepare_a)
+        else {
+            panic!("expected first prepare response");
+        };
 
-            let mut locked = conn.lock().expect("lock db");
-            let queue_set_id: Option<String> = locked
-                .query_row(
-                    "SELECT upload_set_id
-                       FROM cloud_upload_queue
-                      WHERE destination_id = 'dest' AND remote_key = 'rk/shared'",
-                    [],
-                    |row| row.get(0),
-                )
-                .expect("read queue upload_set_id");
-            assert_eq!(queue_set_id.as_deref(), Some(second_result.upload_set_id.as_str()));
-            let attempts_before: i64 = locked
-                .query_row("SELECT COUNT(*) FROM cloud_upload_attempts", [], |row| row.get(0))
-                .expect("count attempts before");
-            let history_before: i64 = locked
-                .query_row("SELECT COUNT(*) FROM cloud_sync_history", [], |row| row.get(0))
-                .expect("count history before");
-
-            let late_commit = cloud_upload_commit(
-                &mut locked,
-                &CloudQueuePk {
-                    destination_id: "dest".to_owned(),
-                    remote_key: "rk/shared".to_owned(),
-                },
-                "attempt-late-commit",
-                "22222222222222222222222222222222",
-                "md5",
-                222,
-                Some(first_result.upload_set_id.as_str()),
-            );
-            assert!(late_commit.is_err());
-            let late_fail = cloud_upload_fail(
-                &mut locked,
-                &CloudQueuePk {
-                    destination_id: "dest".to_owned(),
-                    remote_key: "rk/shared".to_owned(),
-                },
-                "attempt-late-fail",
-                "timeout",
-                Some(1234),
-                false,
-                Some(first_result.upload_set_id.as_str()),
-            );
-            assert!(late_fail.is_err());
-
-            let attempts_after: i64 = locked
-                .query_row("SELECT COUNT(*) FROM cloud_upload_attempts", [], |row| row.get(0))
-                .expect("count attempts after");
-            let history_after: i64 = locked
-                .query_row("SELECT COUNT(*) FROM cloud_sync_history", [], |row| row.get(0))
-                .expect("count history after");
-            let queue_state: String = locked
-                .query_row(
-                    "SELECT state
-                       FROM cloud_upload_queue
-                      WHERE destination_id = 'dest' AND remote_key = 'rk/shared'",
-                    [],
-                    |row| row.get(0),
-                )
-                .expect("read queue state");
-            assert_eq!(attempts_after, attempts_before);
-            assert_eq!(history_after, history_before);
-            assert_eq!(queue_state, "queued");
-        }
-
-        #[test]
-        fn prepare_parent_upload_rejects_verify_alg_none() {
-            let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
-            let children = vec![prepare_child!(
-                "front.mp4",
-                "rk/front",
-                1,
-                100,
-                1_718_805_700_000,
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "etag-front",
-                "none",
-            )];
-            let digest = manifest_digest_for_prepare_children(&children);
-            let archive_item_id = {
-                let locked = conn.lock().expect("lock db");
-                insert_prepare_parent(
-                    &locked,
-                    "archive/events/prepare-none",
-                    "LIVE",
-                    0,
-                    Some(digest.as_str()),
-                )
-            };
-            let request = CloudPrepareParentUploadRequest {
-                archive_item_id,
-                destination_id: "dest".to_owned(),
-                source_manifest_digest: digest,
-                children,
-            };
-            assert!(matches!(
-                call_prepare(&conn, &request),
-                Response::Rejected { .. }
-            ));
-        }
-
-        #[test]
-        fn prepare_parent_upload_rejects_remote_key_owned_by_another_parent_current_set() {
-            let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
-            let children_a = vec![prepare_child!(
-                "front-a.mp4",
-                "rk/shared",
-                1,
-                100,
-                1_718_805_700_000,
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "etag-a",
-                "md5",
-            )];
-            let digest_a = manifest_digest_for_prepare_children(&children_a);
-            let parent_a = {
-                let locked = conn.lock().expect("lock db");
-                insert_prepare_parent(
-                    &locked,
-                    "archive/events/prepare-remote-a",
-                    "LIVE",
-                    0,
-                    Some(digest_a.as_str()),
-                )
-            };
-            let request_a = CloudPrepareParentUploadRequest {
-                archive_item_id: parent_a,
-                destination_id: "dest".to_owned(),
-                source_manifest_digest: digest_a,
-                children: children_a,
-            };
-            assert!(matches!(
-                call_prepare(&conn, &request_a),
-                Response::CloudPrepareParentUpload(_)
-            ));
-
-            let children_b = vec![prepare_child!(
+        let children_b = vec![
+            prepare_child!(
                 "front-b.mp4",
-                "rk/shared",
+                "rk/b/front",
                 1,
-                101,
-                1_718_805_701_000,
-                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                "etag-b",
+                333,
+                1_718_805_702_000,
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "etag-b-front",
                 "md5",
-            )];
-            let digest_b = manifest_digest_for_prepare_children(&children_b);
-            let parent_b = {
-                let locked = conn.lock().expect("lock db");
-                insert_prepare_parent(
-                    &locked,
-                    "archive/events/prepare-remote-b",
-                    "LIVE",
-                    0,
-                    Some(digest_b.as_str()),
-                )
-            };
-            let request_b = CloudPrepareParentUploadRequest {
-                archive_item_id: parent_b,
-                destination_id: "dest".to_owned(),
-                source_manifest_digest: digest_b,
-                children: children_b,
-            };
-            assert!(matches!(
-                call_prepare(&conn, &request_b),
-                Response::Rejected { .. }
-            ));
-        }
-
-        #[test]
-        fn prepare_parent_upload_rejects_non_live_or_durable_parent() {
-            let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
-            let live_children = vec![prepare_child!(
-                "front.mp4",
-                "rk/front",
-                1,
-                100,
-                1_718_805_700_000,
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "etag-front",
+            ),
+            prepare_child!(
+                "back-b.mp4",
+                "rk/b/back",
+                2,
+                444,
+                1_718_805_703_000,
+                "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                "etag-b-back",
                 "md5",
-            )];
-            let live_digest = manifest_digest_for_prepare_children(&live_children);
-            let (non_live_parent, durable_parent) = {
-                let locked = conn.lock().expect("lock db");
-                (
-                    insert_prepare_parent(
-                        &locked,
-                        "archive/events/prepare-non-live",
-                        "DELETE_CLAIMED",
-                        0,
-                        Some(live_digest.as_str()),
-                    ),
-                    insert_prepare_parent(
-                        &locked,
-                        "archive/events/prepare-durable",
-                        "LIVE",
-                        1,
-                        Some(live_digest.as_str()),
-                    ),
-                )
-            };
-
-            let non_live_request = CloudPrepareParentUploadRequest {
-                archive_item_id: non_live_parent,
-                destination_id: "dest".to_owned(),
-                source_manifest_digest: live_digest.clone(),
-                children: live_children.clone(),
-            };
-            assert!(matches!(
-                call_prepare(&conn, &non_live_request),
-                Response::Rejected { .. }
-            ));
-
-            let durable_request = CloudPrepareParentUploadRequest {
-                archive_item_id: durable_parent,
-                destination_id: "dest".to_owned(),
-                source_manifest_digest: live_digest,
-                children: live_children,
-            };
-            assert!(matches!(
-                call_prepare(&conn, &durable_request),
-                Response::Rejected { .. }
-            ));
-        }
-
-        #[test]
-        fn prepare_parent_upload_rejects_negative_bytes_bad_hash_bad_child_keys_and_duplicates() {
-            let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
-            let baseline_children = vec![prepare_child!(
-                "front.mp4",
-                "rk/front",
-                1,
-                100,
-                1_718_805_700_000,
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "etag-front",
-                "md5",
-            )];
-            let baseline_digest = manifest_digest_for_prepare_children(&baseline_children);
-            let archive_item_id = {
-                let locked = conn.lock().expect("lock db");
-                insert_prepare_parent(
-                    &locked,
-                    "archive/events/prepare-byte-exactness",
-                    "LIVE",
-                    0,
-                    Some(baseline_digest.as_str()),
-                )
-            };
-
-            let mut negative_bytes_children = baseline_children.clone();
-            negative_bytes_children[0].total_bytes = -1;
-            let negative_request = CloudPrepareParentUploadRequest {
-                archive_item_id,
-                destination_id: "dest".to_owned(),
-                source_manifest_digest: baseline_digest.clone(),
-                children: negative_bytes_children,
-            };
-            assert!(matches!(
-                call_prepare(&conn, &negative_request),
-                Response::Rejected { .. }
-            ));
-
-            let mut bad_hash_children = baseline_children.clone();
-            bad_hash_children[0].content_sha256 = "AA".repeat(32);
-            let bad_hash_request = CloudPrepareParentUploadRequest {
-                archive_item_id,
-                destination_id: "dest".to_owned(),
-                source_manifest_digest: baseline_digest.clone(),
-                children: bad_hash_children,
-            };
-            assert!(matches!(
-                call_prepare(&conn, &bad_hash_request),
-                Response::Rejected { .. }
-            ));
-
-            let mut dotdot_children = baseline_children.clone();
-            dotdot_children[0].child_key = "../front.mp4".to_owned();
-            let dotdot_request = CloudPrepareParentUploadRequest {
-                archive_item_id,
-                destination_id: "dest".to_owned(),
-                source_manifest_digest: baseline_digest.clone(),
-                children: dotdot_children,
-            };
-            assert!(matches!(
-                call_prepare(&conn, &dotdot_request),
-                Response::Rejected { .. }
-            ));
-
-            let mut backslash_children = baseline_children.clone();
-            backslash_children[0].child_key = "front\\mp4".to_owned();
-            let backslash_request = CloudPrepareParentUploadRequest {
-                archive_item_id,
-                destination_id: "dest".to_owned(),
-                source_manifest_digest: baseline_digest.clone(),
-                children: backslash_children,
-            };
-            assert!(matches!(
-                call_prepare(&conn, &backslash_request),
-                Response::Rejected { .. }
-            ));
-
-            let duplicate_children = vec![
-                baseline_children[0].clone(),
-                prepare_child!(
-                    "front.mp4",
-                    "rk/other",
-                    2,
-                    100,
-                    1_718_805_700_001,
-                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                    "etag-other",
-                    "md5",
-                ),
-            ];
-            let duplicate_request = CloudPrepareParentUploadRequest {
-                archive_item_id,
-                destination_id: "dest".to_owned(),
-                source_manifest_digest: baseline_digest,
-                children: duplicate_children,
-            };
-            assert!(matches!(
-                call_prepare(&conn, &duplicate_request),
-                Response::Rejected { .. }
-            ));
-
-            let set_count: i64 = conn
-                .lock()
-                .expect("lock db")
-                .query_row("SELECT COUNT(*) FROM cloud_parent_upload_sets", [], |row| row.get(0))
-                .expect("count upload sets");
-            assert_eq!(set_count, 0);
-        }
-
-        #[test]
-        fn finalize_parent_upload_complete_set_flips_durable() {
-            let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
-            let (archive_item_id, _manifest_digest, upload_set_id) =
-                prepare_two_child_upload_set(&conn, "archive/events/finalize-parent-complete");
-            {
-                let locked = conn.lock().expect("lock db");
-                locked
-                    .execute(
-                        "UPDATE cloud_upload_queue
-                            SET state = 'done', bytes_uploaded = total_bytes
-                          WHERE upload_set_id = ?1",
-                        params![upload_set_id],
-                    )
-                    .expect("mark queue done");
-            }
-            let response = call_finalize_parent(
-                &conn,
-                &CloudFinalizeParentUploadRequest {
-                    upload_set_id: upload_set_id.clone(),
-                },
-            );
-            let Response::CloudFinalizeParentUpload(result) = response else {
-                panic!("expected finalize parent response");
-            };
-            assert!(result.ok);
-            assert!(result.durable_parent);
-            assert!(!result.already_finalized);
+            ),
+        ];
+        let digest_b = manifest_digest_for_prepare_children(&children_b);
+        {
             let locked = conn.lock().expect("lock db");
-            let finalized_at: Option<i64> = locked
-                .query_row(
-                    "SELECT finalized_at
-                       FROM cloud_parent_upload_sets
-                      WHERE upload_set_id = ?1",
-                    params![upload_set_id],
-                    |row| row.get(0),
+            locked
+                .execute(
+                    "UPDATE archive_items SET manifest_digest = ?2 WHERE id = ?1",
+                    params![archive_item_id, digest_b],
                 )
-                .expect("read finalized_at");
-            assert!(finalized_at.is_some());
-            let durable: i64 = locked
-                .query_row(
-                    "SELECT durable FROM archive_items WHERE id = ?1",
-                    params![archive_item_id],
-                    |row| row.get(0),
-                )
-                .expect("read durable");
-            assert_eq!(durable, 1);
+                .expect("update parent digest");
         }
+        let prepare_b = CloudPrepareParentUploadRequest {
+            archive_item_id,
+            destination_id: "dest".to_owned(),
+            source_manifest_digest: digest_b,
+            children: children_b,
+        };
+        let second = call_prepare(&conn, &prepare_b);
+        assert!(matches!(second, Response::CloudPrepareParentUpload(_)));
 
-        #[test]
-        fn finalize_parent_upload_idempotent_replay_after_durable() {
-            let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
-            let (archive_item_id, _manifest_digest, upload_set_id) =
-                prepare_two_child_upload_set(&conn, "archive/events/finalize-parent-replay");
-            {
-                let locked = conn.lock().expect("lock db");
-                locked
-                    .execute(
-                        "UPDATE cloud_upload_queue
-                            SET state = 'done', bytes_uploaded = total_bytes
-                          WHERE upload_set_id = ?1",
-                        params![upload_set_id],
-                    )
-                    .expect("mark queue done");
+        let response = call_finalize_parent(
+            &conn,
+            &CloudFinalizeParentUploadRequest {
+                upload_set_id: first_result.upload_set_id,
+            },
+        );
+        assert_eq!(
+            response,
+            Response::Rejected {
+                message: "finalize rejected: upload set is superseded".to_owned(),
             }
-            let first = call_finalize_parent(
-                &conn,
-                &CloudFinalizeParentUploadRequest {
-                    upload_set_id: upload_set_id.clone(),
-                },
-            );
-            let Response::CloudFinalizeParentUpload(first_result) = first else {
-                panic!("expected finalize parent response");
-            };
-            assert!(first_result.durable_parent);
-            assert!(!first_result.already_finalized);
-            let finalized_before: i64 = conn
-                .lock()
-                .expect("lock db")
-                .query_row(
-                    "SELECT finalized_at
-                       FROM cloud_parent_upload_sets
-                      WHERE upload_set_id = ?1",
-                    params![upload_set_id],
-                    |row| row.get(0),
-                )
-                .expect("read finalized_at before replay");
+        );
+        let durable: i64 = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT durable FROM archive_items WHERE id = ?1",
+                params![archive_item_id],
+                |row| row.get(0),
+            )
+            .expect("read durable");
+        assert_eq!(durable, 0);
+    }
 
-            let second = call_finalize_parent(
-                &conn,
-                &CloudFinalizeParentUploadRequest {
-                    upload_set_id: upload_set_id.clone(),
-                },
-            );
-            let Response::CloudFinalizeParentUpload(second_result) = second else {
-                panic!("expected finalize parent replay response");
-            };
-            assert!(second_result.ok);
-            assert!(second_result.durable_parent);
-            assert!(second_result.already_finalized);
+    #[test]
+    fn finalize_parent_upload_rejects_unknown_set() {
+        let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
+        let response = call_finalize_parent(
+            &conn,
+            &CloudFinalizeParentUploadRequest {
+                upload_set_id: "ffffffffffffffffffffffffffffffff".to_owned(),
+            },
+        );
+        assert_eq!(
+            response,
+            Response::Rejected {
+                message: "finalize rejected: unknown upload set".to_owned(),
+            }
+        );
+    }
 
+    #[test]
+    fn finalize_parent_upload_rejects_non_live_parent() {
+        let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
+        let (archive_item_id, _manifest_digest, upload_set_id) =
+            prepare_two_child_upload_set(&conn, "archive/events/finalize-parent-non-live");
+        {
             let locked = conn.lock().expect("lock db");
-            let finalized_after: i64 = locked
-                .query_row(
-                    "SELECT finalized_at
-                       FROM cloud_parent_upload_sets
-                      WHERE upload_set_id = ?1",
-                    params![upload_set_id],
-                    |row| row.get(0),
-                )
-                .expect("read finalized_at after replay");
-            assert_eq!(finalized_after, finalized_before);
-            let durable: i64 = locked
-                .query_row(
-                    "SELECT durable FROM archive_items WHERE id = ?1",
-                    params![archive_item_id],
-                    |row| row.get(0),
-                )
-                .expect("read durable");
-            assert_eq!(durable, 1);
-        }
-
-        #[test]
-        fn finalize_parent_upload_incomplete_does_not_flip() {
-            let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
-            let (archive_item_id, _manifest_digest, upload_set_id) =
-                prepare_two_child_upload_set(&conn, "archive/events/finalize-parent-incomplete");
-            {
-                let locked = conn.lock().expect("lock db");
-                locked
-                    .execute(
-                        "UPDATE cloud_upload_queue
-                            SET state = 'done', bytes_uploaded = total_bytes
-                          WHERE upload_set_id = ?1
-                            AND child_key = 'front.mp4'",
-                        params![upload_set_id],
-                    )
-                    .expect("mark only one queue row done");
-            }
-            let response = call_finalize_parent(
-                &conn,
-                &CloudFinalizeParentUploadRequest {
-                    upload_set_id: upload_set_id.clone(),
-                },
-            );
-            let Response::CloudFinalizeParentUpload(result) = response else {
-                panic!("expected finalize parent response");
-            };
-            assert!(result.ok);
-            assert!(!result.durable_parent);
-            assert!(!result.already_finalized);
-
-            let locked = conn.lock().expect("lock db");
-            let durable: i64 = locked
-                .query_row(
-                    "SELECT durable FROM archive_items WHERE id = ?1",
-                    params![archive_item_id],
-                    |row| row.get(0),
-                )
-                .expect("read durable");
-            assert_eq!(durable, 0);
-            let finalized_at: Option<i64> = locked
-                .query_row(
-                    "SELECT finalized_at
-                       FROM cloud_parent_upload_sets
-                      WHERE upload_set_id = ?1",
-                    params![upload_set_id],
-                    |row| row.get(0),
-                )
-                .expect("read finalized_at");
-            assert_eq!(finalized_at, None);
-        }
-
-        #[test]
-        fn finalize_parent_upload_member_mismatch_does_not_flip() {
-            let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
-            let (archive_item_id, _manifest_digest, upload_set_id) =
-                prepare_two_child_upload_set(&conn, "archive/events/finalize-parent-mismatch");
-            {
-                let locked = conn.lock().expect("lock db");
-                locked
-                    .execute(
-                        "UPDATE cloud_upload_queue
-                            SET state = 'done', bytes_uploaded = total_bytes
-                          WHERE upload_set_id = ?1",
-                        params![upload_set_id],
-                    )
-                    .expect("mark queue done");
-                locked
-                    .execute(
-                        "UPDATE cloud_upload_queue
-                            SET content_sha256 = ?2
-                          WHERE upload_set_id = ?1
-                            AND child_key = 'front.mp4'",
-                        params![
-                            upload_set_id,
-                            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-                        ],
-                    )
-                    .expect("corrupt one queue row hash");
-            }
-            let response = call_finalize_parent(
-                &conn,
-                &CloudFinalizeParentUploadRequest {
-                    upload_set_id: upload_set_id.clone(),
-                },
-            );
-            let Response::CloudFinalizeParentUpload(result) = response else {
-                panic!("expected finalize parent response");
-            };
-            assert!(result.ok);
-            assert!(!result.durable_parent);
-            assert!(!result.already_finalized);
-
-            let locked = conn.lock().expect("lock db");
-            let durable: i64 = locked
-                .query_row(
-                    "SELECT durable FROM archive_items WHERE id = ?1",
-                    params![archive_item_id],
-                    |row| row.get(0),
-                )
-                .expect("read durable");
-            assert_eq!(durable, 0);
-            let finalized_at: Option<i64> = locked
-                .query_row(
-                    "SELECT finalized_at
-                       FROM cloud_parent_upload_sets
-                      WHERE upload_set_id = ?1",
-                    params![upload_set_id],
-                    |row| row.get(0),
-                )
-                .expect("read finalized_at");
-            assert_eq!(finalized_at, None);
-        }
-
-        #[test]
-        fn finalize_parent_upload_missing_queue_row_does_not_flip() {
-            let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
-            let (archive_item_id, _manifest_digest, upload_set_id) =
-                prepare_two_child_upload_set(&conn, "archive/events/finalize-parent-missing-row");
-            {
-                let locked = conn.lock().expect("lock db");
-                locked
-                    .execute(
-                        "UPDATE cloud_upload_queue
-                            SET state = 'done', bytes_uploaded = total_bytes
-                          WHERE upload_set_id = ?1",
-                        params![upload_set_id],
-                    )
-                    .expect("mark queue done");
-                locked
-                    .execute(
-                        "DELETE FROM cloud_upload_queue
-                          WHERE upload_set_id = ?1
-                            AND child_key = 'back.mp4'",
-                        params![upload_set_id],
-                    )
-                    .expect("delete one queue row");
-            }
-            let response = call_finalize_parent(
-                &conn,
-                &CloudFinalizeParentUploadRequest {
-                    upload_set_id: upload_set_id.clone(),
-                },
-            );
-            let Response::CloudFinalizeParentUpload(result) = response else {
-                panic!("expected finalize parent response");
-            };
-            assert!(result.ok);
-            assert!(!result.durable_parent);
-            assert!(!result.already_finalized);
-            let locked = conn.lock().expect("lock db");
-            let durable: i64 = locked
-                .query_row(
-                    "SELECT durable FROM archive_items WHERE id = ?1",
-                    params![archive_item_id],
-                    |row| row.get(0),
-                )
-                .expect("read durable");
-            assert_eq!(durable, 0);
-        }
-
-        #[test]
-        fn finalize_parent_upload_rejects_superseded_set() {
-            let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
-            let children_a = vec![
-                prepare_child!(
-                    "front-a.mp4",
-                    "rk/a/front",
-                    1,
-                    111,
-                    1_718_805_700_000,
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                    "etag-a-front",
-                    "md5",
-                ),
-                prepare_child!(
-                    "back-a.mp4",
-                    "rk/a/back",
-                    2,
-                    222,
-                    1_718_805_701_000,
-                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                    "etag-a-back",
-                    "md5",
-                ),
-            ];
-            let digest_a = manifest_digest_for_prepare_children(&children_a);
-            let archive_item_id = {
-                let locked = conn.lock().expect("lock db");
-                insert_prepare_parent(
-                    &locked,
-                    "archive/events/finalize-parent-superseded",
-                    "LIVE",
-                    0,
-                    Some(digest_a.as_str()),
-                )
-            };
-            let prepare_a = CloudPrepareParentUploadRequest {
-                archive_item_id,
-                destination_id: "dest".to_owned(),
-                source_manifest_digest: digest_a,
-                children: children_a,
-            };
-            let Response::CloudPrepareParentUpload(first_result) = call_prepare(&conn, &prepare_a) else {
-                panic!("expected first prepare response");
-            };
-
-            let children_b = vec![
-                prepare_child!(
-                    "front-b.mp4",
-                    "rk/b/front",
-                    1,
-                    333,
-                    1_718_805_702_000,
-                    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-                    "etag-b-front",
-                    "md5",
-                ),
-                prepare_child!(
-                    "back-b.mp4",
-                    "rk/b/back",
-                    2,
-                    444,
-                    1_718_805_703_000,
-                    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-                    "etag-b-back",
-                    "md5",
-                ),
-            ];
-            let digest_b = manifest_digest_for_prepare_children(&children_b);
-            {
-                let locked = conn.lock().expect("lock db");
-                locked
-                    .execute(
-                        "UPDATE archive_items SET manifest_digest = ?2 WHERE id = ?1",
-                        params![archive_item_id, digest_b],
-                    )
-                    .expect("update parent digest");
-            }
-            let prepare_b = CloudPrepareParentUploadRequest {
-                archive_item_id,
-                destination_id: "dest".to_owned(),
-                source_manifest_digest: digest_b,
-                children: children_b,
-            };
-            let second = call_prepare(&conn, &prepare_b);
-            assert!(matches!(second, Response::CloudPrepareParentUpload(_)));
-
-            let response = call_finalize_parent(
-                &conn,
-                &CloudFinalizeParentUploadRequest {
-                    upload_set_id: first_result.upload_set_id,
-                },
-            );
-            assert_eq!(
-                response,
-                Response::Rejected {
-                    message: "finalize rejected: upload set is superseded".to_owned(),
-                }
-            );
-            let durable: i64 = conn
-                .lock()
-                .expect("lock db")
-                .query_row(
-                    "SELECT durable FROM archive_items WHERE id = ?1",
-                    params![archive_item_id],
-                    |row| row.get(0),
-                )
-                .expect("read durable");
-            assert_eq!(durable, 0);
-        }
-
-        #[test]
-        fn finalize_parent_upload_rejects_unknown_set() {
-            let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
-            let response = call_finalize_parent(
-                &conn,
-                &CloudFinalizeParentUploadRequest {
-                    upload_set_id: "ffffffffffffffffffffffffffffffff".to_owned(),
-                },
-            );
-            assert_eq!(
-                response,
-                Response::Rejected {
-                    message: "finalize rejected: unknown upload set".to_owned(),
-                }
-            );
-        }
-
-        #[test]
-        fn finalize_parent_upload_rejects_non_live_parent() {
-            let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
-            let (archive_item_id, _manifest_digest, upload_set_id) =
-                prepare_two_child_upload_set(&conn, "archive/events/finalize-parent-non-live");
-            {
-                let locked = conn.lock().expect("lock db");
-                locked
-                    .execute(
-                        "UPDATE archive_items
+            locked
+                .execute(
+                    "UPDATE archive_items
                             SET delete_state = 'DELETE_CLAIMED'
                           WHERE id = ?1",
-                        params![archive_item_id],
-                    )
-                    .expect("set non-live state");
-            }
-            let response = call_finalize_parent(
-                &conn,
-                &CloudFinalizeParentUploadRequest { upload_set_id },
-            );
-            assert_eq!(
-                response,
-                Response::Rejected {
-                    message: "finalize rejected: parent archive item is not LIVE".to_owned(),
-                }
-            );
-            let durable: i64 = conn
-                .lock()
-                .expect("lock db")
-                .query_row(
-                    "SELECT durable FROM archive_items WHERE id = ?1",
                     params![archive_item_id],
-                    |row| row.get(0),
                 )
-                .expect("read durable");
-            assert_eq!(durable, 0);
+                .expect("set non-live state");
         }
+        let response =
+            call_finalize_parent(&conn, &CloudFinalizeParentUploadRequest { upload_set_id });
+        assert_eq!(
+            response,
+            Response::Rejected {
+                message: "finalize rejected: parent archive item is not LIVE".to_owned(),
+            }
+        );
+        let durable: i64 = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT durable FROM archive_items WHERE id = ?1",
+                params![archive_item_id],
+                |row| row.get(0),
+            )
+            .expect("read durable");
+        assert_eq!(durable, 0);
+    }
 
-        #[test]
-        fn finalize_parent_upload_rejects_digest_mismatch() {
-            let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
-            let (archive_item_id, _manifest_digest, upload_set_id) =
-                prepare_two_child_upload_set(&conn, "archive/events/finalize-parent-digest-mismatch");
-            {
-                let locked = conn.lock().expect("lock db");
-                locked
-                    .execute(
-                        "UPDATE cloud_upload_queue
+    #[test]
+    fn finalize_parent_upload_rejects_digest_mismatch() {
+        let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
+        let (archive_item_id, _manifest_digest, upload_set_id) =
+            prepare_two_child_upload_set(&conn, "archive/events/finalize-parent-digest-mismatch");
+        {
+            let locked = conn.lock().expect("lock db");
+            locked
+                .execute(
+                    "UPDATE cloud_upload_queue
                             SET state = 'done', bytes_uploaded = total_bytes
                           WHERE upload_set_id = ?1",
-                        params![upload_set_id],
-                    )
-                    .expect("mark queue done");
-                locked
-                    .execute(
-                        "UPDATE archive_items
+                    params![upload_set_id],
+                )
+                .expect("mark queue done");
+            locked
+                .execute(
+                    "UPDATE archive_items
                             SET manifest_digest = ?2
                           WHERE id = ?1",
-                        params![archive_item_id, "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"],
-                    )
-                    .expect("replace digest");
-            }
-            let response = call_finalize_parent(
-                &conn,
-                &CloudFinalizeParentUploadRequest { upload_set_id },
-            );
-            assert_eq!(
-                response,
-                Response::Rejected {
-                    message: "finalize rejected: manifest digest mismatch".to_owned(),
-                }
-            );
-            let durable: i64 = conn
-                .lock()
-                .expect("lock db")
-                .query_row(
-                    "SELECT durable FROM archive_items WHERE id = ?1",
-                    params![archive_item_id],
-                    |row| row.get(0),
+                    params![archive_item_id, "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"],
                 )
-                .expect("read durable");
-            assert_eq!(durable, 0);
+                .expect("replace digest");
         }
+        let response =
+            call_finalize_parent(&conn, &CloudFinalizeParentUploadRequest { upload_set_id });
+        assert_eq!(
+            response,
+            Response::Rejected {
+                message: "finalize rejected: manifest digest mismatch".to_owned(),
+            }
+        );
+        let durable: i64 = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT durable FROM archive_items WHERE id = ?1",
+                params![archive_item_id],
+                |row| row.get(0),
+            )
+            .expect("read durable");
+        assert_eq!(durable, 0);
+    }
 
-        #[test]
-        fn finalize_parent_upload_legacy_null_upload_set_id_never_completes() {
-            let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
-            let (archive_item_id, _manifest_digest, upload_set_id) =
-                prepare_two_child_upload_set(&conn, "archive/events/finalize-parent-legacy-null");
-            {
-                let locked = conn.lock().expect("lock db");
-                locked
-                    .execute(
-                        "UPDATE cloud_upload_queue
+    #[test]
+    fn finalize_parent_upload_legacy_null_upload_set_id_never_completes() {
+        let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
+        let (archive_item_id, _manifest_digest, upload_set_id) =
+            prepare_two_child_upload_set(&conn, "archive/events/finalize-parent-legacy-null");
+        {
+            let locked = conn.lock().expect("lock db");
+            locked
+                .execute(
+                    "UPDATE cloud_upload_queue
                             SET state = 'done', bytes_uploaded = total_bytes
                           WHERE upload_set_id = ?1",
-                        params![upload_set_id],
-                    )
-                    .expect("mark queue done");
-                locked
-                    .execute(
-                        "UPDATE cloud_upload_queue
+                    params![upload_set_id],
+                )
+                .expect("mark queue done");
+            locked
+                .execute(
+                    "UPDATE cloud_upload_queue
                             SET upload_set_id = NULL
                           WHERE archive_item_id = ?1",
-                        params![archive_item_id],
-                    )
-                    .expect("detach queue rows from upload set");
-            }
-            let response = call_finalize_parent(
-                &conn,
-                &CloudFinalizeParentUploadRequest {
-                    upload_set_id: upload_set_id.clone(),
-                },
-            );
-            let Response::CloudFinalizeParentUpload(result) = response else {
-                panic!("expected finalize parent response");
-            };
-            assert!(result.ok);
-            assert!(!result.durable_parent);
-            assert!(!result.already_finalized);
-            let locked = conn.lock().expect("lock db");
-            let durable: i64 = locked
-                .query_row(
-                    "SELECT durable FROM archive_items WHERE id = ?1",
                     params![archive_item_id],
-                    |row| row.get(0),
                 )
-                .expect("read durable");
-            assert_eq!(durable, 0);
-            let finalized_at: Option<i64> = locked
-                .query_row(
-                    "SELECT finalized_at
+                .expect("detach queue rows from upload set");
+        }
+        let response = call_finalize_parent(
+            &conn,
+            &CloudFinalizeParentUploadRequest {
+                upload_set_id: upload_set_id.clone(),
+            },
+        );
+        let Response::CloudFinalizeParentUpload(result) = response else {
+            panic!("expected finalize parent response");
+        };
+        assert!(result.ok);
+        assert!(!result.durable_parent);
+        assert!(!result.already_finalized);
+        let locked = conn.lock().expect("lock db");
+        let durable: i64 = locked
+            .query_row(
+                "SELECT durable FROM archive_items WHERE id = ?1",
+                params![archive_item_id],
+                |row| row.get(0),
+            )
+            .expect("read durable");
+        assert_eq!(durable, 0);
+        let finalized_at: Option<i64> = locked
+            .query_row(
+                "SELECT finalized_at
                        FROM cloud_parent_upload_sets
                       WHERE upload_set_id = ?1",
-                    params![upload_set_id],
-                    |row| row.get(0),
-                )
-                .expect("read finalized_at");
-            assert_eq!(finalized_at, None);
-        }
+                params![upload_set_id],
+                |row| row.get(0),
+            )
+            .expect("read finalized_at");
+        assert_eq!(finalized_at, None);
+    }
 
-        fn set_durable_via_complete_upload_set(
-            conn: &Connection,
-            archive_item_id: i64,
-            manifest_digest: &str,
-            upload_set_id: &str,
-        ) {
-            conn.execute(
+    fn set_durable_via_complete_upload_set(
+        conn: &Connection,
+        archive_item_id: i64,
+        manifest_digest: &str,
+        upload_set_id: &str,
+    ) {
+        conn.execute(
                 "INSERT INTO cloud_parent_upload_sets
                     (upload_set_id, archive_item_id, destination_id, source_manifest_digest, request_digest,
                      expected_child_count, created_at, finalized_at)
@@ -4127,7 +4229,7 @@ mod tests {
                 ],
             )
             .expect("insert upload set");
-            conn.execute(
+        conn.execute(
                 "INSERT INTO cloud_parent_upload_set_children
                     (upload_set_id, child_key, destination_id, remote_key, category, seq, total_bytes, manifest_mtime_ms,
                      content_sha256, expected_hash, verify_alg)
@@ -4139,7 +4241,7 @@ mod tests {
                 ],
             )
             .expect("insert upload set child");
-            conn.execute(
+        conn.execute(
                 "INSERT INTO cloud_upload_queue
                     (archive_item_id, child_key, destination_id, remote_key, category, seq, total_bytes, bytes_uploaded,
                      expected_hash, verify_alg, content_sha256, state, attempts, upload_set_id)
@@ -4152,273 +4254,276 @@ mod tests {
                 ],
             )
             .expect("insert queue row");
-            conn.execute(
-                "UPDATE archive_items SET durable = 1 WHERE id = ?1",
-                params![archive_item_id],
+        conn.execute(
+            "UPDATE archive_items SET durable = 1 WHERE id = ?1",
+            params![archive_item_id],
+        )
+        .expect("set durable");
+    }
+
+    #[test]
+    fn finalize_event_archive_absent_creates_row_and_links() {
+        let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
+        let boot = Arc::new(BootContext::new());
+        let request = finalize_payload();
+
+        let response = call_finalize(&conn, &boot, &request);
+        let Response::FinalizeEventArchive(result) = response else {
+            panic!("expected finalize response");
+        };
+        assert!(!result.already_finalized);
+
+        let locked = conn.lock().expect("lock db");
+        let row: (String, i64, String) = locked
+            .query_row(
+                "SELECT delete_state, durable, path FROM archive_items WHERE id = ?1",
+                params![result.archive_item_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
-            .expect("set durable");
-        }
+            .expect("read archive row");
+        assert_eq!(row.0, "LIVE");
+        assert_eq!(row.1, 0);
+        assert_eq!(row.2, request.generation_dir_path);
+        let link_count: i64 = locked
+            .query_row(
+                "SELECT COUNT(*) FROM archive_item_clips WHERE archive_item_id = ?1",
+                params![result.archive_item_id],
+                |row| row.get(0),
+            )
+            .expect("read link count");
+        assert_eq!(link_count, request.clips.len() as i64);
+    }
 
-        #[test]
-        fn finalize_event_archive_absent_creates_row_and_links() {
-            let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
-            let boot = Arc::new(BootContext::new());
-            let request = finalize_payload();
+    #[test]
+    fn finalize_event_archive_exact_replay_preserves_durable() {
+        let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
+        let boot = Arc::new(BootContext::new());
+        let request = finalize_payload();
+        let first = call_finalize(&conn, &boot, &request);
+        let Response::FinalizeEventArchive(first_result) = first else {
+            panic!("expected finalize response");
+        };
 
-            let response = call_finalize(&conn, &boot, &request);
-            let Response::FinalizeEventArchive(result) = response else {
-                panic!("expected finalize response");
-            };
-            assert!(!result.already_finalized);
-
+        {
             let locked = conn.lock().expect("lock db");
-            let row: (String, i64, String) = locked
-                .query_row(
-                    "SELECT delete_state, durable, path FROM archive_items WHERE id = ?1",
-                    params![result.archive_item_id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-                .expect("read archive row");
-            assert_eq!(row.0, "LIVE");
-            assert_eq!(row.1, 0);
-            assert_eq!(row.2, request.generation_dir_path);
-            let link_count: i64 = locked
-                .query_row(
-                    "SELECT COUNT(*) FROM archive_item_clips WHERE archive_item_id = ?1",
-                    params![result.archive_item_id],
-                    |row| row.get(0),
-                )
-                .expect("read link count");
-            assert_eq!(link_count, request.clips.len() as i64);
+            set_durable_via_complete_upload_set(
+                &locked,
+                first_result.archive_item_id,
+                &request.manifest_digest,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            );
         }
 
-        #[test]
-        fn finalize_event_archive_exact_replay_preserves_durable() {
-            let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
-            let boot = Arc::new(BootContext::new());
-            let request = finalize_payload();
-            let first = call_finalize(&conn, &boot, &request);
-            let Response::FinalizeEventArchive(first_result) = first else {
-                panic!("expected finalize response");
-            };
+        let replay = call_finalize(&conn, &boot, &request);
+        let Response::FinalizeEventArchive(replay_result) = replay else {
+            panic!("expected finalize replay response");
+        };
+        assert!(replay_result.already_finalized);
+        assert_eq!(replay_result.archive_item_id, first_result.archive_item_id);
+        let durable: i64 = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT durable FROM archive_items WHERE id = ?1",
+                params![first_result.archive_item_id],
+                |row| row.get(0),
+            )
+            .expect("read durable");
+        assert_eq!(durable, 1);
+    }
 
-            {
-                let locked = conn.lock().expect("lock db");
-                set_durable_via_complete_upload_set(
-                    &locked,
-                    first_result.archive_item_id,
-                    &request.manifest_digest,
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                );
+    #[test]
+    fn finalize_event_archive_conflict_same_digest_rejected_without_mutation() {
+        let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
+        let boot = Arc::new(BootContext::new());
+        let request = finalize_payload();
+        let created = call_finalize(&conn, &boot, &request);
+        let Response::FinalizeEventArchive(created_result) = created else {
+            panic!("expected finalize response");
+        };
+
+        let mut conflicting = request.clone();
+        conflicting.size_bytes += 1;
+        let response = call_finalize(&conn, &boot, &conflicting);
+        assert_eq!(
+            response,
+            Response::Rejected {
+                message: FINALIZE_CONFLICT_SAME_DIGEST_MESSAGE.to_owned()
             }
+        );
+        let locked = conn.lock().expect("lock db");
+        let row: (i64, String) = locked
+            .query_row(
+                "SELECT size_bytes, path FROM archive_items WHERE id = ?1",
+                params![created_result.archive_item_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read archive row");
+        assert_eq!(row.0, request.size_bytes);
+        assert_eq!(row.1, request.generation_dir_path);
+    }
 
-            let replay = call_finalize(&conn, &boot, &request);
-            let Response::FinalizeEventArchive(replay_result) = replay else {
-                panic!("expected finalize replay response");
-            };
-            assert!(replay_result.already_finalized);
-            assert_eq!(replay_result.archive_item_id, first_result.archive_item_id);
-            let durable: i64 = conn
-                .lock()
-                .expect("lock db")
-                .query_row(
-                    "SELECT durable FROM archive_items WHERE id = ?1",
-                    params![first_result.archive_item_id],
-                    |row| row.get(0),
-                )
-                .expect("read durable");
-            assert_eq!(durable, 1);
-        }
+    #[test]
+    fn finalize_event_archive_same_digest_changed_clip_metadata_rejected_without_mutation() {
+        let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
+        let boot = Arc::new(BootContext::new());
+        let request = finalize_payload();
+        let created = call_finalize(&conn, &boot, &request);
+        let Response::FinalizeEventArchive(created_result) = created else {
+            panic!("expected finalize response");
+        };
 
-        #[test]
-        fn finalize_event_archive_conflict_same_digest_rejected_without_mutation() {
-            let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
-            let boot = Arc::new(BootContext::new());
-            let request = finalize_payload();
-            let created = call_finalize(&conn, &boot, &request);
-            let Response::FinalizeEventArchive(created_result) = created else {
-                panic!("expected finalize response");
-            };
+        // Identical manifest_digest + segment_set_digest + path + counts + clip-key
+        // set, but a clip's timing differs. The file/segment bytes match, yet the
+        // derived clip metadata (uncovered by either digest) diverges, so finalize
+        // must fail closed as a same-digest conflict rather than treat it as an
+        // idempotent replay that silently preserves stale metadata.
+        let mut conflicting = request.clone();
+        conflicting.clips[0].started_at -= 1;
+        let response = call_finalize(&conn, &boot, &conflicting);
+        assert_eq!(
+            response,
+            Response::Rejected {
+                message: FINALIZE_CONFLICT_SAME_DIGEST_MESSAGE.to_owned()
+            }
+        );
 
-            let mut conflicting = request.clone();
-            conflicting.size_bytes += 1;
-            let response = call_finalize(&conn, &boot, &conflicting);
-            assert_eq!(
-                response,
-                Response::Rejected {
-                    message: FINALIZE_CONFLICT_SAME_DIGEST_MESSAGE.to_owned()
-                }
-            );
-            let locked = conn.lock().expect("lock db");
-            let row: (i64, String) = locked
-                .query_row(
-                    "SELECT size_bytes, path FROM archive_items WHERE id = ?1",
-                    params![created_result.archive_item_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .expect("read archive row");
-            assert_eq!(row.0, request.size_bytes);
-            assert_eq!(row.1, request.generation_dir_path);
-        }
-
-        #[test]
-        fn finalize_event_archive_same_digest_changed_clip_metadata_rejected_without_mutation() {
-            let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
-            let boot = Arc::new(BootContext::new());
-            let request = finalize_payload();
-            let created = call_finalize(&conn, &boot, &request);
-            let Response::FinalizeEventArchive(created_result) = created else {
-                panic!("expected finalize response");
-            };
-
-            // Identical manifest_digest + segment_set_digest + path + counts + clip-key
-            // set, but a clip's timing differs. The file/segment bytes match, yet the
-            // derived clip metadata (uncovered by either digest) diverges, so finalize
-            // must fail closed as a same-digest conflict rather than treat it as an
-            // idempotent replay that silently preserves stale metadata.
-            let mut conflicting = request.clone();
-            conflicting.clips[0].started_at -= 1;
-            let response = call_finalize(&conn, &boot, &conflicting);
-            assert_eq!(
-                response,
-                Response::Rejected {
-                    message: FINALIZE_CONFLICT_SAME_DIGEST_MESSAGE.to_owned()
-                }
-            );
-
-            let locked = conn.lock().expect("lock db");
-            let started_at: i64 = locked
-                .query_row(
-                    "SELECT c.started_at
+        let locked = conn.lock().expect("lock db");
+        let started_at: i64 = locked
+            .query_row(
+                "SELECT c.started_at
                        FROM archive_item_clips aic
                        JOIN clips c ON c.id = aic.clip_id
                       WHERE aic.archive_item_id = ?1
                       ORDER BY c.canonical_key
                       LIMIT 1",
-                    params![created_result.archive_item_id],
-                    |row| row.get(0),
-                )
-                .expect("read clip started_at");
-            assert_eq!(started_at, request.clips[0].started_at);
-        }
+                params![created_result.archive_item_id],
+                |row| row.get(0),
+            )
+            .expect("read clip started_at");
+        assert_eq!(started_at, request.clips[0].started_at);
+    }
 
-        #[test]
-        fn finalize_event_archive_same_digest_changed_angle_rejected_without_mutation() {
-            let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
-            let boot = Arc::new(BootContext::new());
-            let request = finalize_payload();
-            let created = call_finalize(&conn, &boot, &request);
-            let Response::FinalizeEventArchive(created_result) = created else {
-                panic!("expected finalize response");
-            };
+    #[test]
+    fn finalize_event_archive_same_digest_changed_angle_rejected_without_mutation() {
+        let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
+        let boot = Arc::new(BootContext::new());
+        let request = finalize_payload();
+        let created = call_finalize(&conn, &boot, &request);
+        let Response::FinalizeEventArchive(created_result) = created else {
+            panic!("expected finalize response");
+        };
 
-            // Same digests/counts, but an angle's file_ref (camera-to-file mapping)
-            // differs — this is not covered by either digest and can make archived
-            // footage undiscoverable, so it must be a conflict, not a replay.
-            let mut conflicting = request.clone();
-            conflicting.angles[0].file_ref = "archive/events/e1/front-00-alt.mp4".to_owned();
-            let response = call_finalize(&conn, &boot, &conflicting);
-            assert_eq!(
-                response,
-                Response::Rejected {
-                    message: FINALIZE_CONFLICT_SAME_DIGEST_MESSAGE.to_owned()
-                }
-            );
+        // Same digests/counts, but an angle's file_ref (camera-to-file mapping)
+        // differs — this is not covered by either digest and can make archived
+        // footage undiscoverable, so it must be a conflict, not a replay.
+        let mut conflicting = request.clone();
+        conflicting.angles[0].file_ref = "archive/events/e1/front-00-alt.mp4".to_owned();
+        let response = call_finalize(&conn, &boot, &conflicting);
+        assert_eq!(
+            response,
+            Response::Rejected {
+                message: FINALIZE_CONFLICT_SAME_DIGEST_MESSAGE.to_owned()
+            }
+        );
 
-            let locked = conn.lock().expect("lock db");
-            let file_ref: String = locked
-                .query_row(
-                    "SELECT a.file_ref
+        let locked = conn.lock().expect("lock db");
+        let file_ref: String = locked
+            .query_row(
+                "SELECT a.file_ref
                        FROM archive_item_clips aic
                        JOIN clips c ON c.id = aic.clip_id
                        JOIN angles a ON a.clip_id = c.id AND a.view_kind = 'archive'
                       WHERE aic.archive_item_id = ?1
                       ORDER BY c.canonical_key, a.camera
                       LIMIT 1",
-                    params![created_result.archive_item_id],
-                    |row| row.get(0),
-                )
-                .expect("read angle file_ref");
-            assert_eq!(file_ref, request.angles[0].file_ref);
+                params![created_result.archive_item_id],
+                |row| row.get(0),
+            )
+            .expect("read angle file_ref");
+        assert_eq!(file_ref, request.angles[0].file_ref);
+    }
+
+    #[test]
+    fn finalize_event_archive_changed_generation_supersedes_and_replaces_links() {
+        let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
+        let boot = Arc::new(BootContext::new());
+        let request = finalize_payload();
+        let Response::FinalizeEventArchive(initial) = call_finalize(&conn, &boot, &request) else {
+            panic!("expected finalize response");
+        };
+
+        {
+            let locked = conn.lock().expect("lock db");
+            set_durable_via_complete_upload_set(
+                &locked,
+                initial.archive_item_id,
+                &request.manifest_digest,
+                "cccccccccccccccccccccccccccccccc",
+            );
         }
 
-        #[test]
-        fn finalize_event_archive_changed_generation_supersedes_and_replaces_links() {
-            let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
-            let boot = Arc::new(BootContext::new());
-            let request = finalize_payload();
-            let Response::FinalizeEventArchive(initial) = call_finalize(&conn, &boot, &request) else {
-                panic!("expected finalize response");
-            };
+        let next = finalize_payload_generation_two();
+        let response = call_finalize(&conn, &boot, &next);
+        let Response::FinalizeEventArchive(result) = response else {
+            panic!("expected finalize response");
+        };
+        assert!(!result.already_finalized);
+        assert_eq!(result.archive_item_id, initial.archive_item_id);
 
-            {
-                let locked = conn.lock().expect("lock db");
-                set_durable_via_complete_upload_set(
-                    &locked,
-                    initial.archive_item_id,
-                    &request.manifest_digest,
-                    "cccccccccccccccccccccccccccccccc",
-                );
-            }
+        let locked = conn.lock().expect("lock db");
+        let row: (String, i64, String) = locked
+            .query_row(
+                "SELECT path, durable, manifest_digest FROM archive_items WHERE id = ?1",
+                params![result.archive_item_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read archive row");
+        assert_eq!(row.0, next.generation_dir_path);
+        assert_eq!(row.1, 0);
+        assert_eq!(row.2, next.manifest_digest);
 
-            let next = finalize_payload_generation_two();
-            let response = call_finalize(&conn, &boot, &next);
-            let Response::FinalizeEventArchive(result) = response else {
-                panic!("expected finalize response");
-            };
-            assert!(!result.already_finalized);
-            assert_eq!(result.archive_item_id, initial.archive_item_id);
+        let superseded: Option<i64> = locked
+            .query_row(
+                "SELECT superseded_at FROM cloud_parent_upload_sets WHERE upload_set_id = ?1",
+                params!["cccccccccccccccccccccccccccccccc"],
+                |row| row.get(0),
+            )
+            .expect("read superseded_at");
+        assert!(superseded.is_some());
 
-            let locked = conn.lock().expect("lock db");
-            let row: (String, i64, String) = locked
-                .query_row(
-                    "SELECT path, durable, manifest_digest FROM archive_items WHERE id = ?1",
-                    params![result.archive_item_id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-                .expect("read archive row");
-            assert_eq!(row.0, next.generation_dir_path);
-            assert_eq!(row.1, 0);
-            assert_eq!(row.2, next.manifest_digest);
-
-            let superseded: Option<i64> = locked
-                .query_row(
-                    "SELECT superseded_at FROM cloud_parent_upload_sets WHERE upload_set_id = ?1",
-                    params!["cccccccccccccccccccccccccccccccc"],
-                    |row| row.get(0),
-                )
-                .expect("read superseded_at");
-            assert!(superseded.is_some());
-
-            let linked: Vec<String> = {
-                let mut stmt = locked
-                    .prepare(
-                        "SELECT c.canonical_key
+        let linked: Vec<String> = {
+            let mut stmt = locked
+                .prepare(
+                    "SELECT c.canonical_key
                            FROM archive_item_clips aic
                            JOIN clips c ON c.id = aic.clip_id
                           WHERE aic.archive_item_id = ?1
                           ORDER BY c.canonical_key",
-                    )
-                    .expect("prepare linked clip query");
-                let rows = stmt
-                    .query_map(params![result.archive_item_id], |row| row.get::<_, String>(0))
-                    .expect("query linked clips");
-                rows.collect::<Result<Vec<_>, _>>().expect("collect linked clips")
-            };
-            assert_eq!(linked, vec![next.clips[0].canonical_key.clone()]);
-        }
+                )
+                .expect("prepare linked clip query");
+            let rows = stmt
+                .query_map(params![result.archive_item_id], |row| {
+                    row.get::<_, String>(0)
+                })
+                .expect("query linked clips");
+            rows.collect::<Result<Vec<_>, _>>()
+                .expect("collect linked clips")
+        };
+        assert_eq!(linked, vec![next.clips[0].canonical_key.clone()]);
+    }
 
-        #[test]
-        fn finalize_changed_generation_supersedes_and_parks_unfinished_rows() {
-            let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
-            let boot = Arc::new(BootContext::new());
-            let request = finalize_payload();
-            let Response::FinalizeEventArchive(initial) = call_finalize(&conn, &boot, &request) else {
-                panic!("expected finalize response");
-            };
-            {
-                let locked = conn.lock().expect("lock db");
-                locked
+    #[test]
+    fn finalize_changed_generation_supersedes_and_parks_unfinished_rows() {
+        let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
+        let boot = Arc::new(BootContext::new());
+        let request = finalize_payload();
+        let Response::FinalizeEventArchive(initial) = call_finalize(&conn, &boot, &request) else {
+            panic!("expected finalize response");
+        };
+        {
+            let locked = conn.lock().expect("lock db");
+            locked
                     .execute(
                         "INSERT INTO cloud_parent_upload_sets
                             (upload_set_id, archive_item_id, destination_id, source_manifest_digest, request_digest,
@@ -4432,7 +4537,7 @@ mod tests {
                         ],
                     )
                     .expect("insert active upload set");
-                locked
+            locked
                     .execute(
                         "INSERT INTO cloud_upload_queue
                             (archive_item_id, child_key, destination_id, remote_key, category, seq, total_bytes, bytes_uploaded,
@@ -4444,7 +4549,7 @@ mod tests {
                         params![initial.archive_item_id, "abababababababababababababababab"],
                     )
                     .expect("insert done queue row");
-                locked
+            locked
                     .execute(
                         "INSERT INTO cloud_upload_queue
                             (archive_item_id, child_key, destination_id, remote_key, category, seq, total_bytes, bytes_uploaded,
@@ -4456,205 +4561,221 @@ mod tests {
                         params![initial.archive_item_id, "abababababababababababababababab"],
                     )
                     .expect("insert queued row");
-            }
+        }
 
-            let next = finalize_payload_generation_two();
-            let response = call_finalize(&conn, &boot, &next);
-            let Response::FinalizeEventArchive(result) = response else {
-                panic!("expected finalize response");
-            };
-            assert!(!result.already_finalized);
-            assert_eq!(result.archive_item_id, initial.archive_item_id);
+        let next = finalize_payload_generation_two();
+        let response = call_finalize(&conn, &boot, &next);
+        let Response::FinalizeEventArchive(result) = response else {
+            panic!("expected finalize response");
+        };
+        assert!(!result.already_finalized);
+        assert_eq!(result.archive_item_id, initial.archive_item_id);
 
-            let locked = conn.lock().expect("lock db");
-            let superseded_at: Option<i64> = locked
-                .query_row(
-                    "SELECT superseded_at
+        let locked = conn.lock().expect("lock db");
+        let superseded_at: Option<i64> = locked
+            .query_row(
+                "SELECT superseded_at
                        FROM cloud_parent_upload_sets
                       WHERE upload_set_id = 'abababababababababababababababab'",
-                    [],
-                    |row| row.get(0),
-                )
-                .expect("read superseded_at");
-            assert!(superseded_at.is_some());
-            let done_row: (String, i64, i64, Option<i64>, Option<String>) = locked
-                .query_row(
-                    "SELECT state, bytes_uploaded, attempts, not_before, last_error
+                [],
+                |row| row.get(0),
+            )
+            .expect("read superseded_at");
+        assert!(superseded_at.is_some());
+        let done_row: (String, i64, i64, Option<i64>, Option<String>) = locked
+            .query_row(
+                "SELECT state, bytes_uploaded, attempts, not_before, last_error
                        FROM cloud_upload_queue
                       WHERE destination_id='dest' AND remote_key='rk/done'",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
-                )
-                .expect("read done row");
-            assert_eq!(done_row.0, "done");
-            assert_eq!(done_row.1, 10);
-            assert_eq!(done_row.2, 1);
-            assert_eq!(done_row.3, None);
-            assert_eq!(done_row.4, None);
-            let queued_row: (String, i64, i64, Option<i64>, Option<String>) = locked
-                .query_row(
-                    "SELECT state, bytes_uploaded, attempts, not_before, last_error
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("read done row");
+        assert_eq!(done_row.0, "done");
+        assert_eq!(done_row.1, 10);
+        assert_eq!(done_row.2, 1);
+        assert_eq!(done_row.3, None);
+        assert_eq!(done_row.4, None);
+        let queued_row: (String, i64, i64, Option<i64>, Option<String>) = locked
+            .query_row(
+                "SELECT state, bytes_uploaded, attempts, not_before, last_error
                        FROM cloud_upload_queue
                       WHERE destination_id='dest' AND remote_key='rk/queued'",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
-                )
-                .expect("read queued row");
-            assert_eq!(queued_row.0, "parked");
-            assert_eq!(queued_row.1, 0);
-            assert_eq!(queued_row.2, 0);
-            assert_eq!(queued_row.3, None);
-            assert_eq!(
-                queued_row.4.as_deref(),
-                Some(FINALIZE_SUPERSEDE_PARK_MESSAGE)
-            );
-            let durable: i64 = locked
-                .query_row(
-                    "SELECT durable FROM archive_items WHERE id = ?1",
-                    params![initial.archive_item_id],
-                    |row| row.get(0),
-                )
-                .expect("read durable");
-            assert_eq!(durable, 0);
-        }
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("read queued row");
+        assert_eq!(queued_row.0, "parked");
+        assert_eq!(queued_row.1, 0);
+        assert_eq!(queued_row.2, 0);
+        assert_eq!(queued_row.3, None);
+        assert_eq!(
+            queued_row.4.as_deref(),
+            Some(FINALIZE_SUPERSEDE_PARK_MESSAGE)
+        );
+        let durable: i64 = locked
+            .query_row(
+                "SELECT durable FROM archive_items WHERE id = ?1",
+                params![initial.archive_item_id],
+                |row| row.get(0),
+            )
+            .expect("read durable");
+        assert_eq!(durable, 0);
+    }
 
-        #[test]
-        fn finalize_event_archive_cas_stale_rejected_without_mutation() {
-            let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
-            let boot = Arc::new(BootContext::new());
-            let request = finalize_payload();
-            let Response::FinalizeEventArchive(initial) = call_finalize(&conn, &boot, &request) else {
-                panic!("expected finalize response");
-            };
-            let mut stale = finalize_payload_generation_two();
-            stale.expected_prior_manifest_digest = None;
-            let response = call_finalize(&conn, &boot, &stale);
-            assert_eq!(
-                response,
-                Response::Rejected {
-                    message: FINALIZE_CAS_STALE_MESSAGE.to_owned()
-                }
-            );
-            let digest: String = conn
-                .lock()
-                .expect("lock db")
-                .query_row(
-                    "SELECT manifest_digest FROM archive_items WHERE id = ?1",
-                    params![initial.archive_item_id],
-                    |row| row.get(0),
-                )
-                .expect("read manifest_digest");
-            assert_eq!(digest, request.manifest_digest);
-        }
+    #[test]
+    fn finalize_event_archive_cas_stale_rejected_without_mutation() {
+        let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
+        let boot = Arc::new(BootContext::new());
+        let request = finalize_payload();
+        let Response::FinalizeEventArchive(initial) = call_finalize(&conn, &boot, &request) else {
+            panic!("expected finalize response");
+        };
+        let mut stale = finalize_payload_generation_two();
+        stale.expected_prior_manifest_digest = None;
+        let response = call_finalize(&conn, &boot, &stale);
+        assert_eq!(
+            response,
+            Response::Rejected {
+                message: FINALIZE_CAS_STALE_MESSAGE.to_owned()
+            }
+        );
+        let digest: String = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT manifest_digest FROM archive_items WHERE id = ?1",
+                params![initial.archive_item_id],
+                |row| row.get(0),
+            )
+            .expect("read manifest_digest");
+        assert_eq!(digest, request.manifest_digest);
+    }
 
-        #[test]
-        fn finalize_event_archive_changed_generation_rejected_when_upload_lease_active() {
-            let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
-            let boot = Arc::new(BootContext::new());
-            let request = finalize_payload();
-            let Response::FinalizeEventArchive(initial) = call_finalize(&conn, &boot, &request) else {
-                panic!("expected finalize response");
-            };
-            {
-                let locked = conn.lock().expect("lock db");
-                locked
-                    .execute(
-                        "INSERT INTO leases
+    #[test]
+    fn finalize_event_archive_changed_generation_rejected_when_upload_lease_active() {
+        let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
+        let boot = Arc::new(BootContext::new());
+        let request = finalize_payload();
+        let Response::FinalizeEventArchive(initial) = call_finalize(&conn, &boot, &request) else {
+            panic!("expected finalize response");
+        };
+        {
+            let locked = conn.lock().expect("lock db");
+            locked
+                .execute(
+                    "INSERT INTO leases
                             (archive_item_id, kind, holder, gen, boot_id, expires_mono_ms)
                          VALUES (?1, 'upload', 'uploadd:test', 'lease-gen', ?2, ?3)",
-                        params![
-                            initial.archive_item_id,
-                            boot.boot_id(),
-                            boot.mono_now_ms() + 60_000
-                        ],
-                    )
-                    .expect("insert lease");
+                    params![
+                        initial.archive_item_id,
+                        boot.boot_id(),
+                        boot.mono_now_ms() + 60_000
+                    ],
+                )
+                .expect("insert lease");
+        }
+        let next = finalize_payload_generation_two();
+        let response = call_finalize(&conn, &boot, &next);
+        assert_eq!(
+            response,
+            Response::Rejected {
+                message: "finalize rejected: active upload lease".to_owned()
             }
-            let next = finalize_payload_generation_two();
-            let response = call_finalize(&conn, &boot, &next);
-            assert_eq!(
-                response,
-                Response::Rejected {
-                    message: "finalize rejected: active upload lease".to_owned()
-                }
-            );
-        }
+        );
+    }
 
-        #[test]
-        fn finalize_event_archive_oversize_rejected_without_write() {
-            let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
-            let boot = Arc::new(BootContext::new());
-            let mut request = finalize_payload();
-            request.source_event_key = "x".repeat(MAX_REQUEST_FRAME as usize + 1);
-            let response = call_finalize(&conn, &boot, &request);
-            assert_eq!(
-                response,
-                Response::Rejected {
-                    message: FINALIZE_EVENT_TOO_LARGE_MESSAGE.to_owned()
-                }
-            );
-            let count: i64 = conn
-                .lock()
-                .expect("lock db")
-                .query_row("SELECT COUNT(*) FROM archive_items", [], |row| row.get(0))
-                .expect("count archive items");
-            assert_eq!(count, 0);
-        }
+    #[test]
+    fn finalize_event_archive_oversize_rejected_without_write() {
+        let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
+        let boot = Arc::new(BootContext::new());
+        let mut request = finalize_payload();
+        request.source_event_key = "x".repeat(MAX_REQUEST_FRAME as usize + 1);
+        let response = call_finalize(&conn, &boot, &request);
+        assert_eq!(
+            response,
+            Response::Rejected {
+                message: FINALIZE_EVENT_TOO_LARGE_MESSAGE.to_owned()
+            }
+        );
+        let count: i64 = conn
+            .lock()
+            .expect("lock db")
+            .query_row("SELECT COUNT(*) FROM archive_items", [], |row| row.get(0))
+            .expect("count archive items");
+        assert_eq!(count, 0);
+    }
 
-        #[test]
-        fn finalize_event_archive_self_consistency_failures_reject_without_write() {
-            let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
-            let boot = Arc::new(BootContext::new());
+    #[test]
+    fn finalize_event_archive_self_consistency_failures_reject_without_write() {
+        let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
+        let boot = Arc::new(BootContext::new());
 
-            let mut bad_count = finalize_payload();
-            bad_count.expected_segment_count += 1;
-            assert!(matches!(
-                call_finalize(&conn, &boot, &bad_count),
-                Response::Rejected { .. }
-            ));
+        let mut bad_count = finalize_payload();
+        bad_count.expected_segment_count += 1;
+        assert!(matches!(
+            call_finalize(&conn, &boot, &bad_count),
+            Response::Rejected { .. }
+        ));
 
-            let mut bad_digest = finalize_payload();
-            bad_digest.segment_set_digest =
-                "9999999999999999999999999999999999999999999999999999999999999999".to_owned();
-            assert!(matches!(
-                call_finalize(&conn, &boot, &bad_digest),
-                Response::Rejected { .. }
-            ));
+        let mut bad_digest = finalize_payload();
+        bad_digest.segment_set_digest =
+            "9999999999999999999999999999999999999999999999999999999999999999".to_owned();
+        assert!(matches!(
+            call_finalize(&conn, &boot, &bad_digest),
+            Response::Rejected { .. }
+        ));
 
-            let mut traversal = finalize_payload();
-            traversal.segments[0].segment_key = "../escape/front.mp4".to_owned();
-            traversal.segment_set_digest = compute_segment_set_digest(&traversal.segments)
-                .expect("compute segment_set_digest");
-            assert!(matches!(
-                call_finalize(&conn, &boot, &traversal),
-                Response::Rejected { .. }
-            ));
+        let mut traversal = finalize_payload();
+        traversal.segments[0].segment_key = "../escape/front.mp4".to_owned();
+        traversal.segment_set_digest =
+            compute_segment_set_digest(&traversal.segments).expect("compute segment_set_digest");
+        assert!(matches!(
+            call_finalize(&conn, &boot, &traversal),
+            Response::Rejected { .. }
+        ));
 
-            let mut duplicate_camera = finalize_payload();
-            duplicate_camera
-                .angles
-                .push(duplicate_camera.angles[0].clone());
-            assert!(matches!(
-                call_finalize(&conn, &boot, &duplicate_camera),
-                Response::Rejected { .. }
-            ));
+        let mut duplicate_camera = finalize_payload();
+        duplicate_camera
+            .angles
+            .push(duplicate_camera.angles[0].clone());
+        assert!(matches!(
+            call_finalize(&conn, &boot, &duplicate_camera),
+            Response::Rejected { .. }
+        ));
 
-            let count: i64 = conn
-                .lock()
-                .expect("lock db")
-                .query_row("SELECT COUNT(*) FROM archive_items", [], |row| row.get(0))
-                .expect("count archive items");
-            assert_eq!(count, 0);
-        }
+        let count: i64 = conn
+            .lock()
+            .expect("lock db")
+            .query_row("SELECT COUNT(*) FROM archive_items", [], |row| row.get(0))
+            .expect("count archive items");
+        assert_eq!(count, 0);
+    }
 
-        #[test]
-        fn finalize_event_archive_source_identity_trigger_conflict_is_non_panicking() {
-            let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
-            let boot = Arc::new(BootContext::new());
-            let request = finalize_payload();
-            {
-                let locked = conn.lock().expect("lock db");
-                locked
+    #[test]
+    fn finalize_event_archive_source_identity_trigger_conflict_is_non_panicking() {
+        let conn = Arc::new(Mutex::new(open_in_memory().expect("open db")));
+        let boot = Arc::new(BootContext::new());
+        let request = finalize_payload();
+        {
+            let locked = conn.lock().expect("lock db");
+            locked
                     .execute(
                         "INSERT INTO archive_items
                             (folder_class, path, size_bytes, file_count, archived_at, durable, delete_state,
@@ -4667,21 +4788,21 @@ mod tests {
                         params![request.source_event_key],
                     )
                     .expect("insert seed row");
-            }
-            let mut conflicting = request.clone();
-            conflicting.source_volume_id = None;
-            let response = call_finalize(&conn, &boot, &conflicting);
-            assert!(matches!(
-                response,
-                Response::Rejected { .. } | Response::Error { .. }
-            ));
-            let count: i64 = conn
-                .lock()
-                .expect("lock db")
-                .query_row("SELECT COUNT(*) FROM archive_items", [], |row| row.get(0))
-                .expect("count archive items");
-            assert_eq!(count, 1);
         }
+        let mut conflicting = request.clone();
+        conflicting.source_volume_id = None;
+        let response = call_finalize(&conn, &boot, &conflicting);
+        assert!(matches!(
+            response,
+            Response::Rejected { .. } | Response::Error { .. }
+        ));
+        let count: i64 = conn
+            .lock()
+            .expect("lock db")
+            .query_row("SELECT COUNT(*) FROM archive_items", [], |row| row.get(0))
+            .expect("count archive items");
+        assert_eq!(count, 1);
+    }
     #[test]
     fn archived_clips_folder_class_is_rejected() {
         assert!(parse_folder_class("ArchivedClips").is_err());

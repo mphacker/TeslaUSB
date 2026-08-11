@@ -30,11 +30,11 @@
 use std::time::SystemTime;
 
 use teslausb_core::sei::mp4::{
-    find_box, parse_mdhd, parse_mvhd, parse_stts_durations, BoxRef, Mp4Error,
+    BoxRef, Mp4Error, find_box, parse_mdhd, parse_mvhd, parse_stts_durations,
 };
 use teslausb_core::sei::nal::{AvccIter, NalUnit};
 use teslausb_core::sei::payload::extract_tesla_payload;
-use teslausb_core::sei::tesla::{decode_sei_message, SeiMessage};
+use teslausb_core::sei::tesla::{SeiMessage, decode_sei_message};
 
 /// Default per-sample duration in ms when the `stts` table is missing,
 /// truncated, or shorter than the frame count. 33.33 ms ≈ 30 fps — Tesla
@@ -213,7 +213,7 @@ mod tests {
         clippy::trivially_copy_pass_by_ref
     )]
 
-    use super::{walk_clip_waypoints, DEFAULT_FRAME_DURATION_MS};
+    use super::{DEFAULT_FRAME_DURATION_MS, walk_clip_waypoints};
     use teslausb_core::sei::payload::{
         RBSP_TRAILING_BYTE, TESLA_PADDING_BYTE, TESLA_PROTOBUF_MARKER,
     };

@@ -74,7 +74,14 @@ impl ImagePlan {
             image,
             size_mib,
             label: "MEDIA".to_owned(),
-            seed_dirs: &["Boombox", "Chimes", "LicensePlate", "LightShow", "Music", "Wraps"],
+            seed_dirs: &[
+                "Boombox",
+                "Chimes",
+                "LicensePlate",
+                "LightShow",
+                "Music",
+                "Wraps",
+            ],
             reseed_existing: true,
             min_usable_mib: MIN_MEDIA_MIB,
         }
@@ -413,7 +420,14 @@ mod tests {
         assert_eq!(p.label, "MEDIA");
         assert_eq!(
             p.seed_dirs,
-            &["Boombox", "Chimes", "LicensePlate", "LightShow", "Music", "Wraps"],
+            &[
+                "Boombox",
+                "Chimes",
+                "LicensePlate",
+                "LightShow",
+                "Music",
+                "Wraps"
+            ],
             "media image must seed the exact Tesla media-feature folder names/casing"
         );
         assert!(

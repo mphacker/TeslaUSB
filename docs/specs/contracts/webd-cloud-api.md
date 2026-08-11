@@ -10,16 +10,15 @@ found the wire contract underspecified. Pinned in P4, not here.
 >   attributes, expiry, CSRF token issuance/rotation, origin policy, exact 401/403
 >   envelopes — so webd and the SPA implement one interoperable scheme (webd has
 >   **no auth today**; §0).
-> - **The uploadd control socket** (path, frame cap, timeout, response envelope)
->   incl. a typed `get_status` verb — the only authoritative source for
->   `configured` / `provider_type` / uploader status / `sync-now` status (§4).
 > - Manual retry maps to the indexd **`cloud_queue_retry`** verb (parent/child +
 >   collision resolution), not a plain upsert.
 > - Redaction is enforced **before persistence** in the rclone engine, not only at
 >   this edge (see the creds contract).
 
-webd today exposes only `/api/jobs` + `/api/jobs/failed`; there is **no
-`/api/cloud`**. P4 adds it.
+webd now ships a **read-only first slice**: `GET /api/cloud` (uploadd
+`get_status`) + `GET /api/cloud/queue` + `GET /api/cloud/history` (durable
+indexd-backed observability). The remaining
+`/api/cloud/*` status/config/mutation lanes are still pending in P4.
 
 ---
 
@@ -52,9 +51,10 @@ state/config/history and an **uploadd control socket** for actions (D6, §4).
 ## 2. Endpoints
 
 ### Reads
-- `GET /api/cloud` → dashboard: `{ configured, provider_type, status, counters:
-  {synced_count, synced_bytes, since_at}, queue: {counts_by_state, in_progress?},
-  last_error_class? }`. Counters come from `cloud_stats_get` (derived — M1).
+- `GET /api/cloud` → **minimal read-only status slice** from uploadd control
+  `get_status`: `{ configured, provider_type, uploader_state, sync_now_state }`.
+  No secrets, no mutations. The full dashboard counters/queue summary are still
+  pending in P4.
 - `GET /api/cloud/config` → non-secret config (`cloud_config_get`): folders,
   priority, `reserve_gb`, retry, toggles. **Never** returns secrets.
 - `GET /api/cloud/queue?cursor=&limit=` → paginated queue snapshot
@@ -96,10 +96,22 @@ restart):
 
 ## 4. uploadd control socket (D6)
 `sync-now`, `provider/test`, and the provider-reload signal need a **live uploadd
-process**, not indexd. P4 pins a small uploadd control socket (framed-JSON
-`{"cmd":…}`, same framing family) with verbs `sync_now`, `test_remote`,
-`reload_credentials`. Until uploadd is enabled (Phase 8 gate), these return a
-well-formed **503 "uploader offline"** rather than a hang or a 500.
+process**, not indexd. The first implemented control-socket slice is read-only:
+
+- **Path:** `/run/teslausb/uploadd.sock` (overridable by daemon/env config)
+- **Framing:** 4-byte little-endian length + JSON payload (same family as
+  indexd/wifid/gadgetd), frame cap **64 KiB**
+- **Timeout:** 15 s socket read/write
+- **Verb:** `{"cmd":"get_status"}`
+- **Success envelope:** `{"status":"uploadd_status","configured":bool,
+  "provider_type":string|null,"uploader_state":string,"sync_now_state":"unsupported"}`
+- **Error envelope:** `{"status":"error","message":"..."}`
+
+Mutation verbs (`sync_now`, `test_remote`, `reload_credentials`) remain pending
+and are explicitly deferred until webd auth/CSRF is in place and each mutation
+has durable accepted/job semantics.
+Until uploadd is enabled (Phase 8 gate), webd returns **503 "uploader offline"**
+rather than a hang or a 500.
 
 ## 5. Deferred (post-P0)
 - A remote **browse** endpoint (list objects on the remote) — **post-P0** (m2);

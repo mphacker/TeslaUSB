@@ -857,14 +857,13 @@ mod tests {
     use super::{
         ArchiveAngle, ArchiveUnit, CloudCandidateWire, CloudConfigWire, CloudDiscoverWire,
         CloudFinalizeParentUploadRequest, CloudFinalizeParentUploadResponse, CloudHistoryRowWire,
-        CloudPendingUploadSetWire,
-        CloudPrepareParentUploadChildWire, CloudPrepareParentUploadRequest,
-        CloudPrepareParentUploadResponse, CloudQueuePkWire, CloudQueueRetryResolutionWire,
-        CloudQueueRowWire, CloudQueueUpsertWire, EvictionCandidateWire,
-        FinalizeEventArchiveAngleWire, FinalizeEventArchiveClipWire, FinalizeEventArchiveRequest,
-        FinalizeEventArchiveResponse, FinalizeEventArchiveSegmentWire, MAX_REQUEST_FRAME,
-        RecoveryRowWire, RegisterArchivedClip, Request, Response, read_frame, read_request,
-        write_frame, write_response,
+        CloudPendingUploadSetWire, CloudPrepareParentUploadChildWire,
+        CloudPrepareParentUploadRequest, CloudPrepareParentUploadResponse, CloudQueuePkWire,
+        CloudQueueRetryResolutionWire, CloudQueueRowWire, CloudQueueUpsertWire,
+        EvictionCandidateWire, FinalizeEventArchiveAngleWire, FinalizeEventArchiveClipWire,
+        FinalizeEventArchiveRequest, FinalizeEventArchiveResponse, FinalizeEventArchiveSegmentWire,
+        MAX_REQUEST_FRAME, RecoveryRowWire, RegisterArchivedClip, Request, Response, read_frame,
+        read_request, write_frame, write_response,
     };
 
     #[test]
@@ -1391,9 +1390,7 @@ mod tests {
                         archive_item_id: 1,
                         folder_class: "RecentClips".to_owned(),
                         path: "archive/a".to_owned(),
-                        manifest_digest: Some(
-                            "cccccccccccccccccccccccccccccccc".to_owned(),
-                        ),
+                        manifest_digest: Some("cccccccccccccccccccccccccccccccc".to_owned()),
                         category: "bulk".to_owned(),
                     }],
                     next_cursor: Some("opaque".to_owned()),
@@ -1601,8 +1598,8 @@ mod tests {
             source_generation: "boot-b:9".to_owned(),
             expected_prior_manifest_digest: Some("88888888888888888888888888888888".to_owned()),
             manifest_digest: "99999999999999999999999999999999".to_owned(),
-            segment_set_digest:
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+            segment_set_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_owned(),
             expected_segment_count: 2,
             size_bytes: 20,
             file_count: 2,

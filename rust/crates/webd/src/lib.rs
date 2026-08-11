@@ -35,10 +35,12 @@ mod chime_enforcer;
 mod chime_library;
 mod chime_scheduler;
 mod chimes;
+mod cloud;
 mod cloud_creds;
 mod daybucket;
 mod dto;
 mod error;
+mod fsck;
 mod gadget;
 mod health;
 mod indexd_client;
@@ -53,15 +55,17 @@ mod polyline;
 mod query;
 mod range;
 mod read_client;
+mod retention;
 mod route;
 mod scheduler;
-mod sysinfo;
 mod stats_client;
-mod wifid_client;
+mod sysinfo;
 pub(crate) mod timezone;
+mod uploadd_client;
 mod wifi;
 mod wifi_ap;
 mod wifi_mutate;
+mod wifid_client;
 mod wraps;
 
 #[cfg(test)]
@@ -100,6 +104,7 @@ struct AppState {
     scheduler: Arc<dyn scheduler::SchedulerClient>,
     wifid: Arc<dyn wifid_client::WifidClient>,
     indexd: Arc<dyn indexd_client::IndexdClient>,
+    uploadd: Arc<dyn uploadd_client::UploaddClient>,
     read_client: Arc<dyn read_client::ReadFileClient + Send + Sync>,
     stats_client: Arc<dyn stats_client::VolumeStatsClient + Send + Sync>,
     jobs: jobs::JobHub,
@@ -254,6 +259,15 @@ fn default_wifid_sock() -> PathBuf {
         .map_or_else(|| PathBuf::from("/run/teslausb/wifid.sock"), PathBuf::from)
 }
 
+/// The default `uploadd` control-socket path (overridable via
+/// `WEBD_UPLOADD_SOCK`).
+fn default_uploadd_sock() -> PathBuf {
+    std::env::var_os("WEBD_UPLOADD_SOCK").map_or_else(
+        || PathBuf::from("/run/teslausb/uploadd.sock"),
+        PathBuf::from,
+    )
+}
+
 /// The default `schedulerd` chime-library directory (overridable via
 /// `WEBD_CHIME_LIBRARY_DIR`). Must match `schedulerd`'s `SCHEDULERD_LIBRARY_DIR`;
 /// `webd` only ever reads it.
@@ -314,6 +328,35 @@ fn router_with_all_clients(
     )
 }
 
+#[cfg(test)]
+fn router_with_all_clients_and_uploadd(
+    catalog: Catalog,
+    static_dir: PathBuf,
+    media: MediaConfig,
+    gadget: Arc<dyn gadget::GadgetClient>,
+    scheduler: Arc<dyn scheduler::SchedulerClient>,
+    indexd: Arc<dyn indexd_client::IndexdClient>,
+    uploadd: Arc<dyn uploadd_client::UploaddClient>,
+    chime_library_dir: PathBuf,
+) -> Router {
+    router_with_all_clients_and_read_client_and_probe_and_cloud_creds(
+        catalog,
+        static_dir,
+        media,
+        gadget,
+        scheduler,
+        indexd,
+        uploadd,
+        default_read_client(),
+        default_stats_client(),
+        wifid_client::default_client(default_wifid_sock()),
+        chime_library_dir,
+        default_cloud_creds_dir(),
+        Arc::new(sysinfo::LinuxProbe),
+        cloud_creds::default_onedrive_discoverer(),
+    )
+}
+
 fn default_read_client() -> Arc<dyn read_client::ReadFileClient + Send + Sync> {
     #[cfg(unix)]
     {
@@ -361,6 +404,7 @@ fn router_with_all_clients_and_read_client_and_probe(
         gadget,
         scheduler,
         indexd,
+        uploadd_client::default_client(default_uploadd_sock()),
         read_client,
         stats_client,
         wifid,
@@ -379,6 +423,7 @@ fn router_with_all_clients_and_read_client_and_probe_and_cloud_creds(
     gadget: Arc<dyn gadget::GadgetClient>,
     scheduler: Arc<dyn scheduler::SchedulerClient>,
     indexd: Arc<dyn indexd_client::IndexdClient>,
+    uploadd: Arc<dyn uploadd_client::UploaddClient>,
     read_client: Arc<dyn read_client::ReadFileClient + Send + Sync>,
     stats_client: Arc<dyn stats_client::VolumeStatsClient + Send + Sync>,
     wifid: Arc<dyn wifid_client::WifidClient>,
@@ -400,6 +445,12 @@ fn router_with_all_clients_and_read_client_and_probe_and_cloud_creds(
             governor_status_file: std::env::var_os("WEBD_GOVERNOR_STATUS_FILE")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("/run/teslausb/retentiond.governor.json")),
+            fsck_status_file: std::env::var_os("WEBD_FSCK_STATUS_FILE")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/data/teslausb/fsck_status.json")),
+            fsck_history_file: std::env::var_os("WEBD_FSCK_HISTORY_FILE")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/data/teslausb/fsck_history.json")),
             media_ro_mount: std::env::var_os("WEBD_MEDIA_RO_MOUNT")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("/run/teslausb/media-ro")),
@@ -416,6 +467,7 @@ fn router_with_all_clients_and_read_client_and_probe_and_cloud_creds(
         scheduler,
         wifid,
         indexd,
+        uploadd,
         read_client,
         stats_client,
         jobs: jobs::JobHub::new(),
@@ -448,6 +500,7 @@ fn router_with_cloud_creds_dir_and_onedrive_discoverer(
         gadget,
         scheduler::default_client(default_scheduler_sock()),
         indexd_client::default_client(default_indexd_sock()),
+        uploadd_client::default_client(default_uploadd_sock()),
         default_read_client(),
         default_stats_client(),
         wifid_client::default_client(default_wifid_sock()),

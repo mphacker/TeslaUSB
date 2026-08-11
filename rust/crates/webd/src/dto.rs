@@ -29,6 +29,90 @@ pub(crate) struct Page<T> {
     pub limit: i64,
 }
 
+/// Read-only catalog health summary for mapping/index diagnostics.
+#[derive(Debug, Serialize)]
+pub(crate) struct IndexStatusDto {
+    /// SQLite schema version reported by the catalog.
+    pub schema_version: i64,
+    /// Number of indexed trips.
+    pub trip_count: i64,
+    /// Number of indexed events.
+    pub event_count: i64,
+    /// Number of indexed clips.
+    pub clip_count: i64,
+    /// Number of indexed GPS waypoints.
+    pub waypoint_count: i64,
+}
+
+/// Read-only index lifecycle diagnostics (no job mutation controls).
+#[derive(Debug, Serialize)]
+pub(crate) struct IndexLifecycleDto {
+    /// SQLite schema version reported by the catalog.
+    pub schema_version: i64,
+    /// Lifecycle health synthesized from persisted parse/retry/stale rows.
+    /// Values: `empty`, `healthy`, `stale`, `error`.
+    pub lifecycle_state: String,
+    /// Count of clips currently not marked `availability = 'present'`.
+    pub stale_clip_count: i64,
+    /// `COUNT(front_parse_attempts)`.
+    pub front_parse_total: i64,
+    /// `COUNT(front_parse_attempts WHERE parse_state IN ('parse_error','read_error'))`.
+    pub front_parse_error_count: i64,
+    /// `COUNT(front_parse_attempts WHERE parse_state = 'legacy_unknown')`.
+    pub front_parse_stale_count: i64,
+    /// `COUNT(front_parse_attempts WHERE next_retry_at > now)`.
+    pub front_parse_retry_pending_count: i64,
+    /// Count of present front-camera clips that still have no parse-attempt row.
+    pub front_parse_missing_count: i64,
+    /// Latest derived row timestamp (`MAX(trips.created_at, events.created_at)`).
+    pub last_derived_at: Option<i64>,
+    /// Latest durable front parse-attempt timestamp (`MAX(attempted_at)`).
+    pub last_front_parse_attempt_at: Option<i64>,
+}
+
+/// Read-only driving aggregates for mapping/index administration diagnostics.
+#[derive(Debug, Serialize)]
+pub(crate) struct DrivingStatsDto {
+    /// `COUNT(trips)`.
+    pub total_trips: i64,
+    /// `SUM(trips.distance_m)`, metres.
+    pub total_distance_m: f64,
+    /// `SUM(trips.ended_at - trips.started_at)`, seconds.
+    pub total_drive_time_s: i64,
+    /// `COUNT(events WHERE severity >= 2)` — warnings + critical.
+    pub warning_event_count: i64,
+    /// `COUNT(events WHERE type = 'sentry')`.
+    pub sentry_event_count: i64,
+    /// `AVG(trip_points.speed)`, m/s (`None` when no speed samples exist).
+    pub avg_speed_mps: Option<f64>,
+    /// `MAX(trip_points.speed)`, m/s (`None` when no speed samples exist).
+    pub max_speed_mps: Option<f64>,
+}
+
+/// One day bucket in `GET /api/index/event-chart`.
+#[derive(Debug, Serialize)]
+pub(crate) struct EventChartDayPoint {
+    /// UTC civil day key (`YYYY-MM-DD`).
+    pub day: String,
+    /// Total events on this day.
+    pub count: i64,
+    /// Events with `type = 'sentry'` on this day.
+    pub sentry_count: i64,
+    /// Events with `severity >= 2` on this day.
+    pub warning_count: i64,
+}
+
+/// Read-only event-chart aggregates for mapping/index diagnostics.
+#[derive(Debug, Serialize)]
+pub(crate) struct EventChartDto {
+    /// `COUNT(events)`.
+    pub total_events: i64,
+    /// Event counts grouped by `events.type`, sorted by `count DESC, type ASC`.
+    pub by_type: Vec<EventTypeCount>,
+    /// Recent UTC-day event buckets, newest day first.
+    pub by_day: Vec<EventChartDayPoint>,
+}
+
 /// One entry in `GET /api/days`: a civil day that has driving trips or
 /// standalone pinned events, with rolled-up counts. `day` is the UTC civil
 /// date by default (the stable civil date on the RTC-less Pi), or the
@@ -139,6 +223,50 @@ pub(crate) struct EventDto {
     pub description: Option<String>,
 }
 
+/// Clip metadata attached to `GET /api/events/:id/detail`.
+#[derive(Debug, Serialize)]
+pub(crate) struct EventDetailClipDto {
+    /// `clips.id`.
+    pub id: i64,
+    /// `clips.canonical_key`.
+    pub canonical_key: String,
+    /// `clips.folder_class`.
+    pub folder_class: String,
+    /// `clips.is_sentry`.
+    pub is_sentry: bool,
+    /// `clips.started_at`, UTC epoch seconds.
+    pub started_at: i64,
+    /// `clips.ended_at`, UTC epoch seconds (nullable).
+    pub ended_at: Option<i64>,
+}
+
+/// Sentry/event.json sidecar context for `GET /api/events/:id/detail`.
+#[derive(Debug, Serialize)]
+pub(crate) struct EventDetailSentryDto {
+    /// `clip_events.bucket` (e.g. `sentry`, `saved`).
+    pub bucket: String,
+    /// `clip_events.timestamp_utc`, UTC epoch seconds.
+    pub timestamp_utc: i64,
+    /// `clip_events.reason` (nullable).
+    pub reason: Option<String>,
+    /// `clip_events.city` (nullable).
+    pub city: Option<String>,
+    /// `clip_events.camera` (nullable).
+    pub camera: Option<String>,
+}
+
+/// Read-only enriched event detail for mapping administration.
+#[derive(Debug, Serialize)]
+pub(crate) struct EventDetailDto {
+    /// Base event row (`events.*`).
+    #[serde(flatten)]
+    pub event: EventDto,
+    /// Linked clip metadata when `events.clip_id` is present and resolvable.
+    pub clip: Option<EventDetailClipDto>,
+    /// Nearest sidecar event detail for the linked clip, when available.
+    pub sentry: Option<EventDetailSentryDto>,
+}
+
 /// One camera angle within a clip (`angles`).
 #[derive(Debug, Serialize)]
 pub(crate) struct AngleDto {
@@ -185,6 +313,21 @@ pub(crate) struct ClipDto {
     pub lon: Option<f64>,
     /// Camera angles, ordered by `camera`.
     pub angles: Vec<AngleDto>,
+}
+
+/// One GPS/telemetry waypoint for `GET /api/clips/:id/waypoints`.
+#[derive(Debug, Serialize)]
+pub(crate) struct ClipWaypointDto {
+    /// Waypoint sequence within the clip.
+    pub seq: i64,
+    /// Waypoint timestamp, UTC epoch seconds.
+    pub t: i64,
+    /// Latitude in degrees.
+    pub lat: f64,
+    /// Longitude in degrees.
+    pub lon: f64,
+    /// Whether the parser marked this point as GPS-fixed.
+    pub has_gps_fix: bool,
 }
 
 /// One `{type, count}` row of `events_by_type` in `GET /api/analytics`.
@@ -300,6 +443,44 @@ pub(crate) struct PrefDto {
     pub key: String,
     /// `prefs.value` (an opaque string; often JSON).
     pub value: String,
+}
+
+/// Validation shape for one advanced-setting value.
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum AdvancedSettingValidationDto {
+    /// Enumerated string values.
+    Enum { allowed: Vec<String> },
+    /// Inclusive integer range.
+    IntegerRange { min: u32, max: u32 },
+    /// IANA timezone string or empty string ("auto").
+    TimezoneOrAuto,
+}
+
+/// One bounded advanced-setting snapshot row.
+#[derive(Debug, Serialize)]
+pub(crate) struct AdvancedSettingDto {
+    /// Stable pref key (`/api/settings` namespace).
+    pub key: String,
+    /// Friendly UI label.
+    pub label: String,
+    /// One-line behavior description.
+    pub description: String,
+    /// Effective value after validation/defaulting.
+    pub value: String,
+    /// Default value used when the stored one is missing/invalid.
+    pub default_value: String,
+    /// `stored` | `default_missing` | `default_invalid`.
+    pub source_status: String,
+    /// Allowed-value contract for this key.
+    pub validation: AdvancedSettingValidationDto,
+}
+
+/// Read-only advanced settings response (`GET /api/settings/advanced`).
+#[derive(Debug, Serialize)]
+pub(crate) struct AdvancedSettingsDto {
+    /// Bounded allow-listed settings only (fixed list/order).
+    pub items: Vec<AdvancedSettingDto>,
 }
 
 /// The installed lock chime (`GET /api/chimes` → `installed`), read from the

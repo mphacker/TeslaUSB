@@ -13,7 +13,7 @@
 
 use std::collections::HashSet;
 
-use teslausb_core::fs::exfat::dir_decode::{decode_directory_cluster, DecodedExfatEntry};
+use teslausb_core::fs::exfat::dir_decode::{DecodedExfatEntry, decode_directory_cluster};
 use teslausb_core::fs::exfat::directory::FileTimestamps;
 
 use crate::error::ScannerError;

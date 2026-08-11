@@ -1731,7 +1731,8 @@ mod tests {
         // finalizes the segment the driver re-copies and re-registers LIVE. The
         // reverse transition flips QUARANTINED -> LIVE and promotes the angle to
         // archive, reusing the same rows.
-        let (live_clip_id, live_item_id) = register_archived_clip(&mut conn, &registration).unwrap();
+        let (live_clip_id, live_item_id) =
+            register_archived_clip(&mut conn, &registration).unwrap();
         assert_eq!(live_clip_id, clip_id);
         assert_eq!(
             live_item_id, q_item_id,

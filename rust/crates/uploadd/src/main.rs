@@ -28,7 +28,10 @@ fn main() -> ExitCode {
 }
 
 fn usage() -> String {
-    format!("usage: uploadd <version|serve|help>\n{}", serve_subcommand_usage())
+    format!(
+        "usage: uploadd <version|serve|help>\n{}",
+        serve_subcommand_usage()
+    )
 }
 
 #[cfg(unix)]

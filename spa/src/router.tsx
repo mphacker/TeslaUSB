@@ -57,6 +57,7 @@ export const ROUTES: Route[] = [
   { path: "/wraps", active: "media", screen: Wraps, title: "Wraps" },
   { path: "/license_plates", active: "media", screen: LicensePlates, title: "License Plates" },
   { path: "/analytics", active: "analytics", screen: Analytics, title: "Analytics" },
+  { path: "/storage", active: "analytics", screen: Analytics, title: "Storage" },
   { path: "/events", active: "map", screen: EventPlayer, title: "Events" },
   { path: "/cloud", active: "cloud", screen: CloudArchive, title: "Cloud" },
   { path: "/captive-portal", active: "settings", screen: CaptivePortal, title: "Wi-Fi setup" },

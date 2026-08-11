@@ -17,7 +17,7 @@
 //! Box walking reuses `teslausb_core::sei::mp4`, which already does
 //! checked, overflow-safe box parsing.
 
-use teslausb_core::sei::mp4::{find_box, find_box_path, parse_mdhd, BoxRef};
+use teslausb_core::sei::mp4::{BoxRef, find_box, find_box_path, parse_mdhd};
 
 /// Detected video codec of a clip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

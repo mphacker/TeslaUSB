@@ -3,8 +3,8 @@
 //! Pure domain parsing only: callers read bytes from disk and pass them
 //! here for typed metadata.
 
-use serde::de::{self, Visitor};
 use serde::Deserialize;
+use serde::de::{self, Visitor};
 
 const SECONDS_PER_MINUTE: i64 = 60;
 const MINUTES_PER_HOUR: i64 = 60;

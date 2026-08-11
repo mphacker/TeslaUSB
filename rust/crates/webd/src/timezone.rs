@@ -66,8 +66,7 @@ async fn set_timezone(
 }
 
 fn zoneinfo_dir() -> PathBuf {
-    std::env::var_os("WEBD_ZONEINFO_DIR")
-        .map_or_else(|| PathBuf::from(ZONEINFO_DIR), PathBuf::from)
+    std::env::var_os("WEBD_ZONEINFO_DIR").map_or_else(|| PathBuf::from(ZONEINFO_DIR), PathBuf::from)
 }
 
 fn timezone_task_error(_: tokio::task::JoinError) -> ApiError {
@@ -420,16 +419,13 @@ mod tests {
 
         // In-tree alias symlink (like `US/Eastern` -> `America/New_York`): KEPT,
         // named by its lexical path.
-        symlink(base.join("America/New_York"), base.join("US-Eastern"))
-            .expect("alias symlink");
+        symlink(base.join("America/New_York"), base.join("US-Eastern")).expect("alias symlink");
         // File symlink escaping the base: REJECTED (target not under base).
-        symlink(outside.path().join("secret"), base.join("escape"))
-            .expect("escape symlink");
+        symlink(outside.path().join("secret"), base.join("escape")).expect("escape symlink");
         // Directory symlink: must not be recursed into.
         fs::create_dir_all(outside.path().join("Subdir")).expect("subdir");
         write_tzif(outside.path().join("Subdir/Buried"));
-        symlink(outside.path().join("Subdir"), base.join("DirLink"))
-            .expect("dir symlink");
+        symlink(outside.path().join("Subdir"), base.join("DirLink")).expect("dir symlink");
 
         let zones = enumerate_zones(base);
 

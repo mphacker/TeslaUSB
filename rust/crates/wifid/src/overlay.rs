@@ -370,7 +370,8 @@ fn interface_exists(iface: &str) -> bool {
 fn iface_has_addr(iface: &str, ip_cidr: &str) -> bool {
     capture("ip", &["addr", "show", "dev", iface]).is_some_and(|out| {
         let needle = format!("inet {ip_cidr}");
-        out.lines().any(|line| line.trim_start().starts_with(&needle))
+        out.lines()
+            .any(|line| line.trim_start().starts_with(&needle))
     })
 }
 
@@ -407,12 +408,8 @@ fn read_iface_mac_bytes(iface: &str) -> Result<[u8; 6]> {
     let path = Path::new("/sys/class/net").join(iface).join("address");
     let value = std::fs::read_to_string(&path)
         .map_err(|e| WifidError::Network(format!("read {}: {e}", path.display())))?;
-    parse_mac(value.trim()).ok_or_else(|| {
-        WifidError::Network(format!(
-            "invalid MAC in {}",
-            path.display()
-        ))
-    })
+    parse_mac(value.trim())
+        .ok_or_else(|| WifidError::Network(format!("invalid MAC in {}", path.display())))
 }
 
 fn parse_mac(s: &str) -> Option<[u8; 6]> {
@@ -426,7 +423,11 @@ fn parse_mac(s: &str) -> Option<[u8; 6]> {
         let byte = u8::from_str_radix(part, 16).ok()?;
         *slot = byte;
     }
-    if bytes.next().is_none() { Some(out) } else { None }
+    if bytes.next().is_none() {
+        Some(out)
+    } else {
+        None
+    }
 }
 
 fn render_dnsmasq_conf(uap0: &str, gateway_ip: &str) -> String {
@@ -813,6 +814,9 @@ Interface uap0
 
     #[test]
     fn dnsmasq_range_constant_matches_expected_pool() {
-        assert_eq!(DEFAULT_DNSMASQ_RANGE, "192.168.4.10,192.168.4.50,255.255.255.0");
+        assert_eq!(
+            DEFAULT_DNSMASQ_RANGE,
+            "192.168.4.10,192.168.4.50,255.255.255.0"
+        );
     }
 }

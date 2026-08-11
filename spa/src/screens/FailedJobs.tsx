@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import { Icon } from "../components/Icon";
-import { ApiError } from "../api/client";
+import { ApiError, api } from "../api/client";
+import type { FailedJob } from "../api/types";
 import "../styles/failed-jobs.css";
 
 /**
@@ -36,9 +37,6 @@ import "../styles/failed-jobs.css";
 
 const DASH = "\u2014";
 
-/** Path of the single read-only endpoint this screen consumes. */
-const FAILED_JOBS_PATH = "/api/jobs/failed";
-
 /**
  * Server-side retention cap on the failed-job ring (`MAX_FAILED_RETAINED` in
  * webd jobs.rs). At this length older failures may have been evicted, so the
@@ -46,74 +44,20 @@ const FAILED_JOBS_PATH = "/api/jobs/failed";
  */
 const RING_CAP = 100;
 
-/** Job lifecycle states (contract §3). Kept as a closed union for the badge,
- *  but the wire value is treated opaquely — an unknown future state degrades to
- *  a neutral badge rather than being rejected. */
-type JobState = "running" | "done" | "failed" | "refused" | "busy";
-
-/** One retained job (the realized `job_status` payload, webd jobs.rs). */
-interface FailedJob {
-  job_id: number;
-  kind: string;
-  state: JobState | string;
-  progress: number | null;
-  detail?: string;
-  handoff_id?: string;
-}
-
-/** The realized `GET /api/jobs/failed` envelope. */
-interface FailedJobsResponse {
-  jobs: FailedJob[];
-}
-
 type LoadState =
   | { status: "loading" }
   | { status: "error"; message: string }
   | { status: "ready"; jobs: FailedJob[] };
 
 /**
- * Fetch the failed-jobs snapshot. Mirrors the shared catalog client's
- * `getJson` runtime behaviour (same-origin credentials, `Accept: json`,
- * text-then-parse, `ApiError` envelope) so this screen behaves identically to
- * the typed `api` client without editing that shared module. Defensively
- * validates the `{ jobs: [...] }` wrapper: an unexpected shape becomes a
- * handled error, never a render-time exception.
+ * Fetch the failed-jobs snapshot through the shared typed API client.
  */
 async function fetchFailedJobs(signal?: AbortSignal): Promise<FailedJob[]> {
-  let resp: Response;
-  try {
-    resp = await fetch(FAILED_JOBS_PATH, {
-      method: "GET",
-      headers: { Accept: "application/json" },
-      credentials: "same-origin",
-      signal,
-    });
-  } catch (err) {
-    throw new ApiError(0, "network", (err as Error).message || "network error");
+  const response = await api.failedJobs(signal);
+  if (!Array.isArray(response.jobs)) {
+    throw new ApiError(200, "bad_shape", "unexpected response shape");
   }
-  const text = await resp.text();
-  let body: unknown = null;
-  if (text) {
-    try {
-      body = JSON.parse(text);
-    } catch {
-      if (!resp.ok) throw new ApiError(resp.status, "http_error", `HTTP ${resp.status}`);
-      throw new ApiError(resp.status, "bad_json", "malformed JSON response");
-    }
-  }
-  if (!resp.ok) {
-    const env = body as { error?: { code?: string; message?: string } } | null;
-    throw new ApiError(
-      resp.status,
-      env?.error?.code ?? "http_error",
-      env?.error?.message ?? `HTTP ${resp.status}`,
-    );
-  }
-  const jobs = (body as FailedJobsResponse | null)?.jobs;
-  if (!Array.isArray(jobs)) {
-    throw new ApiError(resp.status, "bad_shape", "unexpected response shape");
-  }
-  return jobs as FailedJob[];
+  return response.jobs;
 }
 
 /** Fractional progress (0..1) → a clamped percent, or "—" when unknown. */

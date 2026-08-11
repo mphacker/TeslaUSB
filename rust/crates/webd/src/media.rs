@@ -264,7 +264,9 @@ pub(crate) async fn stream(
             };
             Ok(response)
         }
-        Err(ApiError::NotFound) => stream_non_archive_angle(&state, id, &camera, head, &headers).await,
+        Err(ApiError::NotFound) => {
+            stream_non_archive_angle(&state, id, &camera, head, &headers).await
+        }
         Err(err) => Err(err),
     }
 }
@@ -320,8 +322,10 @@ pub(crate) async fn telemetry(
         .await
         .map_err(|_| ApiError::Internal)?;
 
-    let json = match tokio::task::spawn_blocking(move || telemetry_json_blocking(&path, id, &camera))
-        .await
+    let json = match tokio::task::spawn_blocking(move || {
+        telemetry_json_blocking(&path, id, &camera)
+    })
+    .await
     {
         Ok(json) => json,
         Err(err) => {
@@ -339,7 +343,11 @@ pub(crate) async fn telemetry(
 /// `[]` (never an error) for a missing angle, an unverifiable size, an oversize
 /// clip, or any read/parse failure.
 #[allow(clippy::print_stderr)]
-async fn telemetry_non_archive(state: &AppState, id: i64, camera: &str) -> Result<Response, ApiError> {
+async fn telemetry_non_archive(
+    state: &AppState,
+    id: i64,
+    camera: &str,
+) -> Result<Response, ApiError> {
     let catalog = state.catalog.clone();
     let camera_owned = camera.to_owned();
     let source = crate::route::read(catalog, move |conn| {
@@ -387,7 +395,11 @@ async fn telemetry_non_archive(state: &AppState, id: i64, camera: &str) -> Resul
 /// A bare `[]` JSON telemetry response — the graceful empty state returned for a
 /// non-archive angle, an oversize clip, or any parse failure.
 fn empty_telemetry_response() -> Response {
-    ([(CONTENT_TYPE, "application/json")], Bytes::from_static(b"[]")).into_response()
+    (
+        [(CONTENT_TYPE, "application/json")],
+        Bytes::from_static(b"[]"),
+    )
+        .into_response()
 }
 
 /// A `Write` sink that accumulates bytes but fails once it would exceed `cap`,

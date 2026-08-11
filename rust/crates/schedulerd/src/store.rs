@@ -266,7 +266,9 @@ impl Store {
         let mut changed = 0usize;
 
         let before = self.state.schedules.len();
-        self.state.schedules.retain(|s| !matches(&s.input.chime_filename));
+        self.state
+            .schedules
+            .retain(|s| !matches(&s.input.chime_filename));
         changed += before - self.state.schedules.len();
 
         let mut emptied: Vec<String> = Vec::new();
@@ -353,7 +355,14 @@ impl Store {
             .filter_map(|s| s.input.validate(&s.id).ok())
             .collect();
         let members = self.random_members(library);
-        resolve_boot(now, &core, active_chime, library, members.as_deref(), boot_seed)
+        resolve_boot(
+            now,
+            &core,
+            active_chime,
+            library,
+            members.as_deref(),
+            boot_seed,
+        )
     }
 
     /// Evaluate the boot-time chime when the system clock is NOT yet trustworthy
@@ -380,7 +389,14 @@ impl Store {
             )
             .collect();
         let members = self.random_members(library);
-        resolve_boot(now, &onboot, active_chime, library, members.as_deref(), boot_seed)
+        resolve_boot(
+            now,
+            &onboot,
+            active_chime,
+            library,
+            members.as_deref(),
+            boot_seed,
+        )
     }
 
     fn random_members(&self, library: &[String]) -> Option<Vec<String>> {
@@ -649,13 +665,14 @@ mod tests {
             })
             .unwrap();
 
-        let changed = store
-            .rename_chime_references("old.wav", "New.wav")
-            .unwrap();
+        let changed = store.rename_chime_references("old.wav", "New.wav").unwrap();
         assert_eq!(changed, 2);
         assert_eq!(store.schedules()[0].input.chime_filename, "New.wav");
         let updated = store.groups().iter().find(|g| g.id == group.id).unwrap();
-        assert_eq!(updated.chimes, vec!["New.wav".to_owned(), "Keep.wav".to_owned()]);
+        assert_eq!(
+            updated.chimes,
+            vec!["New.wav".to_owned(), "Keep.wav".to_owned()]
+        );
         let _ = std::fs::remove_file(path);
     }
 
@@ -692,7 +709,9 @@ mod tests {
 
         // Renaming `old.wav` to a different-case spelling of the existing member
         // must collapse to the verbatim `to`, not preserve the old spelling.
-        let changed = store.rename_chime_references("old.wav", "bell.wav").unwrap();
+        let changed = store
+            .rename_chime_references("old.wav", "bell.wav")
+            .unwrap();
         assert_eq!(changed, 1);
         let updated = store.groups().iter().find(|g| g.id == group.id).unwrap();
         assert_eq!(updated.chimes, vec!["bell.wav".to_owned()]);
@@ -710,7 +729,12 @@ mod tests {
                 chimes: vec!["A.wav".to_owned()],
             })
             .unwrap();
-        assert_eq!(store.rename_chime_references("Missing.wav", "New.wav").unwrap(), 0);
+        assert_eq!(
+            store
+                .rename_chime_references("Missing.wav", "New.wav")
+                .unwrap(),
+            0
+        );
         let _ = std::fs::remove_file(path);
     }
 
@@ -718,7 +742,9 @@ mod tests {
     fn remove_deletes_dependent_schedule_and_scrubs_group() {
         let path = tmp_path("remove-sched-group");
         let mut store = Store::load(path.clone());
-        store.add_schedule(weekly("A", "X.wav", "Monday", 8)).unwrap();
+        store
+            .add_schedule(weekly("A", "X.wav", "Monday", 8))
+            .unwrap();
         let group = store
             .add_group(GroupInput {
                 name: "Grp".to_owned(),
@@ -727,7 +753,9 @@ mod tests {
             })
             .unwrap();
 
-        let changed = store.remove_chime_references(&["x.wav".to_owned()]).unwrap();
+        let changed = store
+            .remove_chime_references(&["x.wav".to_owned()])
+            .unwrap();
         assert_eq!(changed, 2);
         assert!(store.schedules().is_empty());
         let updated = store.groups().iter().find(|g| g.id == group.id).unwrap();
@@ -753,7 +781,9 @@ mod tests {
             })
             .unwrap();
 
-        let changed = store.remove_chime_references(&["Z.wav".to_owned()]).unwrap();
+        let changed = store
+            .remove_chime_references(&["Z.wav".to_owned()])
+            .unwrap();
         assert_eq!(changed, 1);
         assert!(store.groups().iter().all(|g| g.id != group.id));
         assert_eq!(store.random_mode(), &RandomMode::default());
@@ -809,7 +839,9 @@ mod tests {
             })
             .unwrap();
         let members = vec!["G1.wav".to_owned(), "G2.wav".to_owned()];
-        let pick = store.evaluate_boot(ct(2026, 1, 1, 12, 0), None, &members, 7).unwrap();
+        let pick = store
+            .evaluate_boot(ct(2026, 1, 1, 12, 0), None, &members, 7)
+            .unwrap();
         assert!(members.contains(&pick.chime_filename));
         let _ = std::fs::remove_file(path);
     }
@@ -831,7 +863,11 @@ mod tests {
                 group_id: Some(group.id.clone()),
             })
             .unwrap();
-        assert!(store.evaluate_boot(ct(2026, 1, 1, 12, 0), None, &[], 1).is_none());
+        assert!(
+            store
+                .evaluate_boot(ct(2026, 1, 1, 12, 0), None, &[], 1)
+                .is_none()
+        );
         let _ = std::fs::remove_file(path);
     }
 

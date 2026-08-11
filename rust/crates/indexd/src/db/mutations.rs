@@ -780,9 +780,11 @@ pub fn set_pref(conn: &Connection, key: &str, value: &str) -> Result<(), DbError
 /// Returns [`DbError`] if the query fails.
 pub fn get_pref(conn: &Connection, key: &str) -> Result<Option<String>, DbError> {
     let value = conn
-        .query_row("SELECT value FROM prefs WHERE key = ?1", params![key], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT value FROM prefs WHERE key = ?1",
+            params![key],
+            |r| r.get(0),
+        )
         .optional()?;
     Ok(value)
 }
@@ -810,10 +812,10 @@ mod tests {
     use rusqlite::{Connection, params};
 
     use super::{
-        ClipLeaseGrant, LeaseGrant, LeaseKind, ReleaseResult, RenewResult, claim_eviction_candidate,
-        claim_for_delete, get_pref, has_unexpired_lease, lease_acquire, lease_acquire_for_clip,
-        lease_release, lease_renew, mark_deleted, mark_deleting, reap_stale_leases, set_pref,
-        wal_checkpoint_truncate,
+        ClipLeaseGrant, LeaseGrant, LeaseKind, ReleaseResult, RenewResult,
+        claim_eviction_candidate, claim_for_delete, get_pref, has_unexpired_lease, lease_acquire,
+        lease_acquire_for_clip, lease_release, lease_renew, mark_deleted, mark_deleting,
+        reap_stale_leases, set_pref, wal_checkpoint_truncate,
     };
     use crate::db::open_in_memory;
 
@@ -868,11 +870,11 @@ mod tests {
                  durable, pinned, suppress_until, created_at, updated_at)
              VALUES (?1, ?2, 4096, 1, ?3, ?4, ?5, ?6, ?7, 0, 0)",
             params![
-               folder_class,
-               path.clone(),
-               archived_at,
-               delete_state,
-               durable,
+                folder_class,
+                path.clone(),
+                archived_at,
+                delete_state,
+                durable,
                 pinned,
                 suppress_until
             ],
@@ -1333,8 +1335,8 @@ mod tests {
         let mut conn = open_in_memory().unwrap();
         let item = insert_eviction_item(&conn, "RecentClips", 100, 1, 0, None, "LIVE");
 
-        let generation = claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false)
-            .unwrap();
+        let generation =
+            claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false).unwrap();
         assert!(generation.is_some());
         let state: String = conn
             .query_row(
@@ -1352,8 +1354,8 @@ mod tests {
         let item = insert_eviction_item(&conn, "RecentClips", 100, 1, 0, None, "LIVE");
         lease_acquire(&conn, BOOT, 0, item, LeaseKind::Playback, "webd", TTL).unwrap();
 
-        let generation = claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false)
-            .unwrap();
+        let generation =
+            claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false).unwrap();
         assert_eq!(generation, None);
     }
 
@@ -1362,8 +1364,8 @@ mod tests {
         let mut conn = open_in_memory().unwrap();
         let item = insert_eviction_item(&conn, "RecentClips", 500, 1, 0, None, "LIVE");
 
-        let generation = claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false)
-            .unwrap();
+        let generation =
+            claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false).unwrap();
         assert_eq!(generation, None);
     }
 
@@ -1372,12 +1374,12 @@ mod tests {
         let mut conn = open_in_memory().unwrap();
         let item = insert_eviction_item(&conn, "RecentClips", 100, 0, 0, None, "LIVE");
 
-        let denied = claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false)
-            .unwrap();
+        let denied =
+            claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false).unwrap();
         assert_eq!(denied, None);
 
-        let claimed = claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, true)
-            .unwrap();
+        let claimed =
+            claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, true).unwrap();
         assert!(claimed.is_some());
     }
 
@@ -1386,8 +1388,8 @@ mod tests {
         let mut conn = open_in_memory().unwrap();
         let item = insert_eviction_item(&conn, "RecentClips", 100, 1, 1, None, "LIVE");
 
-        let generation = claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false)
-            .unwrap();
+        let generation =
+            claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false).unwrap();
         assert_eq!(generation, None);
     }
 
@@ -1396,8 +1398,8 @@ mod tests {
         let mut conn = open_in_memory().unwrap();
         let item = insert_eviction_item(&conn, "SentryClips", 100, 1, 0, None, "LIVE");
 
-        let generation = claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false)
-            .unwrap();
+        let generation =
+            claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false).unwrap();
         assert_eq!(generation, None);
     }
 
@@ -1406,8 +1408,8 @@ mod tests {
         let mut conn = open_in_memory().unwrap();
         let item = insert_eviction_item(&conn, "RecentClips", 100, 1, 0, Some(2_000), "LIVE");
 
-        let generation = claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false)
-            .unwrap();
+        let generation =
+            claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false).unwrap();
         assert_eq!(generation, None);
     }
 
@@ -1416,8 +1418,8 @@ mod tests {
         let mut conn = open_in_memory().unwrap();
         let item = insert_eviction_item(&conn, "RecentClips", 100, 1, 0, None, "DELETE_CLAIMED");
 
-        let generation = claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false)
-            .unwrap();
+        let generation =
+            claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false).unwrap();
         assert_eq!(generation, None);
     }
 
@@ -1426,8 +1428,8 @@ mod tests {
         let mut conn = open_in_memory().unwrap();
         let item = insert_eviction_item_unlinked(&conn, "RecentClips", 100, 1, 0, None, "LIVE");
 
-        let generation = claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false)
-            .unwrap();
+        let generation =
+            claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false).unwrap();
         assert_eq!(generation, None);
     }
 
@@ -1437,8 +1439,8 @@ mod tests {
         let item = insert_eviction_item_unlinked(&conn, "RecentClips", 100, 1, 0, None, "LIVE");
         insert_clip_for_eviction(&conn, item, "zero-started-at", 0, "RecentClips");
 
-        let generation = claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false)
-            .unwrap();
+        let generation =
+            claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false).unwrap();
         assert_eq!(generation, None);
     }
 
@@ -1448,8 +1450,8 @@ mod tests {
         let item = insert_eviction_item_unlinked(&conn, "RecentClips", 100, 1, 0, None, "LIVE");
         insert_clip_for_eviction(&conn, item, "mismatched-folder-class", 100, "SentryClips");
 
-        let generation = claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false)
-            .unwrap();
+        let generation =
+            claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false).unwrap();
         assert_eq!(generation, None);
     }
 
@@ -1457,10 +1459,16 @@ mod tests {
     fn claim_eviction_candidate_excludes_stale_archived_at_but_fresh_started_at() {
         let mut conn = open_in_memory().unwrap();
         let item = insert_eviction_item_unlinked(&conn, "RecentClips", 100, 1, 0, None, "LIVE");
-        insert_clip_for_eviction(&conn, item, "stale-archived-fresh-started", 9_500, "RecentClips");
+        insert_clip_for_eviction(
+            &conn,
+            item,
+            "stale-archived-fresh-started",
+            9_500,
+            "RecentClips",
+        );
 
-        let generation = claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false)
-            .unwrap();
+        let generation =
+            claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false).unwrap();
         assert_eq!(generation, None);
     }
 
@@ -1468,10 +1476,16 @@ mod tests {
     fn claim_eviction_candidate_deletes_when_started_at_old_even_if_archived_at_fresh() {
         let mut conn = open_in_memory().unwrap();
         let item = insert_eviction_item_unlinked(&conn, "RecentClips", 9_500, 1, 0, None, "LIVE");
-        insert_clip_for_eviction(&conn, item, "fresh-archived-old-started", 100, "RecentClips");
+        insert_clip_for_eviction(
+            &conn,
+            item,
+            "fresh-archived-old-started",
+            100,
+            "RecentClips",
+        );
 
-        let generation = claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false)
-            .unwrap();
+        let generation =
+            claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false).unwrap();
         assert!(generation.is_some());
     }
 
@@ -1495,8 +1509,8 @@ mod tests {
         )
         .unwrap();
 
-        let generation = claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false)
-            .unwrap();
+        let generation =
+            claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false).unwrap();
         assert_eq!(generation, None);
     }
 
@@ -1510,8 +1524,8 @@ mod tests {
         )
         .unwrap();
 
-        let generation = claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false)
-            .unwrap();
+        let generation =
+            claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false).unwrap();
         assert_eq!(generation, None);
     }
 
@@ -1525,8 +1539,8 @@ mod tests {
         )
         .unwrap();
 
-        let generation = claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false)
-            .unwrap();
+        let generation =
+            claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false).unwrap();
         assert_eq!(generation, None);
     }
 
@@ -1540,8 +1554,8 @@ mod tests {
         )
         .unwrap();
 
-        let generation = claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false)
-            .unwrap();
+        let generation =
+            claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false).unwrap();
         assert_eq!(generation, None);
     }
 
@@ -1557,8 +1571,8 @@ mod tests {
         )
         .unwrap();
 
-        let generation = claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false)
-            .unwrap();
+        let generation =
+            claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false).unwrap();
         assert_eq!(generation, None);
     }
 
@@ -1567,8 +1581,8 @@ mod tests {
         let mut conn = open_in_memory().unwrap();
         let item = insert_eviction_item(&conn, "RecentClips", 100, 1, 0, None, "LIVE");
 
-        let generation = claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false)
-            .unwrap();
+        let generation =
+            claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false).unwrap();
         assert!(generation.is_some());
     }
 
@@ -1592,8 +1606,8 @@ mod tests {
         )
         .unwrap();
 
-        let generation = claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, true)
-            .unwrap();
+        let generation =
+            claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, true).unwrap();
         assert!(generation.is_some());
     }
 
@@ -1670,16 +1684,9 @@ mod tests {
             );
             let mut conn = open_in_memory().unwrap();
             let sanity_item = insert_eviction_item(&conn, "RecentClips", 100, 1, 0, None, "LIVE");
-            let sanity = claim_eviction_candidate(
-                &mut conn,
-                BOOT,
-                1_000,
-                1_000,
-                sanity_item,
-                500,
-                false,
-            )
-            .unwrap();
+            let sanity =
+                claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, sanity_item, 500, false)
+                    .unwrap();
             assert!(
                 sanity.is_some(),
                 "case {case_name}: baseline proven seed must be claimable before mutation"
@@ -1688,16 +1695,9 @@ mod tests {
                 insert_eviction_item(&conn, "RecentClips", 101, 1, 0, None, "LIVE");
             let fixture = proving_upload_set_fixture(candidate_item);
             mutate(&conn, candidate_item, &fixture);
-            let claim = claim_eviction_candidate(
-                &mut conn,
-                BOOT,
-                1_000,
-                1_000,
-                candidate_item,
-                500,
-                false,
-            )
-            .unwrap();
+            let claim =
+                claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, candidate_item, 500, false)
+                    .unwrap();
             if claim.is_some() {
                 unexpectedly_claimed.push(case_name);
             }
@@ -1737,8 +1737,8 @@ mod tests {
         insert_clip_for_eviction(&conn, item, "multiclip-old", 100, "RecentClips");
         insert_clip_for_eviction(&conn, item, "multiclip-fresh", 9_500, "RecentClips");
 
-        let generation = claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false)
-            .unwrap();
+        let generation =
+            claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false).unwrap();
         assert_eq!(generation, None);
     }
 
@@ -1748,8 +1748,8 @@ mod tests {
         let item = insert_eviction_item_unlinked(&conn, "RecentClips", 100, 1, 0, None, "LIVE");
         insert_sentry_flagged_recent_clip_for_eviction(&conn, item, "sentry-flagged", 100);
 
-        let generation = claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false)
-            .unwrap();
+        let generation =
+            claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false).unwrap();
         assert_eq!(generation, None);
     }
 
@@ -1770,7 +1770,6 @@ mod tests {
         assert_eq!(bytes, 4096);
         // Idempotent re-apply.
         mark_deleted(&conn, item, 4096).unwrap();
-
     }
 
     #[test]

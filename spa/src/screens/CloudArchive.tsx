@@ -3,8 +3,12 @@ import { useScreenHook } from "../components/screenHook";
 import { useEffect, useState } from "preact/hooks";
 import { ApiError, api } from "../api/client";
 import type {
+  CloudHistoryPageResponse,
+  CloudQueueItem,
+  CloudQueuePageResponse,
   CloudCredentialProvider,
   CloudCredentialsResponse,
+  CloudStatusResponse,
 } from "../api/types";
 import "../styles/cloud-archive.css";
 
@@ -17,16 +21,22 @@ import "../styles/cloud-archive.css";
  * sync-settings form (folders, priority, reserve, retry, cleanup toggles), and
  * a sync queue + history.
  *
- * B-1 reality: only cloud-provider credentials are live today. This page now
- * calls `GET/POST/DELETE /api/cloud/credentials` for Section 2 (provider + token
- * paste), while sections 1/3/4/5 remain inert v1-parity scaffolding until their
- * backend lanes land.
+ * B-1 reality: cloud-provider credentials plus a read-only queue/status slice
+ * are live today. This page now calls `GET/POST/DELETE /api/cloud/credentials`
+ * for Section 2 and the new read-only `GET /api/cloud/queue` +
+ * `GET /api/cloud/history` surfaces for observability. Mutating sync controls
+ * remain pending.
  */
 export function CloudArchive() {
   useScreenHook("cloud-archive");
   const [provider, setProvider] = useState<CloudCredentialProvider>("drive");
   const [token, setToken] = useState("");
   const [creds, setCreds] = useState<CloudCredentialsResponse | null>(null);
+  const [cloudStatus, setCloudStatus] = useState<CloudStatusResponse | null>(null);
+  const [queue, setQueue] = useState<CloudQueuePageResponse | null>(null);
+  const [history, setHistory] = useState<CloudHistoryPageResponse | null>(null);
+  const [queueError, setQueueError] = useState<string | null>(null);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const [saveBusy, setSaveBusy] = useState(false);
   const [removeBusy, setRemoveBusy] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
@@ -54,29 +64,130 @@ export function CloudArchive() {
     return "Stored cloud credentials cannot be decrypted on this hardware (the SD card was moved). Re-paste credentials to continue syncing.";
   };
 
+  const formatBytes = (bytes: number | null | undefined): string => {
+    if (bytes == null || !Number.isFinite(bytes)) return "—";
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GiB`;
+  };
+
+  const queueCount = (
+    loadedQueue: CloudQueuePageResponse | null,
+    states: string[],
+  ): number | null => {
+    if (!loadedQueue) return null;
+    return loadedQueue.items.filter((item) => states.includes(item.state)).length;
+  };
+
+  const queueSubtitle = (): string => {
+    if (queueError) return "Cloud queue is temporarily unavailable.";
+    if (!queue) return "Loading cloud queue…";
+    if (queue.items.length === 0) return "No uploads are queued right now.";
+    const pending = queueCount(queue, ["queued", "in_progress"]) ?? 0;
+    const failed = queueCount(queue, ["failed"]) ?? 0;
+    if (failed > 0) {
+      return `${pending} pending upload(s), ${failed} failed.`;
+    }
+    return `${pending} upload(s) queued.`;
+  };
+
+  const uploaderSubtitle = (): string => {
+    if (!cloudStatus) return "Uploader status is loading…";
+    if (!cloudStatus.configured) return "Uploader is not configured.";
+    if (cloudStatus.uploader_state === "running") return "Uploader is running.";
+    if (cloudStatus.uploader_state === "stopping") return "Uploader is stopping.";
+    if (cloudStatus.uploader_state === "starting") return "Uploader is starting.";
+    if (cloudStatus.uploader_state === "idle") return "Uploader is idle.";
+    return `Uploader state: ${cloudStatus.uploader_state}.`;
+  };
+
+  const uploadedFromHistory = (loadedHistory: CloudHistoryPageResponse | null): number | null => {
+    if (!loadedHistory) return null;
+    return loadedHistory.items.filter((item) => item.outcome === "uploaded").length;
+  };
+
+  const transferredFromHistory = (
+    loadedHistory: CloudHistoryPageResponse | null,
+  ): number | null => {
+    if (!loadedHistory) return null;
+    return loadedHistory.items
+      .filter((item) => item.outcome === "uploaded")
+      .reduce((total, item) => total + item.size_bytes, 0);
+  };
+
   useEffect(() => {
     const ctrl = new AbortController();
-    api
-      .cloudCredentials(ctrl.signal)
-      .then((loaded) => {
+    setQueueError(null);
+    setHistoryError(null);
+    Promise.allSettled([
+      api.cloudCredentials(ctrl.signal),
+      api.cloudStatus(ctrl.signal),
+      api.cloudQueue({}, ctrl.signal),
+      api.cloudHistory({}, ctrl.signal),
+    ])
+      .then(([credsResult, statusResult, queueResult, historyResult]) => {
         if (ctrl.signal.aborted) return;
-        setCreds(loaded);
-        if (loaded.provider) setProvider(loaded.provider);
-        setConfirmRemove(false);
-        setMessage({ kind: "info", text: statusText(loaded) });
-      })
-      .catch((err) => {
-        if (ctrl.signal.aborted) return;
-        setMessage({
-          kind: "error",
-          text:
-            err instanceof ApiError
-              ? err.message
-              : "Could not load cloud credentials.",
-        });
+        if (credsResult.status === "fulfilled") {
+          setCreds(credsResult.value);
+          if (credsResult.value.provider) setProvider(credsResult.value.provider);
+          setConfirmRemove(false);
+          setMessage({ kind: "info", text: statusText(credsResult.value) });
+        } else {
+          const err = credsResult.reason;
+          setMessage({
+            kind: "error",
+            text:
+              err instanceof ApiError
+                ? err.message
+                : "Could not load cloud credentials.",
+          });
+        }
+        if (statusResult.status === "fulfilled") {
+          setCloudStatus(statusResult.value);
+        } else if (statusResult.reason instanceof ApiError) {
+          setMessage({ kind: "error", text: statusResult.reason.message });
+        }
+        if (queueResult.status === "fulfilled") {
+          setQueue(queueResult.value);
+        } else {
+          const err = queueResult.reason;
+          if (err instanceof ApiError) {
+            setQueueError(err.message);
+          } else {
+            setQueueError("Could not load cloud queue.");
+          }
+        }
+        if (historyResult.status === "fulfilled") {
+          setHistory(historyResult.value);
+        } else {
+          const err = historyResult.reason;
+          if (err instanceof ApiError) {
+            setHistoryError(err.message);
+          } else {
+            setHistoryError("Could not load cloud history.");
+          }
+        }
       });
     return () => ctrl.abort();
   }, []);
+
+  const refreshObservability = async () => {
+    try {
+      const loaded = await api.cloudQueue();
+      setQueue(loaded);
+      setQueueError(null);
+    } catch (err) {
+      if (err instanceof ApiError) setQueueError(err.message);
+    }
+    try {
+      const loaded = await api.cloudHistory();
+      setHistory(loaded);
+      setHistoryError(null);
+    } catch (err) {
+      if (err instanceof ApiError) setHistoryError(err.message);
+    }
+  };
 
   const onSaveCredentials = async () => {
     if (saveBusy || token.trim().length === 0) return;
@@ -88,6 +199,7 @@ export function CloudArchive() {
       setCreds(next);
       if (next.provider) setProvider(next.provider);
       setToken("");
+      await refreshObservability();
       setMessage({ kind: "success", text: statusText(next) });
     } catch (err) {
       setMessage({
@@ -114,6 +226,7 @@ export function CloudArchive() {
       const next = await api.deleteCloudCredentials();
       setCreds(next);
       setConfirmRemove(false);
+      await refreshObservability();
       setMessage({ kind: "success", text: statusText(next) });
     } catch (err) {
       setMessage({
@@ -140,8 +253,7 @@ export function CloudArchive() {
           <div class="device-status-info">
             <strong>Cloud Sync</strong>
             <p data-testid="cloud-sync-subtitle">
-              Cloud sync status will appear here once webd exposes the uploadd
-              queue. Configure a provider below to start syncing.
+              {uploaderSubtitle()} {queueSubtitle()}
             </p>
           </div>
         </div>
@@ -157,7 +269,7 @@ export function CloudArchive() {
             Sync Now
           </button>
           <span style="font-size: var(--text-sm); color: var(--text-secondary);">
-            Set up a cloud provider below to start syncing.
+            Configure provider credentials below to enable uploads.
           </span>
         </div>
       </div>
@@ -165,17 +277,23 @@ export function CloudArchive() {
       {/* ── Sync statistics summary (honest pending) ── */}
       <div style="display: flex; gap: var(--space-4); flex-wrap: wrap; margin-bottom: var(--space-4);">
         {[
-          ["Events Synced"],
-          ["Events Pending"],
-          ["Failed"],
-          ["Transferred"],
-        ].map(([label]) => (
+          [
+            "Events Synced",
+            uploadedFromHistory(history)?.toString() ?? "—",
+          ],
+          [
+            "Events Pending",
+            queueCount(queue, ["queued", "in_progress"])?.toString() ?? "—",
+          ],
+          ["Failed", queueCount(queue, ["failed"])?.toString() ?? "—"],
+          ["Transferred", formatBytes(transferredFromHistory(history))],
+        ].map(([label, value]) => (
           <div
             key={label}
             style="flex: 1; min-width: 120px; padding: var(--space-3); background: var(--bg-info); border-radius: var(--radius-md); text-align: center;"
           >
             <div style="font-size: var(--text-2xl); font-weight: 600; color: var(--text-primary);">
-              &mdash;
+              {value}
             </div>
             <div style="font-size: var(--text-sm); color: var(--text-secondary);">
               {label}
@@ -543,21 +661,50 @@ export function CloudArchive() {
           Sync Queue
         </summary>
         <div class="section-content">
-          <div
-            class="cloud-empty"
-            data-testid="cloud-queue-empty"
-            style="text-align: center; padding: var(--space-6) 0; color: var(--text-muted);"
-          >
-            <Icon
-              name="list"
-              class="nav-icon"
-              style="width: 48px; height: 48px; opacity: 0.4; margin-bottom: var(--space-2);"
-            />
-            <p style="margin: 0;">
-              The sync queue will list pending uploads once webd exposes the
-              uploadd queue. No queue can be shown in this build yet.
-            </p>
-          </div>
+          {queue && queue.items.length > 0 ? (
+            <ul data-testid="cloud-queue-list" style="margin: 0; padding: 0; list-style: none; display: grid; gap: var(--space-2);">
+              {queue.items.map((item: CloudQueueItem) => (
+                <li
+                  key={`${item.archive_item_id}:${item.child_key}:${item.seq}`}
+                  style="padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-secondary);"
+                >
+                  <div style="display:flex; justify-content:space-between; gap: var(--space-2); flex-wrap: wrap;">
+                    <strong style="font-size: var(--text-sm); color: var(--text-primary);">
+                      {item.child_key} · {item.category}
+                    </strong>
+                    <span style="font-size: var(--text-xs); color: var(--text-muted); text-transform: capitalize;">
+                      {item.state.replace("_", " ")}
+                    </span>
+                  </div>
+                  <div style="font-size: var(--text-xs); color: var(--text-secondary); margin-top: 4px;">
+                    {formatBytes(item.bytes_uploaded)} / {formatBytes(item.total_bytes)} • attempts {item.attempts}
+                  </div>
+                  {item.last_error_class ? (
+                    <div style="font-size: var(--text-xs); color: var(--accent-error, #e53935); margin-top: 4px;">
+                      Error class: {item.last_error_class}
+                    </div>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div
+              class="cloud-empty"
+              data-testid="cloud-queue-empty"
+              style="text-align: center; padding: var(--space-6) 0; color: var(--text-muted);"
+            >
+              <Icon
+                name="list"
+                class="nav-icon"
+                style="width: 48px; height: 48px; opacity: 0.4; margin-bottom: var(--space-2);"
+              />
+              <p style="margin: 0;">
+                {queueError
+                  ? "Cloud queue is temporarily unavailable."
+                  : "No uploads are queued right now."}
+              </p>
+            </div>
+          )}
         </div>
       </details>
 
@@ -568,18 +715,48 @@ export function CloudArchive() {
           Sync History
         </summary>
         <div class="section-content">
-          <div
-            class="cloud-empty"
-            data-testid="cloud-history-empty"
-            style="text-align: center; padding: var(--space-8) 0; color: var(--text-muted);"
-          >
-            <Icon
-              name="cloud"
-              class="nav-icon"
-              style="width: 48px; height: 48px; opacity: 0.4; margin-bottom: var(--space-2);"
-            />
-            <p style="margin: 0;">No sync sessions yet</p>
-          </div>
+          {history && history.items.length > 0 ? (
+            <ul data-testid="cloud-history-list" style="margin: 0; padding: 0; list-style: none; display: grid; gap: var(--space-2);">
+              {history.items.map((item) => (
+                <li
+                  key={`${item.id}:${item.completion_seq}`}
+                  style="padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-secondary);"
+                >
+                  <div style="display:flex; justify-content:space-between; gap: var(--space-2); flex-wrap: wrap;">
+                    <strong style="font-size: var(--text-sm); color: var(--text-primary);">
+                      {item.child_key}
+                    </strong>
+                    <span style="font-size: var(--text-xs); color: var(--text-muted); text-transform: capitalize;">
+                      {item.outcome}
+                    </span>
+                  </div>
+                  <div style="font-size: var(--text-xs); color: var(--text-secondary); margin-top: 4px;">
+                    {formatBytes(item.size_bytes)} • {formatSavedAt(item.at)}
+                  </div>
+                  {item.error_class ? (
+                    <div style="font-size: var(--text-xs); color: var(--accent-error, #e53935); margin-top: 4px;">
+                      {item.error_class}
+                    </div>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div
+              class="cloud-empty"
+              data-testid="cloud-history-empty"
+              style="text-align: center; padding: var(--space-8) 0; color: var(--text-muted);"
+            >
+              <Icon
+                name="cloud"
+                class="nav-icon"
+                style="width: 48px; height: 48px; opacity: 0.4; margin-bottom: var(--space-2);"
+              />
+              <p style="margin: 0;">
+                {historyError ? "Cloud history is temporarily unavailable." : "No sync sessions yet"}
+              </p>
+            </div>
+          )}
         </div>
       </details>
     </div>

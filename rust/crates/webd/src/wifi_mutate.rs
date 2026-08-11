@@ -335,7 +335,10 @@ fn connect_flow(ops: &dyn WifiOps, req: &ConnectReq) -> Result<ConnectResp, ApiE
             prev_uuid.as_str(),
             StatusCode::BAD_GATEWAY,
             "wifi_join_failed",
-            &format!("failed to activate Wi-Fi profile ({})", wifi_ops_error_text(&err)),
+            &format!(
+                "failed to activate Wi-Fi profile ({})",
+                wifi_ops_error_text(&err)
+            ),
         );
     }
 
@@ -588,7 +591,10 @@ fn forget_flow(ops: &dyn WifiOps, req: &ForgetReq) -> Result<ForgetResp, ApiErro
                 ApiError::status(
                     StatusCode::BAD_GATEWAY,
                     "wifi_forget_failed",
-                    format!("failed to forget Wi-Fi profile ({})", wifi_ops_error_text(&err)),
+                    format!(
+                        "failed to forget Wi-Fi profile ({})",
+                        wifi_ops_error_text(&err)
+                    ),
                 )
             })?;
     }
@@ -618,7 +624,8 @@ fn priority_flow(ops: &dyn WifiOps, req: &PriorityReq) -> Result<PriorityResp, A
         }
     }
 
-    let distinct_saved: HashSet<String> = saved.iter().map(|profile| profile.ssid.clone()).collect();
+    let distinct_saved: HashSet<String> =
+        saved.iter().map(|profile| profile.ssid.clone()).collect();
     if order_set != distinct_saved {
         return Err(ApiError::bad_request(
             "invalid_order",
@@ -650,7 +657,10 @@ fn priority_flow(ops: &dyn WifiOps, req: &PriorityReq) -> Result<PriorityResp, A
                 ApiError::status(
                     StatusCode::BAD_GATEWAY,
                     "wifi_priority_failed",
-                    format!("failed to set Wi-Fi priority ({})", wifi_ops_error_text(&err)),
+                    format!(
+                        "failed to set Wi-Fi priority ({})",
+                        wifi_ops_error_text(&err)
+                    ),
                 )
             })?;
     }
@@ -825,7 +835,9 @@ pub(crate) fn same_origin_ok(headers: &HeaderMap) -> bool {
             || origin_host.to_owned(),
             |port| format!("{origin_host}:{port}"),
         );
-        let normalized_origin = origin_host_port.strip_suffix(":80").unwrap_or(&origin_host_port);
+        let normalized_origin = origin_host_port
+            .strip_suffix(":80")
+            .unwrap_or(&origin_host_port);
         let normalized_host = host_text.strip_suffix(":80").unwrap_or(host_text);
         if !normalized_origin.eq_ignore_ascii_case(normalized_host) {
             return false;
@@ -856,9 +868,7 @@ impl LiveOps {
             Ok(output) => output,
             Err(err) if err.kind() == ErrorKind::NotFound => return Err(WifiOpsError::Unavailable),
             Err(_) => {
-                return Err(WifiOpsError::Failed(format!(
-                    "{program} execution failed",
-                )));
+                return Err(WifiOpsError::Failed(format!("{program} execution failed",)));
             }
         };
         // GNU timeout exits with 124 on timeout; that maps to Failed below.
@@ -907,7 +917,10 @@ impl LiveOps {
     }
 
     fn list_connections() -> Result<Vec<(String, String, String)>, WifiOpsError> {
-        let output = Self::run_command("nmcli", &["-t", "-f", "UUID,NAME,TYPE", "connection", "show"])?;
+        let output = Self::run_command(
+            "nmcli",
+            &["-t", "-f", "UUID,NAME,TYPE", "connection", "show"],
+        )?;
         let mut out = Vec::new();
         for line in output.lines() {
             let fields = split_terse_line(line);
@@ -993,7 +1006,10 @@ impl LiveOps {
     fn parse_ip4_address(output: &str) -> Option<String> {
         output.lines().find_map(|line| {
             let fields = split_terse_line(line);
-            if fields.first().is_none_or(|key| !key.starts_with("IP4.ADDRESS")) {
+            if fields
+                .first()
+                .is_none_or(|key| !key.starts_with("IP4.ADDRESS"))
+            {
                 return None;
             }
             let raw = fields.get(1)?.split('/').next()?.trim();
@@ -1202,9 +1218,11 @@ impl WifiOps for LiveOps {
     fn verify_active_ip(&self, uuid: &str) -> Option<String> {
         for attempt in 0..VERIFY_MAX_POLLS {
             if self.active_uuid_on_wlan0().as_deref() == Some(uuid) {
-                let ip_output =
-                    Self::run_command("nmcli", &["-t", "-f", "IP4.ADDRESS", "device", "show", "wlan0"])
-                        .ok()?;
+                let ip_output = Self::run_command(
+                    "nmcli",
+                    &["-t", "-f", "IP4.ADDRESS", "device", "show", "wlan0"],
+                )
+                .ok()?;
                 if let Some(ip) = Self::parse_ip4_address(&ip_output) {
                     return Some(ip);
                 }
@@ -1221,9 +1239,7 @@ impl WifiOps for LiveOps {
         // assume nothing is active (a transient nmcli failure must not delete the live profile).
         let active = Self::list_active_connections()?;
         let is_active = active.iter().any(|row| {
-            row.device == "wlan0"
-                && row.state.eq_ignore_ascii_case("activated")
-                && row.uuid == uuid
+            row.device == "wlan0" && row.state.eq_ignore_ascii_case("activated") && row.uuid == uuid
         });
         if is_active {
             return Err(WifiOpsError::Failed(
@@ -1731,9 +1747,10 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert_eq!(code, "wifi_join_failed");
         assert!(ops.calls().contains(&"rollback_checkpoint".to_owned()));
-        assert!(ops
-            .calls()
-            .contains(&"delete_profile_unprotected:candidate-uuid".to_owned()));
+        assert!(
+            ops.calls()
+                .contains(&"delete_profile_unprotected:candidate-uuid".to_owned())
+        );
         assert!(ops.calls().contains(&"active_uuid_on_wlan0".to_owned()));
         assert!(!ops.calls().contains(&"destroy_checkpoint".to_owned()));
         assert!(ops.calls().contains(&"clear_hold".to_owned()));
@@ -1756,7 +1773,10 @@ mod tests {
         assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
         assert_eq!(code, "wifi_join_timeout");
         assert!(ops.calls().contains(&"rollback_checkpoint".to_owned()));
-        assert!(ops.calls().contains(&"delete_profile_unprotected:candidate-uuid".to_owned()));
+        assert!(
+            ops.calls()
+                .contains(&"delete_profile_unprotected:candidate-uuid".to_owned())
+        );
         assert!(ops.calls().contains(&"active_uuid_on_wlan0".to_owned()));
         assert!(!ops.calls().contains(&"destroy_checkpoint".to_owned()));
         assert!(ops.calls().contains(&"clear_hold".to_owned()));
@@ -2010,9 +2030,10 @@ mod tests {
                 count: 1
             }
         );
-        assert!(ops
-            .calls()
-            .contains(&"delete_profile_unprotected:uuid-netplan".to_owned()));
+        assert!(
+            ops.calls()
+                .contains(&"delete_profile_unprotected:uuid-netplan".to_owned())
+        );
     }
 
     #[test]
@@ -2063,9 +2084,10 @@ mod tests {
                 count: 1
             }
         );
-        assert!(ops
-            .calls()
-            .contains(&"delete_profile_unprotected:uuid-only".to_owned()));
+        assert!(
+            ops.calls()
+                .contains(&"delete_profile_unprotected:uuid-only".to_owned())
+        );
     }
 
     #[test]
@@ -2096,9 +2118,10 @@ mod tests {
                 count: 1
             }
         );
-        assert!(ops
-            .calls()
-            .contains(&"delete_profile_unprotected:uuid-drop".to_owned()));
+        assert!(
+            ops.calls()
+                .contains(&"delete_profile_unprotected:uuid-drop".to_owned())
+        );
     }
 
     #[test]
@@ -2205,10 +2228,11 @@ mod tests {
         let (status, code) = status_and_code(&err);
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(code, "invalid_order");
-        assert!(!ops
-            .calls()
-            .iter()
-            .any(|call| call.starts_with("set_conn_priority:")));
+        assert!(
+            !ops.calls()
+                .iter()
+                .any(|call| call.starts_with("set_conn_priority:"))
+        );
     }
 
     #[test]
@@ -2245,10 +2269,11 @@ mod tests {
         let (status, code) = status_and_code(&err);
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(code, "invalid_order");
-        assert!(!ops
-            .calls()
-            .iter()
-            .any(|call| call.starts_with("set_conn_priority:")));
+        assert!(
+            !ops.calls()
+                .iter()
+                .any(|call| call.starts_with("set_conn_priority:"))
+        );
     }
 
     #[test]
@@ -2279,10 +2304,11 @@ mod tests {
         let (status, code) = status_and_code(&err);
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(code, "invalid_order");
-        assert!(!ops
-            .calls()
-            .iter()
-            .any(|call| call.starts_with("set_conn_priority:")));
+        assert!(
+            !ops.calls()
+                .iter()
+                .any(|call| call.starts_with("set_conn_priority:"))
+        );
     }
 
     #[test]
@@ -2410,10 +2436,11 @@ mod tests {
                 "clear_hold"
             ]
         );
-        assert!(!ops
-            .calls()
-            .iter()
-            .any(|call| call.starts_with("delete_profile_unprotected:")));
+        assert!(
+            !ops.calls()
+                .iter()
+                .any(|call| call.starts_with("delete_profile_unprotected:"))
+        );
     }
 
     #[test]
@@ -2447,9 +2474,11 @@ mod tests {
         assert!(calls.contains(&"rollback_checkpoint".to_owned()));
         assert!(calls.contains(&"active_uuid_on_wlan0".to_owned()));
         assert!(calls.contains(&"clear_hold".to_owned()));
-        assert!(!calls
-            .iter()
-            .any(|call| call.starts_with("delete_profile_unprotected:")));
+        assert!(
+            !calls
+                .iter()
+                .any(|call| call.starts_with("delete_profile_unprotected:"))
+        );
     }
 
     #[test]
@@ -2519,7 +2548,11 @@ mod tests {
         let calls = ops.calls();
         assert_eq!(
             calls,
-            vec!["list_saved_wifi", "active_uuid_on_wlan0", "verify_active_ip"]
+            vec![
+                "list_saved_wifi",
+                "active_uuid_on_wlan0",
+                "verify_active_ip"
+            ]
         );
         assert!(!calls.contains(&"create_checkpoint".to_owned()));
     }

@@ -493,7 +493,11 @@ mod tests {
 
         fn persist(&self, item: &QueueItem) -> Result<(), IndexError> {
             let mut inner = self.borrow_mut();
-            if let Some(slot) = inner.items.iter_mut().find(|existing| existing.key == item.key) {
+            if let Some(slot) = inner
+                .items
+                .iter_mut()
+                .find(|existing| existing.key == item.key)
+            {
                 *slot = item.clone();
             } else {
                 inner.items.push(item.clone());

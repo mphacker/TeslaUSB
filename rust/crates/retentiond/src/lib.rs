@@ -44,8 +44,8 @@ pub mod delete;
 pub mod durability;
 pub mod folder;
 pub mod governor;
-pub mod io;
 pub mod index_delete_client;
+pub mod io;
 pub mod lease;
 pub mod manifest;
 pub mod probe;
@@ -56,7 +56,7 @@ pub mod serve;
 pub mod status;
 pub mod time;
 pub mod value;
+mod volume_reader;
 /// Volume-image-backed `RecentClips` candidate inventory (`scannerd` library path).
 pub mod volume_source;
 pub mod watchdog;
-mod volume_reader;

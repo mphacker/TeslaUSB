@@ -83,7 +83,10 @@ async fn enforce_boot(state: &AppState) -> Option<String> {
         return None;
     }
     if let Err(err) = install_and_track(state, &name).await {
-        let _ = writeln!(std::io::stderr(), "chime enforcer: boot apply failed: {err:?}");
+        let _ = writeln!(
+            std::io::stderr(),
+            "chime enforcer: boot apply failed: {err:?}"
+        );
         return None;
     }
     Some(name)
@@ -128,7 +131,10 @@ async fn enforce_tick(state: &AppState, last_enforced: Option<&str>) -> Option<S
         return None;
     }
     if let Err(err) = install_and_track(state, &name).await {
-        let _ = writeln!(std::io::stderr(), "chime enforcer: tick apply failed: {err:?}");
+        let _ = writeln!(
+            std::io::stderr(),
+            "chime enforcer: tick apply failed: {err:?}"
+        );
         return None;
     }
     Some(name)
@@ -161,18 +167,27 @@ async fn library_names(state: &AppState) -> Option<Vec<String>> {
 
 async fn call_scheduler(state: &AppState, request: Value) -> Option<Value> {
     let client = state.scheduler.clone();
-    let join = tokio::task::spawn_blocking(move || client.call(request)).await.ok()?;
+    let join = tokio::task::spawn_blocking(move || client.call(request))
+        .await
+        .ok()?;
     match join {
         Ok(value) => Some(value),
         Err(err) => {
-            let _ = writeln!(std::io::stderr(), "chime enforcer: scheduler call failed: {err:?}");
+            let _ = writeln!(
+                std::io::stderr(),
+                "chime enforcer: scheduler call failed: {err:?}"
+            );
             None
         }
     }
 }
 
 fn pick_name(value: &Value) -> Option<String> {
-    value.get("pick")?.get("chimeFilename").and_then(Value::as_str).map(str::to_owned)
+    value
+        .get("pick")?
+        .get("chimeFilename")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
 }
 
 fn local_offset_secs() -> i32 {
@@ -278,7 +293,10 @@ fn ntp_synchronized() -> Option<bool> {
     if !output.status.success() {
         return None;
     }
-    let text = std::str::from_utf8(&output.stdout).ok()?.trim().to_ascii_lowercase();
+    let text = std::str::from_utf8(&output.stdout)
+        .ok()?
+        .trim()
+        .to_ascii_lowercase();
     match text.as_str() {
         "yes" => Some(true),
         "no" => Some(false),

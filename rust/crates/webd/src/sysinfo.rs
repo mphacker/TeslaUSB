@@ -195,6 +195,10 @@ pub struct SysPaths {
     pub indexer_health_file: PathBuf,
     /// Retention governor status file (`retentiond.governor.json`).
     pub governor_status_file: PathBuf,
+    /// FSCK status snapshot (`fsck_status.json`).
+    pub fsck_status_file: PathBuf,
+    /// FSCK history snapshot (`fsck_history.json`).
+    pub fsck_history_file: PathBuf,
     /// Read-only mount of the MEDIA exFAT volume.
     pub media_ro_mount: PathBuf,
 }
@@ -1028,7 +1032,10 @@ fn read_governor_dto(probe: &dyn SystemProbe, paths: &SysPaths) -> Option<Govern
     validate_governor(dto, now)
 }
 
-fn read_governor(probe: &dyn SystemProbe, paths: &SysPaths) -> Option<serde_json::Value> {
+pub(crate) fn retention_governor(
+    probe: &dyn SystemProbe,
+    paths: &SysPaths,
+) -> Option<serde_json::Value> {
     read_governor_dto(probe, paths).and_then(|dto| serde_json::to_value(dto).ok())
 }
 
@@ -1097,7 +1104,7 @@ pub fn storage(
     Storage {
         filesystems,
         volumes: vec![dashcam, media],
-        governor: read_governor(probe, paths),
+        governor: retention_governor(probe, paths),
         quarantined,
     }
 }
@@ -1117,13 +1124,14 @@ pub fn storage_health(probe: &dyn SystemProbe, paths: &SysPaths) -> StorageHealt
                 .file_name()
                 .and_then(|s| s.to_str())
                 .unwrap_or("");
-            let errors_raw = probe.read_file_string(Path::new(&format!(
-                "/sys/fs/ext4/{dev_base}/errors_count"
-            )));
+            let errors_raw =
+                probe.read_file_string(Path::new(&format!("/sys/fs/ext4/{dev_base}/errors_count")));
             let discard_raw = probe.read_file_string(Path::new(&format!(
                 "/sys/class/block/{dev_base}/../queue/discard_max_bytes"
             )));
-            let timer_enabled = probe.read_file_string(Path::new(FSTRIM_TIMER_WANTS)).is_some();
+            let timer_enabled = probe
+                .read_file_string(Path::new(FSTRIM_TIMER_WANTS))
+                .is_some();
             wear_telemetry(&m.fstype, errors_raw, discard_raw, timer_enabled)
         }
         None => (None, None),
@@ -1242,7 +1250,17 @@ impl SystemProbe for LinuxProbe {
         // timeout -> status.success() is false -> degrades to "unknown" like any
         // other probe failure. Mirrors the bounded runner in wifi_mutate.rs.
         let out = std::process::Command::new("timeout")
-            .args(["-k", "2", "5", "nmcli", "-t", "-f", "ACTIVE,SSID,SIGNAL", "dev", "wifi"])
+            .args([
+                "-k",
+                "2",
+                "5",
+                "nmcli",
+                "-t",
+                "-f",
+                "ACTIVE,SSID,SIGNAL",
+                "dev",
+                "wifi",
+            ])
             .output()
             .ok()?;
         if !out.status.success() {
@@ -1403,6 +1421,8 @@ mod tests {
             worker_health_file: PathBuf::from("/run/teslausb/retentiond.health.json"),
             indexer_health_file: PathBuf::from("/run/teslausb/indexd.health.json"),
             governor_status_file: PathBuf::from("/run/teslausb/retentiond.governor.json"),
+            fsck_status_file: PathBuf::from("/data/teslausb/fsck_status.json"),
+            fsck_history_file: PathBuf::from("/data/teslausb/fsck_history.json"),
             media_ro_mount: PathBuf::from("/run/teslausb/media-ro"),
         }
     }
@@ -1505,7 +1525,10 @@ mod tests {
             ),
             (Some(3), Some("Enabled (scheduled)".to_owned()))
         );
-        assert_eq!(wear_telemetry("vfat", Some("5".to_owned()), None, false), (None, None));
+        assert_eq!(
+            wear_telemetry("vfat", Some("5".to_owned()), None, false),
+            (None, None)
+        );
         assert_eq!(
             wear_telemetry("ext4", None, Some("0".to_owned()), true),
             (None, Some("Not supported".to_owned()))
@@ -1954,10 +1977,7 @@ mod tests {
         };
         let m = system_metrics(&probe, None);
         assert_eq!(m.hostname.as_deref(), Some("cybertruck"));
-        assert_eq!(
-            m.platform.as_deref(),
-            Some("Raspberry Pi Zero 2 W Rev 1.0")
-        );
+        assert_eq!(m.platform.as_deref(), Some("Raspberry Pi Zero 2 W Rev 1.0"));
         assert_eq!(m.ip_address.as_deref(), Some("192.168.1.42"));
     }
 

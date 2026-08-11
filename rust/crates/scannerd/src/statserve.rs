@@ -12,12 +12,12 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use scannerd::boot::{parse_boot_sector, ExfatParams};
+use scannerd::boot::{ExfatParams, parse_boot_sector};
 use scannerd::error::ScannerError;
-use scannerd::freespace::{volume_free_space, VolumeStats};
+use scannerd::freespace::{VolumeStats, volume_free_space};
 use scannerd::mbr::parse_mbr;
 use scannerd::proto::{
-    read_frame, write_frame, VolumeStatsReply, VolumeStatsRequest, MAX_REQUEST_FRAME,
+    MAX_REQUEST_FRAME, VolumeStatsReply, VolumeStatsRequest, read_frame, write_frame,
 };
 use scannerd::reader::BlockReader;
 use scannerd::volume::Volume;

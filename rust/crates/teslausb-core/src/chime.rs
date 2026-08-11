@@ -1012,14 +1012,30 @@ mod tests {
     fn resolve_boot_schedule_beats_random_default() {
         let sched = weekly("weekly", "Specific.wav", &[Weekday::Thursday], 12, 0);
         let members = vec!["X.wav".to_owned(), "Y.wav".to_owned()];
-        let pick = resolve_boot(ct(2026, 1, 1, 12, 0), &[sched], None, &[], Some(&members), 9).unwrap();
+        let pick = resolve_boot(
+            ct(2026, 1, 1, 12, 0),
+            &[sched],
+            None,
+            &[],
+            Some(&members),
+            9,
+        )
+        .unwrap();
         assert_eq!(pick.chime_filename, "Specific.wav");
     }
 
     #[test]
     fn resolve_boot_random_excludes_active() {
         let members = vec!["A.wav".to_owned(), "B.wav".to_owned()];
-        let pick = resolve_boot(ct(2026, 1, 1, 12, 0), &[], Some("A.wav"), &members, Some(&members), 1).unwrap();
+        let pick = resolve_boot(
+            ct(2026, 1, 1, 12, 0),
+            &[],
+            Some("A.wav"),
+            &members,
+            Some(&members),
+            1,
+        )
+        .unwrap();
         assert_eq!(pick.chime_filename, "B.wav");
     }
 
@@ -1031,8 +1047,24 @@ mod tests {
     #[test]
     fn resolve_boot_seed_is_stable() {
         let members = vec!["A.wav".to_owned(), "B.wav".to_owned()];
-        let a = resolve_boot(ct(2026, 1, 1, 12, 0), &[], None, &members, Some(&members), 7).unwrap();
-        let b = resolve_boot(ct(2026, 1, 1, 12, 0), &[], None, &members, Some(&members), 7).unwrap();
+        let a = resolve_boot(
+            ct(2026, 1, 1, 12, 0),
+            &[],
+            None,
+            &members,
+            Some(&members),
+            7,
+        )
+        .unwrap();
+        let b = resolve_boot(
+            ct(2026, 1, 1, 12, 0),
+            &[],
+            None,
+            &members,
+            Some(&members),
+            7,
+        )
+        .unwrap();
         assert_eq!(a, b);
     }
 

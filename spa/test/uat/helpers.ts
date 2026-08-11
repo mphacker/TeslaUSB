@@ -98,16 +98,24 @@ export { expect };
 /** Read APIs the settings-dashboard screen is permitted to call. webd is
  *  read-only; anything outside this set (or any non-GET) is a hard failure.
  *  The dashboard reads /api/settings (config-form bindings), /api/clips (Video
- *  Indexer enrichment), the three read-only device-status probes (5.1d), and
- *  the read-only Wi-Fi probes (`/api/wifi/status`, `/api/wifi/networks`).
+ *  Indexer enrichment), /api/settings/advanced (bounded advanced visibility),
+ *  the three read-only device-status probes (5.1d), and the read-only Wi-Fi
+ *  probes (`/api/wifi/status`, `/api/wifi/networks`).
  *  The full catalog client is exercised separately by api-client.spec.ts. */
 export const ALLOWED_API = new Set([
   "/api/settings",
+  "/api/settings/advanced",
   "/api/clips",
   "/api/system/health",
   "/api/system/metrics",
   "/api/storage/health",
+  "/api/fsck/status",
+  "/api/fsck/history",
+  "/api/fsck/last-check/1",
+  "/api/fsck/last-check/2",
+  "/api/fsck/last-check/3",
   "/api/wifi/status",
   "/api/wifi/networks",
   "/api/gadget/status",
+  "/api/gadget/mode-status",
 ]);

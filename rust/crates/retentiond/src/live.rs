@@ -316,9 +316,9 @@ impl IndexClient for LiveIndexClient {
             Ok(DeleteWireResponse::Claimed {}) => ClaimResult::Claimed,
             Ok(DeleteWireResponse::ClaimDenied { reason }) => ClaimResult::Denied { reason },
             Ok(DeleteWireResponse::NotFound {}) => ClaimResult::NotFound,
-            Ok(DeleteWireResponse::Error { message } | DeleteWireResponse::Rejected { message }) => {
-                ClaimResult::Denied { reason: message }
-            }
+            Ok(
+                DeleteWireResponse::Error { message } | DeleteWireResponse::Rejected { message },
+            ) => ClaimResult::Denied { reason: message },
             Ok(other) => ClaimResult::Denied {
                 reason: format!("unexpected claim response: {other:?}"),
             },
@@ -822,10 +822,10 @@ mod tests {
         use std::thread;
 
         use super::super::{LiveArchiveDeleteOps, LiveCatalog, LiveIndexClient};
+        use retentiond::delete::IndexClient;
         use retentiond::index_delete_client::{
             DeleteWireResponse, EvictionCandidateWire, IndexDeleteClient, RecoveryRowWire,
         };
-        use retentiond::delete::IndexClient;
         use retentiond::io::ArchiveItemId;
         use retentiond::lease::DeleteState;
         use retentiond::serve::Catalog;
@@ -1104,10 +1104,12 @@ mod tests {
                 req2.source_path,
                 archive_root.join("RecentClips/older/3").to_string_lossy()
             );
-            assert!(catalog
-                .delete_request(ArchiveItemId(99))
-                .expect("delete request")
-                .is_none());
+            assert!(
+                catalog
+                    .delete_request(ArchiveItemId(99))
+                    .expect("delete request")
+                    .is_none()
+            );
             server.join().expect("join");
             let _ = fs::remove_dir_all(temp_dir);
         }
@@ -1138,10 +1140,12 @@ mod tests {
             let catalog = LiveCatalog::new(shared, &archive_root, "/archive/.retention-trash");
             let items = catalog.eviction_items().expect("eviction items");
             assert!(items.is_empty());
-            assert!(catalog
-                .delete_request(ArchiveItemId(21))
-                .expect("delete request")
-                .is_none());
+            assert!(
+                catalog
+                    .delete_request(ArchiveItemId(21))
+                    .expect("delete request")
+                    .is_none()
+            );
             server.join().expect("join");
             let _ = fs::remove_dir_all(temp_dir);
         }
@@ -1163,10 +1167,12 @@ mod tests {
             let shared = Rc::new(IndexDeleteClient::new(socket_path));
             let catalog = LiveCatalog::new(shared, &archive_root, "/archive/.retention-trash");
             let _ = catalog.eviction_items().expect("seed cache");
-            assert!(catalog
-                .delete_request(ArchiveItemId(404))
-                .expect("delete request")
-                .is_none());
+            assert!(
+                catalog
+                    .delete_request(ArchiveItemId(404))
+                    .expect("delete request")
+                    .is_none()
+            );
             server.join().expect("join");
             let _ = fs::remove_dir_all(temp_dir);
         }
@@ -1181,7 +1187,10 @@ mod tests {
             let server = thread::spawn(move || {
                 let (mut stream, _) = listener.accept().expect("accept");
                 let payload = read_frame(&mut stream, MAX_REQUEST_FRAME).expect("read request");
-                assert_eq!(String::from_utf8(payload).expect("utf8"), "{\"cmd\":\"list_recovery_rows\"}");
+                assert_eq!(
+                    String::from_utf8(payload).expect("utf8"),
+                    "{\"cmd\":\"list_recovery_rows\"}"
+                );
                 let response = DeleteWireResponse::RecoveryRows {
                     rows: vec![RecoveryRowWire {
                         id: 5,
@@ -1199,7 +1208,10 @@ mod tests {
             let rows = catalog.recovery_rows().expect("recovery rows");
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].delete_state, DeleteState::Deleting);
-            assert_eq!(rows[0].source_path, archive_root.join("RecentClips/older/5").to_string_lossy());
+            assert_eq!(
+                rows[0].source_path,
+                archive_root.join("RecentClips/older/5").to_string_lossy()
+            );
             assert_eq!(
                 rows[0].trash_path,
                 "/archive/.retention-trash/5.0000000000000000000000000000000f.deleting"
@@ -1267,9 +1279,13 @@ mod tests {
             fs::write(&src, b"x").expect("write src");
 
             let ops = LiveArchiveDeleteOps::new(&archive_root);
-            assert!(ops
-                .rename_into_trash(src.to_string_lossy().as_ref(), dst.to_string_lossy().as_ref())
-                .is_err());
+            assert!(
+                ops.rename_into_trash(
+                    src.to_string_lossy().as_ref(),
+                    dst.to_string_lossy().as_ref()
+                )
+                .is_err()
+            );
             assert!(src.exists());
             assert!(!dst.exists());
             let _ = fs::remove_dir_all(temp_dir);
@@ -1304,9 +1320,10 @@ mod tests {
             let target = outside.join("file.txt");
             fs::write(&target, b"x").expect("file");
             let ops = LiveArchiveDeleteOps::new(&archive_root);
-            assert!(ops
-                .recursive_delete(target.to_string_lossy().as_ref())
-                .is_err());
+            assert!(
+                ops.recursive_delete(target.to_string_lossy().as_ref())
+                    .is_err()
+            );
             assert!(target.exists());
             let _ = fs::remove_dir_all(temp_dir);
         }

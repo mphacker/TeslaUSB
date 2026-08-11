@@ -56,6 +56,18 @@ ensure_secrets_dir() {
 
 # --- modes -------------------------------------------------------------------
 
+mode_migration_readonly() {
+    local command="$1"
+    [ "${BOOTSTRAP_IMAGE:-0}" = "0" ] || \
+        die "$EX_USAGE" "${command} is read-only; --bootstrap-image is not permitted"
+    local root="${MIGRATION_ROOT:-}"
+    [ -n "$root" ] || die "$EX_USAGE" "${command} requires --root DIR"
+    local binary="${TESLAUSB_BIN_DIR}/teslausb-migrate"
+    [ -x "$binary" ] || die "$EX_PRECOND" "migration discovery binary is not installed: ${binary}"
+    log_info "running read-only migration ${command} for ${root}"
+    "$binary" "$command" --root "$root"
+}
+
 mode_install() {
     require_privilege
     artifact_resolve_and_verify

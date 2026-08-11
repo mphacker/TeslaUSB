@@ -181,7 +181,12 @@ fn stable_bitmap_popcount<R: BlockReader + ?Sized>(
         bytes_per_cluster,
         clusters_needed,
         |idx, masked| {
-            if usize::try_from(idx).ok().and_then(|i| a_bytes.get(i)).copied() != Some(masked) {
+            if usize::try_from(idx)
+                .ok()
+                .and_then(|i| a_bytes.get(i))
+                .copied()
+                != Some(masked)
+            {
                 matches_a = false;
             }
         },
@@ -234,9 +239,7 @@ fn scan_bitmap<R: BlockReader + ?Sized>(
             return Err(ScannerError::FreeSpace("bitmap cluster short read"));
         }
         for byte in bytes.iter().take(consume) {
-            let is_last_needed = bytes_seen
-                .checked_add(1)
-                .is_some_and(|n| n == needed_bytes);
+            let is_last_needed = bytes_seen.checked_add(1).is_some_and(|n| n == needed_bytes);
             let masked = if is_last_needed && tail_bits != 0 {
                 *byte & ((1_u8 << tail_bits) - 1)
             } else {
@@ -262,8 +265,7 @@ fn scan_bitmap<R: BlockReader + ?Sized>(
         ));
     }
 
-    u32::try_from(used_clusters)
-        .map_err(|_| ScannerError::FreeSpace("used cluster count overflow"))
+    u32::try_from(used_clusters).map_err(|_| ScannerError::FreeSpace("used cluster count overflow"))
 }
 
 #[cfg(test)]

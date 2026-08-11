@@ -11,7 +11,7 @@
 //!   request is refused, never queued.
 //! - `handoff_status` — last/current handoff record.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -29,7 +29,7 @@ use crate::exec::{self, LiveLun, MtimeSaveGuard};
 use crate::handoff::{self, HandoffOutcome, ImageMutator, LunControl, Mutation, Partition};
 use crate::mediamount::MediaRoMount;
 use crate::mutate::LoopMutator;
-use crate::queue::{BatchPlan, MutationQueue, MutationState};
+use crate::queue::{BatchPlan, MutationQueue, MutationState, PersistErrorStage};
 use crate::reenum::{self, ReEnumMethod, ReEnumOpts, ReEnumOutcome};
 
 /// Maximum accepted frame size (a handful of small JSON fields).
@@ -364,6 +364,10 @@ pub(crate) fn serve(
         media_ro,
         busy_backoff: Mutex::new(HashMap::new()),
     });
+
+    // Retry terminal-blob cleanup once at startup so retained terminal entries
+    // from a prior crash/failure don't require new queued work to be reclaimed.
+    sweep_terminal_cleanup(&state);
 
     // Background drain worker: applies queued mutations at safe windows.
     {
@@ -762,7 +766,8 @@ fn request_mutation(state: &ServeState, partition: u8, mutation: &Mutation) -> s
         |phase| update_phase(state, phase.as_str()),
     );
 
-    if matches!(outcome, HandoffOutcome::Done) && mutation_requires_chime_reenum(partition, mutation)
+    if matches!(outcome, HandoffOutcome::Done)
+        && mutation_requires_chime_reenum(partition, mutation)
     {
         // webd routes chime installs through enqueue; this direct path is legacy.
         match chime_reenum_token_for_install(mutation) {
@@ -797,8 +802,9 @@ fn set_record(state: &ServeState, rec: HandoffRecord) {
 
 /// Accept a validated mutation into the durable queue. This NEVER hard-fails on
 /// a busy/connected host — that is the whole point. It refuses only when the
-/// mutation is itself invalid (a real client bug, surfaced as an error) or the
-/// queue is full (backpressure). On success it returns `{job_id, state}`.
+/// mutation is itself invalid (a real client bug, surfaced as an error), the
+/// queue is full (backpressure), or the enqueue cannot be durably persisted. On
+/// success it returns `{job_id, state}`.
 fn enqueue_mutation(
     state: &ServeState,
     partition: u8,
@@ -806,6 +812,14 @@ fn enqueue_mutation(
     blob_path: Option<String>,
     idempotency_key: Option<String>,
 ) -> serde_json::Value {
+    fn queue_unavailable(detail: String) -> serde_json::Value {
+        json!({
+            "error_code": "queue_unavailable",
+            "error": "queue unavailable",
+            "detail": detail,
+        })
+    }
+
     // Validate the partition and the mutation up front so only well-formed,
     // appliable work ever enters the queue (the drain worker trusts entries).
     if let Err(e) = Partition::from_u8(partition) {
@@ -816,19 +830,36 @@ fn enqueue_mutation(
     }
 
     let Ok(mut queue) = state.queue.lock() else {
-        return json!({ "error": "queue unavailable" });
+        return queue_unavailable("queue lock unavailable".to_owned());
     };
+    let preexisting_id = idempotency_key.as_deref().and_then(|key| {
+        queue
+            .find_live_by_idempotency_key(key)
+            .map(|entry| entry.id.clone())
+    });
     match queue.enqueue(partition, mutation, blob_path, idempotency_key) {
         Ok(job_id) => {
-            // Persist before returning so the accepted work is durable. A persist
-            // failure is logged but still reported as queued: the entry is in the
-            // live queue and will be applied + persisted on its next transition;
-            // the only exposure is loss across an immediate crash, which is rare
-            // and far better UX than rejecting a valid upload.
+            // Idempotent replay path: the entry already existed and was previously
+            // persisted when first accepted.
+            if preexisting_id.as_deref() == Some(job_id.as_str()) {
+                return json!({ "job_id": job_id, "state": "queued" });
+            }
+
+            // Persist before returning so accepted work is durable.
             if let Err(e) = queue.persist(&state.queue_path) {
+                if e.stage() == PersistErrorStage::PreCommit {
+                    let _ = queue.rollback_enqueue(&job_id);
+                    return queue_unavailable(format!("queue persist failed: {e}"));
+                }
                 eprintln!(
-                    "gadgetd queue: enqueue persist failed (will retry on next transition): {e}"
+                    "gadgetd queue: post-commit parent sync failed for {job_id}, enqueue durability status ambiguous: {e}"
                 );
+                return json!({
+                    "error_code": "queue_persist_ambiguous",
+                    "error": "queue persist status ambiguous",
+                    "detail": format!("post-commit parent sync failed: {e}"),
+                    "job_id": job_id,
+                });
             }
             json!({ "job_id": job_id, "state": "queued" })
         }
@@ -872,6 +903,7 @@ fn reenum_scheduler_worker(state: &ServeState) {
 }
 
 fn drain_once(state: &ServeState) {
+    sweep_terminal_cleanup(state);
     let partitions = match state.queue.lock() {
         Ok(q) => q.pending_partitions(),
         Err(_) => return,
@@ -1353,28 +1385,76 @@ fn mark_and_persist(state: &ServeState, seqs: &[u64], new_state: MutationState) 
 /// persist guarantees a crash re-applies from the still-present blob instead of
 /// losing it.
 fn retire_seqs(state: &ServeState, seqs: &[u64], terminal: MutationState) {
-    let mut blobs = Vec::new();
-    if let Ok(mut queue) = state.queue.lock() {
-        queue.set_state(seqs, terminal);
-        match queue.persist(&state.queue_path) {
-            Ok(()) => {
-                blobs = queue.reclaimable_blobs(seqs);
-                queue.prune_terminal();
-                if let Err(e) = queue.persist(&state.queue_path) {
-                    eprintln!("gadgetd queue: persist after prune failed: {e}");
-                }
-            }
-            Err(e) => {
-                eprintln!("gadgetd queue: terminal persist failed, not reclaiming blobs: {e}");
-            }
+    retire_seqs_with_cleanup(state, seqs, terminal, remove_blob_and_sync_parent);
+}
+
+fn retire_seqs_with_cleanup<F>(
+    state: &ServeState,
+    seqs: &[u64],
+    terminal: MutationState,
+    mut cleanup_blob: F,
+) where
+    F: FnMut(&str) -> io::Result<()>,
+{
+    let blobs = if let Ok(mut queue) = state.queue.lock() {
+        let has_terminal = queue.entries().iter().any(|entry| entry.state.is_terminal());
+        if !has_terminal && seqs.is_empty() {
+            return;
         }
-    }
+        if !seqs.is_empty() {
+            queue.set_state(seqs, terminal);
+        }
+        // Always persist the current terminal-bearing queue state before blob
+        // cleanup (including empty-seq sweeps). If persist is ambiguous/failed,
+        // keep entries + blobs and retry later.
+        if let Err(e) = queue.persist(&state.queue_path) {
+            eprintln!("gadgetd queue: terminal persist failed, not reclaiming blobs: {e}");
+            return;
+        }
+        queue.reclaimable_terminal_blobs()
+    } else {
+        return;
+    };
+
+    let mut reclaimed_blobs = HashSet::new();
     for blob in blobs {
-        match std::fs::remove_file(&blob) {
-            Ok(()) => {}
-            Err(ref e) if e.kind() == io::ErrorKind::NotFound => {}
+        match cleanup_blob(&blob) {
+            Ok(()) => {
+                reclaimed_blobs.insert(blob);
+            }
             Err(e) => eprintln!("gadgetd queue: blob reclaim failed for {blob}: {e}"),
         }
+    }
+
+    if let Ok(mut queue) = state.queue.lock() {
+        queue.prune_terminal_reclaimed(&reclaimed_blobs);
+        if let Err(e) = queue.persist(&state.queue_path) {
+            eprintln!("gadgetd queue: persist after prune failed: {e}");
+        }
+    }
+}
+
+fn sweep_terminal_cleanup(state: &ServeState) {
+    retire_seqs_with_cleanup(state, &[], MutationState::Applied, remove_blob_and_sync_parent);
+}
+
+fn remove_blob_and_sync_parent(blob: &str) -> io::Result<()> {
+    let path = Path::new(blob);
+    match std::fs::remove_file(path) {
+        Ok(()) => sync_blob_parent_dir(path),
+        Err(ref e) if e.kind() == io::ErrorKind::NotFound => sync_blob_parent_dir(path),
+        Err(e) => Err(e),
+    }
+}
+
+fn sync_blob_parent_dir(path: &Path) -> io::Result<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    match std::fs::File::open(parent) {
+        Ok(dir) => dir.sync_all(),
+        Err(ref e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
     }
 }
 
@@ -1402,14 +1482,15 @@ fn finalize_record(state: &ServeState, id: &str, outcome: &HandoffOutcome) {
 mod tests {
     use super::{
         ChimeReenumState, MAX_FRAME, Request, ServeState, busy_backoff_delay, dispatch,
-        fatal_split, mutation_requires_chime_reenum, note_reenum_failure_backoff, read_frame,
-        reenum_failure_backoff_active, request_reenumerate, requeue_suffix, staged_precheck,
+        drain_once, enqueue_mutation, fatal_split, mutation_requires_chime_reenum, note_reenum_failure_backoff, read_frame,
+        reenum_failure_backoff_active, request_reenumerate, requeue_suffix, retire_seqs,
+        retire_seqs_with_cleanup, staged_precheck,
         startup_needs_connect, write_frame,
     };
     use crate::config::GadgetConfig;
     use crate::handoff::{Mutation, Partition};
     use crate::mediamount::MediaRoMount;
-    use crate::queue::MutationQueue;
+    use crate::queue::{MutationQueue, MutationState};
     use std::io::Cursor;
     use std::sync::atomic::AtomicU64;
     use std::sync::{Arc, Mutex};
@@ -1618,6 +1699,299 @@ mod tests {
         assert!(startup_needs_connect(true, Some("configured")));
         assert!(startup_needs_connect(true, None));
         assert!(startup_needs_connect(true, Some("not attached")));
+    }
+
+    #[test]
+    fn enqueue_mutation_persist_failure_rolls_back_and_errors() {
+        let mut state = test_state();
+        state.queue_path = PathBuf::from("/proc/teslausb-queue.json");
+        let response = enqueue_mutation(
+            &state,
+            2,
+            Mutation::DeletePath {
+                rel_path: "Music/x.mp3".to_owned(),
+            },
+            None,
+            None,
+        );
+        assert_eq!(
+            response.get("error_code"),
+            Some(&serde_json::json!("queue_unavailable"))
+        );
+        assert_eq!(
+            response.get("error"),
+            Some(&serde_json::json!("queue unavailable"))
+        );
+        assert!(
+            response.get("detail").and_then(serde_json::Value::as_str).is_some(),
+            "expected queue-unavailable detail"
+        );
+        let queue = state.queue.lock().expect("lock");
+        assert_eq!(queue.live_len(), 0, "failed persist must not leave live entry");
+    }
+
+    #[test]
+    fn enqueue_mutation_idempotent_replay_does_not_repersist_or_rollback() {
+        let mut state = test_state();
+        state.queue_path = PathBuf::from("/proc/teslausb-queue.json");
+        {
+            let mut queue = state.queue.lock().expect("lock");
+            let job_id = queue
+                .enqueue(
+                    2,
+                    Mutation::DeletePath {
+                        rel_path: "Music/x.mp3".to_owned(),
+                    },
+                    None,
+                    Some("idem-k1".to_owned()),
+                )
+                .expect("seed queue");
+            assert_eq!(job_id, "m-1");
+        }
+        let response = enqueue_mutation(
+            &state,
+            2,
+            Mutation::DeletePath {
+                rel_path: "Music/x.mp3".to_owned(),
+            },
+            None,
+            Some("idem-k1".to_owned()),
+        );
+        assert_eq!(response.get("job_id"), Some(&serde_json::json!("m-1")));
+        assert_eq!(response.get("state"), Some(&serde_json::json!("queued")));
+        let queue = state.queue.lock().expect("lock");
+        assert_eq!(queue.live_len(), 1, "replay must keep the original live entry");
+    }
+
+    #[test]
+    fn retire_seqs_reclaims_older_terminal_blobs_before_prune() {
+        let dir = scratch_dir("retire-blobs");
+        let queue_path = dir.join("queue.json");
+        let old_blob = dir.join("old.blob");
+        let new_blob = dir.join("new.blob");
+        std::fs::write(&old_blob, b"old").expect("write old blob");
+        std::fs::write(&new_blob, b"new").expect("write new blob");
+
+        let mut state = test_state();
+        state.queue_path = queue_path.clone();
+        {
+            let mut queue = state.queue.lock().expect("lock");
+            queue
+                .enqueue(
+                    2,
+                    Mutation::InstallFile {
+                        rel_path: "Music/old.mp3".to_owned(),
+                        source_path: "/stage/old".to_owned(),
+                    },
+                    Some(old_blob.to_string_lossy().into_owned()),
+                    None,
+                )
+                .expect("enqueue old");
+            queue
+                .enqueue(
+                    2,
+                    Mutation::InstallFile {
+                        rel_path: "Music/new.mp3".to_owned(),
+                        source_path: "/stage/new".to_owned(),
+                    },
+                    Some(new_blob.to_string_lossy().into_owned()),
+                    None,
+                )
+                .expect("enqueue new");
+            // Simulate an already-terminal residue entry from an earlier cycle.
+            queue.set_state(&[1], MutationState::Applied);
+            queue.persist(&state.queue_path).expect("persist prior residue");
+        }
+
+        retire_seqs(&state, &[2], MutationState::Applied);
+
+        assert!(
+            !old_blob.exists(),
+            "older terminal blob must be reclaimed before prune"
+        );
+        assert!(
+            !new_blob.exists(),
+            "current terminal blob must be reclaimed before prune"
+        );
+        let queue = state.queue.lock().expect("lock");
+        assert!(queue.entries().is_empty(), "terminal entries should be pruned");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn retire_seqs_keeps_terminal_entry_when_blob_remove_fails_until_blob_absent() {
+        let dir = scratch_dir("retire-stuck-blob");
+        let queue_path = dir.join("queue.json");
+        let stuck_blob = dir.join("stuck.blob");
+        std::fs::create_dir_all(&stuck_blob).expect("create stuck blob dir");
+
+        let mut state = test_state();
+        state.queue_path = queue_path.clone();
+        {
+            let mut queue = state.queue.lock().expect("lock");
+            queue
+                .enqueue(
+                    2,
+                    Mutation::InstallFile {
+                        rel_path: "Music/stuck.mp3".to_owned(),
+                        source_path: "/stage/stuck".to_owned(),
+                    },
+                    Some(stuck_blob.to_string_lossy().into_owned()),
+                    None,
+                )
+                .expect("enqueue stuck");
+        }
+
+        retire_seqs(&state, &[1], MutationState::Applied);
+        {
+            let queue = state.queue.lock().expect("lock");
+            assert_eq!(
+                queue.entries().len(),
+                1,
+                "terminal entry must remain when blob reclaim fails"
+            );
+        }
+        let loaded = MutationQueue::load(&queue_path);
+        assert_eq!(
+            loaded.entries().len(),
+            1,
+            "journal must retain terminal entry when blob reclaim fails"
+        );
+
+        std::fs::remove_dir_all(&stuck_blob).expect("remove stuck blob dir");
+        retire_seqs(&state, &[], MutationState::Applied);
+        let queue = state.queue.lock().expect("lock");
+        assert!(
+            queue.entries().is_empty(),
+            "once blob is absent, terminal entry should be pruned"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn retire_seqs_does_not_prune_when_unlink_succeeds_but_cleanup_sync_fails() {
+        let dir = scratch_dir("retire-unlink-sync-fail");
+        let queue_path = dir.join("queue.json");
+        let blob = dir.join("sync-fail.blob");
+        std::fs::write(&blob, b"x").expect("write blob");
+        let blob_str = blob.to_string_lossy().into_owned();
+
+        let mut state = test_state();
+        state.queue_path = queue_path.clone();
+        {
+            let mut queue = state.queue.lock().expect("lock");
+            queue
+                .enqueue(
+                    2,
+                    Mutation::InstallFile {
+                        rel_path: "Music/sync-fail.mp3".to_owned(),
+                        source_path: "/stage/sync-fail".to_owned(),
+                    },
+                    Some(blob_str.clone()),
+                    None,
+                )
+                .expect("enqueue");
+        }
+
+        retire_seqs_with_cleanup(&state, &[1], MutationState::Applied, |path| {
+            std::fs::remove_file(path)?;
+            Err(std::io::Error::other("parent fsync failed"))
+        });
+
+        assert!(!blob.exists(), "unlink succeeded");
+        {
+            let queue = state.queue.lock().expect("lock");
+            assert_eq!(
+                queue.entries().len(),
+                1,
+                "entry must remain until cleanup (including parent sync) succeeds"
+            );
+        }
+        let loaded = MutationQueue::load(&queue_path);
+        assert_eq!(
+            loaded.entries().len(),
+            1,
+            "persisted queue must retain unreclaimed entry"
+        );
+
+        retire_seqs(&state, &[], MutationState::Applied);
+        let queue = state.queue.lock().expect("lock");
+        assert!(
+            queue.entries().is_empty(),
+            "next retire pass should prune after NotFound + parent sync succeeds"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn drain_once_sweeps_terminal_cleanup_without_pending_work() {
+        let dir = scratch_dir("drain-terminal-sweep");
+        let queue_path = dir.join("queue.json");
+        let missing_blob = dir.join("missing.blob");
+
+        let mut state = test_state();
+        state.queue_path = queue_path.clone();
+        {
+            let mut queue = state.queue.lock().expect("lock");
+            queue
+                .enqueue(
+                    2,
+                    Mutation::InstallFile {
+                        rel_path: "Music/missing.mp3".to_owned(),
+                        source_path: "/stage/missing".to_owned(),
+                    },
+                    Some(missing_blob.to_string_lossy().into_owned()),
+                    None,
+                )
+                .expect("enqueue");
+            queue.set_state(&[1], MutationState::Applied);
+            queue.persist(&state.queue_path).expect("persist terminal entry");
+            assert!(queue.pending_partitions().is_empty(), "no queued work");
+        }
+
+        drain_once(&state);
+        let queue = state.queue.lock().expect("lock");
+        assert!(
+            queue.entries().is_empty(),
+            "periodic drain pass must sweep terminal cleanup even without queued partitions"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn empty_seq_sweep_skips_cleanup_when_terminal_persist_fails() {
+        let dir = scratch_dir("sweep-persist-fail");
+        let blob = dir.join("retain.blob");
+        std::fs::write(&blob, b"x").expect("write blob");
+
+        let mut state = test_state();
+        state.queue_path = PathBuf::from("/proc/teslausb-queue.json");
+        {
+            let mut queue = state.queue.lock().expect("lock");
+            queue
+                .enqueue(
+                    2,
+                    Mutation::InstallFile {
+                        rel_path: "Music/retain.mp3".to_owned(),
+                        source_path: "/stage/retain".to_owned(),
+                    },
+                    Some(blob.to_string_lossy().into_owned()),
+                    None,
+                )
+                .expect("enqueue");
+            queue.set_state(&[1], MutationState::Applied);
+        }
+
+        retire_seqs(&state, &[], MutationState::Applied);
+        assert!(
+            blob.exists(),
+            "blob must be retained when terminal state persistence is not confirmed"
+        );
+        let queue = state.queue.lock().expect("lock");
+        assert_eq!(queue.entries().len(), 1, "terminal entry must remain for retry");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

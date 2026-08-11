@@ -24,14 +24,10 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
-use std::rc::Rc;
-#[cfg(unix)]
 use live::{
     LiveArchiveDeleteOps, LiveArchiveStore, LiveCatalog, LiveClock, LiveIndexClient, LiveRand,
     LiveStatfs,
 };
-#[cfg(unix)]
-use serde::Serialize;
 #[cfg(unix)]
 use retentiond::archive::{CarDeleteHandoff, CarDeleteRequest, HandoffOutcome};
 #[cfg(unix)]
@@ -50,6 +46,10 @@ use retentiond::register_client::{INDEXD_SOCKET_PATH, UnixRegisterClient};
 use retentiond::serve::{DrainInput, DrainOutcome, DrainStop, RetentionLoop, Seams};
 #[cfg(unix)]
 use retentiond::volume_source::VolumeCandidateSource;
+#[cfg(unix)]
+use serde::Serialize;
+#[cfg(unix)]
+use std::rc::Rc;
 
 #[cfg(unix)]
 const DEFAULT_SLOT: u8 = 0;
@@ -141,7 +141,11 @@ enum EvictionMode {
 }
 
 #[cfg(unix)]
-fn resolve_eviction_mode(enable_eviction: bool, dry_run: bool, allow_permanent_loss: bool) -> EvictionMode {
+fn resolve_eviction_mode(
+    enable_eviction: bool,
+    dry_run: bool,
+    allow_permanent_loss: bool,
+) -> EvictionMode {
     if !enable_eviction {
         EvictionMode::Inert
     } else if dry_run || !allow_permanent_loss {
@@ -152,7 +156,11 @@ fn resolve_eviction_mode(enable_eviction: bool, dry_run: bool, allow_permanent_l
 }
 
 #[cfg(unix)]
-fn cumulative_evict_budget(free_at_startup: u64, target_free_bytes: u64, per_cycle_evict_bytes: u64) -> u64 {
+fn cumulative_evict_budget(
+    free_at_startup: u64,
+    target_free_bytes: u64,
+    per_cycle_evict_bytes: u64,
+) -> u64 {
     let startup_deficit = target_free_bytes.saturating_sub(free_at_startup);
     startup_deficit.saturating_add(per_cycle_evict_bytes)
 }
@@ -213,7 +221,11 @@ impl EvictBudget {
 }
 
 #[cfg(unix)]
-#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
 fn frac_bytes(total: u64, frac: f64) -> u64 {
     (total as f64 * frac.clamp(0.0, 1.0)) as u64
 }
@@ -255,8 +267,13 @@ fn log_drain(outcome: &DrainOutcome, dry_run: bool, cfg: &RetentionConfig, inter
             (bytes as f64 * 100.0) / total as f64
         }
     };
-    let recency_floor_epoch = now_epoch_s_saturating().saturating_sub(cfg.target_drain.recency_floor_secs);
-    let permanent_loss_count = outcome.records.iter().filter(|record| record.permanent_loss).count();
+    let recency_floor_epoch =
+        now_epoch_s_saturating().saturating_sub(cfg.target_drain.recency_floor_secs);
+    let permanent_loss_count = outcome
+        .records
+        .iter()
+        .filter(|record| record.permanent_loss)
+        .count();
     println!(
         "retentiond governor [{mode_tag}] stop={:?} items={} bytes_freed={} free_before={} ({:.2}%) free_after={} ({:.2}%) total={} target_free≈{} ({:.2}%) gap_to_target={} recency_floor_epoch={}",
         outcome.stop,
@@ -364,8 +381,10 @@ fn run_serve(args: &[String]) -> ExitCode {
     let mut state = DriverState::with_archive_root(&archive_root);
     let health_file = std::env::var_os("RETENTIOND_HEALTH_FILE")
         .map_or_else(|| PathBuf::from(DEFAULT_HEALTH_FILE), PathBuf::from);
-    let governor_status_file = std::env::var_os("RETENTIOND_GOVERNOR_STATUS_FILE")
-        .map_or_else(|| PathBuf::from(DEFAULT_GOVERNOR_STATUS_FILE), PathBuf::from);
+    let governor_status_file = std::env::var_os("RETENTIOND_GOVERNOR_STATUS_FILE").map_or_else(
+        || PathBuf::from(DEFAULT_GOVERNOR_STATUS_FILE),
+        PathBuf::from,
+    );
     let startup_now = now_epoch_s_saturating();
     let mut last_progress_at = startup_now;
     let mut last_pending: u64 = 0;
@@ -686,7 +705,10 @@ fn run_serve(args: &[String]) -> ExitCode {
                         report.pending_len
                     );
                 }
-                if report.observed > 0 || report.registered > 0 || report.registered_from_pending > 0 {
+                if report.observed > 0
+                    || report.registered > 0
+                    || report.registered_from_pending > 0
+                {
                     last_progress_at = cycle_end;
                 }
                 last_pending = u64::try_from(report.pending_len).unwrap_or(u64::MAX);
@@ -1035,8 +1057,7 @@ fn parse_serve_args(args: &[String]) -> Result<ServeArgs, String> {
             "--drain-only" => parsed.drain_only = true,
             "--recency-floor-secs" => {
                 let value = next_arg_value(&mut iter, "--recency-floor-secs")?;
-                parsed.recency_floor_secs =
-                    Some(parse_arg::<i64>("--recency-floor-secs", &value)?);
+                parsed.recency_floor_secs = Some(parse_arg::<i64>("--recency-floor-secs", &value)?);
             }
             "--archive-root" => {
                 let value = next_arg_value(&mut iter, "--archive-root")?;
@@ -1058,7 +1079,12 @@ fn parse_serve_args(args: &[String]) -> Result<ServeArgs, String> {
                 let value = next_arg_value(&mut iter, "--interval-secs")?;
                 parsed.interval_secs = parse_arg::<u64>("--interval-secs", &value)?;
             }
-            other => return Err(format!("retentiond serve: unknown option `{other}`.\n{}", usage())),
+            other => {
+                return Err(format!(
+                    "retentiond serve: unknown option `{other}`.\n{}",
+                    usage()
+                ));
+            }
         }
     }
     if parsed.interval_secs == 0 {
@@ -1153,11 +1179,11 @@ mod tests {
     use retentiond::read_client::VolumeReadFileClient;
 
     use super::{
-        LiveArchiveDeleteOps, LiveArchiveStore, LiveCatalog, LiveClock, LiveIndexClient, LiveRand,
-        LiveStatfs, NoCarHandoff, Seams, cumulative_evict_budget, drain_stop_tag, parse_serve_args,
-        publisher_instance_hex_128, render_health, resolve_eviction_mode, validate_phase1_mode,
-        DrainStop, EvictBudget, EvictionMode, GovernorStatus, RetentionLoop, ServeArgs,
-        maybe_retry_recover,
+        DrainStop, EvictBudget, EvictionMode, GovernorStatus, LiveArchiveDeleteOps,
+        LiveArchiveStore, LiveCatalog, LiveClock, LiveIndexClient, LiveRand, LiveStatfs,
+        NoCarHandoff, RetentionLoop, Seams, ServeArgs, cumulative_evict_budget, drain_stop_tag,
+        maybe_retry_recover, parse_serve_args, publisher_instance_hex_128, render_health,
+        resolve_eviction_mode, validate_phase1_mode,
     };
 
     #[test]
@@ -1359,7 +1385,10 @@ mod tests {
         assert!(parsed.archive_recent_only);
         assert!(parsed.no_delete);
         assert_eq!(
-            parsed.archive_root.as_deref().and_then(std::path::Path::to_str),
+            parsed
+                .archive_root
+                .as_deref()
+                .and_then(std::path::Path::to_str),
             Some("/data/teslausb/archive")
         );
         assert_eq!(
@@ -1683,7 +1712,10 @@ mod tests {
             drain_stop_tag(&DrainStop::NoSafeCandidate),
             "no_safe_candidate"
         );
-        assert_eq!(drain_stop_tag(&DrainStop::AlreadyHealthy), "already_healthy");
+        assert_eq!(
+            drain_stop_tag(&DrainStop::AlreadyHealthy),
+            "already_healthy"
+        );
         assert_eq!(
             drain_stop_tag(&DrainStop::AnomalyRefused {
                 bytes_to_free: 1,

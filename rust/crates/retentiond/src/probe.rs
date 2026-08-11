@@ -143,11 +143,7 @@ enum HeaderScan {
     End,
 }
 
-fn read_top_level_box_header(
-    file: &mut File,
-    pos: u64,
-    file_len: u64,
-) -> io::Result<HeaderScan> {
+fn read_top_level_box_header(file: &mut File, pos: u64, file_len: u64) -> io::Result<HeaderScan> {
     if pos.saturating_add(8) > file_len {
         return Ok(HeaderScan::End);
     }

@@ -86,19 +86,19 @@ pub fn list_eviction_candidates(
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(
         params![
-          recency_floor_epoch,
-          now_epoch,
-          i64::from(allow_undurable),
-          capped
+            recency_floor_epoch,
+            now_epoch,
+            i64::from(allow_undurable),
+            capped
         ],
         |row| {
-          Ok(EvictionCandidate {
-              id: row.get(0)?,
-              path: row.get(1)?,
-              size_bytes: row.get(2)?,
-              archived_at: row.get(3)?,
-              folder_class: row.get(4)?,
-          })
+            Ok(EvictionCandidate {
+                id: row.get(0)?,
+                path: row.get(1)?,
+                size_bytes: row.get(2)?,
+                archived_at: row.get(3)?,
+                folder_class: row.get(4)?,
+            })
         },
     )?;
 
@@ -995,7 +995,13 @@ mod tests {
                 delete_gen: None,
             },
         );
-        insert_linked_clip(&conn, item, "clip:mismatched-folder-class", 100, "SentryClips");
+        insert_linked_clip(
+            &conn,
+            item,
+            "clip:mismatched-folder-class",
+            100,
+            "SentryClips",
+        );
 
         let rows = list_eviction_candidates(&conn, 1_000, 1_000, false, 100).expect("query");
         assert!(rows.is_empty());
@@ -1530,7 +1536,13 @@ mod tests {
                 delete_gen: None,
             },
         );
-        let _ = insert_linked_clip(&conn, pure_junk, "clip:pure-junk-newest", 9_000, "RecentClips");
+        let _ = insert_linked_clip(
+            &conn,
+            pure_junk,
+            "clip:pure-junk-newest",
+            9_000,
+            "RecentClips",
+        );
         insert_front_parse_attempt(&conn, "clip:pure-junk-newest", "no_waypoints");
 
         let mixed = insert_archive_item_unlinked(
@@ -1670,8 +1682,7 @@ mod tests {
             "RecentClips",
         );
 
-        let rows =
-            list_eviction_candidates(&conn, recency_floor, now, false, 100).expect("query");
+        let rows = list_eviction_candidates(&conn, recency_floor, now, false, 100).expect("query");
         let ids: Vec<i64> = rows.iter().map(|row| row.id).collect();
         assert_eq!(ids, vec![outside_grace]);
     }

@@ -38,6 +38,7 @@ mod mediamount;
 #[cfg(unix)]
 mod mutate;
 mod provision;
+#[cfg(unix)]
 mod queue;
 #[cfg(unix)]
 mod reenum;

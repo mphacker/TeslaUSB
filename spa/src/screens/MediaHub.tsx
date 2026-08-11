@@ -2,9 +2,13 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import { Fragment } from "preact";
 import { ApiError, api } from "../api/client";
 import type {
+  AdvancedSetting,
   ApInfo,
   ApMode,
-  GadgetStatus,
+  FsckHistoryEntry,
+  FsckLastCheckResponse,
+  FsckStatusResponse,
+  GadgetModeStatus,
   HealthBlock,
   Pref,
   SavedWifiNetwork,
@@ -180,6 +184,87 @@ function isAbortError(err: unknown): boolean {
   return err instanceof DOMException && err.name === "AbortError";
 }
 
+function advancedValueLabel(
+  value: string,
+  validation: AdvancedSetting["validation"],
+): string {
+  if (validation.kind === "timezone_or_auto" && value === "") return "Auto";
+  return value;
+}
+
+function advancedSourceLabel(status: AdvancedSetting["source_status"]): string {
+  if (status === "stored") return "Configured";
+  if (status === "default_invalid") return "Defaulted (invalid saved value)";
+  return "Defaulted (missing)";
+}
+
+function advancedValidationLabel(validation: AdvancedSetting["validation"]): string {
+  if (validation.kind === "enum") return validation.allowed.join(" | ");
+  if (validation.kind === "integer_range") return `${validation.min}–${validation.max}`;
+  return "IANA timezone or Auto";
+}
+
+function partitionLabel(partition: "part1" | "part2" | "part3"): string {
+  if (partition === "part1") return "TeslaCam";
+  if (partition === "part2") return "Light Show";
+  return "Music";
+}
+
+function fsckResultLabel(result: string | null | undefined): string {
+  if (!result) return "—";
+  return result.replace(/_/g, " ");
+}
+
+function formatLastCheckAge(ageHours: number | undefined): string {
+  if (ageHours == null || !Number.isFinite(ageHours)) return "Unknown age";
+  if (ageHours < 1) return "Less than 1 hour ago";
+  if (ageHours < 24) return `${Math.round(ageHours)} hours ago`;
+  return `${Math.round(ageHours / 24)} days ago`;
+}
+
+function gadgetModeLabel(mode: GadgetModeStatus["mode"] | undefined): string {
+  if (mode === "syncing") return "Syncing";
+  if (mode === "presented") return "Presented";
+  if (mode === "degraded") return "Degraded";
+  return "Unavailable";
+}
+
+function gadgetHandoffLabel(gadget: GadgetModeStatus): string {
+  const bits = [gadget.handoff.state === "active" ? "Active" : "Idle"];
+  if (
+    gadget.handoff.pending_mutations != null &&
+    gadget.handoff.applying_mutations != null
+  ) {
+    bits.push(
+      `Queue ${gadget.handoff.pending_mutations} pending / ${gadget.handoff.applying_mutations} applying`,
+    );
+  }
+  if (gadget.handoff.last_result) {
+    bits.push(
+      `Last ${gadget.handoff.last_result}${gadget.handoff.last_handoff_id ? ` (${gadget.handoff.last_handoff_id})` : ""}`,
+    );
+  }
+  return bits.join(" · ");
+}
+
+function lunStatusLabel(image: string | null, loaded: boolean | null): string {
+  const loadedText =
+    loaded === null ? "Unknown" : loaded ? "Loaded" : "Not loaded";
+  return image ? `${loadedText} (${image})` : loadedText;
+}
+
+function recoveryLabel(gadget: GadgetModeStatus): string {
+  if (gadget.banner?.message) return gadget.banner.message;
+  const reenum = gadget.recovery.last_reenum;
+  if (reenum?.result) {
+    if (reenum.disconnect_ms != null) {
+      return `Last USB re-enumeration: ${reenum.result} (${reenum.disconnect_ms} ms disconnect)`;
+    }
+    return `Last USB re-enumeration: ${reenum.result}`;
+  }
+  return "—";
+}
+
 function wifiSignalBars(signal: number): string {
   if (signal >= 75) return "▂▄▆█";
   if (signal >= 50) return "▂▄▆";
@@ -258,10 +343,19 @@ export function MediaHub() {
   const [mappingMsg, setMappingMsg] = useState<
     { kind: "info" | "success" | "error"; text: string } | null
   >(null);
+  const [advancedSettings, setAdvancedSettings] = useState<AdvancedSetting[]>([]);
+  const [advancedLoaded, setAdvancedLoaded] = useState(false);
   const [indexer, setIndexer] = useState<HealthBlock | null>(null);
   const [health, setHealth] = useState<SystemHealth | null>(null);
   const [metrics, setMetrics] = useState<SystemMetrics | null>(null);
   const [storage, setStorage] = useState<StorageHealth | null>(null);
+  const [fsckStatus, setFsckStatus] = useState<FsckStatusResponse | null>(null);
+  const [fsckHistory, setFsckHistory] = useState<FsckHistoryEntry[]>([]);
+  const [fsckLastChecks, setFsckLastChecks] = useState<Record<"part1" | "part2" | "part3", FsckLastCheckResponse | null>>({
+    part1: null,
+    part2: null,
+    part3: null,
+  });
   const [wifiStatus, setWifiStatus] = useState<WifiStatus | null>(null);
   const [wifiNetworks, setWifiNetworks] = useState<WifiNetwork[]>([]);
   const [wifiSaved, setWifiSaved] = useState<SavedWifiNetwork[]>([]);
@@ -289,7 +383,7 @@ export function MediaHub() {
   const [apEditing, setApEditing] = useState(false);
   const [apSsid, setApSsid] = useState("");
   const [apPass, setApPass] = useState("");
-  const [gadget, setGadget] = useState<GadgetStatus | null>(null);
+  const [gadget, setGadget] = useState<GadgetModeStatus | null>(null);
   const [gadgetUnavailable, setGadgetUnavailable] = useState(false);
   const [derived, setDerived] = useState<{
     cpuPct: number | null;
@@ -321,17 +415,41 @@ export function MediaHub() {
         // Read-only degrade: fall back to template defaults without logging,
         // so an absent/empty prefs store never trips the zero-console gate.
       });
+    api
+      .advancedSettings(ctrl.signal)
+      .then((response) => {
+        if (ctrl.signal.aborted) return;
+        setAdvancedSettings(response.items);
+      })
+      .catch(() => {
+        // Read-only degrade: keep the section in its loading/default state.
+      })
+      .finally(() => {
+        if (!ctrl.signal.aborted) setAdvancedLoaded(true);
+      });
     // Device-status reads (5.1d). Each handler never 5xx and self-degrades to
     // unknown/null, so on the rare transport error we simply leave the section
     // in its loading/unknown state without logging (zero-console gate).
     api.systemHealth(ctrl.signal).then(setHealth).catch(() => {});
     api.storageHealth(ctrl.signal).then(setStorage).catch(() => {});
-    // USB-gadget status is the first cross-daemon control-socket read: it talks
-    // to gadgetd's live socket and so, unlike the catalog reads, it CAN be
+    api.fsckStatus(ctrl.signal).then(setFsckStatus).catch(() => {});
+    api.fsckHistory(ctrl.signal).then(setFsckHistory).catch(() => {});
+    Promise.all([
+      api.fsckLastCheck(1, ctrl.signal),
+      api.fsckLastCheck(2, ctrl.signal),
+      api.fsckLastCheck(3, ctrl.signal),
+    ])
+      .then(([part1, part2, part3]) => {
+        if (ctrl.signal.aborted) return;
+        setFsckLastChecks({ part1, part2, part3 });
+      })
+      .catch(() => {});
+    // USB-gadget mode status is the first cross-daemon control-socket read: it
+    // talks to gadgetd's live socket and so, unlike the catalog reads, it CAN be
     // unavailable (gadgetd down / not running). Surface an honest "unavailable"
     // state on a real failure; ignore aborts (unmount) to keep the console clean.
     api
-      .gadgetStatus(ctrl.signal)
+      .gadgetModeStatus(ctrl.signal)
       .then(setGadget)
       .catch(() => {
         if (!ctrl.signal.aborted) setGadgetUnavailable(true);
@@ -799,6 +917,15 @@ export function MediaHub() {
     .filter((n): n is SavedWifiNetwork => n != null);
   const availableWifi = wifiNetworks.filter((n) => !n.saved && !n.active);
   const apMode = apStatus?.mode ?? "auto";
+  const fsckRecent = fsckHistory.slice(-5).reverse();
+  const fsckStatusLine =
+    fsckStatus == null
+      ? "Filesystem check status unavailable."
+      : fsckStatus.running
+        ? `${fsckStatus.partition ? partitionLabel(fsckStatus.partition) : "Filesystem"} check running${fsckStatus.progress ? ` — ${fsckStatus.progress}` : ""}`
+        : fsckStatus.result
+          ? `Last result: ${fsckResultLabel(fsckStatus.result)}${fsckStatus.details ? ` — ${fsckStatus.details}` : ""}`
+          : "No filesystem check currently running.";
 
   return (
     // Bare screen content — the router hoists a single shared <Shell> and
@@ -935,7 +1062,7 @@ export function MediaHub() {
         </details>
 
         {/* USB Drive — live state from gadgetd's control socket
-            (GET /api/gadget/status), the first cross-daemon control-socket read
+            (GET /api/gadget/mode-status), the first cross-daemon control-socket read
             surfaced in the SPA. Unlike the catalog reads this CAN be unavailable
             (gadgetd down / not running), in which case we show an honest
             "unavailable" state rather than fabricating a "connected" status. */}
@@ -951,30 +1078,45 @@ export function MediaHub() {
                 <div data-testid="usb-present" style="color:var(--text-primary)">
                   {gadget.present ? "Yes" : "No"}
                 </div>
+                <div style="color:var(--text-secondary)">Gadget mode</div>
+                <div data-testid="usb-mode" style="color:var(--text-primary)">
+                  {gadgetModeLabel(gadget.mode)}
+                </div>
                 <div style="color:var(--text-secondary)">Controller bound</div>
                 <div data-testid="usb-bound" style="color:var(--text-primary)">
                   {gadget.bound
                     ? `Yes (${gadget.udc_state ?? "unknown"})`
                     : "No"}
                 </div>
-                <div style="color:var(--text-secondary)">Dashcam image</div>
-                <div style="color:var(--text-primary); min-width:0; overflow-wrap:anywhere;">
-                  {gadget.lun_file ?? "\u2014"}
+                <div style="color:var(--text-secondary)">Handoff state</div>
+                <div data-testid="usb-handoff" style="color:var(--text-primary)">
+                  {gadgetHandoffLabel(gadget)}
                 </div>
-                <div style="color:var(--text-secondary)">Media image</div>
+                <div style="color:var(--text-secondary)">TeslaCam LUN image</div>
                 <div style="color:var(--text-primary); min-width:0; overflow-wrap:anywhere;">
-                  {gadget.media_lun_file ?? "\u2014"}
+                  {lunStatusLabel(gadget.lun.teslacam.image, gadget.lun.teslacam.loaded)}
+                </div>
+                <div style="color:var(--text-secondary)">Media LUN image</div>
+                <div style="color:var(--text-primary); min-width:0; overflow-wrap:anywhere;">
+                  {lunStatusLabel(gadget.lun.media.image, gadget.lun.media.loaded)}
+                </div>
+                <div style="color:var(--text-secondary)">Recovery / banner</div>
+                <div
+                  data-testid="usb-recovery"
+                  style="color:var(--text-primary); min-width:0; overflow-wrap:anywhere;"
+                >
+                  {recoveryLabel(gadget)}
                 </div>
                 <div style="color:var(--text-secondary)">Media mount (read)</div>
                 <div
                   data-testid="usb-media-ro"
                   style="color:var(--text-primary); min-width:0; overflow-wrap:anywhere;"
                 >
-                  {gadget.media_ro_mounted === null
+                  {gadget.recovery.media_ro_mounted === null
                     ? "\u2014"
-                    : gadget.media_ro_mounted
-                      ? `Mounted${gadget.media_ro_path ? ` (${gadget.media_ro_path})` : ""}`
-                      : `Not mounted${gadget.media_ro_error ? ` \u2014 ${gadget.media_ro_error}` : ""}`}
+                    : gadget.recovery.media_ro_mounted
+                      ? `Mounted${gadget.recovery.media_ro_path ? ` (${gadget.recovery.media_ro_path})` : ""}`
+                      : `Not mounted${gadget.recovery.media_ro_error ? ` \u2014 ${gadget.recovery.media_ro_error}` : ""}`}
                 </div>
               </div>
             ) : gadgetUnavailable ? (
@@ -1631,6 +1773,58 @@ export function MediaHub() {
           </div>
         </details>
 
+        {/* Advanced Settings — read-only bounded visibility into supported,
+            validated pref keys only (no writes on this surface). */}
+        <details class="settings-section" id="advanced-settings-section">
+          <summary>Advanced Settings</summary>
+          <div class="section-content" id="advanced-settings-card">
+            <p style="font-size:0.85rem; color:var(--text-secondary); margin:0 0 12px;">
+              Read-only visibility into supported advanced preferences. Values are
+              bounded to validated keys; missing or invalid saved values fall back
+              to defaults.
+            </p>
+            {!advancedLoaded ? (
+              <p style="margin:0; color:var(--text-secondary); font-size:0.85rem;">
+                Loading advanced settings…
+              </p>
+            ) : advancedSettings.length === 0 ? (
+              <p style="margin:0; color:var(--text-secondary); font-size:0.85rem;">
+                No supported advanced settings available.
+              </p>
+            ) : (
+              <div class="advanced-settings-list">
+                {advancedSettings.map((setting) => (
+                  <article
+                    class="advanced-setting-row"
+                    key={setting.key}
+                    data-testid={`advanced-setting-${setting.key}`}
+                  >
+                    <div>
+                      <strong>{setting.label}</strong>
+                      <p class="advanced-setting-description">{setting.description}</p>
+                    </div>
+                    <div class="advanced-setting-meta">
+                      <code class="advanced-setting-value">
+                        {advancedValueLabel(setting.value, setting.validation)}
+                      </code>
+                      <span class="advanced-setting-status">
+                        {advancedSourceLabel(setting.source_status)}
+                      </span>
+                    </div>
+                    <div class="advanced-setting-foot">
+                      <span>Allowed: {advancedValidationLabel(setting.validation)}</span>
+                      <span>
+                        Default:{" "}
+                        {advancedValueLabel(setting.default_value, setting.validation)}
+                      </span>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            )}
+          </div>
+        </details>
+
         {/* Storage Health — from /api/storage/health. Capacity-derived severity
             + summary with best-effort wear telemetry probes. */}
         <details class="settings-section" id="storage-health-section">
@@ -1664,6 +1858,93 @@ export function MediaHub() {
               checksums). Plan to replace the card every 12 months and keep cloud
               archive enabled so a card failure never costs you data.
             </p>
+          </div>
+        </details>
+
+        <details class="settings-section" id="fsck-section">
+          <summary>Filesystem Health Check</summary>
+          <div class="section-content">
+            <p style="font-size:0.85rem; color:var(--text-secondary); margin:0 0 12px">
+              Read-only visibility into persisted filesystem check state and
+              recent results. Starting, cancelling, and repair actions are
+              intentionally disabled in B-1.
+            </p>
+            <p
+              id="fsck-status-line"
+              data-testid="fsck-status-line"
+              style="margin:0 0 10px; font-size:0.9rem"
+            >
+              {fsckStatusLine}
+            </p>
+
+            <div
+              id="fsck-last-checks"
+              style="display:grid; gap:10px; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); margin-bottom:12px"
+            >
+              {(["part1", "part2", "part3"] as const).map((partition) => {
+                const last = fsckLastChecks[partition];
+                const hasCheck = Boolean(last?.timestamp);
+                return (
+                  <article
+                    key={partition}
+                    data-testid={`fsck-last-${partition}`}
+                    style="border:1px solid var(--border-color); border-radius:8px; padding:10px"
+                  >
+                    <strong>{partitionLabel(partition)}</strong>
+                    <p style="margin:6px 0 0; color:var(--text-secondary); font-size:0.85rem">
+                      {hasCheck
+                        ? `Last checked ${formatLastCheckAge(last?.age_hours)}`
+                        : "Never checked"}
+                    </p>
+                    {hasCheck ? (
+                      <p style="margin:4px 0 0; font-size:0.85rem">
+                        {fsckResultLabel(last?.result ?? null)}
+                        {last?.details ? ` — ${last.details}` : ""}
+                      </p>
+                    ) : null}
+                  </article>
+                );
+              })}
+            </div>
+
+            <div id="fsck-history">
+              <strong style="font-size:0.9rem">Recent Checks</strong>
+              {fsckRecent.length === 0 ? (
+                <p
+                  data-testid="fsck-history-empty"
+                  style="margin:8px 0 0; color:var(--text-secondary); font-size:0.85rem"
+                >
+                  No filesystem checks recorded yet.
+                </p>
+              ) : (
+                <table
+                  class="fsck-history-table"
+                  data-testid="fsck-history-table"
+                  style="width:100%; margin-top:8px; border-collapse:collapse; font-size:0.85rem"
+                >
+                  <thead>
+                    <tr style="text-align:left; border-bottom:1px solid var(--border-color)">
+                      <th style="padding:6px">Time</th>
+                      <th style="padding:6px">Drive</th>
+                      <th style="padding:6px">Mode</th>
+                      <th style="padding:6px">Result</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {fsckRecent.map((entry, idx) => (
+                      <tr key={`${entry.timestamp}-${idx}`}>
+                        <td style="padding:6px">
+                          {new Date(entry.timestamp).toLocaleString()}
+                        </td>
+                        <td style="padding:6px">{partitionLabel(entry.partition)}</td>
+                        <td style="padding:6px">{entry.mode}</td>
+                        <td style="padding:6px">{fsckResultLabel(entry.result)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
           </div>
         </details>
 

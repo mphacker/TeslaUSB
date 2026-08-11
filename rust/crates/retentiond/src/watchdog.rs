@@ -46,7 +46,9 @@ fn decide(
     // near-full WatchdogSec budget rather than starting on a stale clock.
     let interval_ms = watchdog_usec
         .and_then(|raw| raw.parse::<i64>().ok())
-        .map_or(1000_i64, |usec| (usec / 1000 / 2).clamp(1000_i64, 10_000_i64));
+        .map_or(1000_i64, |usec| {
+            (usec / 1000 / 2).clamp(1000_i64, 10_000_i64)
+        });
 
     let kind = if let Some(name) = socket
         .strip_prefix('@')

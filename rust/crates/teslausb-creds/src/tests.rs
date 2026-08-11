@@ -4,7 +4,9 @@ use std::path::PathBuf;
 use crate::blob::BlobKeyMaterial;
 use crate::error::CredsError;
 use crate::hardware_root::{StaticHardwareRoot, derive_key, parse_cpuinfo_serial};
-use crate::schema::{CredentialDocument, CredentialFlow, CredentialValue, NasCredentials, OAuthProvider};
+use crate::schema::{
+    CredentialDocument, CredentialFlow, CredentialValue, NasCredentials, OAuthProvider,
+};
 // Storage-permission tests are unix-only; the crate itself compiles on Windows so
 // webd (which depends on it) can be built by the SPA UAT harness there.
 #[cfg(unix)]
@@ -19,9 +21,8 @@ use crate::{read_blob, read_or_create_salt, write_blob_atomic};
 use zeroize::Zeroizing;
 
 const TEST_SALT: [u8; 32] = [
-    0x32, 0x8b, 0x18, 0x74, 0x7a, 0x2f, 0x98, 0x44, 0xb2, 0x9d, 0x33, 0x2d, 0xb0, 0x11, 0x9a,
-    0xc7, 0x6d, 0x9b, 0xe5, 0x03, 0x61, 0x0e, 0x2f, 0x87, 0xb9, 0xae, 0x44, 0x3c, 0xd8, 0x10,
-    0xfe, 0x09,
+    0x32, 0x8b, 0x18, 0x74, 0x7a, 0x2f, 0x98, 0x44, 0xb2, 0x9d, 0x33, 0x2d, 0xb0, 0x11, 0x9a, 0xc7,
+    0x6d, 0x9b, 0xe5, 0x03, 0x61, 0x0e, 0x2f, 0x87, 0xb9, 0xae, 0x44, 0x3c, 0xd8, 0x10, 0xfe, 0x09,
 ];
 const TEST_NONCE: [u8; 12] = [
     0xb4, 0x4f, 0x0c, 0x96, 0x72, 0x27, 0xaa, 0x55, 0x3e, 0x19, 0x44, 0x8f,
@@ -66,10 +67,7 @@ fn wrong_machine_decrypt_fails_closed() {
 
 #[test]
 fn kat_vector_matches_committed_blob_hex() {
-    let root = StaticHardwareRoot::new(
-        "00000000cafebabe",
-        "1234567890abcdef1234567890abcdef",
-    );
+    let root = StaticHardwareRoot::new("00000000cafebabe", "1234567890abcdef1234567890abcdef");
     let key = derive_key(&root, &TEST_SALT, DEFAULT_KDF_ITERS).unwrap();
     let blob_key = BlobKeyMaterial {
         key,
@@ -129,7 +127,10 @@ fn type_allow_list_rejects_crypt_union_local_http() {
 fn per_key_allow_list_rejects_banned_keys_and_multisection_paste() {
     let mut webdav = BTreeMap::new();
     webdav.insert("url".to_owned(), "https://dav.example".to_owned());
-    webdav.insert("bearer_token_command".to_owned(), "cat /etc/token".to_owned());
+    webdav.insert(
+        "bearer_token_command".to_owned(),
+        "cat /etc/token".to_owned(),
+    );
     let err = validate_options_map("webdav", &webdav).unwrap_err();
     assert!(matches!(err, CredsError::ForbiddenOptionKey(_)));
 
@@ -257,10 +258,9 @@ Paste the following into your remote machine --->
 
 #[test]
 fn normalize_oauth_token_round_trips_bare_json() {
-    let bare =
-        r#"{"access_token":"abc","token_type":"Bearer","refresh_token":"def","expiry":"2026-01-01T00:00:00Z"}"#;
-    let expected = serde_json::to_string(&serde_json::from_str::<serde_json::Value>(bare).unwrap())
-        .unwrap();
+    let bare = r#"{"access_token":"abc","token_type":"Bearer","refresh_token":"def","expiry":"2026-01-01T00:00:00Z"}"#;
+    let expected =
+        serde_json::to_string(&serde_json::from_str::<serde_json::Value>(bare).unwrap()).unwrap();
     assert_eq!(normalize_oauth_token(bare).unwrap(), expected);
 }
 
@@ -342,7 +342,10 @@ fn multiline_valid_json_token_is_compacted_before_rendering() {
         .lines()
         .filter(|line| line.starts_with('['))
         .count();
-    assert_eq!(section_lines, 1, "rendered config has {section_lines} sections");
+    assert_eq!(
+        section_lines, 1,
+        "rendered config has {section_lines} sections"
+    );
 
     let parsed = parse_single_remote_conf(&rendered).unwrap();
     let reparsed = validate_options_map(&parsed.backend_type, &parsed.options).unwrap();
@@ -434,7 +437,12 @@ fn drive_id_rejects_illegal_values() {
         CredsError::OnedriveDriveIdTooLong
     ));
 
-    for illegal in ["has space", "with[bracket", "with]bracket", "bad\u{0007}char"] {
+    for illegal in [
+        "has space",
+        "with[bracket",
+        "with]bracket",
+        "bad\u{0007}char",
+    ] {
         let document = CredentialDocument::new(CredentialFlow::OAuth {
             provider: OAuthProvider::Onedrive,
             token: token.clone(),
@@ -557,7 +565,10 @@ fn option_values_trim_and_accept_safe_values() {
 fn typed_map_is_canonical_and_stable() {
     let mut options = BTreeMap::new();
     options.insert("port".to_owned(), CredentialValue::Int(22));
-    options.insert("host".to_owned(), CredentialValue::String("nas.local".to_owned()));
+    options.insert(
+        "host".to_owned(),
+        CredentialValue::String("nas.local".to_owned()),
+    );
     options.insert("tls".to_owned(), CredentialValue::Bool(false));
     let doc = CredentialDocument::new(CredentialFlow::NasCustom {
         creds: NasCredentials::Typed {
@@ -643,8 +654,8 @@ fn invalid_config_line_error_redacts_secret_content() {
 fn blob_key_material_debug_redacts_key() {
     let blob_key = BlobKeyMaterial {
         key: Zeroizing::new([
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
-            24, 25, 26, 27, 28, 29, 30, 31, 32,
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+            25, 26, 27, 28, 29, 30, 31, 32,
         ]),
         salt: [0_u8; 32],
         kdf_iters: DEFAULT_KDF_ITERS,

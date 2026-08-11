@@ -195,10 +195,7 @@ pub(crate) fn validate_ssid(value: &str) -> std::result::Result<(), &'static str
         .as_bytes()
         .first()
         .is_some_and(u8::is_ascii_whitespace)
-        || value
-            .as_bytes()
-            .last()
-            .is_some_and(u8::is_ascii_whitespace)
+        || value.as_bytes().last().is_some_and(u8::is_ascii_whitespace)
     {
         return Err("SSID must not have leading or trailing ASCII whitespace");
     }

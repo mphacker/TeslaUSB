@@ -48,11 +48,11 @@ mod unix_app {
     use scannerd::clip::parse_clip_name;
     use scannerd::error::ScannerError;
     use scannerd::mbr::parse_mbr;
-    use scannerd::mp4probe::{probe_mp4, Codec};
+    use scannerd::mp4probe::{Codec, probe_mp4};
     use scannerd::seiscan::scan_sei;
     use scannerd::stability::{StabilityConfig, StabilityTracker};
     use scannerd::volume::Volume;
-    use scannerd::walk::{walk_volume, FileRecord};
+    use scannerd::walk::{FileRecord, walk_volume};
 
     use crate::io::PreadReader;
 

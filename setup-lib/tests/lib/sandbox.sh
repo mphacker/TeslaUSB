@@ -87,7 +87,11 @@ EOF
 printf '%s\n' "\$*" >> "\${APT_LOG}"
 exit 0
 EOF
-    chmod +x "${base}/bin/systemctl" "${base}/bin/gadgetd" "${base}/bin/apt-get"
+    cat > "${base}/bin/visudo" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "${base}/bin/systemctl" "${base}/bin/gadgetd" "${base}/bin/apt-get" "${base}/bin/visudo"
 
     export TESLAUSB_PREFIX="${base}/root"
     export SYSTEMCTL_LOG="${base}/systemctl.log"

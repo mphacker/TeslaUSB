@@ -146,4 +146,36 @@ test.describe("webd catalog client", () => {
     expect(map.get("trip_gap_minutes")).toBe("15");
     expect(map.get("display_timezone")).toBe("America/Los_Angeles");
   });
+
+  test("advancedSettings() returns bounded validated rows", async () => {
+    const advanced = await api.advancedSettings();
+    expect(Array.isArray(advanced.items)).toBe(true);
+    expect(advanced.items.length).toBe(5);
+    expect(advanced.items.map((item) => item.key)).toEqual([
+      "trip_gap_minutes",
+      "speed_limit_mph",
+      "speed_unit",
+      "display_timezone",
+      "clock",
+    ]);
+    expect(advanced.items.find((item) => item.key === "speed_unit")?.value).toBe("kph");
+  });
+
+  test("fsck read APIs return typed maintenance visibility payloads", async () => {
+    const status = await api.fsckStatus();
+    expect(typeof status.running).toBe("boolean");
+    expect(status).toHaveProperty("result");
+
+    const history = await api.fsckHistory();
+    expect(Array.isArray(history)).toBe(true);
+    for (const entry of history) {
+      expect(entry).toHaveProperty("timestamp");
+      expect(entry).toHaveProperty("partition");
+      expect(entry).toHaveProperty("result");
+    }
+
+    const last = await api.fsckLastCheck(1);
+    expect(last).toHaveProperty("timestamp");
+    expect(last).toHaveProperty("result");
+  });
 });

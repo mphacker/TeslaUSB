@@ -384,13 +384,11 @@ impl UploadEngine<'_> {
             VerifySpec::Native { .. } => RemoteVerify::sha256(remote_digest),
         };
         match verify_digest(&item.verify, &remote, item.total_bytes) {
-            Integrity::Corrupt => {
-                self.fail_item(
-                    item,
-                    "integrity check failed: remote verification mismatch",
-                    true,
-                )
-            }
+            Integrity::Corrupt => self.fail_item(
+                item,
+                "integrity check failed: remote verification mismatch",
+                true,
+            ),
             Integrity::Verified => match remote {
                 RemoteVerify::Native { alg, value } => {
                     let evidence = CommitEvidence {

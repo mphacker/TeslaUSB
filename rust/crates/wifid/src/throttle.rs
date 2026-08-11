@@ -198,7 +198,12 @@ impl ThrottlePublisher {
         // Priority order matters: recovery and non-STA modes fail closed before
         // any "allowed" path is considered.
         let (uploads_allowed, max_tx, action, reason) = if i.chip_recovering {
-            (false, 0, PauseAction::AbortResumeLater, PauseReason::ChipRecovery)
+            (
+                false,
+                0,
+                PauseAction::AbortResumeLater,
+                PauseReason::ChipRecovery,
+            )
         } else if i.link_mode == LinkMode::Ap {
             (false, 0, PauseAction::DrainNoNew, PauseReason::ApMode)
         } else if i.link_mode == LinkMode::Down {

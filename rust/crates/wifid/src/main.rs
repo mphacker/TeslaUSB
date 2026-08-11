@@ -33,15 +33,15 @@ mod exec;
 mod ipc;
 mod link;
 mod nmcli;
-mod overlay;
 mod orchestrator;
+mod overlay;
 mod status;
 mod throttle;
 mod traits;
 mod watchdog;
 
-use std::process::ExitCode;
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::Duration;
 use std::time::Instant;
@@ -53,8 +53,8 @@ use exec::{
     current_boot_id,
 };
 use nmcli::NmcliNetworkController;
-use overlay::Uap0Overlay;
 use orchestrator::Daemon;
+use overlay::Uap0Overlay;
 
 /// Default credential file (Pi-side ext4 data area, never on the Tesla volume).
 const DEFAULT_CRED_PATH: &str = "/data/teslausb/wifi-credentials";

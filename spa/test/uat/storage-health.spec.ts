@@ -33,6 +33,7 @@ import { resolve } from "node:path";
 const ALLOWED_API = new Set([
   "/api/storage",
   "/api/storage/health",
+  "/api/retention/status",
   "/api/recording/encryption",
   "/api/system/metrics",
   "/api/system/health",
@@ -129,6 +130,22 @@ const STORAGE_HEALTH_FIXTURE = {
   trim: null,
 };
 
+const RETENTION_STATUS_FIXTURE = {
+  governor: GOVERNOR_FIXTURE,
+  candidate_count: 3,
+  candidate_count_truncated: false,
+  estimated_reclaimable_bytes: 6 * GIB,
+  estimated_reclaimable_bytes_truncated: false,
+  recent_cleanup: [
+    { at: 1700000040, items: 2, bytes_freed: 2 * GIB },
+    { at: 1700000000, items: 1, bytes_freed: 1 * GIB },
+  ],
+  recent_cleanup_truncated: false,
+  cloud_durability_required: false,
+  cloud_durability_disclosure:
+    "Armed local cleanup may delete footage before cloud upload confirmation.",
+};
+
 const METRICS_FIXTURE = {
   uptime_s: 123456,
   load: { one: 0.15, five: 0.22, fifteen: 0.18 },
@@ -147,7 +164,7 @@ const SYS_HEALTH_FIXTURE = {
   },
 };
 
-/** Intercept the four read-only probes with deterministic fixtures so the
+/** Intercept the read-only probes with deterministic fixtures so the
  *  functional assertions are host-independent. The specific `/storage/health`
  *  route is registered last so Playwright (matches most-recent first) resolves
  *  it before the broader `/storage` glob. Must run BEFORE the navigation that
@@ -161,6 +178,9 @@ async function routeProbes(page: Page) {
   await page.route("**/api/storage", (r) => r.fulfill(json(STORAGE_FIXTURE)));
   await page.route("**/api/system/metrics", (r) => r.fulfill(json(METRICS_FIXTURE)));
   await page.route("**/api/system/health", (r) => r.fulfill(json(SYS_HEALTH_FIXTURE)));
+  await page.route("**/api/retention/status", (r) =>
+    r.fulfill(json(RETENTION_STATUS_FIXTURE)),
+  );
   await page.route("**/api/recording/encryption", (r) =>
     r.fulfill(
       json({
@@ -326,6 +346,17 @@ test.describe("storage health UAT", () => {
 
     // Retention headroom — governor is null ⇒ degraded note (no fabricated figure).
     await expect(page.locator('[data-testid="retention-degraded"]')).toBeVisible();
+    await expect(page.locator('[data-testid="retention-candidate-count"]')).toContainText(
+      "3 clips",
+    );
+    await expect(page.locator('[data-testid="retention-reclaimable-bytes"]')).toContainText(
+      "6.0 GB",
+    );
+    await expect(page.locator('[data-testid="retention-history-list"]')).toBeVisible();
+    await expect(page.locator('[data-testid="retention-history-entry"]')).toHaveCount(2);
+    await expect(page.locator('[data-testid="retention-cloud-disclosure"]')).toContainText(
+      "before cloud upload confirmation",
+    );
 
     assertCleanConsole(probe);
   });
@@ -351,6 +382,9 @@ test.describe("storage health UAT", () => {
     await expect(page.locator('[data-testid="retention-degraded"]')).toHaveCount(0);
     await expect(page.locator("#storage-governor")).toBeVisible();
     await expect(page.locator('[data-testid="governor-mode"]')).toContainText("Armed");
+    await expect(page.locator('[data-testid="governor-policy"]')).toContainText(
+      "does not wait for cloud upload confirmation",
+    );
     await expect(page.locator('[data-testid="governor-free-pct"]')).toContainText("10.6");
     await expect(page.locator("#storage-governor")).toContainText("free of");
     await expect(page.locator('[data-testid="governor-target"]')).toContainText("10%");
@@ -383,6 +417,9 @@ test.describe("storage health UAT", () => {
     await expect(page.locator("#storage-governor")).toBeVisible();
     await expect(page.locator('[data-testid="governor-mode"]')).toContainText(
       "Dry-run (reporting only)",
+    );
+    await expect(page.locator('[data-testid="governor-policy"]')).toContainText(
+      "No files will be deleted",
     );
     await expect(page.locator("#storage-governor")).toContainText("projected free");
     await expect(page.locator('[data-testid="governor-last"]')).toContainText("would free");
@@ -476,9 +513,10 @@ test.describe("storage health UAT", () => {
       expect(ALLOWED_API.has(u.pathname), `unexpected API path ${u.pathname}`).toBe(true);
       seen.add(u.pathname);
     }
-    // Prove the four read-only probes are actually wired in.
+    // Prove the read-only probes are actually wired in.
     expect(seen.has("/api/storage"), "/api/storage was never requested").toBe(true);
     expect(seen.has("/api/storage/health"), "/api/storage/health never requested").toBe(true);
+    expect(seen.has("/api/retention/status"), "/api/retention/status never requested").toBe(true);
     expect(seen.has("/api/recording/encryption"), "/api/recording/encryption never requested").toBe(
       true,
     );

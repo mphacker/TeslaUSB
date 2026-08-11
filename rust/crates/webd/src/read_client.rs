@@ -3,9 +3,9 @@
 //! Wire types intentionally remain crate-local (same pattern as
 //! `register_client.rs`): no shared proto crate coupling.
 
-use std::io::{self, Write};
 #[cfg(any(unix, test))]
 use std::io::Read;
+use std::io::{self, Write};
 
 use serde::{Deserialize, Serialize};
 
@@ -95,8 +95,8 @@ pub struct ReadFileOk {
 /// `UnavailableReadFileClient` is the sole wired client there and the Unix
 /// transport/parse paths (which construct the rest) are `cfg`-gated out. The
 /// other variants are matched cross-platform in `media.rs` but only built on
-/// Unix / under `cfg(test)`, so allow them to be "dead" on that one build.
-#[cfg_attr(not(any(unix, test)), allow(dead_code))]
+/// Unix / under `cfg(test)`, so allow them to be "dead" on non-Unix builds.
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, thiserror::Error)]
 pub enum ReadFileError {
     /// Transport/framing I/O failure.
@@ -381,9 +381,9 @@ mod tests {
     use std::io::Cursor;
 
     use super::{
-        ClipIdentity, MAX_REQUEST_FRAME, ReadFileClient, ReadFileError, ReadFileHeader,
-        ReadFileOk, ReadFileRequest, read_frame, read_full_file, read_full_file_to_writer,
-        read_raw_tail, write_frame, MAX_READ_LEN,
+        ClipIdentity, MAX_READ_LEN, MAX_REQUEST_FRAME, ReadFileClient, ReadFileError,
+        ReadFileHeader, ReadFileOk, ReadFileRequest, read_frame, read_full_file,
+        read_full_file_to_writer, read_raw_tail, write_frame,
     };
 
     #[test]

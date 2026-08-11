@@ -152,7 +152,8 @@ impl<'a, C: IndexdCloudClient, S: ChildSource> DiscoverEnqueuer<'a, C, S> {
             for parent in page.items {
                 report.discovered_parents = report.discovered_parents.saturating_add(1);
                 if queued_parents.contains(&parent.archive_item_id) {
-                    report.skipped_existing_parents = report.skipped_existing_parents.saturating_add(1);
+                    report.skipped_existing_parents =
+                        report.skipped_existing_parents.saturating_add(1);
                     continue;
                 }
                 // Stop *before* hashing this parent: reading and digesting its
@@ -294,8 +295,8 @@ impl LiveChildSource {
     }
 
     fn hash_file_streaming(path: &Path) -> Result<(i64, String), IndexError> {
-        let mut file =
-            File::open(path).map_err(|err| IndexError::new("child_source_hash", err.to_string()))?;
+        let mut file = File::open(path)
+            .map_err(|err| IndexError::new("child_source_hash", err.to_string()))?;
         let mut hasher = Sha256::new();
         let mut total: i64 = 0;
         let mut buffer = vec![0_u8; 64 * 1024];
@@ -313,8 +314,8 @@ impl LiveChildSource {
                 ));
             };
             hasher.update(chunk);
-            let read_i64 =
-                i64::try_from(read).map_err(|_| IndexError::new("child_source_hash", "read too large"))?;
+            let read_i64 = i64::try_from(read)
+                .map_err(|_| IndexError::new("child_source_hash", "read too large"))?;
             total = total.saturating_add(read_i64);
         }
         let digest = hasher.finalize();
@@ -335,9 +336,9 @@ impl ChildSource for LiveChildSource {
 
         let mut out = Vec::new();
         for file_path in files {
-            let relative = file_path.strip_prefix(parent_dir).map_err(|_| {
-                IndexError::new("child_source_parent", "child path escaped parent")
-            })?;
+            let relative = file_path
+                .strip_prefix(parent_dir)
+                .map_err(|_| IndexError::new("child_source_parent", "child path escaped parent"))?;
             let child_key = relative
                 .to_string_lossy()
                 .replace('\\', "/")
@@ -368,8 +369,8 @@ mod tests {
 
     use crate::indexd_client::{
         CloudCandidateRow, CloudQueueCommitRequest, CloudQueueCommitResult, CloudQueueFailRequest,
-        CloudQueueFailResult, CloudQueueRetryRequest, CloudQueueUpsertItem, Page, UploadLeaseAcquireResult,
-        UploadLeaseReleaseResult, UploadLeaseRenewResult, CloudQueueRow,
+        CloudQueueFailResult, CloudQueueRetryRequest, CloudQueueRow, CloudQueueUpsertItem, Page,
+        UploadLeaseAcquireResult, UploadLeaseReleaseResult, UploadLeaseRenewResult,
     };
 
     use super::*;
@@ -379,7 +380,10 @@ mod tests {
     }
 
     impl ChildSource for FakeChildSource {
-        fn children_for_parent(&self, parent: &CloudDiscoverRow) -> Result<Vec<ChildFile>, IndexError> {
+        fn children_for_parent(
+            &self,
+            parent: &CloudDiscoverRow,
+        ) -> Result<Vec<ChildFile>, IndexError> {
             Ok(self
                 .by_parent
                 .get(&parent.archive_item_id)
@@ -628,7 +632,8 @@ mod tests {
                 ],
             )]),
         };
-        let producer = DiscoverEnqueuer::new(&client, &source, "dest-a", "prefix").expect("producer");
+        let producer =
+            DiscoverEnqueuer::new(&client, &source, "dest-a", "prefix").expect("producer");
         producer.run().expect("run");
         let upserts = client.upserts.borrow();
         let seqs: Vec<i64> = upserts.iter().map(|item| item.seq).collect();
@@ -661,7 +666,8 @@ mod tests {
                 (20, vec![child("b.mp4", 1, &"2".repeat(64))]),
             ]),
         };
-        let producer = DiscoverEnqueuer::new(&client, &source, "dest-a", "prefix").expect("producer");
+        let producer =
+            DiscoverEnqueuer::new(&client, &source, "dest-a", "prefix").expect("producer");
         let report = producer.run().expect("run");
         let upserts = client.upserts.borrow();
         assert_eq!(report.skipped_existing_parents, 1);
@@ -737,10 +743,7 @@ mod tests {
             ..FakeClient::default()
         };
         let source = FakeChildSource {
-            by_parent: BTreeMap::from([(
-                40,
-                vec![child(&"k".repeat(1_100), 1, &"e".repeat(64))],
-            )]),
+            by_parent: BTreeMap::from([(40, vec![child(&"k".repeat(1_100), 1, &"e".repeat(64))])]),
         };
         let producer = DiscoverEnqueuer::new(&client, &source, "dest-a", "root").expect("producer");
         let report = producer.run().expect("run");

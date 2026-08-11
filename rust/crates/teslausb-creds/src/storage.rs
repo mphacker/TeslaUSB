@@ -1,8 +1,8 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
+use std::path::{Path, PathBuf};
 
 use crate::{CredsError, SALT_LEN};
 
@@ -210,9 +210,18 @@ fn parent_dir(path: &Path) -> &Path {
 }
 
 fn sync_dir(path: &Path) -> Result<(), CredsError> {
-    let dir = File::open(path)?;
-    dir.sync_all()?;
-    Ok(())
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        return Ok(());
+    }
+
+    #[cfg(unix)]
+    {
+        let dir = File::open(path)?;
+        dir.sync_all()?;
+        Ok(())
+    }
 }
 
 fn temp_path(path: &Path) -> Result<PathBuf, CredsError> {

@@ -87,8 +87,8 @@ impl NetworkController for NmcliNetworkController {
         let link = capture("iw", &["dev", iface, "link"]).unwrap_or_default();
         let associated = sta_associated(&link, sta_running);
         let signal_dbm = parse_iw_signal_dbm(&link);
-        let sta_channel = capture("iw", &["dev", iface, "info"])
-            .and_then(|info| parse_iface_channel(&info));
+        let sta_channel =
+            capture("iw", &["dev", iface, "info"]).and_then(|info| parse_iface_channel(&info));
 
         let dev_show = capture(
             "nmcli",
@@ -177,7 +177,9 @@ impl NetworkController for NmcliNetworkController {
         if run_ok("tc", &argv) {
             Ok(())
         } else {
-            Err(WifidError::Network("tc egress cap on uap0 failed".to_owned()))
+            Err(WifidError::Network(
+                "tc egress cap on uap0 failed".to_owned(),
+            ))
         }
     }
 
@@ -296,9 +298,7 @@ fn any_active_wifi_sta(active_list: &str, iface: &str) -> bool {
         let device = fields.next().unwrap_or_default();
         let state = fields.next().unwrap_or_default();
         let _name = fields.next().unwrap_or_default();
-        ty == "802-11-wireless"
-            && device == iface
-            && matches!(state, "activated" | "activating")
+        ty == "802-11-wireless" && device == iface && matches!(state, "activated" | "activating")
     })
 }
 
@@ -408,8 +408,8 @@ pub(crate) fn count_stations(dump: &str) -> usize {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::{
-        any_active_wifi_sta, count_stations, has_ip, iw_connected, mutation_hold_fresh, nmcli_field,
-        parse_iw_signal_dbm, sta_associated, tc_cap_args,
+        any_active_wifi_sta, count_stations, has_ip, iw_connected, mutation_hold_fresh,
+        nmcli_field, parse_iw_signal_dbm, sta_associated, tc_cap_args,
     };
 
     #[test]

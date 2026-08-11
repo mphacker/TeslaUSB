@@ -81,6 +81,7 @@ interface RenderInput {
 
 interface TripMapControllerOptions {
   onWatchEvent?: (ev: MapEvent) => void;
+  onShowEventDetail?: (ev: MapEvent) => void;
   onRoutePick?: (pick: { tripId: number; t: number; lat: number; lon: number }) => void;
 }
 
@@ -187,11 +188,13 @@ export class TripMapController {
   private disambigPopup: L.Popup | null = null;
   private hooks: MapHooks;
   private readonly onWatchEvent?: (ev: MapEvent) => void;
+  private readonly onShowEventDetail?: (ev: MapEvent) => void;
   private readonly onRoutePick?: (pick: { tripId: number; t: number; lat: number; lon: number }) => void;
-  private readonly watchableEventsById = new Map<number, MapEvent>();
+  private readonly popupEventsById = new Map<number, MapEvent>();
 
   constructor(container: HTMLElement, options: TripMapControllerOptions = {}) {
     this.onWatchEvent = options.onWatchEvent;
+    this.onShowEventDetail = options.onShowEventDetail;
     this.onRoutePick = options.onRoutePick;
     const tileUrl = (window as unknown as { __TESLAUSB_TILE_URL__?: string })
       .__TESLAUSB_TILE_URL__;
@@ -370,20 +373,32 @@ export class TripMapController {
   };
 
   private onPopupOpen = (event: L.PopupEvent) => {
-    if (!this.onWatchEvent) return;
     const root = event.popup?.getElement();
     if (!root) return;
-    const link = root.querySelector<HTMLAnchorElement>("a.map-watch-link");
-    if (!link || link.dataset.watchBound === "1") return;
-    const eventId = Number(link.dataset.mapEventId ?? "");
-    if (!Number.isFinite(eventId)) return;
-    const mapEvent = this.watchableEventsById.get(eventId);
-    if (!mapEvent || mapEvent.clipId == null) return;
-    link.dataset.watchBound = "1";
-    link.addEventListener("click", (ev) => {
-      ev.preventDefault();
-      this.onWatchEvent?.(mapEvent);
-    });
+    const watchLink = root.querySelector<HTMLAnchorElement>("a.map-watch-link");
+    if (watchLink && watchLink.dataset.watchBound !== "1") {
+      const eventId = Number(watchLink.dataset.mapEventId ?? "");
+      const mapEvent = Number.isFinite(eventId) ? this.popupEventsById.get(eventId) : null;
+      if (mapEvent && mapEvent.clipId != null) {
+        watchLink.dataset.watchBound = "1";
+        watchLink.addEventListener("click", (ev) => {
+          ev.preventDefault();
+          this.onWatchEvent?.(mapEvent);
+        });
+      }
+    }
+    const detailLink = root.querySelector<HTMLAnchorElement>("a.map-detail-link");
+    if (detailLink && detailLink.dataset.detailBound !== "1") {
+      const eventId = Number(detailLink.dataset.mapEventId ?? "");
+      const mapEvent = Number.isFinite(eventId) ? this.popupEventsById.get(eventId) : null;
+      if (mapEvent) {
+        detailLink.dataset.detailBound = "1";
+        detailLink.addEventListener("click", (ev) => {
+          ev.preventDefault();
+          this.onShowEventDetail?.(mapEvent);
+        });
+      }
+    }
   };
 
   private renderCurrent(allowFitBounds: boolean) {
@@ -399,7 +414,7 @@ export class TripMapController {
     this.tripLayer.clearLayers();
     this.eventCluster.clearLayers();
     this.disambigHighlightLayer.clearLayers();
-    this.watchableEventsById.clear();
+    this.popupEventsById.clear();
 
     let polylineCount = 0;
     const bounds: L.LatLngTuple[] = [];
@@ -430,13 +445,12 @@ export class TripMapController {
         ev.clipId != null
           ? `<br><a class="map-watch-link" data-map-event-id="${ev.id}" href="/events?event=${ev.id}">▶ Watch video</a>`
           : "";
+      const detailLink = `<br><a class="map-detail-link" data-map-event-id="${ev.id}" href="/events?event=${ev.id}">ℹ Event details</a>`;
       const tz = this.last?.tz ?? "UTC";
       marker.bindPopup(
-        `<strong>${safeType}</strong><br>${fmtLocalTime(ev.t, tz)}<br>${safeDesc}${watchLink}`,
+        `<strong>${safeType}</strong><br>${fmtLocalTime(ev.t, tz)}<br>${safeDesc}${watchLink}${detailLink}`,
       );
-      if (ev.clipId != null) {
-        this.watchableEventsById.set(ev.id, ev);
-      }
+      this.popupEventsById.set(ev.id, ev);
       this.eventCluster.addLayer(marker);
       bounds.push([ev.lat, ev.lon]);
       eventMarkerCount++;
@@ -851,7 +865,7 @@ export class TripMapController {
     this.last = null;
     this.visibleTrips = [];
     this.disambigPopup = null;
-    this.watchableEventsById.clear();
+    this.popupEventsById.clear();
   }
 }
 

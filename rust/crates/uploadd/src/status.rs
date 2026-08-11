@@ -114,8 +114,8 @@ impl CloudUploadStatus {
 mod tests {
     use super::CloudUploadStatus;
     use crate::priority::UploadCategory;
-    use crate::queue::{QueueItem, UploadQueue};
     use crate::queue::QueueKey;
+    use crate::queue::{QueueItem, UploadQueue};
     use crate::source::ArchiveItemId;
     use crate::throttle::{StoragePressure, ThrottleSnapshot, WifiThrottle};
     use crate::transfer::{VerifyAlg, VerifySpec};

@@ -48,8 +48,8 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use scannerd::produce::{produce, ImageSource, DEFAULT_SEI_SAMPLE_RATE};
-use scannerd::proto::{read_request, write_batch, Request};
+use scannerd::produce::{DEFAULT_SEI_SAMPLE_RATE, ImageSource, produce};
+use scannerd::proto::{Request, read_request, write_batch};
 use scannerd::stability::{StabilityConfig, StabilityTracker};
 
 use crate::io::PreadReader;

@@ -62,8 +62,8 @@ use crate::recent::{
 use crate::status::{HealthInputs, StorageHealth, assemble};
 use crate::time::Clock;
 use crate::value::{
-    EvictionItem, EvictionKind, EvictionPolicy, LossClass, hard_exclusion, list_eviction_candidates,
-    loss_class,
+    EvictionItem, EvictionKind, EvictionPolicy, LossClass, hard_exclusion,
+    list_eviction_candidates, loss_class,
 };
 
 /// Consecutive identical `scannerd` passes a folder's `manifest` must hold before
@@ -1396,15 +1396,14 @@ mod tests {
         cfg
     }
 
-    fn recent_mirror_items_with_reqs(ids: &[i64], size_bytes: u64) -> (Vec<EvictionItem>, HashMap<i64, DeleteRequest>) {
+    fn recent_mirror_items_with_reqs(
+        ids: &[i64],
+        size_bytes: u64,
+    ) -> (Vec<EvictionItem>, HashMap<i64, DeleteRequest>) {
         let mut items = Vec::with_capacity(ids.len());
         let mut reqs = HashMap::new();
         for id in ids {
-            items.push(evic(
-                *id,
-                EvictionKind::RecentMirror,
-                Durability::Undurable,
-            ));
+            items.push(evic(*id, EvictionKind::RecentMirror, Durability::Undurable));
             reqs.insert(
                 *id,
                 DeleteRequest {

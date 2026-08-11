@@ -41,15 +41,16 @@ use crate::error::ScannerError;
 use crate::mbr::parse_mbr;
 use crate::reader::BlockReader;
 use crate::record::{
-    autopilot_to_u32, gear_to_u32, AngleRecord, Bucket, ClipAngleRecord, ClipEventRecord,
-    FrontCensusRecord, FrontUnplaceableRecord, MediaFileRecord, ProducerStats, ScanBatch,
-    WireWaypoint, MAX_CLIP_EVENT_RECORDS, MAX_MEDIA_RECORDS, PARSER_VERSION, PROTOCOL_VERSION,
+    AngleRecord, Bucket, ClipAngleRecord, ClipEventRecord, FrontCensusRecord,
+    FrontUnplaceableRecord, MAX_CLIP_EVENT_RECORDS, MAX_MEDIA_RECORDS, MediaFileRecord,
+    PARSER_VERSION, PROTOCOL_VERSION, ProducerStats, ScanBatch, WireWaypoint, autopilot_to_u32,
+    gear_to_u32,
 };
-use crate::seiwalk::{walk_clip_waypoints, Waypoint};
-use crate::stability::{fingerprint, StabilityTracker};
+use crate::seiwalk::{Waypoint, walk_clip_waypoints};
+use crate::stability::{StabilityTracker, fingerprint};
 use crate::timestamp::epoch_from_tesla_timestamp;
 use crate::volume::Volume;
-use crate::walk::{walk_volume, FileRecord};
+use crate::walk::{FileRecord, walk_volume};
 
 /// The Tesla front camera angle — the only one carrying the SEI telemetry
 /// that trips/events derive from.
@@ -770,13 +771,13 @@ mod tests {
     use std::collections::{BTreeSet, HashSet};
 
     use super::{
-        clip_identity, collect_media, decode_exfat_timestamp, is_toybox_path, partition_label,
-        ClipIdent, MEDIA_PARTITION_SLOT,
+        ClipIdent, MEDIA_PARTITION_SLOT, clip_identity, collect_media, decode_exfat_timestamp,
+        is_toybox_path, partition_label,
     };
     use crate::record::Bucket;
     use crate::walk::FileRecord;
     use teslausb_core::fs::exfat::directory::{
-        encode_file_entry_set, FileAttributes, FileEntrySetParams, FileTimestamps,
+        FileAttributes, FileEntrySetParams, FileTimestamps, encode_file_entry_set,
     };
     use teslausb_core::fs::exfat::upcase_table::UpcaseTable;
 
@@ -1022,7 +1023,7 @@ mod tests {
 
     // ---- two-image / two-LUN produce path -------------------------------
 
-    use super::{produce, ImageSource, DEFAULT_SEI_SAMPLE_RATE, MAX_FRONT_SHAPES_PER_BATCH};
+    use super::{DEFAULT_SEI_SAMPLE_RATE, ImageSource, MAX_FRONT_SHAPES_PER_BATCH, produce};
     use crate::reader::SliceReader;
     use crate::stability::{StabilityConfig, StabilityTracker};
 
@@ -1684,10 +1685,12 @@ mod tests {
 
         assert!(batch.clip_events_inventory);
         assert!(batch.clip_events.is_empty());
-        assert!(batch
-            .records
-            .iter()
-            .any(|r| r.canonical_key == canonical_key));
+        assert!(
+            batch
+                .records
+                .iter()
+                .any(|r| r.canonical_key == canonical_key)
+        );
         assert!(batch.present_keys.iter().any(|k| k == &canonical_key));
     }
 
@@ -1701,15 +1704,19 @@ mod tests {
 
         assert!(batch.clip_events_inventory);
         assert!(batch.clip_events.is_empty());
-        assert!(batch
-            .records
-            .iter()
-            .any(|r| r.canonical_key == canonical_key));
+        assert!(
+            batch
+                .records
+                .iter()
+                .any(|r| r.canonical_key == canonical_key)
+        );
         assert!(batch.present_keys.iter().any(|k| k == &canonical_key));
-        assert!(batch
-            .records
-            .iter()
-            .any(|r| r.angle.file_ref == front_clip_path("RecentClips")));
+        assert!(
+            batch
+                .records
+                .iter()
+                .any(|r| r.angle.file_ref == front_clip_path("RecentClips"))
+        );
     }
 
     #[test]

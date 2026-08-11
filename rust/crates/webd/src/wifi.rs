@@ -309,7 +309,14 @@ fn read_saved_networks() -> Vec<SavedWifiNetwork> {
         );
         let uuid = capture(
             "nmcli",
-            &["-t", "-f", "connection.uuid", "connection", "show", name.as_str()],
+            &[
+                "-t",
+                "-f",
+                "connection.uuid",
+                "connection",
+                "show",
+                name.as_str(),
+            ],
         )
         .as_deref()
         .and_then(parse_connection_uuid)

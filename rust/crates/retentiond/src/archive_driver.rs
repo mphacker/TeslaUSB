@@ -450,10 +450,7 @@ pub fn archive_recent_capped(
                         if !bad_cameras.is_empty() {
                             let mut cams: Vec<_> = bad_cameras.iter().cloned().collect();
                             cams.sort_unstable();
-                            log_partial_archive_warning(
-                                &candidate.canonical_key,
-                                &cams.join(","),
-                            );
+                            log_partial_archive_warning(&candidate.canonical_key, &cams.join(","));
                         }
                         let reg = ArchiveRegistration {
                             canonical_key: candidate.canonical_key.clone(),
@@ -573,7 +570,8 @@ fn finalize_registration(
             } else {
                 MarkerStatus::Partial
             };
-            if let Err(err) = stage_outbox_registration(state, &reg, RegistrationDisposition::Live) {
+            if let Err(err) = stage_outbox_registration(state, &reg, RegistrationDisposition::Live)
+            {
                 log_outbox_stage_failure(&reg.canonical_key, &err);
                 report.copy_failed = report.copy_failed.saturating_add(1);
                 return;
@@ -1005,11 +1003,7 @@ fn stage_outbox_registration(
 /// fingerprint. Periodically re-copying past the backoff is the self-heal
 /// backstop for that (rare) case; a transient `ProbeIo` quarantine is never
 /// suppressed so it keeps retrying every cycle as before.
-fn marker_suppresses_recopy(
-    state: &DriverState,
-    candidate: &Candidate,
-    now_epoch_s: i64,
-) -> bool {
+fn marker_suppresses_recopy(state: &DriverState, candidate: &Candidate, now_epoch_s: i64) -> bool {
     let Some(marker) = state.markers.get(&candidate.canonical_key) else {
         return false;
     };
@@ -1310,9 +1304,8 @@ mod tests {
 
     fn encrypted_candidate(id: usize, started_at: i64) -> Candidate {
         let mut candidate = unique_candidate(id, started_at);
-        candidate.canonical_key = format!(
-            "0:TeslaCam/EncryptedClips/RecentClips/2026-06-19_10-01-{id:02}"
-        );
+        candidate.canonical_key =
+            format!("0:TeslaCam/EncryptedClips/RecentClips/2026-06-19_10-01-{id:02}");
         candidate
     }
 
@@ -1693,15 +1686,18 @@ mod tests {
         let register = FakeRegister::default();
         let mut state = DriverState::new();
 
-        let report = archive_recent_once(&candidates, &store, &register, &mut state, 2_000_000_000)
-            .unwrap();
+        let report =
+            archive_recent_once(&candidates, &store, &register, &mut state, 2_000_000_000).unwrap();
         assert_eq!(report.skipped_encrypted, 1);
         assert_eq!(report.registered, 1);
         assert_eq!(report.quarantined_undecodable, 0);
         assert_eq!(report.registered_from_pending, 0);
         assert_eq!(store.copies.borrow().len(), 2);
         assert_eq!(register.live_calls.borrow().len(), 1);
-        assert_eq!(register.live_calls.borrow()[0].canonical_key, plain.canonical_key);
+        assert_eq!(
+            register.live_calls.borrow()[0].canonical_key,
+            plain.canonical_key
+        );
         assert_eq!(register.quarantine_calls.borrow().len(), 0);
         assert!(
             store

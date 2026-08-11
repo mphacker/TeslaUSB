@@ -31,6 +31,7 @@
 use std::collections::HashSet;
 
 use serde_json::{Value, json};
+use teslausb_core::durable_mutation::{sanitize_public_error, validate_mutation_job_id};
 
 /// Upper bound on the files in one car-delete (must match `gadgetd`'s
 /// `MAX_DELETE_PATHS`). A clip has one file per camera (≤6 today).
@@ -283,21 +284,17 @@ pub(crate) fn map_mutation_outcome(resp: &Value) -> MutationOutcome {
     let handoff_id = resp.get("handoff_id").and_then(Value::as_str);
 
     if let Some(reason) = resp.get("refused").and_then(Value::as_str) {
-        return if is_retryable_refusal(reason) {
-            MutationOutcome::Busy(reason.to_owned())
+        let reason = sanitize_public_error(reason);
+        return if is_retryable_refusal(&reason) {
+            MutationOutcome::Busy(reason)
         } else {
-            MutationOutcome::Refused(reason.to_owned())
+            MutationOutcome::Refused(reason)
         };
     }
     if let Some(err) = resp.get("error").and_then(Value::as_str) {
-        return MutationOutcome::BadResponse(err.to_owned());
+        return MutationOutcome::BadResponse(sanitize_public_error(err));
     }
-    let detail = || {
-        resp.get("detail")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_owned()
-    };
+    let detail = || sanitize_public_error(resp.get("detail").and_then(Value::as_str).unwrap_or(""));
     match resp.get("result").and_then(Value::as_str) {
         Some("done") => match handoff_id {
             Some(id) => MutationOutcome::Done(id.to_owned()),
@@ -312,7 +309,7 @@ pub(crate) fn map_mutation_outcome(resp: &Value) -> MutationOutcome {
             handoff_id: handoff_id.unwrap_or_default().to_owned(),
             detail: detail(),
         },
-        _ => MutationOutcome::BadResponse(format!("unexpected gadgetd response: {resp}")),
+        _ => MutationOutcome::BadResponse("unexpected gadgetd response".to_owned()),
     }
 }
 
@@ -328,6 +325,11 @@ pub(crate) enum QueueOutcome {
     /// `gadgetd` rejected the mutation before queueing it — an invalid mutation
     /// or partition (a client bug) or a full queue (backpressure). → `422`.
     Rejected(String),
+    /// `gadgetd` could not durably persist queue state. Retry later. → `503`.
+    Unavailable(String),
+    /// `gadgetd` could not confirm post-commit durability. Mutation may have
+    /// been accepted; caller must not unlink staged blobs. → `503`.
+    Ambiguous { job_id: Option<String>, detail: String },
     /// `gadgetd` returned a reply `webd` could not interpret. → `502`.
     BadResponse(String),
 }
@@ -335,16 +337,41 @@ pub(crate) enum QueueOutcome {
 /// Interpret a `gadgetd` `enqueue_mutation` response into a [`QueueOutcome`].
 pub(crate) fn map_queue_outcome(resp: &Value) -> QueueOutcome {
     if let Some(err) = resp.get("error").and_then(Value::as_str) {
-        return QueueOutcome::Rejected(err.to_owned());
+        if resp.get("error_code").and_then(Value::as_str) == Some("queue_persist_ambiguous") {
+            let job_id = resp
+                .get("job_id")
+                .and_then(Value::as_str)
+                .filter(|id| validate_mutation_job_id(id).is_ok())
+                .map(ToOwned::to_owned);
+            let detail = resp
+                .get("detail")
+                .and_then(Value::as_str)
+                .unwrap_or(err);
+            return QueueOutcome::Ambiguous {
+                job_id,
+                detail: sanitize_public_error(detail),
+            };
+        }
+        if resp.get("error_code").and_then(Value::as_str) == Some("queue_unavailable") {
+            let detail = resp
+                .get("detail")
+                .and_then(Value::as_str)
+                .unwrap_or(err);
+            return QueueOutcome::Unavailable(sanitize_public_error(detail));
+        }
+        return QueueOutcome::Rejected(sanitize_public_error(err));
     }
     match (
         resp.get("job_id").and_then(Value::as_str),
         resp.get("state").and_then(Value::as_str),
     ) {
-        (Some(job_id), Some("queued")) => QueueOutcome::Queued {
-            job_id: job_id.to_owned(),
+        (Some(job_id), Some("queued")) => match validate_mutation_job_id(job_id) {
+            Ok(()) => QueueOutcome::Queued {
+                job_id: job_id.to_owned(),
+            },
+            Err(_) => QueueOutcome::BadResponse("unexpected gadgetd enqueue response".to_owned()),
         },
-        _ => QueueOutcome::BadResponse(format!("unexpected gadgetd enqueue response: {resp}")),
+        _ => QueueOutcome::BadResponse("unexpected gadgetd enqueue response".to_owned()),
     }
 }
 
@@ -402,6 +429,113 @@ pub(crate) fn map_gadget_status(resp: &Value) -> Option<Value> {
         "last_reenum": field("last_reenum"),
         "last_handoff_id": field("last_handoff_id"),
         "last_result": field("last_result"),
+    }))
+}
+
+/// Normalize a `gadgetd` `gadget_status` response into a bounded mode/status
+/// envelope for UI parity with legacy main status cards:
+/// - current gadget mode (`presented`/`syncing`/`degraded`/`unavailable`);
+/// - handoff lifecycle facts (active/idle, queue counts, last terminal result);
+/// - LUN/image status (path + loaded flag per LUN);
+/// - recovery/banner facts backed only by existing runtime/persisted status.
+///
+/// Returns `None` when `present` is absent (unusable frame). Optional fields from
+/// older `gadgetd` builds degrade to `null`/`false`; no synthetic mutation state
+/// is invented.
+pub(crate) fn map_gadget_mode_status(resp: &Value) -> Option<Value> {
+    if resp.get("error").is_some() {
+        return None;
+    }
+    let present = resp.get("present").and_then(Value::as_bool)?;
+    let bound = resp.get("bound").and_then(Value::as_bool).unwrap_or(false);
+    let handoff_active = resp
+        .get("handoff_active")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let chime_reenum_pending = resp
+        .get("chime_reenum_pending")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let udc_configured = resp.get("udc_state").and_then(Value::as_str) == Some("configured");
+    let mode = if handoff_active || chime_reenum_pending {
+        "syncing"
+    } else if present && bound && udc_configured {
+        "presented"
+    } else if present {
+        "degraded"
+    } else {
+        "unavailable"
+    };
+    let field = |k: &str| resp.get(k).cloned().unwrap_or(Value::Null);
+    let handoff_state = if handoff_active { "active" } else { "idle" };
+
+    let loaded = |k: &str| match resp.get(k) {
+        Some(Value::String(v)) => Value::Bool(!v.is_empty()),
+        Some(Value::Null) => Value::Bool(false),
+        Some(_) => Value::Null,
+        None => Value::Null,
+    };
+
+    let banner = if handoff_active {
+        json!({
+            "level": "info",
+            "code": "handoff_active",
+            "message": "USB file operation in progress."
+        })
+    } else if chime_reenum_pending {
+        json!({
+            "level": "info",
+            "code": "chime_reenum_pending",
+            "message": "LockChime sync pending; keep vehicle doors closed until USB re-enumeration finishes."
+        })
+    } else {
+        match resp.get("last_result").and_then(Value::as_str) {
+            Some("critical_fault") => json!({
+                "level": "warning",
+                "code": "handoff_critical_fault",
+                "message": "Last handoff ended in a critical fault; recovery may be required."
+            }),
+            Some("failed") => json!({
+                "level": "warning",
+                "code": "handoff_failed",
+                "message": "Last handoff failed; inspect status before retrying."
+            }),
+            _ => Value::Null,
+        }
+    };
+
+    Some(json!({
+        "mode": mode,
+        "present": present,
+        "bound": bound,
+        "bound_udc": field("bound_udc"),
+        "udc_state": field("udc_state"),
+        "handoff": {
+            "state": handoff_state,
+            "active": handoff_active,
+            "pending_mutations": field("pending_mutations"),
+            "applying_mutations": field("applying_mutations"),
+            "last_handoff_id": field("last_handoff_id"),
+            "last_result": field("last_result"),
+        },
+        "lun": {
+            "teslacam": {
+                "image": field("lun_file"),
+                "loaded": loaded("lun_file"),
+            },
+            "media": {
+                "image": field("media_lun_file"),
+                "loaded": loaded("media_lun_file"),
+            }
+        },
+        "recovery": {
+            "chime_reenum_pending": chime_reenum_pending,
+            "last_reenum": field("last_reenum"),
+            "media_ro_mounted": field("media_ro_mounted"),
+            "media_ro_path": field("media_ro_path"),
+            "media_ro_error": field("media_ro_error"),
+        },
+        "banner": banner,
     }))
 }
 
@@ -472,10 +606,18 @@ mod unix_client {
 
             write_frame(&mut stream, &payload)
                 .map_err(|e| TransportError::Unavailable(format!("write: {e}")))?;
-            let resp = read_frame(&mut stream, MAX_FRAME)
-                .map_err(|e| TransportError::Protocol(format!("read: {e}")))?;
+            let resp = read_frame(&mut stream, MAX_FRAME).map_err(map_read_error)?;
             serde_json::from_slice(&resp)
                 .map_err(|e| TransportError::Protocol(format!("decode: {e}")))
+        }
+    }
+
+    fn map_read_error(error: io::Error) -> TransportError {
+        match error.kind() {
+            io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => {
+                TransportError::Unavailable(format!("read: {error}"))
+            }
+            _ => TransportError::Protocol(format!("read: {error}")),
         }
     }
 
@@ -499,6 +641,25 @@ mod unix_client {
         stream.write_all(&len.to_le_bytes())?;
         stream.write_all(payload)?;
         stream.flush()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::io;
+
+        use super::{TransportError, map_read_error};
+
+        #[test]
+        fn timeout_read_maps_to_unavailable() {
+            let mapped = map_read_error(io::Error::new(io::ErrorKind::TimedOut, "timed out"));
+            assert!(matches!(mapped, TransportError::Unavailable(_)));
+        }
+
+        #[test]
+        fn non_timeout_read_maps_to_protocol() {
+            let mapped = map_read_error(io::Error::new(io::ErrorKind::InvalidData, "bad frame"));
+            assert!(matches!(mapped, TransportError::Protocol(_)));
+        }
     }
 }
 
@@ -527,8 +688,8 @@ mod stub_client {
 mod tests {
     use super::{
         DeleteRefusal, MutationOutcome, QueueOutcome, enqueue_install_request,
-        enqueue_remove_empty_dir_request, enqueue_remove_request_many, map_gadget_status,
-        map_mutation_outcome, map_queue_outcome, map_status, plan_car_delete,
+        enqueue_remove_empty_dir_request, enqueue_remove_request_many, map_gadget_mode_status,
+        map_gadget_status, map_mutation_outcome, map_queue_outcome, map_status, plan_car_delete,
     };
     use serde_json::{Value, json};
 
@@ -815,12 +976,59 @@ mod tests {
     }
 
     #[test]
+    fn rejects_queued_enqueue_response_with_invalid_job_id() {
+        let resp = json!({ "job_id": "bad-id", "state": "queued" });
+        assert!(matches!(
+            map_queue_outcome(&resp),
+            QueueOutcome::BadResponse(_)
+        ));
+    }
+
+    #[test]
     fn maps_enqueue_error_to_rejected() {
         let resp = json!({ "error": "invalid mutation: empty path" });
         assert!(matches!(
             map_queue_outcome(&resp),
             QueueOutcome::Rejected(_)
         ));
+    }
+
+    #[test]
+    fn maps_queue_unavailable_error_to_unavailable() {
+        let resp = json!({
+            "error_code": "queue_unavailable",
+            "error": "queue unavailable",
+            "detail": "queue persist failed: io error"
+        });
+        assert!(matches!(
+            map_queue_outcome(&resp),
+            QueueOutcome::Unavailable(_)
+        ));
+    }
+
+    #[test]
+    fn maps_queue_persist_ambiguous_to_ambiguous() {
+        let resp = json!({
+            "error_code": "queue_persist_ambiguous",
+            "error": "queue persist status ambiguous",
+            "detail": "post-commit parent sync failed",
+            "job_id": "m-9"
+        });
+        assert!(matches!(
+            map_queue_outcome(&resp),
+            QueueOutcome::Ambiguous { job_id: Some(_), .. }
+        ));
+    }
+
+    #[test]
+    fn mutation_outcome_sanitizes_public_error_detail() {
+        let mut long = "x".repeat(400);
+        long.push('\n');
+        let resp = json!({ "error": long });
+        match map_mutation_outcome(&resp) {
+            MutationOutcome::BadResponse(detail) => assert!(detail.len() <= 160),
+            other => panic!("unexpected outcome: {other:?}"),
+        }
     }
 
     #[test]
@@ -899,5 +1107,64 @@ mod tests {
         assert_eq!(out["media_ro_mounted"], false);
         assert_eq!(out["media_ro_path"], Value::Null);
         assert_eq!(out["media_ro_error"], "mount failed: device busy");
+    }
+
+    #[test]
+    fn gadget_mode_status_summarizes_mode_handoff_and_luns() {
+        let resp = json!({
+            "present": true,
+            "bound": true,
+            "udc_state": "configured",
+            "lun_file": "/data/teslausb/cam.img",
+            "media_lun_file": "/data/teslausb/media.img",
+            "handoff_active": false,
+            "pending_mutations": 2,
+            "applying_mutations": 1,
+            "last_handoff_id": "h-77",
+            "last_result": "done",
+            "media_ro_mounted": true,
+            "media_ro_path": "/run/teslausb/media-ro",
+            "media_ro_error": null,
+            "chime_reenum_pending": false,
+            "last_reenum": { "result": "done", "disconnect_ms": 412 },
+        });
+        let out = map_gadget_mode_status(&resp).expect("mode status");
+        assert_eq!(out["mode"], "presented");
+        assert_eq!(out["handoff"]["state"], "idle");
+        assert_eq!(out["handoff"]["pending_mutations"], 2);
+        assert_eq!(out["handoff"]["applying_mutations"], 1);
+        assert_eq!(out["lun"]["teslacam"]["image"], "/data/teslausb/cam.img");
+        assert_eq!(out["lun"]["teslacam"]["loaded"], true);
+        assert_eq!(out["lun"]["media"]["image"], "/data/teslausb/media.img");
+        assert_eq!(out["lun"]["media"]["loaded"], true);
+        assert_eq!(out["banner"], Value::Null);
+    }
+
+    #[test]
+    fn gadget_mode_status_emits_recovery_banner_when_pending_or_failed() {
+        let resp = json!({
+            "present": true,
+            "bound": true,
+            "udc_state": "configured",
+            "handoff_active": false,
+            "chime_reenum_pending": true,
+            "last_handoff_id": "h-88",
+            "last_result": "critical_fault",
+        });
+        let out = map_gadget_mode_status(&resp).expect("mode status");
+        assert_eq!(out["mode"], "syncing");
+        assert_eq!(out["banner"]["code"], "chime_reenum_pending");
+        assert_eq!(out["banner"]["level"], "info");
+    }
+
+    #[test]
+    fn gadget_mode_status_degrades_when_fields_are_absent() {
+        let out = map_gadget_mode_status(&json!({ "present": false })).expect("mode status");
+        assert_eq!(out["mode"], "unavailable");
+        assert_eq!(out["handoff"]["state"], "idle");
+        assert_eq!(out["lun"]["teslacam"]["loaded"], Value::Null);
+        assert_eq!(out["lun"]["media"]["loaded"], Value::Null);
+        assert_eq!(out["recovery"]["last_reenum"], Value::Null);
+        assert_eq!(out["banner"], Value::Null);
     }
 }

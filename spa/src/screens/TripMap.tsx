@@ -1,7 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { Icon } from "../components/Icon";
 import { api, ApiError } from "../api/client";
-import type { Clip, DaySummary, EventItem, Trip, TripDetail } from "../api/types";
+import type {
+  Clip,
+  DaySummary,
+  EventDetail,
+  EventItem,
+  IndexLifecycleResponse,
+  IndexDrivingStatsResponse,
+  IndexEventChartResponse,
+  IndexStatusResponse,
+  Trip,
+  TripDetail,
+} from "../api/types";
 import { classifyDeleteFailure } from "../player/deleteClip";
 import { MapVideoOverlay } from "./map/MapVideoOverlay";
 import {
@@ -126,6 +137,51 @@ function resolveTz(displayTz: string): string {
   return displayTz || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 }
 
+function formatDistance(distanceM: number, unit: SpeedUnit): string {
+  const value =
+    unit === "kph"
+      ? distanceM / 1000
+      : distanceM / METERS_PER_MILE;
+  return value.toFixed(1);
+}
+
+function formatDriveTime(totalSeconds: number): string {
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  if (hours <= 0) return `${minutes}m`;
+  return `${hours}h ${minutes}m`;
+}
+
+function eventChartSummary(chart: IndexEventChartResponse): string {
+  if (chart.total_events === 0) return "No indexed events yet";
+  const topType = chart.by_type[0];
+  if (!topType) return `${chart.total_events} indexed events`;
+  const sentry = chart.by_type.find((entry) => entry.type === "sentry")?.count ?? 0;
+  return `${chart.total_events} indexed events · ${sentry} sentry · top ${humanizeType(topType.type)} (${topType.count})`;
+}
+
+function indexLifecycleSummary(lifecycle: IndexLifecycleResponse, tz: string): string {
+  const stateLabel = (() => {
+    switch (lifecycle.lifecycle_state) {
+      case "healthy":
+        return "Index lifecycle healthy";
+      case "stale":
+        return "Index lifecycle stale";
+      case "error":
+        return "Index lifecycle error";
+      default:
+        return "Index lifecycle empty";
+    }
+  })();
+  const staleFrontCount =
+    lifecycle.front_parse_stale_count + lifecycle.front_parse_missing_count;
+  const lastDerived =
+    lifecycle.last_derived_at != null
+      ? fmtClock(lifecycle.last_derived_at, tz)
+      : "never";
+  return `${stateLabel} · ${lifecycle.front_parse_error_count} parse errors · ${staleFrontCount} stale fronts · last derive ${lastDerived}`;
+}
+
 function humanizeType(type: string): string {
   return type
     .split("_")
@@ -185,6 +241,10 @@ export function TripMap() {
   const fetchedDisplayTzRef = useRef<string | null>(null);
 
   const [days, setDays] = useState<DaySummary[] | null>(null);
+  const [indexStatus, setIndexStatus] = useState<IndexStatusResponse | null>(null);
+  const [indexLifecycle, setIndexLifecycle] = useState<IndexLifecycleResponse | null>(null);
+  const [drivingStats, setDrivingStats] = useState<IndexDrivingStatsResponse | null>(null);
+  const [eventChart, setEventChart] = useState<IndexEventChartResponse | null>(null);
   const [dayIndex, setDayIndex] = useState(0);
   const [unit, setUnit] = useState<SpeedUnit>("mph");
   const [displayTz, setDisplayTz] = useState("");
@@ -195,6 +255,9 @@ export function TripMap() {
   const [deletingClipIds, setDeletingClipIds] = useState<Set<number>>(new Set());
   const [mapTrips, setMapTrips] = useState<MapTrip[]>([]);
   const [mapEvents, setMapEvents] = useState<MapEvent[]>([]);
+  const [eventDetail, setEventDetail] = useState<EventDetail | null>(null);
+  const [eventDetailLoading, setEventDetailLoading] = useState(false);
+  const [eventDetailError, setEventDetailError] = useState<string | null>(null);
 
   const [legendVisible, setLegendVisible] = useState(false);
   const [filtersVisible, setFiltersVisible] = useState(false);
@@ -227,6 +290,7 @@ export function TripMap() {
     clips: false,
   });
   const overlayDeleteAbortRef = useRef<AbortController | null>(null);
+  const eventDetailAbortRef = useRef<AbortController | null>(null);
 
   const currentDay = days && days.length ? days[dayIndex] : null;
   const presentEventTypes = useMemo(
@@ -287,6 +351,33 @@ export function TripMap() {
       }
     })();
   }, []);
+
+  const openEventDetail = useCallback((eventId: number) => {
+    eventDetailAbortRef.current?.abort();
+    const ac = new AbortController();
+    eventDetailAbortRef.current = ac;
+    setEventDetailLoading(true);
+    setEventDetailError(null);
+    setEventDetail(null);
+    void (async () => {
+      try {
+        const detail = await api.eventDetail(eventId, ac.signal);
+        if (ac.signal.aborted) return;
+        setEventDetail(detail);
+      } catch (err) {
+        if (ac.signal.aborted) return;
+        setEventDetailError(errMessage(err));
+      } finally {
+        if (eventDetailAbortRef.current === ac) eventDetailAbortRef.current = null;
+        if (!ac.signal.aborted) setEventDetailLoading(false);
+      }
+    })();
+  }, []);
+
+  const onShowEventDetail = useCallback((ev: MapEvent) => {
+    setPanelOpen(true);
+    openEventDetail(ev.id);
+  }, [openEventDetail]);
 
   const onRoutePick = useCallback((pick: { tripId: number; t: number; lat: number; lon: number }) => {
     const seq = ++watchSeqRef.current;
@@ -381,7 +472,11 @@ export function TripMap() {
   //    seed the display unit from prefs, and load the day list. ──
   useEffect(() => {
     if (!mapRef.current) return;
-    const ctrl = new TripMapController(mapRef.current, { onWatchEvent, onRoutePick });
+    const ctrl = new TripMapController(mapRef.current, {
+      onWatchEvent,
+      onShowEventDetail,
+      onRoutePick,
+    });
     ctrlRef.current = ctrl;
     // map.css carries three global overrides (full-height, no page scroll); we
     // scope them to .mapping-active so they apply ONLY while the map is mounted.
@@ -404,6 +499,22 @@ export function TripMap() {
         setDays(dayList);
         setDayIndex(0);
         fetchedDisplayTzRef.current = initialDisplayTz;
+        void api
+          .indexStatus(boot.signal)
+          .then(setIndexStatus)
+          .catch(() => setIndexStatus(null));
+        void api
+          .indexLifecycle(boot.signal)
+          .then(setIndexLifecycle)
+          .catch(() => setIndexLifecycle(null));
+        void api
+          .indexDrivingStats(boot.signal)
+          .then(setDrivingStats)
+          .catch(() => setDrivingStats(null));
+        void api
+          .indexEventChart(boot.signal)
+          .then(setEventChart)
+          .catch(() => setEventChart(null));
       } catch (err) {
         if (boot.signal.aborted) return;
         setError(errMessage(err));
@@ -417,7 +528,7 @@ export function TripMap() {
       ctrl.destroy();
       ctrlRef.current = null;
     };
-  }, [onWatchEvent, onRoutePick]);
+  }, [onWatchEvent, onShowEventDetail, onRoutePick]);
 
   // Re-bucket the day list when the settings timezone changes. Skips the initial
   // mount fetch (done above) and resets to the newest day.
@@ -447,6 +558,11 @@ export function TripMap() {
     const tz = resolvedTz;
     watchAbortRef.current?.abort();
     watchAbortRef.current = null;
+    eventDetailAbortRef.current?.abort();
+    eventDetailAbortRef.current = null;
+    setEventDetail(null);
+    setEventDetailError(null);
+    setEventDetailLoading(false);
     routeEventsByTripIdRef.current = new Map();
     tripClipsByTripIdRef.current = new Map();
     setLoading(true);
@@ -759,6 +875,7 @@ export function TripMap() {
       abortTabRequest("clips");
       overlayDeleteAbortRef.current?.abort();
       watchAbortRef.current?.abort();
+      eventDetailAbortRef.current?.abort();
     },
     [abortTabRequest],
   );
@@ -835,6 +952,14 @@ export function TripMap() {
 
   const onOverlayClose = useCallback(() => {
     setOverlayState(null);
+  }, []);
+
+  const onCloseEventDetail = useCallback(() => {
+    eventDetailAbortRef.current?.abort();
+    eventDetailAbortRef.current = null;
+    setEventDetail(null);
+    setEventDetailError(null);
+    setEventDetailLoading(false);
   }, []);
 
   const onOverlayNavigate = useCallback((direction: -1 | 1) => {
@@ -1096,6 +1221,30 @@ export function TripMap() {
           </span>{" "}
           {days && days.length === 1 ? "day mapped" : "days mapped"}
         </div>
+        <div class="trip-card-indexed" id="indexStatus" role="status">
+          {indexStatus
+            ? `${indexStatus.trip_count} trips · ${indexStatus.event_count} events · ` +
+              `${indexStatus.waypoint_count} GPS points indexed`
+            : "Index diagnostics unavailable"}
+        </div>
+        <div class="trip-card-indexed" id="indexLifecycle" role="status">
+          {indexLifecycle
+            ? indexLifecycleSummary(indexLifecycle, resolvedTz)
+            : "Index lifecycle diagnostics unavailable"}
+        </div>
+        <div class="trip-card-indexed" id="indexDrivingStats" role="status">
+          {drivingStats
+            ? `${formatDistance(drivingStats.total_distance_m, unit)} ${unit === "kph" ? "km" : "mi"} total · ` +
+              `${formatDriveTime(drivingStats.total_drive_time_s)} drive time · ` +
+              `${drivingStats.warning_event_count} warning+ · ` +
+              `${drivingStats.sentry_event_count} sentry`
+            : "Driving statistics unavailable"}
+        </div>
+        <div class="trip-card-indexed" id="indexEventChart" role="status">
+          {eventChart
+            ? eventChartSummary(eventChart)
+            : "Event chart diagnostics unavailable"}
+        </div>
       </div>
 
       <div
@@ -1256,6 +1405,64 @@ export function TripMap() {
         </div>
       )}
 
+      {(eventDetailLoading || eventDetailError || eventDetail) && (
+        <div
+          class="event-detail-card"
+          data-testid="event-detail-card"
+          role="dialog"
+          aria-label="Event details"
+        >
+          <div class="event-detail-header">
+            <strong>Event details</strong>
+            <button
+              type="button"
+              class="close-btn"
+              data-testid="event-detail-close"
+              onClick={onCloseEventDetail}
+              aria-label="Close event details"
+            >
+              <Icon name="x" />
+            </button>
+          </div>
+          {eventDetailLoading && <div class="event-detail-loading">Loading event details…</div>}
+          {!eventDetailLoading && eventDetailError && (
+            <div class="event-detail-error">Couldn't load event details. {eventDetailError}</div>
+          )}
+          {!eventDetailLoading && !eventDetailError && eventDetail && (
+            <div class="event-detail-body">
+              <div class="event-detail-row" data-testid="event-detail-type">
+                <strong>{humanizeType(eventDetail.type)}</strong>
+                {severityLabel(eventDetail.severity)
+                  ? ` · ${severityLabel(eventDetail.severity)}`
+                  : ""}
+              </div>
+              <div class="event-detail-row">{fmtClock(eventDetail.t, resolvedTz)}</div>
+              <div class="event-detail-row">
+                {eventDetail.description ||
+                  (eventDetail.trip_id != null ? `Trip #${eventDetail.trip_id}` : "Standalone")}
+              </div>
+              {eventDetail.lat != null && eventDetail.lon != null && (
+                <div class="event-detail-row">
+                  {eventDetail.lat.toFixed(5)}, {eventDetail.lon.toFixed(5)}
+                </div>
+              )}
+              {eventDetail.clip && (
+                <div class="event-detail-row">
+                  Clip #{eventDetail.clip.id} · {eventDetail.clip.folder_class}
+                </div>
+              )}
+              {eventDetail.sentry && (
+                <div class="event-detail-row" data-testid="event-detail-sentry">
+                  {eventDetail.sentry.bucket} ·{" "}
+                  {eventDetail.sentry.reason ?? "reason unknown"}
+                  {eventDetail.sentry.city ? ` · ${eventDetail.sentry.city}` : ""}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       <div class={`video-panel${panelOpen ? " open" : ""}`} id="videoPanel">
         <div class="video-panel-header">
           <div class="vp-tabs">
@@ -1299,6 +1506,7 @@ export function TripMap() {
               error={panelState.events.error}
               sentinelRef={setActiveSentinel}
               onRetry={() => retryPanelTab("events")}
+              onShowDetail={openEventDetail}
             />
           )}
           {panelTab === "trips" && (
@@ -1373,6 +1581,7 @@ function EventsTab({
   error,
   sentinelRef,
   onRetry,
+  onShowDetail,
 }: {
   events: EventItem[] | null;
   tz: string;
@@ -1381,6 +1590,7 @@ function EventsTab({
   error: boolean;
   sentinelRef: (node: HTMLDivElement | null) => void;
   onRetry: () => void;
+  onShowDetail: (eventId: number) => void;
 }) {
   if (events === null) {
     if (error && !loading)
@@ -1430,18 +1640,31 @@ function EventsTab({
         return (
           <div class="st-event" key={ev.id}>
             <span class={`st-dot ${eventDotClass(ev.type)}`} />
-            {ev.clip_id != null ? (
-              <a
-                class="st-card st-card-link"
-                href={`/events?event=${ev.id}`}
-                data-testid={`vp-event-link-${ev.id}`}
-                aria-label={`Watch ${ev.type.replace(/_/g, " ")} event`}
-              >
-                {inner}
-              </a>
-            ) : (
-              <div class="st-card">{inner}</div>
-            )}
+            <div class="st-card">
+              {ev.clip_id != null ? (
+                <a
+                  class="st-card-link"
+                  href={`/events?event=${ev.id}`}
+                  data-testid={`vp-event-link-${ev.id}`}
+                  aria-label={`Watch ${ev.type.replace(/_/g, " ")} event`}
+                >
+                  {inner}
+                </a>
+              ) : (
+                inner
+              )}
+              <div class="st-actions">
+                <button
+                  type="button"
+                  class="vp-btn"
+                  data-testid={`vp-event-detail-${ev.id}`}
+                  aria-label={`Show details for ${ev.type.replace(/_/g, " ")}`}
+                  onClick={() => onShowDetail(ev.id)}
+                >
+                  ℹ
+                </button>
+              </div>
+            </div>
           </div>
         );
       })}

@@ -6,8 +6,10 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::daybucket::civil_day;
 use crate::dto::{
-    AnalyticsDto, AngleDto, Bbox, ClipDto, DaySummary, DayTripCount, EventDto, EventTypeCount,
-    EncryptionStatusDto, FolderClassStat, InstalledChimeDto, MediaItemDto, PrefDto, SeverityCount,
+    AnalyticsDto, AngleDto, Bbox, ClipDto, ClipWaypointDto, DaySummary, DayTripCount,
+    DrivingStatsDto, EncryptionStatusDto, EventChartDayPoint, EventChartDto, EventDetailClipDto,
+    EventDetailDto, EventDetailSentryDto, EventDto, EventTypeCount, FolderClassStat,
+    IndexLifecycleDto, IndexStatusDto, InstalledChimeDto, MediaItemDto, PrefDto, SeverityCount,
     TripDetailDto, TripDto, TripPointDto, VideoStats,
 };
 use crate::polyline;
@@ -27,6 +29,221 @@ const CLIP_COLS: &str = "SELECT id, canonical_key, started_at, ended_at, partiti
 /// `events` column list (column order is relied on by [`map_event`]).
 const EVENT_COLS: &str = "SELECT id, type, severity, t, lat, lon, clip_id, trip_id, \
      front_frame_index, front_frame_offset, description FROM events";
+
+/// Return bounded, read-only catalog counts used by the mapping diagnostics UI.
+pub(crate) fn index_status(conn: &Connection) -> Result<IndexStatusDto, rusqlite::Error> {
+    let schema_version = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+        [],
+        |row| row.get(0),
+    )?;
+    let trip_count = conn.query_row("SELECT COUNT(*) FROM trips", [], |row| row.get(0))?;
+    let event_count = conn.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?;
+    let clip_count = conn.query_row("SELECT COUNT(*) FROM clips", [], |row| row.get(0))?;
+    let waypoint_count =
+        conn.query_row("SELECT COUNT(*) FROM clip_waypoints", [], |row| row.get(0))?;
+    Ok(IndexStatusDto {
+        schema_version,
+        trip_count,
+        event_count,
+        clip_count,
+        waypoint_count,
+    })
+}
+
+/// Read-only index lifecycle diagnostics from persisted catalog state only.
+pub(crate) fn index_lifecycle(conn: &Connection) -> Result<IndexLifecycleDto, rusqlite::Error> {
+    let schema_version: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+        [],
+        |row| row.get(0),
+    )?;
+    let clip_count: i64 = conn.query_row("SELECT COUNT(*) FROM clips", [], |row| row.get(0))?;
+    let stale_clip_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM clips WHERE availability <> 'present'",
+        [],
+        |row| row.get(0),
+    )?;
+    let last_derived_at: Option<i64> = conn.query_row(
+        "SELECT MAX(created_at) FROM (
+            SELECT created_at FROM trips
+            UNION ALL
+            SELECT created_at FROM events
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+
+    let has_front_parse_attempts = table_present(conn, "front_parse_attempts")?;
+    let (
+        front_parse_total,
+        front_parse_error_count,
+        front_parse_stale_count,
+        front_parse_retry_pending_count,
+        front_parse_missing_count,
+        last_front_parse_attempt_at,
+    ) = if has_front_parse_attempts {
+        let front_parse_total: i64 =
+            conn.query_row("SELECT COUNT(*) FROM front_parse_attempts", [], |row| {
+                row.get(0)
+            })?;
+        let front_parse_error_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM front_parse_attempts \
+             WHERE parse_state IN ('parse_error', 'read_error')",
+            [],
+            |row| row.get(0),
+        )?;
+        let front_parse_stale_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM front_parse_attempts WHERE parse_state = 'legacy_unknown'",
+            [],
+            |row| row.get(0),
+        )?;
+        let front_parse_retry_pending_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM front_parse_attempts \
+             WHERE next_retry_at IS NOT NULL \
+               AND next_retry_at > CAST(strftime('%s','now') AS INTEGER)",
+            [],
+            |row| row.get(0),
+        )?;
+        let front_parse_missing_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM clips c \
+             JOIN angles a ON a.clip_id = c.id \
+             LEFT JOIN front_parse_attempts fpa ON fpa.canonical_key = c.canonical_key \
+             WHERE lower(a.camera) = 'front' \
+               AND c.availability = 'present' \
+               AND fpa.canonical_key IS NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        let last_front_parse_attempt_at: Option<i64> = conn.query_row(
+            "SELECT MAX(attempted_at) FROM front_parse_attempts",
+            [],
+            |row| row.get(0),
+        )?;
+        (
+            front_parse_total,
+            front_parse_error_count,
+            front_parse_stale_count,
+            front_parse_retry_pending_count,
+            front_parse_missing_count,
+            last_front_parse_attempt_at,
+        )
+    } else {
+        (0, 0, 0, 0, 0, None)
+    };
+
+    let lifecycle_state = if clip_count == 0 && front_parse_total == 0 && last_derived_at.is_none()
+    {
+        "empty"
+    } else if front_parse_error_count > 0 {
+        "error"
+    } else if stale_clip_count > 0
+        || front_parse_stale_count > 0
+        || front_parse_retry_pending_count > 0
+        || front_parse_missing_count > 0
+    {
+        "stale"
+    } else {
+        "healthy"
+    };
+
+    Ok(IndexLifecycleDto {
+        schema_version,
+        lifecycle_state: lifecycle_state.to_owned(),
+        stale_clip_count,
+        front_parse_total,
+        front_parse_error_count,
+        front_parse_stale_count,
+        front_parse_retry_pending_count,
+        front_parse_missing_count,
+        last_derived_at,
+        last_front_parse_attempt_at,
+    })
+}
+
+/// Read-only aggregate driving diagnostics for mapping administration.
+pub(crate) fn index_driving_stats(conn: &Connection) -> Result<DrivingStatsDto, rusqlite::Error> {
+    let total_trips: i64 = conn.query_row("SELECT COUNT(*) FROM trips", [], |row| row.get(0))?;
+    let total_distance_m: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(distance_m), 0.0) FROM trips",
+        [],
+        |row| row.get(0),
+    )?;
+    let total_drive_time_s: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(ended_at - started_at), 0) FROM trips",
+        [],
+        |row| row.get(0),
+    )?;
+    let warning_event_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM events WHERE severity >= 2",
+        [],
+        |row| row.get(0),
+    )?;
+    let sentry_event_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM events WHERE type = 'sentry'",
+        [],
+        |row| row.get(0),
+    )?;
+    let (avg_speed_mps, max_speed_mps): (Option<f64>, Option<f64>) = conn.query_row(
+        "SELECT AVG(speed), MAX(speed) FROM trip_points WHERE speed IS NOT NULL",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok(DrivingStatsDto {
+        total_trips,
+        total_distance_m,
+        total_drive_time_s,
+        warning_event_count,
+        sentry_event_count,
+        avg_speed_mps,
+        max_speed_mps,
+    })
+}
+
+/// Read-only event-chart aggregates for mapping administration diagnostics.
+pub(crate) fn index_event_chart(conn: &Connection) -> Result<EventChartDto, rusqlite::Error> {
+    const MAX_EVENT_TYPES: i64 = 8;
+    const MAX_EVENT_DAYS: i64 = 30;
+    let total_events: i64 = conn.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?;
+
+    let mut by_type_stmt = conn.prepare(
+        "SELECT type, COUNT(*) AS count FROM events \
+         GROUP BY type ORDER BY count DESC, type ASC LIMIT ?1",
+    )?;
+    let by_type = by_type_stmt
+        .query_map(params![MAX_EVENT_TYPES], |row| {
+            Ok(EventTypeCount {
+                event_type: row.get(0)?,
+                count: row.get(1)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut by_day_stmt = conn.prepare(
+        "SELECT strftime('%Y-%m-%d', t, 'unixepoch') AS day, \
+                COUNT(*) AS count, \
+                SUM(CASE WHEN type = 'sentry' THEN 1 ELSE 0 END) AS sentry_count, \
+                SUM(CASE WHEN severity >= 2 THEN 1 ELSE 0 END) AS warning_count \
+         FROM events \
+         GROUP BY day ORDER BY day DESC LIMIT ?1",
+    )?;
+    let by_day = by_day_stmt
+        .query_map(params![MAX_EVENT_DAYS], |row| {
+            Ok(EventChartDayPoint {
+                day: row.get(0)?,
+                count: row.get(1)?,
+                sentry_count: row.get(2)?,
+                warning_count: row.get(3)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(EventChartDto {
+        total_events,
+        by_type,
+        by_day,
+    })
+}
 
 /// Descending keyset cursor state (`(date DESC, id DESC)`).
 #[derive(Clone, Copy)]
@@ -211,11 +428,22 @@ pub(crate) fn list_trips_page(
     conn: &Connection,
     keyset: Keyset,
     limit: i64,
+    playable_only: bool,
 ) -> Result<Vec<TripDto>, rusqlite::Error> {
     let limit_plus_one = limit.saturating_add(1);
+    let playable_filter = if playable_only {
+        " AND EXISTS (
+            SELECT 1 FROM clips c
+             WHERE c.started_at < trips.ended_at
+               AND COALESCE(c.ended_at, c.started_at) > trips.started_at
+               AND c.availability = 'present'
+        )"
+    } else {
+        ""
+    };
     let trips = if let Some((ts, id)) = keyset.after {
         let sql = format!(
-            "{TRIP_COLS} WHERE id <= ?1 \
+            "{TRIP_COLS} WHERE id <= ?1{playable_filter} \
              AND (started_at < ?2 OR (started_at = ?2 AND id < ?3)) \
              ORDER BY started_at DESC, id DESC LIMIT ?4"
         );
@@ -223,7 +451,10 @@ pub(crate) fn list_trips_page(
         stmt.query_map(params![keyset.snap, ts, id, limit_plus_one], map_trip)?
             .collect::<Result<Vec<_>, _>>()?
     } else {
-        let sql = format!("{TRIP_COLS} WHERE id <= ?1 ORDER BY started_at DESC, id DESC LIMIT ?2");
+        let sql = format!(
+            "{TRIP_COLS} WHERE id <= ?1{playable_filter} \
+         ORDER BY started_at DESC, id DESC LIMIT ?2"
+        );
         let mut stmt = conn.prepare(&sql)?;
         stmt.query_map(params![keyset.snap, limit_plus_one], map_trip)?
             .collect::<Result<Vec<_>, _>>()?
@@ -320,6 +551,77 @@ pub(crate) fn get_event(conn: &Connection, id: i64) -> Result<Option<EventDto>, 
     stmt.query_row(params![id], map_event).optional()
 }
 
+/// `GET /api/events/:id/detail`: enriched event detail (event row + optional clip
+/// metadata + optional nearest `clip_events` sidecar record).
+/// `None` when no event has that id.
+pub(crate) fn get_event_detail(
+    conn: &Connection,
+    id: i64,
+) -> Result<Option<EventDetailDto>, rusqlite::Error> {
+    let Some(event) = get_event(conn, id)? else {
+        return Ok(None);
+    };
+
+    let Some(clip_id) = event.clip_id else {
+        return Ok(Some(EventDetailDto {
+            event,
+            clip: None,
+            sentry: None,
+        }));
+    };
+
+    let clip = conn
+        .query_row(
+            "SELECT id, canonical_key, folder_class, is_sentry, started_at, ended_at \
+             FROM clips WHERE id = ?1",
+            params![clip_id],
+            |row| {
+                Ok(EventDetailClipDto {
+                    id: row.get(0)?,
+                    canonical_key: row.get(1)?,
+                    folder_class: row.get(2)?,
+                    is_sentry: row.get(3)?,
+                    started_at: row.get(4)?,
+                    ended_at: row.get(5)?,
+                })
+            },
+        )
+        .optional()?;
+
+    let sentry = if let Some(clip_meta) = clip.as_ref() {
+        if table_present(conn, "clip_events")? {
+            conn.query_row(
+                "SELECT bucket, timestamp_utc, reason, city, camera \
+                 FROM clip_events \
+                 WHERE primary_canonical_key = ?1 \
+                 ORDER BY ABS(timestamp_utc - ?2) ASC, timestamp_utc DESC \
+                 LIMIT 1",
+                params![clip_meta.canonical_key, event.t],
+                |row| {
+                    Ok(EventDetailSentryDto {
+                        bucket: row.get(0)?,
+                        timestamp_utc: row.get(1)?,
+                        reason: row.get(2)?,
+                        city: row.get(3)?,
+                        camera: row.get(4)?,
+                    })
+                },
+            )
+            .optional()?
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Ok(Some(EventDetailDto {
+        event,
+        clip,
+        sentry,
+    }))
+}
+
 /// `GET /api/events`: newest-first keyset page of event bubbles, optionally
 /// filtered to a single `trip`.
 pub(crate) fn list_events(
@@ -337,12 +639,16 @@ pub(crate) fn list_events(
                  ORDER BY t DESC, id DESC LIMIT ?5"
             );
             let mut stmt = conn.prepare(&sql)?;
-            stmt.query_map(params![keyset.snap, trip_id, ts, id, limit_plus_one], map_event)?
-                .collect::<Result<Vec<_>, _>>()?
+            stmt.query_map(
+                params![keyset.snap, trip_id, ts, id, limit_plus_one],
+                map_event,
+            )?
+            .collect::<Result<Vec<_>, _>>()?
         }
         (Some(trip_id), None) => {
-            let sql =
-                format!("{EVENT_COLS} WHERE id <= ?1 AND trip_id = ?2 ORDER BY t DESC, id DESC LIMIT ?3");
+            let sql = format!(
+                "{EVENT_COLS} WHERE id <= ?1 AND trip_id = ?2 ORDER BY t DESC, id DESC LIMIT ?3"
+            );
             let mut stmt = conn.prepare(&sql)?;
             stmt.query_map(params![keyset.snap, trip_id, limit_plus_one], map_event)?
                 .collect::<Result<Vec<_>, _>>()?
@@ -442,7 +748,8 @@ pub(crate) fn list_clips(
                 .collect::<Result<Vec<_>, _>>()?
         }
         (None, None) => {
-            let sql = format!("{CLIP_COLS} WHERE id <= ?1 ORDER BY started_at DESC, id DESC LIMIT ?2");
+            let sql =
+                format!("{CLIP_COLS} WHERE id <= ?1 ORDER BY started_at DESC, id DESC LIMIT ?2");
             let mut stmt = conn.prepare(&sql)?;
             stmt.query_map(params![keyset.snap, limit_plus_one], map_clip)?
                 .collect::<Result<Vec<_>, _>>()?
@@ -479,6 +786,41 @@ pub(crate) fn get_clip(conn: &Connection, id: i64) -> Result<Option<ClipDto>, ru
         clip.lon = Some(lon);
     }
     Ok(Some(clip))
+}
+
+/// `GET /api/clips/:id/waypoints`: all bounded waypoints for one clip.
+pub(crate) fn clip_waypoints(
+    conn: &Connection,
+    id: i64,
+) -> Result<Option<Vec<ClipWaypointDto>>, rusqlite::Error> {
+    let exists = conn
+        .query_row("SELECT 1 FROM clips WHERE id = ?1", params![id], |_| Ok(()))
+        .optional()?
+        .is_some();
+    if !exists {
+        return Ok(None);
+    }
+
+    const MAX_WAYPOINTS: i64 = 20_000;
+    let mut stmt = conn.prepare(
+        "SELECT seq, t, lat, lon, has_gps_fix
+           FROM clip_waypoints
+          WHERE clip_id = ?1
+          ORDER BY seq ASC
+          LIMIT ?2",
+    )?;
+    let points = stmt
+        .query_map(params![id, MAX_WAYPOINTS], |row| {
+            Ok(ClipWaypointDto {
+                seq: row.get(0)?,
+                t: row.get(1)?,
+                lat: row.get(2)?,
+                lon: row.get(3)?,
+                has_gps_fix: row.get::<_, i64>(4)? != 0,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(points))
 }
 
 /// `GET /api/analytics`: basic read-only aggregates over events/trips.
@@ -738,7 +1080,7 @@ pub(crate) fn non_archive_angle_source(
     stmt.query_row(params![clip_id, camera], |row| {
         Ok((row.get(0)?, row.get(1)?))
     })
-        .optional()
+    .optional()
 }
 
 /// List the archive-view angles of a clip for the zip-export endpoint, as
@@ -932,15 +1274,20 @@ fn map_event(row: &Row<'_>) -> Result<EventDto, rusqlite::Error> {
 // LightShows targets the `LightShow/` subtree; Wraps targets the separate
 // root-level `Wraps/` subtree. The two never overlap on disk.
 
-/// Return `true` iff the `media_entries` table exists in this connection's DB.
-fn media_entries_present(conn: &Connection) -> Result<bool, rusqlite::Error> {
+/// Return `true` iff the named table exists in this connection's DB.
+fn table_present(conn: &Connection, table_name: &str) -> Result<bool, rusqlite::Error> {
     conn.query_row(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_entries'",
-        [],
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
+        params![table_name],
         |_| Ok(true),
     )
     .optional()
     .map(|v| v.unwrap_or(false))
+}
+
+/// Return `true` iff the `media_entries` table exists in this connection's DB.
+fn media_entries_present(conn: &Connection) -> Result<bool, rusqlite::Error> {
+    table_present(conn, "media_entries")
 }
 
 /// Map a `media_entries` row (name, `rel_path`, `size_bytes`, modified) to a
@@ -1087,9 +1434,11 @@ mod tests {
     use crate::daybucket::{local_day_bounds, parse_tz};
 
     use super::{
-        Keyset, SnapshotResource, encryption_status, get_clip, list_chime_library, list_clips,
-        list_days, list_days_tz, list_standalone_day_events, list_standalone_day_events_range,
-        list_trips, list_trips_tz, quarantined_summary, snapshot_max_id,
+        Keyset, SnapshotResource, encryption_status, get_clip, get_event_detail,
+        index_driving_stats, index_event_chart, index_lifecycle, index_status, list_chime_library,
+        list_clips, list_days, list_days_tz, list_standalone_day_events,
+        list_standalone_day_events_range, list_trips, list_trips_tz, quarantined_summary,
+        snapshot_max_id,
     };
 
     fn seed_media_rows(conn: &Connection, rows: &[(&str, &str, &str, i64)]) {
@@ -1108,6 +1457,149 @@ mod tests {
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         indexd::db::apply_migrations(&mut conn).unwrap();
         conn
+    }
+
+    #[test]
+    fn index_status_reports_schema_and_catalog_counts() {
+        let conn = test_conn();
+        insert_clip(&conn, 1, 100);
+        insert_waypoint(&conn, 1, 0, 37.0, -122.0, true);
+        insert_trip(&conn, 1, "1970-01-01", 100, 1000.0);
+        insert_event(
+            &conn,
+            1,
+            "sentry",
+            100,
+            Some(37.0),
+            Some(-122.0),
+            Some(1),
+            "test event",
+        );
+
+        let status = index_status(&conn).unwrap();
+        assert_eq!(status.schema_version, 7);
+        assert_eq!(status.trip_count, 1);
+        assert_eq!(status.event_count, 1);
+        assert_eq!(status.clip_count, 1);
+        assert_eq!(status.waypoint_count, 1);
+    }
+
+    #[test]
+    fn index_driving_stats_reports_aggregate_driving_metrics() {
+        let conn = test_conn();
+        insert_trip(&conn, 1, "1970-01-01", 100, 1_000.0);
+        insert_trip(&conn, 2, "1970-01-01", 200, 2_000.0);
+        conn.execute(
+            "INSERT INTO trip_points (trip_id, seq, t, lat, lon, speed, heading) VALUES
+                (1, 0, 100, 40.0, -75.0, 10.0, NULL),
+                (2, 0, 200, 41.0, -74.0, 20.0, NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO events \
+                (id, type, severity, t, lat, lon, clip_id, trip_id, front_frame_index, front_frame_offset, description, created_at) \
+             VALUES
+                (1, 'sentry', 1, 120, NULL, NULL, NULL, NULL, NULL, NULL, 'sentry', 120),
+                (2, 'harsh_braking', 2, 220, NULL, NULL, NULL, 1, NULL, NULL, 'warn', 220)",
+            [],
+        )
+        .unwrap();
+
+        let stats = index_driving_stats(&conn).unwrap();
+        assert_eq!(stats.total_trips, 2);
+        assert_eq!(stats.total_distance_m, 3_000.0);
+        assert_eq!(stats.total_drive_time_s, 120);
+        assert_eq!(stats.warning_event_count, 1);
+        assert_eq!(stats.sentry_event_count, 1);
+        assert_eq!(stats.avg_speed_mps, Some(15.0));
+        assert_eq!(stats.max_speed_mps, Some(20.0));
+    }
+
+    #[test]
+    fn index_event_chart_reports_type_and_day_buckets() {
+        let conn = test_conn();
+        conn.execute(
+            "INSERT INTO events \
+                (id, type, severity, t, lat, lon, clip_id, trip_id, front_frame_index, front_frame_offset, description, created_at) \
+             VALUES
+                (1, 'sentry', 1, 1000, NULL, NULL, NULL, NULL, NULL, NULL, 'sentry', 1000),
+                (2, 'harsh_braking', 2, 2000, NULL, NULL, NULL, NULL, NULL, NULL, 'warn', 2000),
+                (3, 'harsh_braking', 3, 90000, NULL, NULL, NULL, NULL, NULL, NULL, 'critical', 90000)",
+            [],
+        )
+        .unwrap();
+
+        let chart = index_event_chart(&conn).unwrap();
+        assert_eq!(chart.total_events, 3);
+        assert_eq!(chart.by_type.len(), 2);
+        assert_eq!(chart.by_type[0].event_type, "harsh_braking");
+        assert_eq!(chart.by_type[0].count, 2);
+        assert_eq!(chart.by_type[1].event_type, "sentry");
+        assert_eq!(chart.by_type[1].count, 1);
+        assert_eq!(chart.by_day.len(), 2);
+        assert_eq!(chart.by_day[0].day, "1970-01-02");
+        assert_eq!(chart.by_day[0].count, 1);
+        assert_eq!(chart.by_day[0].sentry_count, 0);
+        assert_eq!(chart.by_day[0].warning_count, 1);
+        assert_eq!(chart.by_day[1].day, "1970-01-01");
+        assert_eq!(chart.by_day[1].count, 2);
+        assert_eq!(chart.by_day[1].sentry_count, 1);
+        assert_eq!(chart.by_day[1].warning_count, 1);
+    }
+
+    #[test]
+    fn index_lifecycle_reports_error_and_stale_diagnostics() {
+        let conn = test_conn();
+        insert_clip_with_key(&conn, 1, "clip-front-a", 100);
+        insert_clip_with_key(&conn, 2, "clip-front-b", 200);
+        insert_clip_with_key(&conn, 3, "clip-front-c", 300);
+        conn.execute(
+            "INSERT INTO angles (clip_id, camera, file_ref, view_kind, offset_ms, duration_s, size_bytes) VALUES
+                (1, 'front', 'slot0/a-front.mp4', 'archive', 0, 60.0, 1000),
+                (2, 'front', 'slot0/b-front.mp4', 'archive', 0, 60.0, 1000),
+                (3, 'front', 'slot0/c-front.mp4', 'archive', 0, 60.0, 1000)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO front_parse_attempts
+                (canonical_key, parse_state, parse_fingerprint, parser_version, attempt_count, next_retry_at, attempted_at, updated_at)
+             VALUES
+                ('clip-front-a', 'parse_error', 'f-a', 1, 3, 4000000000, 900, 900),
+                ('clip-front-b', 'legacy_unknown', NULL, NULL, 0, NULL, 700, 700)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE clips SET availability = 'missing', updated_at = 450 WHERE id = 2",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO trips (id, day, started_at, ended_at, distance_m, point_count, created_at, updated_at) \
+             VALUES (10, '1970-01-01', 1000, 1100, 10.0, 0, 800, 800)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO events (id, type, severity, t, lat, lon, clip_id, trip_id, front_frame_index, front_frame_offset, description, created_at) \
+             VALUES (50, 'sentry', 1, 1200, NULL, NULL, 1, 10, NULL, NULL, 'seed', 950)",
+            [],
+        )
+        .unwrap();
+
+        let lifecycle = index_lifecycle(&conn).unwrap();
+        assert_eq!(lifecycle.lifecycle_state, "error");
+        assert_eq!(lifecycle.schema_version, 7);
+        assert_eq!(lifecycle.stale_clip_count, 1);
+        assert_eq!(lifecycle.front_parse_total, 2);
+        assert_eq!(lifecycle.front_parse_error_count, 1);
+        assert_eq!(lifecycle.front_parse_stale_count, 1);
+        assert_eq!(lifecycle.front_parse_retry_pending_count, 1);
+        assert_eq!(lifecycle.front_parse_missing_count, 1);
+        assert_eq!(lifecycle.last_derived_at, Some(950));
+        assert_eq!(lifecycle.last_front_parse_attempt_at, Some(900));
     }
 
     fn insert_clip(conn: &Connection, id: i64, started_at: i64) {
@@ -1144,7 +1636,15 @@ mod tests {
                  accel_x, accel_y, accel_z, autopilot, gear, has_gps_fix)
              VALUES
                 (?1, ?2, ?3, ?4, NULL, ?5, ?6, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?7)",
-            params![clip_id, seq, seq, seq as f64, lat, lon, i64::from(has_gps_fix)],
+            params![
+                clip_id,
+                seq,
+                seq,
+                seq as f64,
+                lat,
+                lon,
+                i64::from(has_gps_fix)
+            ],
         )
         .unwrap();
     }
@@ -1211,7 +1711,10 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["a.wav", "b.wav"]
         );
-        assert!(items.iter().all(|item| item.rel_path.starts_with("Chimes/") && item.rel_path.matches('/').count() == 1));
+        assert!(
+            items.iter().all(|item| item.rel_path.starts_with("Chimes/")
+                && item.rel_path.matches('/').count() == 1)
+        );
     }
 
     #[test]
@@ -1316,6 +1819,60 @@ mod tests {
         let clip = get_clip(&conn, 4).unwrap().unwrap();
         assert_eq!(clip.lat, None);
         assert_eq!(clip.lon, None);
+    }
+
+    #[test]
+    fn get_event_detail_returns_clip_and_nearest_sentry_sidecar() {
+        let conn = test_conn();
+        insert_clip_with_key(&conn, 5, "clip-5", 4_980);
+        conn.execute(
+            "INSERT INTO events \
+                (id, type, severity, t, lat, lon, clip_id, trip_id, front_frame_index, front_frame_offset, description, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, NULL, ?8, ?4)",
+            params![500, "sentry", 1, 5_000, 47.62, -122.33, 5, "probe detail"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO clip_events \
+                (event_dir_key, bucket, primary_canonical_key, timestamp_utc, timestamp_local_naive, timestamp_has_offset, est_lat, est_lon, reason, city, camera, updated_at) \
+             VALUES ('sentry:clip-5:4700', 'sentry', 'clip-5', 4_700, 4_700, 0, NULL, NULL, 'person_detected', 'Seattle', 'front', 4_700)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO clip_events \
+                (event_dir_key, bucket, primary_canonical_key, timestamp_utc, timestamp_local_naive, timestamp_has_offset, est_lat, est_lon, reason, city, camera, updated_at) \
+             VALUES ('sentry:clip-5:5010', 'sentry', 'clip-5', 5_010, 5_010, 0, NULL, NULL, 'alarm_triggered', 'Seattle', 'left_repeater', 5_010)",
+            [],
+        )
+        .unwrap();
+
+        let detail = get_event_detail(&conn, 500).unwrap().unwrap();
+        assert_eq!(detail.event.id, 500);
+        assert_eq!(detail.clip.as_ref().map(|clip| clip.id), Some(5));
+        let sentry = detail.sentry.unwrap();
+        assert_eq!(sentry.timestamp_utc, 5_010);
+        assert_eq!(sentry.reason.as_deref(), Some("alarm_triggered"));
+        assert_eq!(sentry.camera.as_deref(), Some("left_repeater"));
+    }
+
+    #[test]
+    fn get_event_detail_degrades_when_clip_events_table_absent() {
+        let conn = test_conn();
+        insert_clip_with_key(&conn, 6, "clip-6", 6_000);
+        conn.execute(
+            "INSERT INTO events \
+                (id, type, severity, t, lat, lon, clip_id, trip_id, front_frame_index, front_frame_offset, description, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, NULL, ?8, ?4)",
+            params![600, "saved", 1, 6_050, 47.61, -122.31, 6, "no sidecar table"],
+        )
+        .unwrap();
+        conn.execute("DROP TABLE clip_events", []).unwrap();
+
+        let detail = get_event_detail(&conn, 600).unwrap().unwrap();
+        assert_eq!(detail.event.id, 600);
+        assert_eq!(detail.clip.as_ref().map(|clip| clip.id), Some(6));
+        assert!(detail.sentry.is_none());
     }
 
     #[test]

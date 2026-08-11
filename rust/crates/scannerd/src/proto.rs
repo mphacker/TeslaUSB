@@ -239,11 +239,11 @@ mod tests {
     use std::io::Cursor;
 
     use super::{
-        read_batch, read_frame, read_request, write_batch, write_frame, write_request,
-        ClipIdentity, ReadFileHeader, ReadFileRequest, Request, VolumeStatsReply,
-        VolumeStatsRequest, MAX_FRAME,
+        ClipIdentity, MAX_FRAME, ReadFileHeader, ReadFileRequest, Request, VolumeStatsReply,
+        VolumeStatsRequest, read_batch, read_frame, read_request, write_batch, write_frame,
+        write_request,
     };
-    use crate::record::{ProducerStats, ScanBatch, PROTOCOL_VERSION};
+    use crate::record::{PROTOCOL_VERSION, ProducerStats, ScanBatch};
 
     #[test]
     fn frame_roundtrips() {

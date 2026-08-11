@@ -4,17 +4,20 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use libc::c_int;
 use serde_json::Value;
 use teslausb_creds::{
-    BlobKeyMaterial, CLOUD_PROVIDER_CREDS_FILENAME, CredentialDocument, HardwareRoot, ProcHardwareRoot,
-    TESLA_SALT_FILENAME, decrypt, derive_key, encrypt, normalize_oauth_token, parse_single_remote_conf,
-    read_blob, read_salt, render_rclone_conf, validate_document, with_creds_lock, write_blob_atomic,
+    BlobKeyMaterial, CLOUD_PROVIDER_CREDS_FILENAME, CredentialDocument, HardwareRoot,
+    ProcHardwareRoot, TESLA_SALT_FILENAME, decrypt, derive_key, encrypt, normalize_oauth_token,
+    parse_single_remote_conf, read_blob, read_salt, render_rclone_conf, validate_document,
+    with_creds_lock, write_blob_atomic,
 };
 
 use crate::config::UploaddConfig;
 use crate::indexd_client::{INDEXD_SOCKET_PATH, UnixIndexdClient};
+use crate::live::control::{DEFAULT_CONTROL_SOCKET, StatusSnapshot, spawn_control_server};
 use crate::live::enqueue::{ChildSource, DiscoverEnqueuer, EnqueueReport, LiveChildSource};
 use crate::live::indexd::{LiveLeaseClient, LiveQueueStore};
 use crate::live::system::{LiveCommandRunner, LiveThrottleSource, LiveWaiter};
@@ -45,6 +48,7 @@ static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone)]
 struct ServeArgs {
+    control_socket: PathBuf,
     indexd_socket: PathBuf,
     wifid_socket: PathBuf,
     archive_root: String,
@@ -65,11 +69,17 @@ struct ServeArgs {
 impl Default for ServeArgs {
     fn default() -> Self {
         Self {
+            control_socket: PathBuf::from(
+                std::env::var("UPLOADD_CONTROL_SOCKET")
+                    .unwrap_or_else(|_| DEFAULT_CONTROL_SOCKET.to_owned()),
+            ),
             indexd_socket: PathBuf::from(
-                std::env::var("UPLOADD_INDEXD_SOCKET").unwrap_or_else(|_| INDEXD_SOCKET_PATH.to_owned()),
+                std::env::var("UPLOADD_INDEXD_SOCKET")
+                    .unwrap_or_else(|_| INDEXD_SOCKET_PATH.to_owned()),
             ),
             wifid_socket: PathBuf::from(
-                std::env::var("UPLOADD_WIFID_SOCKET").unwrap_or_else(|_| DEFAULT_WIFID_SOCKET.to_owned()),
+                std::env::var("UPLOADD_WIFID_SOCKET")
+                    .unwrap_or_else(|_| DEFAULT_WIFID_SOCKET.to_owned()),
             ),
             archive_root: std::env::var("UPLOADD_ARCHIVE_ROOT")
                 .unwrap_or_else(|_| DEFAULT_ARCHIVE_ROOT.to_owned()),
@@ -90,7 +100,9 @@ impl Default for ServeArgs {
                 .is_none(),
             rclone_binary: std::env::var("UPLOADD_RCLONE_BINARY")
                 .unwrap_or_else(|_| DEFAULT_RCLONE_BINARY.to_owned()),
-            rclone_config: std::env::var("UPLOADD_RCLONE_CONFIG").ok().filter(|v| !v.is_empty()),
+            rclone_config: std::env::var("UPLOADD_RCLONE_CONFIG")
+                .ok()
+                .filter(|v| !v.is_empty()),
             interval_secs: std::env::var("UPLOADD_INTERVAL_SECS")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
@@ -113,6 +125,7 @@ struct OAuthReadbackBaseline {
 struct RenderedRuntimeConfig {
     path: PathBuf,
     oauth_baseline: Option<OAuthReadbackBaseline>,
+    provider_type: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -191,7 +204,9 @@ struct LiveProducer<'a, C: crate::indexd_client::IndexdCloudClient, S: ChildSour
     enqueuer: DiscoverEnqueuer<'a, C, S>,
 }
 
-impl<C: crate::indexd_client::IndexdCloudClient, S: ChildSource> ProducerPass for LiveProducer<'_, C, S> {
+impl<C: crate::indexd_client::IndexdCloudClient, S: ChildSource> ProducerPass
+    for LiveProducer<'_, C, S>
+{
     fn run_pass(&self) -> Result<EnqueueReport, String> {
         self.enqueuer.run().map_err(|err| err.to_string())
     }
@@ -302,13 +317,19 @@ struct CycleLogState {
 
 fn log_cycle_report(cycle: u64, report: &CycleReport, state: &mut CycleLogState) {
     if let Some(reason) = &report.producer_failure {
-        write_stderr_line(&format!("uploadd serve: cycle {cycle} producer error: {reason}"));
+        write_stderr_line(&format!(
+            "uploadd serve: cycle {cycle} producer error: {reason}"
+        ));
     }
     if let Some(reason) = &report.hydrate_failure {
-        write_stderr_line(&format!("uploadd serve: cycle {cycle} hydrate error: {reason}"));
+        write_stderr_line(&format!(
+            "uploadd serve: cycle {cycle} hydrate error: {reason}"
+        ));
     }
     if let Some(reason) = &report.drain_failure {
-        write_stderr_line(&format!("uploadd serve: cycle {cycle} drain infra error: {reason}"));
+        write_stderr_line(&format!(
+            "uploadd serve: cycle {cycle} drain infra error: {reason}"
+        ));
     }
     if report.exhausted > 0 {
         write_stderr_line(&format!(
@@ -409,7 +430,8 @@ fn render_runtime_rclone_config(
         return None;
     }
 
-    let rendered = (|| -> Result<(String, Option<OAuthReadbackBaseline>), teslausb_creds::CredsError> {
+    let rendered =
+        (|| -> Result<(String, Option<OAuthReadbackBaseline>, String), teslausb_creds::CredsError> {
         let blob = read_blob(&blob_path)?;
         let salt = read_salt(&Path::new(&parsed.cloud_state_dir).join(TESLA_SALT_FILENAME))?;
         let key = derive_key(hardware_root, &salt, teslausb_creds::DEFAULT_KDF_ITERS)?;
@@ -422,24 +444,28 @@ fn render_runtime_rclone_config(
         let document = CredentialDocument::from_bytes(&plaintext)?;
         let oauth_baseline = oauth_readback_baseline(&document)?;
         let validated = validate_document(&document)?;
+        let provider_type = validated.backend_type.clone();
         let contents = render_rclone_conf(RENDERED_REMOTE_NAME, &validated)?;
-        Ok((contents, oauth_baseline))
+        Ok((contents, oauth_baseline, provider_type))
     })();
 
     match rendered {
-        Ok((contents, oauth_baseline)) => match write_runtime_rclone_config(runtime_config, &contents) {
-            Ok(()) => Some(RenderedRuntimeConfig {
-                path: runtime_config.to_path_buf(),
-                oauth_baseline,
-            }),
-            Err(err) => {
-                log(&format!(
-                    "uploadd serve: failed to write runtime rclone config `{}`: {err}; continuing without rendered cloud credentials",
-                    runtime_config.display()
-                ));
-                None
+        Ok((contents, oauth_baseline, provider_type)) => {
+            match write_runtime_rclone_config(runtime_config, &contents) {
+                Ok(()) => Some(RenderedRuntimeConfig {
+                    path: runtime_config.to_path_buf(),
+                    oauth_baseline,
+                    provider_type,
+                }),
+                Err(err) => {
+                    log(&format!(
+                        "uploadd serve: failed to write runtime rclone config `{}`: {err}; continuing without rendered cloud credentials",
+                        runtime_config.display()
+                    ));
+                    None
+                }
             }
-        },
+        }
         Err(err) => {
             log(&format!(
                 "uploadd serve: cloud credentials unreadable ({err}); continuing without cloud upload config. Re-save cloud credentials in the web UI."
@@ -478,7 +504,9 @@ fn readback_runtime_oauth_token(
         Err(err) => return Err(teslausb_creds::CredsError::Io(err)),
     };
     if !conf.lines().any(|line| line.trim() == "[teslausb]") {
-        log("uploadd serve: runtime rclone config missing [teslausb] section; skipping token read-back");
+        log(
+            "uploadd serve: runtime rclone config missing [teslausb] section; skipping token read-back",
+        );
         return Ok(());
     }
     let Ok(parsed_conf) = parse_single_remote_conf(&conf) else {
@@ -487,7 +515,9 @@ fn readback_runtime_oauth_token(
     };
     let expected_backend = oauth_provider_backend_type(&baseline.document);
     if parsed_conf.backend_type != expected_backend {
-        log("uploadd serve: runtime rclone config has unexpected backend for token read-back; skipping");
+        log(
+            "uploadd serve: runtime rclone config has unexpected backend for token read-back; skipping",
+        );
         return Ok(());
     }
     let Some(raw_token) = parsed_conf.options.get("token") else {
@@ -526,7 +556,9 @@ fn readback_runtime_oauth_token(
         return Ok(());
     };
     if render_rclone_conf(RENDERED_REMOTE_NAME, &validated).is_err() {
-        log("uploadd serve: refreshed token cannot be rendered into rclone config; skipping token read-back");
+        log(
+            "uploadd serve: refreshed token cannot be rendered into rclone config; skipping token read-back",
+        );
         return Ok(());
     }
 
@@ -537,7 +569,9 @@ fn readback_runtime_oauth_token(
     let write_result = with_creds_lock(creds_dir, || {
         let blob = match read_blob(&blob_path) {
             Ok(value) => value,
-            Err(teslausb_creds::CredsError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => {
+            Err(teslausb_creds::CredsError::Io(err))
+                if err.kind() == std::io::ErrorKind::NotFound =>
+            {
                 log("uploadd serve: cloud credential blob removed; skipping token read-back");
                 return Ok(false);
             }
@@ -653,6 +687,37 @@ fn effective_destination_id(
         .map(|baseline| oauth_provider_backend_type(&baseline.document).to_owned())
 }
 
+fn effective_provider_type(
+    parsed: &ServeArgs,
+    rendered: Option<&RenderedRuntimeConfig>,
+) -> Option<String> {
+    if let Some(config) = rendered {
+        return Some(config.provider_type.clone());
+    }
+    if !parsed.destination_id.trim().is_empty() {
+        return Some(parsed.destination_id.clone());
+    }
+    None
+}
+
+fn is_uploader_configured(parsed: &ServeArgs, rendered: Option<&RenderedRuntimeConfig>) -> bool {
+    rendered.is_some() || parsed.rclone_config.is_some() || !parsed.destination_id.trim().is_empty()
+}
+
+fn update_control_status(
+    status: &Arc<Mutex<StatusSnapshot>>,
+    configured: bool,
+    provider_type: Option<String>,
+    uploader_state: &str,
+) {
+    let Ok(mut guard) = status.lock() else {
+        return;
+    };
+    guard.configured = configured;
+    guard.provider_type = provider_type;
+    guard.uploader_state = uploader_state.to_owned();
+}
+
 /// Block until SIGTERM/SIGINT, doing no queue work.
 ///
 /// Used when no upload destination can be determined. Idling (rather than
@@ -673,6 +738,10 @@ fn parse_serve_args(args: &[String]) -> Result<ServeArgs, String> {
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
+            "--control-socket" => {
+                let value = next_arg_value(&mut iter, "--control-socket")?;
+                parsed.control_socket = PathBuf::from(value);
+            }
             "--indexd-socket" => {
                 let value = next_arg_value(&mut iter, "--indexd-socket")?;
                 parsed.indexd_socket = PathBuf::from(value);
@@ -716,10 +785,18 @@ fn parse_serve_args(args: &[String]) -> Result<ServeArgs, String> {
                     Some(parse_arg::<u32>("--max-parents-per-pass", &value)?);
             }
             "--once" => parsed.once = true,
-            other => return Err(format!("uploadd serve: unknown option `{other}`.\n{}", serve_usage())),
+            other => {
+                return Err(format!(
+                    "uploadd serve: unknown option `{other}`.\n{}",
+                    serve_usage()
+                ));
+            }
         }
     }
 
+    if parsed.control_socket.as_os_str().is_empty() {
+        return Err("uploadd serve: --control-socket must be non-empty.".to_owned());
+    }
     if parsed.archive_root.trim().is_empty() {
         return Err("uploadd serve: --archive-root must be non-empty.".to_owned());
     }
@@ -784,8 +861,7 @@ fn build_command_runner(
     parsed_for_sync: ServeArgs,
 ) -> LiveCommandRunner {
     let mut runner = LiveCommandRunner::new();
-    if let Some(baseline) =
-        rendered_runtime_config.and_then(|config| config.oauth_baseline.clone())
+    if let Some(baseline) = rendered_runtime_config.and_then(|config| config.oauth_baseline.clone())
     {
         let baseline_cell = RefCell::new(baseline);
         // TIMING: this hook runs synchronously inside `runner.run()`, so after a
@@ -832,18 +908,32 @@ pub fn run_serve(args: &[String]) -> ExitCode {
         write_stderr_line(&format!("uploadd serve: invalid config: {reason}"));
         return ExitCode::FAILURE;
     }
+    let control_status = Arc::new(Mutex::new(StatusSnapshot::default()));
+    if let Err(err) =
+        spawn_control_server(parsed.control_socket.clone(), Arc::clone(&control_status))
+    {
+        write_stderr_line(&format!(
+            "uploadd serve: failed to start control socket `{}`: {err}",
+            parsed.control_socket.display()
+        ));
+    }
     let rendered_runtime_config =
         resolve_runtime_rclone_config(&parsed, &ProcHardwareRoot, write_stderr_line);
-    let rclone_config = parsed
-        .rclone_config
-        .clone()
-        .or_else(|| {
-            rendered_runtime_config
-                .as_ref()
-                .map(|config| config.path.to_string_lossy().into_owned())
-        });
+    let rclone_config = parsed.rclone_config.clone().or_else(|| {
+        rendered_runtime_config
+            .as_ref()
+            .map(|config| config.path.to_string_lossy().into_owned())
+    });
     let rclone_remote = effective_rclone_remote_name(&parsed, rendered_runtime_config.is_some());
     let destination_id = effective_destination_id(&parsed, rendered_runtime_config.as_ref());
+    let configured = is_uploader_configured(&parsed, rendered_runtime_config.as_ref());
+    let provider_type = effective_provider_type(&parsed, rendered_runtime_config.as_ref());
+    update_control_status(
+        &control_status,
+        configured,
+        provider_type.clone(),
+        "starting",
+    );
     let parsed_for_sync = parsed.clone();
 
     install_shutdown_handlers();
@@ -851,11 +941,18 @@ pub fn run_serve(args: &[String]) -> ExitCode {
     // With no credential and no explicit id there is no destination to key the
     // upload ledger by; see `idle_until_shutdown` for why we idle rather than exit.
     let Some(destination_id) = destination_id else {
+        update_control_status(
+            &control_status,
+            configured,
+            provider_type.clone(),
+            "idle_no_destination",
+        );
         write_stderr_line(
             "uploadd serve: no cloud credential configured and no --destination-id given; \
              idling. Save a credential in the web UI, then restart uploadd.",
         );
         idle_until_shutdown();
+        update_control_status(&control_status, configured, provider_type, "stopping");
         return ExitCode::SUCCESS;
     };
 
@@ -863,7 +960,8 @@ pub fn run_serve(args: &[String]) -> ExitCode {
     let queue_store = LiveQueueStore::new(indexd_client.clone(), cfg.retry.max_attempts);
     let lease_client = LiveLeaseClient::new(indexd_client.clone());
     let archive_root = ArchiveRoot::new(parsed.archive_root.clone());
-    let throttle_source = LiveThrottleSource::with_paths(parsed.wifid_socket, DEFAULT_GOVERNOR_FILE);
+    let throttle_source =
+        LiveThrottleSource::with_paths(parsed.wifid_socket, DEFAULT_GOVERNOR_FILE);
     let child_source = LiveChildSource::new(archive_root.clone());
     let enqueuer = match DiscoverEnqueuer::new(
         &indexd_client,
@@ -907,6 +1005,7 @@ pub fn run_serve(args: &[String]) -> ExitCode {
     };
     let mut executor = LoopExecutor { producer, drainer };
     let shutdown = ProcessShutdown;
+    update_control_status(&control_status, configured, provider_type, "running");
     let cycles = run_loop(
         &mut executor,
         &shutdown,
@@ -914,19 +1013,22 @@ pub fn run_serve(args: &[String]) -> ExitCode {
         parsed.interval_secs,
         parsed.once,
     );
-    write_stderr_line(&format!("uploadd serve: clean shutdown after {cycles} cycle(s)"));
+    update_control_status(&control_status, configured, None, "stopping");
+    write_stderr_line(&format!(
+        "uploadd serve: clean shutdown after {cycles} cycle(s)"
+    ));
     ExitCode::SUCCESS
 }
 
 /// Usage text for `uploadd serve`.
 #[must_use]
 pub fn serve_usage() -> String {
-    "uploadd serve [--indexd-socket <path>] [--wifid-socket <path>] \
+    "uploadd serve [--control-socket <path>] [--indexd-socket <path>] [--wifid-socket <path>] \
 [--archive-root <path>] [--cloud-state-dir <path>] [--runtime-dir <path>] \
 --destination-id <id> [--remote-prefix <prefix>] \
 [--rclone-remote <name>] [--rclone-binary <path>] [--rclone-config <path>] \
 [--interval-secs <u64>] [--max-parents-per-pass <u32>] [--once]\n\
-env fallback: UPLOADD_INDEXD_SOCKET, UPLOADD_WIFID_SOCKET, UPLOADD_ARCHIVE_ROOT, \
+env fallback: UPLOADD_CONTROL_SOCKET, UPLOADD_INDEXD_SOCKET, UPLOADD_WIFID_SOCKET, UPLOADD_ARCHIVE_ROOT, \
 UPLOADD_CLOUD_STATE_DIR, UPLOADD_RUNTIME_DIR, \
 UPLOADD_DESTINATION_ID, UPLOADD_REMOTE_PREFIX, UPLOADD_RCLONE_REMOTE, \
 UPLOADD_RCLONE_BINARY, UPLOADD_RCLONE_CONFIG, UPLOADD_INTERVAL_SECS, \
@@ -948,9 +1050,9 @@ mod tests {
 
     use super::*;
     use teslausb_creds::{
-        BlobKeyMaterial, CredentialDocument, CredentialFlow, OAuthProvider, StaticHardwareRoot, decrypt,
-        derive_key, encrypt, normalize_oauth_token, read_blob, read_or_create_salt, read_salt,
-        write_blob_atomic,
+        BlobKeyMaterial, CredentialDocument, CredentialFlow, OAuthProvider, StaticHardwareRoot,
+        decrypt, derive_key, encrypt, normalize_oauth_token, read_blob, read_or_create_salt,
+        read_salt, write_blob_atomic,
     };
 
     #[derive(Default)]
@@ -1061,7 +1163,8 @@ mod tests {
     }
 
     fn read_blob_document(cloud_state_dir: &Path, root: &StaticHardwareRoot) -> CredentialDocument {
-        let blob = read_blob(&cloud_state_dir.join(CLOUD_PROVIDER_CREDS_FILENAME)).expect("read blob");
+        let blob =
+            read_blob(&cloud_state_dir.join(CLOUD_PROVIDER_CREDS_FILENAME)).expect("read blob");
         let salt = read_salt(&cloud_state_dir.join(TESLA_SALT_FILENAME)).expect("read salt");
         let key = derive_key(root, &salt, teslausb_creds::DEFAULT_KDF_ITERS).expect("derive key");
         let material = BlobKeyMaterial {
@@ -1087,7 +1190,8 @@ mod tests {
         root: &StaticHardwareRoot,
     ) -> Vec<String> {
         let mut logs = Vec::new();
-        let result = readback_runtime_oauth_token(parsed, baseline, root, |line| logs.push(line.to_owned()));
+        let result =
+            readback_runtime_oauth_token(parsed, baseline, root, |line| logs.push(line.to_owned()));
         assert!(result.is_ok(), "unexpected read-back error: {result:?}");
         logs
     }
@@ -1128,7 +1232,10 @@ mod tests {
     fn drain_infra_error_does_not_prevent_next_cycle_producer() {
         let producer = FakeProducer {
             calls: Cell::new(0),
-            outcomes: RefCell::new(vec![Ok(EnqueueReport::default()), Ok(EnqueueReport::default())]),
+            outcomes: RefCell::new(vec![
+                Ok(EnqueueReport::default()),
+                Ok(EnqueueReport::default()),
+            ]),
         };
         let drain_state = Rc::new(RefCell::new(FakeDrainerState::default()));
         let drainer = FakeDrainer {
@@ -1279,10 +1386,11 @@ mod tests {
             runtime_dir: runtime_dir.to_string_lossy().into_owned(),
             ..ServeArgs::default()
         };
-        let before_blob =
-            fs::read(cloud_state_dir.join(CLOUD_PROVIDER_CREDS_FILENAME)).expect("read blob before");
+        let before_blob = fs::read(cloud_state_dir.join(CLOUD_PROVIDER_CREDS_FILENAME))
+            .expect("read blob before");
         let logs = sync_readback_once(&parsed, &mut baseline, &root);
-        let after_blob = fs::read(cloud_state_dir.join(CLOUD_PROVIDER_CREDS_FILENAME)).expect("read blob after");
+        let after_blob =
+            fs::read(cloud_state_dir.join(CLOUD_PROVIDER_CREDS_FILENAME)).expect("read blob after");
         assert_eq!(before_blob, after_blob);
         assert!(logs.is_empty(), "unexpected logs: {logs:?}");
         let _ = fs::remove_dir_all(base);
@@ -1326,7 +1434,8 @@ mod tests {
         let cloud_state_dir = base.join("state");
         let runtime_dir = base.join("run");
         let root = StaticHardwareRoot::new("00000000deadbeef", "uploadd-test-machine");
-        let token = normalize_oauth_token(r#"{"access_token":"tok-a","refresh_token":"ref-a"}"#).unwrap();
+        let token =
+            normalize_oauth_token(r#"{"access_token":"tok-a","refresh_token":"ref-a"}"#).unwrap();
         let options = BTreeMap::from([
             ("drive_id".to_owned(), "drive-123".to_owned()),
             ("drive_type".to_owned(), "personal".to_owned()),
@@ -1337,7 +1446,8 @@ mod tests {
             options: options.clone(),
         });
         fs::create_dir_all(&cloud_state_dir).expect("create cloud dir");
-        let salt = read_or_create_salt(&cloud_state_dir.join(TESLA_SALT_FILENAME)).expect("create salt");
+        let salt =
+            read_or_create_salt(&cloud_state_dir.join(TESLA_SALT_FILENAME)).expect("create salt");
         let key = derive_key(&root, &salt, teslausb_creds::DEFAULT_KDF_ITERS).expect("derive key");
         let material = BlobKeyMaterial {
             key,
@@ -1346,7 +1456,8 @@ mod tests {
         };
         let plaintext = document.to_canonical_bytes().expect("serialize doc");
         let blob = encrypt(&plaintext, &material).expect("encrypt blob");
-        write_blob_atomic(&cloud_state_dir.join(CLOUD_PROVIDER_CREDS_FILENAME), &blob).expect("write blob");
+        write_blob_atomic(&cloud_state_dir.join(CLOUD_PROVIDER_CREDS_FILENAME), &blob)
+            .expect("write blob");
 
         let mut baseline = oauth_baseline(&document);
         write_runtime_token_conf(
@@ -1369,10 +1480,13 @@ mod tests {
             token,
             normalize_oauth_token(r#"{"access_token":"tok-b","refresh_token":"ref-b"}"#).unwrap()
         );
-        assert_eq!(options, BTreeMap::from([
-            ("drive_id".to_owned(), "drive-123".to_owned()),
-            ("drive_type".to_owned(), "personal".to_owned()),
-        ]));
+        assert_eq!(
+            options,
+            BTreeMap::from([
+                ("drive_id".to_owned(), "drive-123".to_owned()),
+                ("drive_type".to_owned(), "personal".to_owned()),
+            ])
+        );
         let _ = fs::remove_dir_all(base);
     }
 
@@ -1401,7 +1515,10 @@ mod tests {
             r#"{"access_token":"tok-b","refresh_token":"ref-b"}"#,
         );
         let logs_first = sync_readback_once(&parsed, &mut baseline, &root);
-        assert!(logs_first.is_empty(), "unexpected first logs: {logs_first:?}");
+        assert!(
+            logs_first.is_empty(),
+            "unexpected first logs: {logs_first:?}"
+        );
         assert_eq!(
             read_oauth_token_from_blob(&cloud_state_dir, &root),
             normalize_oauth_token(r#"{"access_token":"tok-b","refresh_token":"ref-b"}"#).unwrap()
@@ -1413,7 +1530,10 @@ mod tests {
             r#"{"access_token":"tok-c","refresh_token":"ref-c"}"#,
         );
         let logs_second = sync_readback_once(&parsed, &mut baseline, &root);
-        assert!(logs_second.is_empty(), "unexpected second logs: {logs_second:?}");
+        assert!(
+            logs_second.is_empty(),
+            "unexpected second logs: {logs_second:?}"
+        );
         assert_eq!(
             read_oauth_token_from_blob(&cloud_state_dir, &root),
             normalize_oauth_token(r#"{"access_token":"tok-c","refresh_token":"ref-c"}"#).unwrap()
@@ -1441,7 +1561,10 @@ mod tests {
             ..ServeArgs::default()
         };
         let logs = sync_readback_once(&parsed, &mut baseline, &root);
-        assert!(logs.iter().any(|line| line.contains("missing refresh_token")));
+        assert!(
+            logs.iter()
+                .any(|line| line.contains("missing refresh_token"))
+        );
         assert_eq!(
             read_oauth_token_from_blob(&cloud_state_dir, &root),
             normalize_oauth_token(r#"{"access_token":"tok-a","refresh_token":"ref-a"}"#).unwrap()
@@ -1524,8 +1647,8 @@ mod tests {
             r#"{"access_token":"tok-a","refresh_token":"ref-a"}"#,
         );
         let mut baseline = oauth_baseline(&original_document);
-        let replacement_token = normalize_oauth_token(r#"{"access_token":"op-new","refresh_token":"op-ref"}"#)
-            .unwrap();
+        let replacement_token =
+            normalize_oauth_token(r#"{"access_token":"op-new","refresh_token":"op-ref"}"#).unwrap();
         let replacement_document = write_oauth_blob(
             &cloud_state_dir,
             &root,
@@ -1544,7 +1667,10 @@ mod tests {
         };
         let logs = sync_readback_once(&parsed, &mut baseline, &root);
         assert!(logs.iter().any(|line| line.contains("changed by operator")));
-        assert_eq!(read_blob_document(&cloud_state_dir, &root), replacement_document);
+        assert_eq!(
+            read_blob_document(&cloud_state_dir, &root),
+            replacement_document
+        );
         let _ = fs::remove_dir_all(base);
     }
 
@@ -1560,7 +1686,8 @@ mod tests {
             OAuthProvider::Onedrive,
             r#"{"access_token":"tok-a","refresh_token":"ref-a"}"#,
         );
-        let expected_token = normalize_oauth_token(r#"{"access_token":"tok-a","refresh_token":"ref-a"}"#).unwrap();
+        let expected_token =
+            normalize_oauth_token(r#"{"access_token":"tok-a","refresh_token":"ref-a"}"#).unwrap();
         let mut baseline = oauth_baseline(&document);
         let parsed = ServeArgs {
             cloud_state_dir: cloud_state_dir.to_string_lossy().into_owned(),
@@ -1575,14 +1702,31 @@ mod tests {
         )
         .expect("write wrong section config");
         let missing_logs = sync_readback_once(&parsed, &mut baseline, &root);
-        assert!(missing_logs.iter().any(|line| line.contains("missing [teslausb] section")));
-        assert_eq!(read_oauth_token_from_blob(&cloud_state_dir, &root), expected_token.clone());
+        assert!(
+            missing_logs
+                .iter()
+                .any(|line| line.contains("missing [teslausb] section"))
+        );
+        assert_eq!(
+            read_oauth_token_from_blob(&cloud_state_dir, &root),
+            expected_token.clone()
+        );
 
-        fs::write(runtime_dir.join(RENDERED_CONFIG_FILENAME), "[teslausb]\nnot-a-kv-line\n")
-            .expect("write malformed config");
+        fs::write(
+            runtime_dir.join(RENDERED_CONFIG_FILENAME),
+            "[teslausb]\nnot-a-kv-line\n",
+        )
+        .expect("write malformed config");
         let malformed_logs = sync_readback_once(&parsed, &mut baseline, &root);
-        assert!(malformed_logs.iter().any(|line| line.contains("is malformed")));
-        assert_eq!(read_oauth_token_from_blob(&cloud_state_dir, &root), expected_token);
+        assert!(
+            malformed_logs
+                .iter()
+                .any(|line| line.contains("is malformed"))
+        );
+        assert_eq!(
+            read_oauth_token_from_blob(&cloud_state_dir, &root),
+            expected_token
+        );
         let _ = fs::remove_dir_all(base);
     }
 
@@ -1600,14 +1744,20 @@ mod tests {
             ..ServeArgs::default()
         };
         let mut logs = Vec::<String>::new();
-        let rendered = resolve_runtime_rclone_config(&parsed, &root, |line| logs.push(line.to_owned()));
+        let rendered =
+            resolve_runtime_rclone_config(&parsed, &root, |line| logs.push(line.to_owned()));
         let rendered_path = rendered.expect("rendered path").path;
         let text = fs::read_to_string(&rendered_path).expect("read rendered config");
         assert_eq!(text.matches("[teslausb]").count(), 1);
         assert!(text.contains("type = onedrive"));
-        assert!(text.contains("token = {\"access_token\":\"token-123\",\"expiry\":\"2026-01-01T00:00:00Z\"}"));
+        assert!(text.contains(
+            "token = {\"access_token\":\"token-123\",\"expiry\":\"2026-01-01T00:00:00Z\"}"
+        ));
         #[cfg(unix)]
-        assert_eq!(fs::metadata(&rendered_path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            fs::metadata(&rendered_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         assert!(logs.is_empty(), "unexpected logs: {logs:?}");
         let _ = fs::remove_dir_all(base);
     }
@@ -1620,8 +1770,11 @@ mod tests {
         let root = StaticHardwareRoot::new("00000000deadbeef", "uploadd-test-machine");
         write_valid_oauth_blob(&cloud_state_dir, &root);
         fs::create_dir_all(&runtime_dir).expect("create runtime dir");
-        fs::write(runtime_dir.join(RENDERED_CONFIG_FILENAME), "[stale]\nmarker = keep-me\n")
-            .expect("write stale config");
+        fs::write(
+            runtime_dir.join(RENDERED_CONFIG_FILENAME),
+            "[stale]\nmarker = keep-me\n",
+        )
+        .expect("write stale config");
         let parsed = ServeArgs {
             cloud_state_dir: cloud_state_dir.to_string_lossy().into_owned(),
             runtime_dir: runtime_dir.to_string_lossy().into_owned(),
@@ -1643,7 +1796,8 @@ mod tests {
         let cloud_state_dir = base.join("state");
         let runtime_dir = base.join("run");
         fs::create_dir_all(&cloud_state_dir).expect("create cloud dir");
-        let _ = read_or_create_salt(&cloud_state_dir.join(TESLA_SALT_FILENAME)).expect("create salt");
+        let _ =
+            read_or_create_salt(&cloud_state_dir.join(TESLA_SALT_FILENAME)).expect("create salt");
         let blob_path = cloud_state_dir.join(CLOUD_PROVIDER_CREDS_FILENAME);
         fs::write(&blob_path, b"corrupt").expect("write corrupt blob");
         let parsed = ServeArgs {
@@ -1654,11 +1808,15 @@ mod tests {
         };
         let root = StaticHardwareRoot::new("00000000deadbeef", "uploadd-test-machine");
         let mut logs = Vec::<String>::new();
-        let rendered = resolve_runtime_rclone_config(&parsed, &root, |line| logs.push(line.to_owned()));
+        let rendered =
+            resolve_runtime_rclone_config(&parsed, &root, |line| logs.push(line.to_owned()));
         assert!(rendered.is_none());
         assert!(blob_path.exists());
         assert!(!runtime_dir.join(RENDERED_CONFIG_FILENAME).exists());
-        assert!(logs.iter().any(|line| line.contains("cloud credentials unreadable")));
+        assert!(
+            logs.iter()
+                .any(|line| line.contains("cloud credentials unreadable"))
+        );
         let _ = fs::remove_dir_all(base);
     }
 
@@ -1670,7 +1828,8 @@ mod tests {
         let root = StaticHardwareRoot::new("00000000deadbeef", "uploadd-test-machine");
         write_valid_oauth_blob(&cloud_state_dir, &root);
         fs::create_dir_all(&runtime_dir).expect("create runtime dir");
-        fs::write(runtime_dir.join(RENDERED_CONFIG_FILENAME), "[stale]\n").expect("write stale config");
+        fs::write(runtime_dir.join(RENDERED_CONFIG_FILENAME), "[stale]\n")
+            .expect("write stale config");
         let parsed = ServeArgs {
             cloud_state_dir: cloud_state_dir.to_string_lossy().into_owned(),
             runtime_dir: runtime_dir.to_string_lossy().into_owned(),
@@ -1696,7 +1855,8 @@ mod tests {
         };
         let root = StaticHardwareRoot::new("00000000deadbeef", "uploadd-test-machine");
         let mut logs = Vec::<String>::new();
-        let rendered = resolve_runtime_rclone_config(&parsed, &root, |line| logs.push(line.to_owned()));
+        let rendered =
+            resolve_runtime_rclone_config(&parsed, &root, |line| logs.push(line.to_owned()));
         assert!(rendered.is_none());
         assert!(logs.is_empty(), "unexpected logs: {logs:?}");
         assert!(!runtime_dir.join(RENDERED_CONFIG_FILENAME).exists());
@@ -1727,10 +1887,7 @@ mod tests {
 
     #[test]
     fn parse_serve_args_rejects_oversized_destination_id() {
-        let parsed_invalid = parse_serve_args(&[
-            "--destination-id".to_owned(),
-            "x".repeat(129),
-        ]);
+        let parsed_invalid = parse_serve_args(&["--destination-id".to_owned(), "x".repeat(129)]);
         assert!(parsed_invalid.is_err());
     }
 
@@ -1739,6 +1896,19 @@ mod tests {
         let parsed = parse_serve_args(&["--destination-id".to_owned(), String::new()])
             .expect("empty destination id is allowed; it is derived from the credential");
         assert!(parsed.destination_id.is_empty());
+    }
+
+    #[test]
+    fn parse_serve_args_accepts_control_socket_override() {
+        let parsed = parse_serve_args(&[
+            "--control-socket".to_owned(),
+            "/run/teslausb/custom-uploadd.sock".to_owned(),
+        ])
+        .expect("control socket override must parse");
+        assert_eq!(
+            parsed.control_socket,
+            PathBuf::from("/run/teslausb/custom-uploadd.sock")
+        );
     }
 
     fn rendered_with_provider(provider: teslausb_creds::OAuthProvider) -> RenderedRuntimeConfig {
@@ -1751,6 +1921,7 @@ mod tests {
         RenderedRuntimeConfig {
             path: PathBuf::from("/run/teslausb/rclone.conf"),
             oauth_baseline: oauth_readback_baseline(&document).expect("baseline"),
+            provider_type: oauth_provider_backend_type(&document).to_owned(),
         }
     }
 
@@ -1811,7 +1982,8 @@ mod tests {
         let args: Vec<String> = fields.map(str::to_owned).collect();
 
         let parsed =
-            parse_serve_args(&args).expect("uploadd.service ExecStart arguments must parse");        assert_eq!(
+            parse_serve_args(&args).expect("uploadd.service ExecStart arguments must parse");
+        assert_eq!(
             parsed.archive_root, "/data/teslausb/archive",
             "the unit must pass the real archive root, not uploadd's /srv default"
         );
@@ -1826,5 +1998,16 @@ mod tests {
             None,
             "no destination means uploadd must idle, never enqueue under a placeholder id"
         );
+    }
+
+    #[test]
+    fn provider_type_is_taken_from_rendered_credential() {
+        let parsed = ServeArgs::default();
+        let rendered = rendered_with_provider(teslausb_creds::OAuthProvider::Dropbox);
+        assert_eq!(
+            effective_provider_type(&parsed, Some(&rendered)),
+            Some("dropbox".to_owned())
+        );
+        assert!(is_uploader_configured(&parsed, Some(&rendered)));
     }
 }

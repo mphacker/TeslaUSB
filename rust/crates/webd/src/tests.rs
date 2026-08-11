@@ -22,8 +22,8 @@ use axum::response::IntoResponse;
 use http_body_util::BodyExt;
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
-use std::path::PathBuf;
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 use tower::ServiceExt;
@@ -36,11 +36,13 @@ use crate::read_client::{
 };
 use crate::scheduler::SchedulerClient;
 use crate::stats_client::UnavailableVolumeStatsClient;
+use crate::uploadd_client;
+use crate::wifid_client;
 use crate::wifid_client::WifidClient;
 use crate::{
-    Catalog, MediaConfig, build_router, router_with_all_clients,
-    router_with_all_clients_and_read_client, router_with_clients, router_with_gadget,
-    router_with_gadget_and_probe, router_with_wifid,
+    Catalog, MediaConfig, build_router, router_with_all_clients_and_read_client,
+    router_with_all_clients_and_read_client_and_probe, router_with_all_clients_and_uploadd,
+    router_with_clients, router_with_gadget, router_with_gadget_and_probe, router_with_wifid,
 };
 
 /// A live fixture: a seeded catalog + its router. `_dir` keeps the temp files
@@ -67,10 +69,101 @@ impl indexd_client::IndexdClient for MockIndexd {
     }
 }
 
+struct MockUploadd {
+    last: Arc<Mutex<Option<Value>>>,
+    response: Value,
+    fail_unavailable: bool,
+    fail_protocol: bool,
+}
+
+impl uploadd_client::UploaddClient for MockUploadd {
+    fn call(&self, request: Value) -> Result<Value, TransportError> {
+        *self.last.lock().unwrap() = Some(request);
+        if self.fail_unavailable {
+            return Err(TransportError::Unavailable(
+                "uploadd socket down".to_owned(),
+            ));
+        }
+        if self.fail_protocol {
+            return Err(TransportError::Protocol("malformed frame".to_owned()));
+        }
+        Ok(self.response.clone())
+    }
+}
+
+struct FsckProbe {
+    status_file: Option<String>,
+    history_file: Option<String>,
+}
+
+impl crate::sysinfo::SystemProbe for FsckProbe {
+    fn proc_file(&self, _name: &str) -> Option<String> {
+        None
+    }
+
+    fn statvfs(&self, _path: &std::path::Path) -> Option<crate::sysinfo::FsStat> {
+        None
+    }
+
+    fn writable(&self, _path: &std::path::Path) -> bool {
+        false
+    }
+
+    fn udc_state(&self) -> Option<String> {
+        None
+    }
+
+    fn mount_for(&self, _path: &std::path::Path) -> Option<crate::sysinfo::MountInfo> {
+        None
+    }
+
+    fn read_file_string(&self, path: &std::path::Path) -> Option<String> {
+        match path.file_name().and_then(|value| value.to_str()) {
+            Some("fsck_status.json") => self.status_file.clone(),
+            Some("fsck_history.json") => self.history_file.clone(),
+            _ => None,
+        }
+    }
+}
+
+struct RetentionProbe {
+    governor_file: Option<String>,
+}
+
+impl crate::sysinfo::SystemProbe for RetentionProbe {
+    fn proc_file(&self, _name: &str) -> Option<String> {
+        None
+    }
+
+    fn statvfs(&self, _path: &std::path::Path) -> Option<crate::sysinfo::FsStat> {
+        None
+    }
+
+    fn writable(&self, _path: &std::path::Path) -> bool {
+        false
+    }
+
+    fn udc_state(&self) -> Option<String> {
+        None
+    }
+
+    fn mount_for(&self, _path: &std::path::Path) -> Option<crate::sysinfo::MountInfo> {
+        None
+    }
+
+    fn read_file_string(&self, path: &std::path::Path) -> Option<String> {
+        match path.file_name().and_then(|value| value.to_str()) {
+            Some("retentiond.governor.json") => self.governor_file.clone(),
+            _ => None,
+        }
+    }
+}
+
 struct SettingsFixture {
     _dir: TempDir,
     app: Router,
     indexd_last: Arc<Mutex<Option<Value>>>,
+    uploadd_last: Arc<Mutex<Option<Value>>>,
 }
 
 /// Build a seeded catalog and an app router over it.
@@ -106,7 +199,58 @@ fn fixture() -> Fixture {
     }
 }
 
+/// Build a seeded catalog and router over an injected system probe.
+fn fixture_with_probe(probe: Arc<dyn crate::sysinfo::SystemProbe>) -> Fixture {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("catalog.db");
+    seed(&db_path);
+
+    let static_dir = dir.path().join("static");
+    std::fs::create_dir_all(&static_dir).unwrap();
+    std::fs::write(
+        static_dir.join("index.html"),
+        "<!doctype html><title>TeslaUSB</title><main>shell</main>",
+    )
+    .unwrap();
+
+    let catalog = Catalog::open(&db_path).unwrap();
+    let archive_dir = dir.path().join("archive");
+    let cache_dir = dir.path().join("cache");
+    std::fs::create_dir_all(&archive_dir).unwrap();
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    let media = MediaConfig::new(archive_dir, cache_dir);
+    let gadget = crate::default_gadget_client(dir.path().join("gadgetd.sock"));
+    let app = router_with_gadget_and_probe(catalog, static_dir, media, gadget, probe);
+    Fixture {
+        _dir: dir,
+        db_path,
+        app,
+    }
+}
+
 fn settings_fixture(indexd_response: Value, fail_unavailable: bool) -> SettingsFixture {
+    settings_fixture_with_uploadd(
+        indexd_response,
+        fail_unavailable,
+        json!({
+            "status": "uploadd_status",
+            "configured": false,
+            "provider_type": null,
+            "uploader_state": "idle_no_destination",
+            "sync_now_state": "unsupported"
+        }),
+        false,
+        false,
+    )
+}
+
+fn settings_fixture_with_uploadd(
+    indexd_response: Value,
+    fail_unavailable: bool,
+    uploadd_response: Value,
+    uploadd_unavailable: bool,
+    uploadd_protocol: bool,
+) -> SettingsFixture {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("catalog.db");
     seed(&db_path);
@@ -132,19 +276,72 @@ fn settings_fixture(indexd_response: Value, fail_unavailable: bool) -> SettingsF
         response: indexd_response,
         fail_unavailable,
     });
-    let app = router_with_all_clients(
+    let uploadd_last = Arc::new(Mutex::new(None));
+    let uploadd: Arc<dyn uploadd_client::UploaddClient> = Arc::new(MockUploadd {
+        last: Arc::clone(&uploadd_last),
+        response: uploadd_response,
+        fail_unavailable: uploadd_unavailable,
+        fail_protocol: uploadd_protocol,
+    });
+    let app = router_with_all_clients_and_uploadd(
+        catalog, static_dir, media, gadget, scheduler, indexd, uploadd, chime_dir,
+    );
+    SettingsFixture {
+        _dir: dir,
+        app,
+        indexd_last,
+        uploadd_last,
+    }
+}
+
+fn retention_settings_fixture(
+    indexd_response: Value,
+    fail_unavailable: bool,
+    governor_file: Option<String>,
+) -> SettingsFixture {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("catalog.db");
+    seed(&db_path);
+
+    let static_dir = dir.path().join("static");
+    std::fs::create_dir_all(&static_dir).unwrap();
+    std::fs::write(static_dir.join("index.html"), "<!doctype html>shell").unwrap();
+
+    let catalog = Catalog::open(&db_path).unwrap();
+    let archive_dir = dir.path().join("archive");
+    let cache_dir = dir.path().join("cache");
+    std::fs::create_dir_all(&archive_dir).unwrap();
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    let media = MediaConfig::new(archive_dir, cache_dir);
+
+    let gadget = crate::default_gadget_client(dir.path().join("gadgetd.sock"));
+    let scheduler = crate::scheduler::default_client(dir.path().join("schedulerd.sock"));
+    let chime_dir = dir.path().join("chimes");
+    std::fs::create_dir_all(&chime_dir).unwrap();
+    let indexd_last = Arc::new(Mutex::new(None));
+    let indexd: Arc<dyn indexd_client::IndexdClient> = Arc::new(MockIndexd {
+        last: Arc::clone(&indexd_last),
+        response: indexd_response,
+        fail_unavailable,
+    });
+    let app = router_with_all_clients_and_read_client_and_probe(
         catalog,
         static_dir,
         media,
         gadget,
         scheduler,
         indexd,
+        Arc::new(UnavailableReadFileClient),
+        Arc::new(UnavailableVolumeStatsClient),
+        wifid_client::default_client(dir.path().join("wifid.sock")),
         chime_dir,
+        Arc::new(RetentionProbe { governor_file }),
     );
     SettingsFixture {
         _dir: dir,
         app,
         indexd_last,
+        uploadd_last: Arc::new(Mutex::new(None)),
     }
 }
 
@@ -229,6 +426,182 @@ async fn get_raw(app: &Router, uri: &str) -> (StatusCode, String, String) {
         content_type,
         String::from_utf8_lossy(&bytes).into_owned(),
     )
+}
+
+#[tokio::test]
+async fn fsck_status_defaults_when_status_snapshot_missing() {
+    let probe: Arc<dyn crate::sysinfo::SystemProbe> = Arc::new(FsckProbe {
+        status_file: None,
+        history_file: None,
+    });
+    let fx = fixture_with_probe(probe);
+    let (status, body) = get_json(&fx.app, "/api/fsck/status").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["running"], false);
+    assert!(body["partition"].is_null());
+    assert!(body["mode"].is_null());
+    assert!(body["result"].is_null());
+}
+
+#[tokio::test]
+async fn fsck_status_reads_valid_snapshot() {
+    let probe: Arc<dyn crate::sysinfo::SystemProbe> = Arc::new(FsckProbe {
+        status_file: Some(
+            json!({
+                "running": true,
+                "partition": "part2",
+                "mode": "quick",
+                "progress": "Scanning metadata",
+                "start_time": "2026-08-10T16:01:02Z",
+                "result": "healthy",
+                "details": "No structural errors found",
+                "duration": 3.4
+            })
+            .to_string(),
+        ),
+        history_file: None,
+    });
+    let fx = fixture_with_probe(probe);
+    let (status, body) = get_json(&fx.app, "/api/fsck/status").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["running"], true);
+    assert_eq!(body["partition"], "part2");
+    assert_eq!(body["mode"], "quick");
+    assert_eq!(body["progress"], "Scanning metadata");
+    assert_eq!(body["result"], "healthy");
+    assert_eq!(body["duration"], 3.4);
+}
+
+#[tokio::test]
+async fn fsck_history_filters_invalid_entries_and_caps_to_twenty() {
+    let mut entries = Vec::new();
+    for idx in 0..24 {
+        entries.push(json!({
+            "timestamp": format!("2026-08-10T16:{idx:02}:00Z"),
+            "partition": if idx % 2 == 0 { "part1" } else { "part2" },
+            "mode": "quick",
+            "result": "healthy",
+            "details": format!("run-{idx}"),
+            "duration_seconds": 1.0
+        }));
+    }
+    entries.push(json!({
+        "timestamp": "not-a-time",
+        "partition": "part1",
+        "mode": "quick",
+        "result": "healthy",
+        "details": "bad",
+        "duration_seconds": 1.0
+    }));
+    entries.push(json!({
+        "timestamp": "2026-08-10T18:00:00Z",
+        "partition": "part9",
+        "mode": "quick",
+        "result": "healthy",
+        "details": "bad",
+        "duration_seconds": 1.0
+    }));
+    let probe: Arc<dyn crate::sysinfo::SystemProbe> = Arc::new(FsckProbe {
+        status_file: None,
+        history_file: Some(Value::Array(entries).to_string()),
+    });
+    let fx = fixture_with_probe(probe);
+    let (status, body) = get_json(&fx.app, "/api/fsck/history").await;
+    assert_eq!(status, StatusCode::OK);
+    let items = body.as_array().unwrap();
+    assert_eq!(items.len(), 20);
+    assert_eq!(items[0]["details"], "run-4");
+    assert_eq!(items[19]["details"], "run-23");
+}
+
+#[tokio::test]
+async fn fsck_last_check_reports_latest_partition_entry_and_never_checked() {
+    let probe: Arc<dyn crate::sysinfo::SystemProbe> = Arc::new(FsckProbe {
+        status_file: None,
+        history_file: Some(
+            json!([
+                {
+                    "timestamp": "2026-08-10T14:00:00Z",
+                    "partition": "part1",
+                    "mode": "quick",
+                    "result": "healthy",
+                    "details": "older",
+                    "duration_seconds": 2.0
+                },
+                {
+                    "timestamp": "2026-08-10T15:00:00Z",
+                    "partition": "part2",
+                    "mode": "repair",
+                    "result": "repaired",
+                    "details": "other partition",
+                    "duration_seconds": 9.0
+                },
+                {
+                    "timestamp": "2026-08-10T16:00:00Z",
+                    "partition": "part1",
+                    "mode": "quick",
+                    "result": "recording",
+                    "details": "latest part1",
+                    "duration_seconds": 3.0
+                }
+            ])
+            .to_string(),
+        ),
+    });
+    let fx = fixture_with_probe(probe);
+
+    let (status, body) = get_json(&fx.app, "/api/fsck/last-check/1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["result"], "recording");
+    assert_eq!(body["details"], "latest part1");
+    assert!(body["timestamp"].is_string());
+    assert!(body["age_hours"].as_f64().unwrap() >= 0.0);
+
+    let (status, body) = get_json(&fx.app, "/api/fsck/last-check/3").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["timestamp"].is_null());
+    assert_eq!(body["result"], "never_checked");
+}
+
+#[tokio::test]
+async fn fsck_last_check_rejects_unknown_partition() {
+    let probe: Arc<dyn crate::sysinfo::SystemProbe> = Arc::new(FsckProbe {
+        status_file: None,
+        history_file: Some("[]".to_owned()),
+    });
+    let fx = fixture_with_probe(probe);
+    let (status, body) = get_json(&fx.app, "/api/fsck/last-check/9").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_partition");
+}
+
+#[tokio::test]
+async fn captive_probe_paths_redirect_to_onboarding() {
+    let fx = fixture();
+    for path in [
+        "/hotspot-detect.html",
+        "/library/test/success.html",
+        "/generate_204",
+        "/gen_204",
+        "/connecttest.txt",
+        "/ncsi.txt",
+        "/redirect",
+        "/success.txt",
+        "/canonical.html",
+    ] {
+        let response = fx
+            .app
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT, "{path}");
+        assert_eq!(
+            response.headers().get(axum::http::header::LOCATION),
+            Some(&axum::http::HeaderValue::from_static("/captive-portal")),
+            "{path}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -401,6 +774,48 @@ async fn event_by_id_missing_returns_404() {
 }
 
 #[tokio::test]
+async fn event_detail_by_id_returns_enriched_read_only_payload() {
+    let fx = fixture();
+    let conn = Connection::open(&fx.db_path).unwrap();
+    conn.execute(
+        "INSERT INTO clip_events \
+            (event_dir_key, bucket, primary_canonical_key, timestamp_utc, timestamp_local_naive, timestamp_has_offset, est_lat, est_lon, reason, city, camera, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, ?4, 0, NULL, NULL, ?5, ?6, ?7, ?4)",
+        params![
+            "sentry:clip-1:1060",
+            "sentry",
+            "clip-1",
+            1060,
+            "person_detected",
+            "San Francisco",
+            "front",
+        ],
+    )
+    .unwrap();
+
+    let (status, body) = get_json(&fx.app, "/api/events/1/detail").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["id"], 1);
+    assert_eq!(body["type"], "harsh_braking");
+    assert_eq!(body["clip"]["id"], 1);
+    assert_eq!(body["clip"]["canonical_key"], "clip-1");
+    assert_eq!(body["clip"]["folder_class"], "SavedClips");
+    assert_eq!(body["sentry"]["bucket"], "sentry");
+    assert_eq!(body["sentry"]["reason"], "person_detected");
+    assert_eq!(body["sentry"]["city"], "San Francisco");
+    assert_eq!(body["sentry"]["camera"], "front");
+    assert_eq!(body["sentry"]["timestamp_utc"], 1060);
+}
+
+#[tokio::test]
+async fn event_detail_by_id_missing_returns_404() {
+    let fx = fixture();
+    let (status, body) = get_json(&fx.app, "/api/events/999999/detail").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "not_found");
+}
+
+#[tokio::test]
 async fn events_filter_by_trip_and_reject_bad_params() {
     let fx = fixture();
     let (status, body) = get_json(&fx.app, "/api/events?trip=1").await;
@@ -479,7 +894,8 @@ async fn trips_page_cursor_paginate() {
     let cursor = body["next_cursor"].as_str().unwrap();
     assert!(!cursor.is_empty());
 
-    let (status, body) = get_json(&fx.app, &format!("/api/trips/page?cursor={cursor}&limit=1")).await;
+    let (status, body) =
+        get_json(&fx.app, &format!("/api/trips/page?cursor={cursor}&limit=1")).await;
     assert_eq!(status, StatusCode::OK);
     let items = body["items"].as_array().unwrap();
     assert_eq!(items.len(), 1);
@@ -542,7 +958,7 @@ async fn analytics_aggregates() {
     assert_eq!(body["avg_speed_mps"], 11.0);
     assert_eq!(body["max_speed_mps"], 12.0);
 
-    // Severity breakdown ascending: {1:1, 2:2}.
+    // Severity breakdown ascending: {1:1, 2:2}
     let by_sev = body["events_by_severity"].as_array().unwrap();
     assert_eq!(by_sev.len(), 2);
     assert_eq!(by_sev[0]["severity"], 1);
@@ -569,6 +985,79 @@ async fn analytics_aggregates() {
 }
 
 #[tokio::test]
+async fn index_status_reports_catalog_health() {
+    let fx = fixture();
+    let (status, body) = get_json(&fx.app, "/api/index/status").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["schema_version"], 7);
+    assert_eq!(body["trip_count"], 2);
+    assert_eq!(body["event_count"], 3);
+    assert_eq!(body["clip_count"], 2);
+    assert_eq!(body["waypoint_count"], 0);
+}
+
+#[tokio::test]
+async fn index_driving_stats_reports_catalog_aggregates() {
+    let fx = fixture();
+    let (status, body) = get_json(&fx.app, "/api/index/driving-stats").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["total_trips"], 2);
+    assert_eq!(body["total_distance_m"], 1234.5);
+    assert_eq!(body["total_drive_time_s"], 300);
+    assert_eq!(body["warning_event_count"], 2);
+    assert_eq!(body["sentry_event_count"], 1);
+    assert_eq!(body["avg_speed_mps"], 11.0);
+    assert_eq!(body["max_speed_mps"], 12.0);
+}
+
+#[tokio::test]
+async fn index_event_chart_reports_event_distribution() {
+    let fx = fixture();
+    let (status, body) = get_json(&fx.app, "/api/index/event-chart").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["total_events"], 3);
+    let by_type = body["by_type"].as_array().unwrap();
+    assert_eq!(by_type.len(), 3);
+    assert_eq!(by_type[0]["type"], "harsh_braking");
+    assert_eq!(by_type[0]["count"], 1);
+    assert_eq!(by_type[1]["type"], "sentry");
+    assert_eq!(by_type[1]["count"], 1);
+    assert_eq!(by_type[2]["type"], "sharp_turn");
+    assert_eq!(by_type[2]["count"], 1);
+    let by_day = body["by_day"].as_array().unwrap();
+    assert_eq!(by_day.len(), 1);
+    assert_eq!(by_day[0]["day"], "1970-01-01");
+    assert_eq!(by_day[0]["count"], 3);
+    assert_eq!(by_day[0]["sentry_count"], 1);
+    assert_eq!(by_day[0]["warning_count"], 2);
+}
+
+#[tokio::test]
+async fn index_lifecycle_reports_parse_and_last_run_diagnostics() {
+    let fx = fixture();
+    let conn = Connection::open(&fx.db_path).unwrap();
+    conn.execute(
+        "INSERT INTO front_parse_attempts
+            (canonical_key, parse_state, parse_fingerprint, parser_version, attempt_count, next_retry_at, attempted_at, updated_at)
+         VALUES
+            ('clip-1', 'parse_error', 'f1', 1, 2, 4000000000, 1700, 1700)",
+        [],
+    )
+    .unwrap();
+
+    let (status, body) = get_json(&fx.app, "/api/index/lifecycle").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["schema_version"], 7);
+    assert_eq!(body["lifecycle_state"], "error");
+    assert_eq!(body["front_parse_total"], 1);
+    assert_eq!(body["front_parse_error_count"], 1);
+    assert_eq!(body["front_parse_retry_pending_count"], 1);
+    assert_eq!(body["front_parse_missing_count"], 1);
+    assert_eq!(body["last_front_parse_attempt_at"], 1700);
+    assert_eq!(body["last_derived_at"], 0);
+}
+
+#[tokio::test]
 async fn settings_returns_raw_prefs() {
     let fx = fixture();
     let (status, body) = get_json(&fx.app, "/api/settings").await;
@@ -579,6 +1068,74 @@ async fn settings_returns_raw_prefs() {
     assert_eq!(rows[0]["key"], "map_provider");
     assert_eq!(rows[0]["value"], "osm");
     assert_eq!(rows[1]["key"], "speed_unit");
+}
+
+#[tokio::test]
+async fn settings_advanced_returns_bounded_validated_snapshot() {
+    let fx = fixture();
+    let (status, body) = get_json(&fx.app, "/api/settings/advanced").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(items.len(), 5);
+    assert_eq!(
+        items
+            .iter()
+            .map(|item| item["key"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec![
+            "trip_gap_minutes",
+            "speed_limit_mph",
+            "speed_unit",
+            "display_timezone",
+            "clock",
+        ]
+    );
+    assert!(
+        items
+            .iter()
+            .all(|item| item["key"].as_str() != Some("map_provider"))
+    );
+
+    let trip_gap = &items[0];
+    assert_eq!(trip_gap["value"], "5");
+    assert_eq!(trip_gap["source_status"], "default_missing");
+    assert_eq!(trip_gap["validation"]["kind"], "integer_range");
+    assert_eq!(trip_gap["validation"]["min"], 1);
+    assert_eq!(trip_gap["validation"]["max"], 60);
+
+    let speed_unit = &items[2];
+    assert_eq!(speed_unit["value"], "mph");
+    assert_eq!(speed_unit["source_status"], "stored");
+    assert_eq!(speed_unit["validation"]["kind"], "enum");
+    assert_eq!(speed_unit["validation"]["allowed"], json!(["mph", "kph"]));
+
+    let display_tz = &items[3];
+    assert_eq!(display_tz["value"], "");
+    assert_eq!(display_tz["validation"]["kind"], "timezone_or_auto");
+}
+
+#[tokio::test]
+async fn settings_advanced_invalid_pref_falls_back_to_default_status() {
+    let fx = fixture();
+    let conn = Connection::open(&fx.db_path).unwrap();
+    conn.execute("DELETE FROM prefs WHERE key = 'trip_gap_minutes'", [])
+        .unwrap();
+    conn.execute(
+        "INSERT INTO prefs (key, value) VALUES ('trip_gap_minutes', '0')",
+        [],
+    )
+    .unwrap();
+
+    let (status, body) = get_json(&fx.app, "/api/settings/advanced").await;
+    assert_eq!(status, StatusCode::OK);
+    let items = body["items"].as_array().unwrap();
+    let trip_gap = items
+        .iter()
+        .find(|item| item["key"] == "trip_gap_minutes")
+        .unwrap();
+    assert_eq!(trip_gap["value"], "5");
+    assert_eq!(trip_gap["source_status"], "default_invalid");
 }
 
 #[tokio::test]
@@ -611,12 +1168,18 @@ async fn put_settings_clock_utc_forwards_set_pref() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, json!({ "key": "clock", "value": "utc" }));
     let req = fx.indexd_last.lock().unwrap().clone().unwrap();
-    assert_eq!(req, json!({ "cmd": "set_pref", "key": "clock", "value": "utc" }));
+    assert_eq!(
+        req,
+        json!({ "cmd": "set_pref", "key": "clock", "value": "utc" })
+    );
 }
 
 #[tokio::test]
 async fn put_settings_trip_gap_minutes_forwards_set_pref() {
-    let fx = settings_fixture(json!({ "status": "pref_set", "key": "trip_gap_minutes" }), false);
+    let fx = settings_fixture(
+        json!({ "status": "pref_set", "key": "trip_gap_minutes" }),
+        false,
+    );
     let (status, body) = put_json(
         &fx.app,
         "/api/settings",
@@ -634,7 +1197,10 @@ async fn put_settings_trip_gap_minutes_forwards_set_pref() {
 
 #[tokio::test]
 async fn put_settings_speed_limit_mph_forwards_set_pref() {
-    let fx = settings_fixture(json!({ "status": "pref_set", "key": "speed_limit_mph" }), false);
+    let fx = settings_fixture(
+        json!({ "status": "pref_set", "key": "speed_limit_mph" }),
+        false,
+    );
     let (status, body) = put_json(
         &fx.app,
         "/api/settings",
@@ -652,7 +1218,10 @@ async fn put_settings_speed_limit_mph_forwards_set_pref() {
 
 #[tokio::test]
 async fn put_settings_display_timezone_forwards_set_pref() {
-    let fx = settings_fixture(json!({ "status": "pref_set", "key": "display_timezone" }), false);
+    let fx = settings_fixture(
+        json!({ "status": "pref_set", "key": "display_timezone" }),
+        false,
+    );
     let (status, body) = put_json(
         &fx.app,
         "/api/settings",
@@ -673,7 +1242,10 @@ async fn put_settings_display_timezone_forwards_set_pref() {
 
 #[tokio::test]
 async fn put_settings_display_timezone_empty_forwards_set_pref() {
-    let fx = settings_fixture(json!({ "status": "pref_set", "key": "display_timezone" }), false);
+    let fx = settings_fixture(
+        json!({ "status": "pref_set", "key": "display_timezone" }),
+        false,
+    );
     let (status, body) = put_json(
         &fx.app,
         "/api/settings",
@@ -705,7 +1277,10 @@ async fn put_settings_rejects_invalid_speed_unit_without_forwarding() {
 
 #[tokio::test]
 async fn put_settings_rejects_trip_gap_minutes_zero_without_forwarding() {
-    let fx = settings_fixture(json!({ "status": "pref_set", "key": "trip_gap_minutes" }), false);
+    let fx = settings_fixture(
+        json!({ "status": "pref_set", "key": "trip_gap_minutes" }),
+        false,
+    );
     let (status, body) = put_json(
         &fx.app,
         "/api/settings",
@@ -719,7 +1294,10 @@ async fn put_settings_rejects_trip_gap_minutes_zero_without_forwarding() {
 
 #[tokio::test]
 async fn put_settings_rejects_trip_gap_minutes_sixty_one_without_forwarding() {
-    let fx = settings_fixture(json!({ "status": "pref_set", "key": "trip_gap_minutes" }), false);
+    let fx = settings_fixture(
+        json!({ "status": "pref_set", "key": "trip_gap_minutes" }),
+        false,
+    );
     let (status, body) = put_json(
         &fx.app,
         "/api/settings",
@@ -733,7 +1311,10 @@ async fn put_settings_rejects_trip_gap_minutes_sixty_one_without_forwarding() {
 
 #[tokio::test]
 async fn put_settings_rejects_speed_limit_mph_201_without_forwarding() {
-    let fx = settings_fixture(json!({ "status": "pref_set", "key": "speed_limit_mph" }), false);
+    let fx = settings_fixture(
+        json!({ "status": "pref_set", "key": "speed_limit_mph" }),
+        false,
+    );
     let (status, body) = put_json(
         &fx.app,
         "/api/settings",
@@ -747,7 +1328,10 @@ async fn put_settings_rejects_speed_limit_mph_201_without_forwarding() {
 
 #[tokio::test]
 async fn put_settings_rejects_invalid_display_timezone_without_forwarding() {
-    let fx = settings_fixture(json!({ "status": "pref_set", "key": "display_timezone" }), false);
+    let fx = settings_fixture(
+        json!({ "status": "pref_set", "key": "display_timezone" }),
+        false,
+    );
     let (status, body) = put_json(
         &fx.app,
         "/api/settings",
@@ -775,10 +1359,7 @@ async fn put_settings_rejects_unknown_setting_without_forwarding() {
 
 #[tokio::test]
 async fn put_settings_maps_indexd_error_to_bad_gateway() {
-    let fx = settings_fixture(
-        json!({ "status": "error", "message": "boom" }),
-        false,
-    );
+    let fx = settings_fixture(json!({ "status": "error", "message": "boom" }), false);
     let (status, body) = put_json(
         &fx.app,
         "/api/settings",
@@ -814,6 +1395,366 @@ async fn put_settings_mismatched_ack_key_fails_closed() {
     )
     .await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn cloud_status_forwards_get_status_and_returns_read_only_fields() {
+    let fx = settings_fixture_with_uploadd(
+        json!({ "status": "cloud_queue_page", "items": [], "next_cursor": null }),
+        false,
+        json!({
+            "status": "uploadd_status",
+            "configured": true,
+            "provider_type": "drive",
+            "uploader_state": "running",
+            "sync_now_state": "unsupported",
+            "secret": "must-not-leak"
+        }),
+        false,
+        false,
+    );
+    let (status, body) = get_json(&fx.app, "/api/cloud").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        json!({
+            "configured": true,
+            "provider_type": "drive",
+            "uploader_state": "running",
+            "sync_now_state": "unsupported"
+        })
+    );
+    assert!(body.get("secret").is_none());
+    let sent = fx.uploadd_last.lock().unwrap().clone().unwrap();
+    assert_eq!(sent, json!({ "cmd": "get_status" }));
+    assert!(fx.indexd_last.lock().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn cloud_status_maps_uploadd_unavailable_to_service_unavailable() {
+    let fx = settings_fixture_with_uploadd(
+        json!({ "status": "cloud_queue_page", "items": [], "next_cursor": null }),
+        false,
+        json!({ "status": "uploadd_status" }),
+        true,
+        false,
+    );
+    let (status, body) = get_json(&fx.app, "/api/cloud").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"]["code"], "unavailable");
+    assert_eq!(body["error"]["message"], "uploader offline");
+}
+
+#[tokio::test]
+async fn cloud_status_maps_uploadd_protocol_error_to_bad_gateway() {
+    let fx = settings_fixture_with_uploadd(
+        json!({ "status": "cloud_queue_page", "items": [], "next_cursor": null }),
+        false,
+        json!({ "status": "uploadd_status" }),
+        false,
+        true,
+    );
+    let (status, body) = get_json(&fx.app, "/api/cloud").await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(body["error"]["code"], "uploadd_protocol");
+}
+
+#[tokio::test]
+async fn cloud_status_maps_uploadd_error_envelope_to_bad_gateway() {
+    let fx = settings_fixture_with_uploadd(
+        json!({ "status": "cloud_queue_page", "items": [], "next_cursor": null }),
+        false,
+        json!({ "status": "error", "message": "status read failed" }),
+        false,
+        false,
+    );
+    let (status, body) = get_json(&fx.app, "/api/cloud").await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(body["error"]["code"], "uploadd_error");
+    assert_eq!(body["error"]["message"], "status read failed");
+}
+
+#[tokio::test]
+async fn cloud_queue_caps_limit_and_sanitizes_rows() {
+    let fx = settings_fixture(
+        json!({
+            "status": "cloud_queue_page",
+            "items": [
+                {
+                    "archive_item_id": 11,
+                    "child_key": "front",
+                    "source_rel": "archive/secret/front.mp4",
+                    "remote_key": "TeslaUSB/event/front.mp4",
+                    "category": "event_sentry",
+                    "seq": 4,
+                    "total_bytes": 1000,
+                    "bytes_uploaded": 250,
+                    "expected_hash": "abcd",
+                    "verify_alg": "md5",
+                    "content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "state": "in_progress",
+                    "attempts": 2,
+                    "not_before": null,
+                    "last_error": null
+                }
+            ],
+            "next_cursor": "next-1"
+        }),
+        false,
+    );
+    let (status, body) = get_json(&fx.app, "/api/cloud/queue?cursor=abc&limit=999").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["limit"], 16);
+    assert_eq!(body["next_cursor"], "next-1");
+    assert_eq!(body["items"][0]["archive_item_id"], 11);
+    assert_eq!(body["items"][0]["child_key"], "front");
+    assert_eq!(body["items"][0]["category"], "event_sentry");
+    assert!(body["items"][0].get("destination_id").is_none());
+    assert!(body["items"][0].get("content_sha256").is_none());
+    assert!(body["items"][0].get("source_rel").is_none());
+    assert!(body["items"][0].get("remote_key").is_none());
+    assert!(body["items"][0].get("last_error").is_none());
+    let req = fx.indexd_last.lock().unwrap().clone().unwrap();
+    assert_eq!(
+        req,
+        json!({
+            "cmd": "cloud_queue_load",
+            "after_cursor": "abc",
+            "limit": 16
+        })
+    );
+}
+
+#[tokio::test]
+async fn cloud_queue_rejects_limit_zero_without_forwarding() {
+    let fx = settings_fixture(
+        json!({ "status": "cloud_queue_page", "items": [], "next_cursor": null }),
+        false,
+    );
+    let (status, body) = get_json(&fx.app, "/api/cloud/queue?limit=0").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_limit");
+    assert!(fx.indexd_last.lock().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn cloud_queue_maps_unavailable_to_service_unavailable() {
+    let fx = settings_fixture(
+        json!({ "status": "cloud_queue_page", "items": [], "next_cursor": null }),
+        true,
+    );
+    let (status, body) = get_json(&fx.app, "/api/cloud/queue").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"]["code"], "unavailable");
+}
+
+#[tokio::test]
+async fn cloud_queue_rejects_oversized_cursor_without_forwarding() {
+    let fx = settings_fixture(
+        json!({ "status": "cloud_queue_page", "items": [], "next_cursor": null }),
+        false,
+    );
+    let huge_cursor = "a".repeat(1025);
+    let (status, body) = get_json(&fx.app, &format!("/api/cloud/queue?cursor={huge_cursor}")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_cursor");
+    assert!(fx.indexd_last.lock().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn cloud_queue_maps_indexd_error_to_bad_gateway() {
+    let fx = settings_fixture(
+        json!({ "status": "error", "message": "queue read failed" }),
+        false,
+    );
+    let (status, body) = get_json(&fx.app, "/api/cloud/queue").await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(body["error"]["code"], "indexd_error");
+}
+
+#[tokio::test]
+async fn cloud_history_happy_path_and_redacts_internal_fields() {
+    let fx = settings_fixture(
+        json!({
+            "status": "cloud_history_page",
+            "items": [
+                {
+                    "id": 17,
+                    "completion_seq": 300,
+                    "archive_item_id": 44,
+                    "child_key": "left",
+                    "destination_id": "dest-main",
+                    "outcome": "uploaded",
+                    "size_bytes": 5120,
+                    "at": 1700000444,
+                    "error_class": null
+                }
+            ],
+            "next_cursor": "h-next"
+        }),
+        false,
+    );
+    let (status, body) = get_json(&fx.app, "/api/cloud/history?cursor=prev&limit=32").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["limit"], 16);
+    assert_eq!(body["next_cursor"], "h-next");
+    assert_eq!(body["items"][0]["archive_item_id"], 44);
+    assert_eq!(body["items"][0]["outcome"], "uploaded");
+    assert_eq!(body["items"][0]["id"], 17);
+    assert_eq!(body["items"][0]["completion_seq"], 300);
+    assert!(body["items"][0].get("destination_id").is_none());
+    let req = fx.indexd_last.lock().unwrap().clone().unwrap();
+    assert_eq!(
+        req,
+        json!({
+            "cmd": "cloud_history_load",
+            "after_cursor": "prev",
+            "limit": 16
+        })
+    );
+}
+
+#[tokio::test]
+async fn cloud_history_maps_unavailable_to_service_unavailable() {
+    let fx = settings_fixture(
+        json!({ "status": "cloud_history_page", "items": [], "next_cursor": null }),
+        true,
+    );
+    let (status, body) = get_json(&fx.app, "/api/cloud/history").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"]["code"], "unavailable");
+}
+
+#[tokio::test]
+async fn cloud_history_rejects_oversized_cursor_without_forwarding() {
+    let fx = settings_fixture(
+        json!({ "status": "cloud_history_page", "items": [], "next_cursor": null }),
+        false,
+    );
+    let huge_cursor = "a".repeat(1025);
+    let (status, body) =
+        get_json(&fx.app, &format!("/api/cloud/history?cursor={huge_cursor}")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_cursor");
+    assert!(fx.indexd_last.lock().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn retention_status_reports_candidate_bytes_and_disclosure() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_secs() as i64)
+        .unwrap_or(1_700_000_000);
+    let governor = json!({
+        "schema": 1,
+        "updated_at": now,
+        "uploads_allowed": true,
+        "seq": 1,
+        "interval_secs": 20,
+        "publisher_instance": "abcd",
+        "mode": "armed",
+        "drain_only": false,
+        "free_bytes": 50,
+        "total_bytes": 100,
+        "target_free_frac": 0.08,
+        "target_exit_frac": 0.10,
+        "recency_floor_secs": 3600,
+        "last_stop": "already_healthy",
+        "last_bytes_freed": 0,
+        "last_items": 0
+    });
+    let fx = retention_settings_fixture(
+        json!({
+            "status": "eviction_candidates",
+            "items": [
+                { "id": 1, "path": "archive/a", "size_bytes": 1024, "archived_at": 100, "folder_class": "RecentClips" },
+                { "id": 2, "path": "archive/b", "size_bytes": 2048, "archived_at": 90, "folder_class": "RecentClips" }
+            ]
+        }),
+        false,
+        Some(governor.to_string()),
+    );
+    let (status, body) = get_json(&fx.app, "/api/retention/status").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["candidate_count"], 2);
+    assert_eq!(body["candidate_count_truncated"], false);
+    assert_eq!(body["estimated_reclaimable_bytes"], 3072);
+    assert_eq!(body["estimated_reclaimable_bytes_truncated"], false);
+    assert_eq!(body["cloud_durability_required"], false);
+    assert_eq!(
+        body["cloud_durability_disclosure"],
+        "Armed local cleanup may delete footage before cloud upload confirmation."
+    );
+    let req = fx.indexd_last.lock().unwrap().clone().unwrap();
+    assert_eq!(req["cmd"], "list_eviction_candidates");
+    assert_eq!(req["allow_undurable"], true);
+    assert_eq!(req["limit"], 256);
+}
+
+#[tokio::test]
+async fn retention_status_reads_bounded_recent_cleanup_history() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_secs() as i64)
+        .unwrap_or(1_700_000_000);
+    let governor = json!({
+        "schema": 1,
+        "updated_at": now,
+        "uploads_allowed": true,
+        "seq": 1,
+        "interval_secs": 20,
+        "publisher_instance": "abcd",
+        "mode": "armed",
+        "drain_only": false,
+        "free_bytes": 50,
+        "total_bytes": 100,
+        "target_free_frac": 0.08,
+        "target_exit_frac": 0.10,
+        "recency_floor_secs": 3600,
+        "last_stop": "already_healthy",
+        "last_bytes_freed": 0,
+        "last_items": 0
+    });
+    let fx = retention_settings_fixture(
+        json!({
+            "status": "eviction_candidates",
+            "items": []
+        }),
+        false,
+        Some(governor.to_string()),
+    );
+    let conn = Connection::open(fx._dir.path().join("catalog.db")).unwrap();
+    conn.execute(
+        "INSERT INTO archive_items
+         (id, folder_class, path, size_bytes, file_count, archived_at, delete_state, bytes_freed, durable, pinned, user_disposable, has_event_json, has_geo, sentry_flood, created_at, updated_at)
+         VALUES (?1, 'RecentClips', ?2, 100, 1, 1, 'DELETED', ?3, 1, 0, 0, 0, 0, 0, 1, ?4)",
+        params![401i64, "archive/deleted-1", 512i64, 1_700_000_100i64],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO archive_items
+         (id, folder_class, path, size_bytes, file_count, archived_at, delete_state, bytes_freed, durable, pinned, user_disposable, has_event_json, has_geo, sentry_flood, created_at, updated_at)
+         VALUES (?1, 'RecentClips', ?2, 100, 1, 1, 'DELETED', ?3, 1, 0, 0, 0, 0, 0, 1, ?4)",
+        params![402i64, "archive/deleted-2", 256i64, 1_700_000_100i64],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO archive_items
+         (id, folder_class, path, size_bytes, file_count, archived_at, delete_state, bytes_freed, durable, pinned, user_disposable, has_event_json, has_geo, sentry_flood, created_at, updated_at)
+         VALUES (?1, 'RecentClips', ?2, 100, 1, 1, 'DELETED', ?3, 1, 0, 0, 0, 0, 0, 1, ?4)",
+        params![403i64, "archive/deleted-3", 128i64, 1_700_000_050i64],
+    )
+    .unwrap();
+
+    let (status, body) = get_json(&fx.app, "/api/retention/status").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["recent_cleanup_truncated"], false);
+    assert_eq!(body["recent_cleanup"][0]["at"], 1_700_000_100);
+    assert_eq!(body["recent_cleanup"][0]["items"], 2);
+    assert_eq!(body["recent_cleanup"][0]["bytes_freed"], 768);
+    assert_eq!(body["recent_cleanup"][1]["at"], 1_700_000_050);
+    assert_eq!(body["recent_cleanup"][1]["items"], 1);
+    assert_eq!(body["recent_cleanup"][1]["bytes_freed"], 128);
 }
 
 #[tokio::test]
@@ -1069,7 +2010,11 @@ fn media_fixture_with_read_client(
     // A 0-byte archive file (empty-file range handling).
     std::fs::write(archive.join("p1/clip-18/empty.mp4"), pattern(0)).unwrap();
     // Archive file with Tesla-shaped SEI for telemetry endpoint coverage.
-    std::fs::write(archive.join("p1/clip-23/front.mp4"), sei_fixture_clip(1, 12.5)).unwrap();
+    std::fs::write(
+        archive.join("p1/clip-23/front.mp4"),
+        sei_fixture_clip(1, 12.5),
+    )
+    .unwrap();
     // clip 16's archive file is intentionally NOT created (missing-on-disk).
 
     // A secret file OUTSIDE the archive root, targeted by the escape angles.
@@ -1526,7 +2471,11 @@ async fn telemetry_ro_usb_size_mismatch_is_empty() {
     // succeeds, yet the size anchor must fail closed with `[]` (the file was
     // recreated/substituted since ingest) rather than parse a wrong file.
     let sei = sei_fixture_clip(1, 12.5);
-    assert_ne!(sei.len() as u64, 5000, "fixture must differ from seeded size");
+    assert_ne!(
+        sei.len() as u64,
+        5000,
+        "fixture must differ from seeded size"
+    );
     let identity = ClipIdentity {
         first_cluster: 1,
         total_size: sei.len() as u64,
@@ -1749,7 +2698,10 @@ async fn stream_archive_first_serves_archive_and_skips_read_file_client() {
     let (status, _, body) = request(&fx.app, Method::GET, "/api/clips/10/stream", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, pattern(100));
-    assert!(fake.requests().is_empty(), "archive path must not call scannerd");
+    assert!(
+        fake.requests().is_empty(),
+        "archive path must not call scannerd"
+    );
 }
 
 #[tokio::test]
@@ -1798,7 +2750,11 @@ async fn stream_falls_back_to_non_archive_read_file_windows_and_echoes_identity(
     )
     .await;
     assert_eq!(status, StatusCode::PARTIAL_CONTENT);
-    let expected_content_range = format!("bytes 0-{}/{}", identity.total_size - 1, identity.total_size);
+    let expected_content_range = format!(
+        "bytes 0-{}/{}",
+        identity.total_size - 1,
+        identity.total_size
+    );
     let expected_content_length = identity.total_size.to_string();
     assert_eq!(
         header(&headers, "content-range"),
@@ -2670,6 +3626,42 @@ async fn gadget_status_error_frame_is_502() {
 }
 
 #[tokio::test]
+async fn gadget_mode_status_maps_live_state() {
+    let fx = delete_fixture(Reply::Json(json!({
+        "present": true,
+        "bound": true,
+        "bound_udc": "fe980000.usb",
+        "udc_state": "configured",
+        "lun_file": "/data/teslausb/cam.img",
+        "media_lun_file": "/data/teslausb/media.img",
+        "handoff_active": false,
+        "pending_mutations": 0,
+        "applying_mutations": 0,
+        "last_handoff_id": "h-9",
+        "last_result": "done",
+        "chime_reenum_pending": false,
+        "last_reenum": { "result": "done" },
+    })));
+    let (status, body) = get_json(&fx.app, "/api/gadget/mode-status").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["mode"], "presented");
+    assert_eq!(body["handoff"]["state"], "idle");
+    assert_eq!(body["lun"]["teslacam"]["loaded"], true);
+    assert_eq!(body["lun"]["media"]["loaded"], true);
+    assert_eq!(body["banner"], Value::Null);
+    let sent = fx.last.lock().unwrap().clone().unwrap();
+    assert_eq!(sent["cmd"], "gadget_status");
+}
+
+#[tokio::test]
+async fn gadget_mode_status_gadgetd_down_is_503() {
+    let fx = delete_fixture(Reply::Unavailable);
+    let (status, body) = get_json(&fx.app, "/api/gadget/mode-status").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"]["code"], "gadgetd_unavailable");
+}
+
+#[tokio::test]
 async fn jobs_stream_is_an_event_stream() {
     let fx = delete_fixture(Reply::Json(
         json!({ "handoff_id": "h-1", "result": "done" }),
@@ -2694,6 +3686,27 @@ async fn jobs_stream_is_an_event_stream() {
     assert!(
         ct.starts_with("text/event-stream"),
         "unexpected content-type: {ct}"
+    );
+}
+
+#[tokio::test]
+async fn jobs_capabilities_reports_read_only_foundation() {
+    let fx = delete_fixture(Reply::Json(
+        json!({ "handoff_id": "h-1", "result": "done" }),
+    ));
+    let (status, body) = get_json(&fx.app, "/api/jobs/capabilities").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["jobs_endpoint"], "/api/jobs");
+    assert_eq!(body["failed_jobs_endpoint"], "/api/jobs/failed");
+    assert_eq!(body["durable_mutation_routes_enabled"], false);
+    assert_eq!(body["legacy_destructive_routes_exist"], true);
+    assert_eq!(body["durable_job_store"]["kind"], "in_memory");
+    assert_eq!(body["idempotency"]["same_key_different_hash"], 409);
+    assert_eq!(body["durable_envelope"]["fields"][1], "idempotencyKey");
+    assert_eq!(body["csrf_hardening_non_get"]["is_authentication"], false);
+    assert_eq!(
+        body["csrf_hardening_non_get"]["current_behavior"]["origin_required"],
+        false
     );
 }
 
@@ -3048,6 +4061,36 @@ async fn install_chime_rejected_is_422_and_cleans_up() {
 }
 
 #[tokio::test]
+async fn install_chime_queue_unavailable_is_503_and_cleans_up() {
+    let fx = chime_fixture(Reply::Json(json!({
+        "error_code": "queue_unavailable",
+        "error": "queue unavailable",
+        "detail": "queue persist failed: io error"
+    })));
+    let (status, body) = post_chime(&fx.app, multipart_body(&[("file", &sample_wav(64))])).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"]["code"], "unavailable");
+    assert!(staging_is_empty(&fx.staging), "staging dir must be empty");
+}
+
+#[tokio::test]
+async fn install_chime_queue_persist_ambiguous_is_503_and_retains_blob() {
+    let fx = chime_fixture(Reply::Json(json!({
+        "error_code": "queue_persist_ambiguous",
+        "error": "queue persist status ambiguous",
+        "detail": "post-commit parent sync failed",
+        "job_id": "m-30"
+    })));
+    let (status, body) = post_chime(&fx.app, multipart_body(&[("file", &sample_wav(64))])).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"]["code"], "durability_ambiguous");
+    assert!(
+        !staging_is_empty(&fx.staging),
+        "staging blob must be retained when acceptance is uncertain"
+    );
+}
+
+#[tokio::test]
 async fn install_chime_bad_reply_is_502_and_recorded_and_cleaned_up() {
     // An unparseable gadgetd enqueue reply (no job_id/state:"queued") is a 502,
     // recorded as a failed job, and the staged blob is cleaned up.
@@ -3166,9 +4209,7 @@ async fn post_json(app: &Router, uri: &str, body: Value) -> (StatusCode, Value) 
 
 #[tokio::test]
 async fn bulk_delete_boombox_enqueues_one_mutation_with_all_paths() {
-    let fx = delete_fixture(Reply::Json(
-        json!({ "job_id": "m-bulk", "state": "queued" }),
-    ));
+    let fx = delete_fixture(Reply::Json(json!({ "job_id": "m-20", "state": "queued" })));
     let (status, body) = post_json(
         &fx.app,
         "/api/boombox/bulk-delete",
@@ -3177,7 +4218,7 @@ async fn bulk_delete_boombox_enqueues_one_mutation_with_all_paths() {
     .await;
     assert_eq!(status, StatusCode::ACCEPTED);
     assert_eq!(body["state"], "queued");
-    assert_eq!(body["job_id"], "m-bulk");
+    assert_eq!(body["job_id"], "m-20");
 
     // gadgetd saw exactly ONE enqueue carrying BOTH derived paths (one
     // eject/remount for the batch, not one per file).
@@ -3193,7 +4234,7 @@ async fn bulk_delete_boombox_enqueues_one_mutation_with_all_paths() {
 
 #[tokio::test]
 async fn bulk_delete_wraps_rebuilds_wraps_subdir() {
-    let fx = delete_fixture(Reply::Json(json!({ "job_id": "m-w", "state": "queued" })));
+    let fx = delete_fixture(Reply::Json(json!({ "job_id": "m-21", "state": "queued" })));
     let (status, _) = post_json(
         &fx.app,
         "/api/wraps/bulk-delete",
@@ -3208,7 +4249,7 @@ async fn bulk_delete_wraps_rebuilds_wraps_subdir() {
 
 #[tokio::test]
 async fn bulk_delete_dedupes_repeated_names() {
-    let fx = delete_fixture(Reply::Json(json!({ "job_id": "m-d", "state": "queued" })));
+    let fx = delete_fixture(Reply::Json(json!({ "job_id": "m-22", "state": "queued" })));
     let (status, _) = post_json(
         &fx.app,
         "/api/music/bulk-delete",
@@ -4302,7 +5343,10 @@ async fn chime_scheduler_library_list_uses_media_catalog() {
     assert_eq!(items[0]["name"], "Horn.wav");
     assert_eq!(items[0]["rel_path"], "Chimes/Horn.wav");
     assert_eq!(items[0]["size_bytes"], 64);
-    assert!(fx.last.lock().unwrap().is_none(), "schedulerd not contacted");
+    assert!(
+        fx.last.lock().unwrap().is_none(),
+        "schedulerd not contacted"
+    );
 }
 
 /// POST a multipart body to the library upload route and return `(status, json)`.
@@ -4376,7 +5420,7 @@ async fn chime_scheduler_library_delete_queues_media_remove() {
 
 #[tokio::test]
 async fn chime_scheduler_library_bulk_delete_enqueues_one_mutation() {
-    let fx = library_fixture(Reply::Json(json!({ "state": "queued", "job_id": "m-bulk" })));
+    let fx = library_fixture(Reply::Json(json!({ "state": "queued", "job_id": "m-23" })));
     let (status, body) = post_json(
         &fx.app,
         "/api/chime-scheduler/library/bulk-delete",
@@ -4385,7 +5429,7 @@ async fn chime_scheduler_library_bulk_delete_enqueues_one_mutation() {
     .await;
     assert_eq!(status, StatusCode::ACCEPTED);
     assert_eq!(body["state"], "queued");
-    assert_eq!(body["job_id"], "m-bulk");
+    assert_eq!(body["job_id"], "m-23");
 
     // gadgetd saw exactly ONE enqueue carrying BOTH derived `Chimes/` paths
     // (one eject/remount for the batch, not one per file).
@@ -4503,8 +5547,7 @@ fn wifi_ap_fixture(reply: WifidReply) -> WifiApFixture {
 
 #[tokio::test]
 async fn wifi_ap_get_status_forwards_cmd_and_relays_body() {
-    let reply =
-        json!({ "ap": { "mode": "auto", "active": false, "ssid": "tesla", "client_count": 0, "ip": null } });
+    let reply = json!({ "ap": { "mode": "auto", "active": false, "ssid": "tesla", "client_count": 0, "ip": null } });
     let fx = wifi_ap_fixture(WifidReply::Json(reply.clone()));
     let (status, body) = get_json(&fx.app, "/api/wifi/ap").await;
     assert_eq!(status, StatusCode::OK);
@@ -4516,7 +5559,8 @@ async fn wifi_ap_get_status_forwards_cmd_and_relays_body() {
 #[tokio::test]
 async fn wifi_ap_set_mode_force_on_forwards_cmd() {
     let fx = wifi_ap_fixture(WifidReply::Json(json!({ "ok": true })));
-    let (status, body) = post_json(&fx.app, "/api/wifi/ap/mode", json!({ "mode": "force_on" })).await;
+    let (status, body) =
+        post_json(&fx.app, "/api/wifi/ap/mode", json!({ "mode": "force_on" })).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, json!({ "ok": true }));
     let req = fx.last.lock().unwrap().clone().unwrap();
@@ -4972,10 +6016,8 @@ fn music_multipart_with_path(mp3_filename: &str, mp3_bytes: &[u8], path: &str) -
     // Binary "file" field.
     body.extend_from_slice(format!("--{BOUNDARY}\r\n").as_bytes());
     body.extend_from_slice(
-        format!(
-            "Content-Disposition: form-data; name=\"file\"; filename=\"{mp3_filename}\"\r\n"
-        )
-        .as_bytes(),
+        format!("Content-Disposition: form-data; name=\"file\"; filename=\"{mp3_filename}\"\r\n")
+            .as_bytes(),
     );
     body.extend_from_slice(b"Content-Type: audio/mpeg\r\n\r\n");
     body.extend_from_slice(mp3_bytes);
@@ -5031,14 +6073,16 @@ async fn create_folder_nested_path_enqueues_nested_keep() {
     assert_eq!(status, StatusCode::ACCEPTED);
 
     let req = fx.last.lock().unwrap().clone().unwrap();
-    assert_eq!(req["mutation"]["rel_path"], "Music/Artist/Album/.teslausb-keep");
+    assert_eq!(
+        req["mutation"]["rel_path"],
+        "Music/Artist/Album/.teslausb-keep"
+    );
 }
 
 #[tokio::test]
 async fn create_folder_traversal_path_is_400() {
     let fx = delete_fixture(Reply::Json(json!({ "state": "queued" })));
-    let (status, body) =
-        post_json(&fx.app, "/api/music/folder", json!({ "path": ".." })).await;
+    let (status, body) = post_json(&fx.app, "/api/music/folder", json!({ "path": ".." })).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"]["code"], "invalid_path");
     assert!(fx.last.lock().unwrap().is_none(), "gadgetd not contacted");
@@ -5047,55 +6091,25 @@ async fn create_folder_traversal_path_is_400() {
 // ── folder delete ──────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn folder_delete_enqueues_remove_and_returns_202() {
+async fn folder_delete_with_files_is_gated_before_enqueue() {
     // Seed three files under Music/NewBand on the media-ro filesystem.
     let fx = music_fixture_with_media(&[
         ("Music/NewBand/a.mp3", b"x"),
         ("Music/NewBand/b.mp3", b"y"),
         ("Music/NewBand/.teslausb-keep", b"k"),
     ]);
-    let (status, body) =
-        post_json(&fx.app, "/api/music/folder-delete", json!({ "path": "NewBand" })).await;
-    assert_eq!(status, StatusCode::ACCEPTED);
-    assert_eq!(body["state"], "queued");
-
-    // All delete calls must be delete_paths enqueues on partition 2; the final
-    // call must be the remove_empty_dir prune of the now-empty folder.
-    let calls = fx.calls.lock().unwrap().clone();
-    assert!(calls.len() >= 2, "expected file deletes + a dir prune");
-
-    let (prune, deletes) = calls.split_last().unwrap();
-    for c in deletes {
-        assert_eq!(c["cmd"], "enqueue_mutation");
-        assert_eq!(c["partition"], 2);
-        assert_eq!(c["mutation"]["op"], "delete_paths");
-    }
-    assert_eq!(prune["cmd"], "enqueue_mutation");
-    assert_eq!(prune["partition"], 2);
-    assert_eq!(prune["mutation"]["op"], "remove_empty_dir");
-    assert_eq!(prune["mutation"]["rel_path"], "Music/NewBand");
-
-    // The union of all rel_paths across the delete calls must equal the files.
-    let mut all_paths: Vec<String> = deletes
-        .iter()
-        .flat_map(|c| {
-            c["mutation"]["rel_paths"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|v| v.as_str().unwrap().to_owned())
-        })
-        .collect();
-    all_paths.sort();
-    all_paths.dedup();
+    let (status, body) = post_json(
+        &fx.app,
+        "/api/music/folder-delete",
+        json!({ "path": "NewBand" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"]["code"], "atomic_enqueue_required");
     assert_eq!(
-        all_paths,
-        vec![
-            "Music/NewBand/.teslausb-keep".to_owned(),
-            "Music/NewBand/a.mp3".to_owned(),
-            "Music/NewBand/b.mp3".to_owned(),
-        ],
-        "union of delete_paths must equal the seeded child files"
+        fx.calls.lock().unwrap().len(),
+        0,
+        "gadgetd must not be contacted for non-empty folder delete until atomic enqueue exists"
     );
 }
 
@@ -5107,8 +6121,12 @@ async fn folder_delete_empty_folder_on_disk_repairs_orphan_and_returns_202() {
     let fx = music_fixture_with_media(&[]);
     std::fs::create_dir_all(fx.media_ro.join("Music").join("EmptyBand")).unwrap();
 
-    let (status, body) =
-        post_json(&fx.app, "/api/music/folder-delete", json!({ "path": "EmptyBand" })).await;
+    let (status, body) = post_json(
+        &fx.app,
+        "/api/music/folder-delete",
+        json!({ "path": "EmptyBand" }),
+    )
+    .await;
     assert_eq!(status, StatusCode::ACCEPTED);
     assert_eq!(body["state"], "queued");
 
@@ -5138,8 +6156,12 @@ async fn folder_delete_symlinked_folder_is_404_and_not_followed() {
     let music = fx.media_ro.join("Music");
     std::os::unix::fs::symlink(music.join("Keep"), music.join("Link")).unwrap();
 
-    let (status, _) =
-        post_json(&fx.app, "/api/music/folder-delete", json!({ "path": "Link" })).await;
+    let (status, _) = post_json(
+        &fx.app,
+        "/api/music/folder-delete",
+        json!({ "path": "Link" }),
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(
         fx.calls.lock().unwrap().is_empty(),
@@ -5164,7 +6186,11 @@ async fn move_music_enqueues_install_only_and_returns_202() {
     assert_eq!(body["state"], "queued");
 
     let calls = fx.calls.lock().unwrap().clone();
-    assert_eq!(calls.len(), 1, "expected exactly one gadgetd call (install only; no delete)");
+    assert_eq!(
+        calls.len(),
+        1,
+        "expected exactly one gadgetd call (install only; no delete)"
+    );
 
     // The single call must be install_file at the destination.
     assert_eq!(calls[0]["cmd"], "enqueue_mutation");
@@ -5409,8 +6435,16 @@ fn headroom_ok_behaviors() {
     assert!(!crate::music::headroom_ok(need + floor - 1, total, need));
     assert!(crate::music::headroom_ok(need + floor, total, need));
     let tiny_total = 8_u64 << 30;
-    assert!(!crate::music::headroom_ok((1_u64 << 30) + need - 1, tiny_total, need));
-    assert!(crate::music::headroom_ok((1_u64 << 30) + need, tiny_total, need));
+    assert!(!crate::music::headroom_ok(
+        (1_u64 << 30) + need - 1,
+        tiny_total,
+        need
+    ));
+    assert!(crate::music::headroom_ok(
+        (1_u64 << 30) + need,
+        tiny_total,
+        need
+    ));
 }
 
 #[tokio::test]
@@ -5427,7 +6461,9 @@ async fn stream_file_field_to_tempfile_enforces_cap() {
         )
         .body(Body::from(body))
         .unwrap();
-    let mut multipart = axum::extract::Multipart::from_request(req, &()).await.unwrap();
+    let mut multipart = axum::extract::Multipart::from_request(req, &())
+        .await
+        .unwrap();
     let field = multipart.next_field().await.unwrap().unwrap();
     let named = crate::route::new_staging_tempfile(&staging).unwrap();
     let err = crate::music::stream_file_field_to_tempfile(field, &named, 8)
@@ -5462,7 +6498,9 @@ async fn read_bounded_text_rejects_oversize() {
         )
         .body(Body::from(body))
         .unwrap();
-    let mut multipart = axum::extract::Multipart::from_request(req, &()).await.unwrap();
+    let mut multipart = axum::extract::Multipart::from_request(req, &())
+        .await
+        .unwrap();
     let field = multipart.next_field().await.unwrap().unwrap();
     let err = crate::music::read_bounded_text(field, 8).await.unwrap_err();
     let resp = err.into_response();
@@ -5479,7 +6517,7 @@ async fn read_bounded_text_rejects_oversize() {
 
 #[tokio::test]
 async fn delete_music_paths_maps_nested_paths_to_music_prefix() {
-    let fx = delete_fixture(Reply::Json(json!({ "job_id": "m-d", "state": "queued" })));
+    let fx = delete_fixture(Reply::Json(json!({ "job_id": "m-24", "state": "queued" })));
     let (status, _) = post_json(
         &fx.app,
         "/api/music/delete",
@@ -5527,7 +6565,7 @@ async fn delete_music_paths_over_cap_is_422_before_handoff() {
 // ── run_remove_many chunking (>16 paths) ──────────────────────────────────
 
 #[tokio::test]
-async fn folder_delete_with_more_than_16_files_produces_chunked_enqueues() {
+async fn folder_delete_with_more_than_16_files_is_gated_before_enqueue() {
     // Seed 20 files under Music/BigBand — more than DELETE_CHUNK=16.
     let files: Vec<(String, &[u8])> = (0..20)
         .map(|i| (format!("Music/BigBand/track{i:02}.mp3"), b"x".as_slice()))
@@ -5535,48 +6573,31 @@ async fn folder_delete_with_more_than_16_files_produces_chunked_enqueues() {
     let file_refs: Vec<(&str, &[u8])> = files.iter().map(|(s, b)| (s.as_str(), *b)).collect();
     let fx = music_fixture_with_media(&file_refs);
 
-    let (status, _) =
-        post_json(&fx.app, "/api/music/folder-delete", json!({ "path": "BigBand" })).await;
-    assert_eq!(status, StatusCode::ACCEPTED);
-
-    let calls = fx.calls.lock().unwrap().clone();
-    // The final call is the remove_empty_dir prune; the rest are delete chunks.
-    let (prune, deletes) = calls.split_last().unwrap();
-    assert_eq!(prune["mutation"]["op"], "remove_empty_dir");
-    assert_eq!(prune["mutation"]["rel_path"], "Music/BigBand");
-
-    // Must have produced ≥2 delete_paths calls (20 files / 16 per chunk = 2 chunks).
-    assert!(
-        deletes.len() >= 2,
-        "expected at least 2 chunked enqueues, got {}",
-        deletes.len()
+    let (status, _) = post_json(
+        &fx.app,
+        "/api/music/folder-delete",
+        json!({ "path": "BigBand" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        fx.calls.lock().unwrap().len(),
+        0,
+        "gadgetd must not be contacted for multi-chunk delete"
     );
+}
 
-    // Each individual delete call must have ≤16 paths.
-    for (i, c) in deletes.iter().enumerate() {
-        assert_eq!(c["mutation"]["op"], "delete_paths");
-        let paths = c["mutation"]["rel_paths"].as_array().unwrap();
-        assert!(
-            paths.len() <= 16,
-            "chunk {i} has {} paths (must be ≤16)",
-            paths.len()
-        );
-    }
-
-    // The union of all paths must equal all 20 seeded files.
-    let mut all_paths: Vec<String> = deletes
-        .iter()
-        .flat_map(|c| {
-            c["mutation"]["rel_paths"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|v| v.as_str().unwrap().to_owned())
-        })
-        .collect();
-    all_paths.sort();
-    all_paths.dedup();
-    assert_eq!(all_paths.len(), 20, "union of all chunks must cover all 20 files");
+#[tokio::test]
+async fn bulk_delete_with_more_than_16_paths_is_gated_before_enqueue() {
+    let fx = delete_fixture(Reply::Json(json!({ "job_id": "m-25", "state": "queued" })));
+    let names: Vec<String> = (0..20).map(|i| format!("track{i:02}.mp3")).collect();
+    let (status, body) = post_json(&fx.app, "/api/music/bulk-delete", json!({ "names": names })).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"]["code"], "atomic_enqueue_required");
+    assert!(
+        fx.last.lock().unwrap().is_none(),
+        "gadgetd must not be contacted for multi-chunk delete"
+    );
 }
 
 // ── validate_music_subpath extended rejections ────────────────────────────

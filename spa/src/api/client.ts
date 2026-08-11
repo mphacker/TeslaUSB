@@ -11,19 +11,34 @@
  * itself; in dev, Vite proxies `/api` to webd.
  */
 import type {
+  AdvancedSettingsResponse,
   Analytics,
   ApMode,
   ApiErrorBody,
   ChimeGroup,
   Chimes,
   Clip,
+  ClipWaypoint,
   ClipsParams,
+  CloudHistoryPageResponse,
+  CloudQueuePageResponse,
+  CloudStatusResponse,
   CloudCredentialsResponse,
+  FailedJobsResponse,
+  IndexEventChartResponse,
+  IndexDrivingStatsResponse,
+  IndexLifecycleResponse,
+  IndexStatusResponse,
   DaySummary,
   EncryptionStatus,
   EventItem,
+  EventDetail,
+  FsckHistoryEntry,
+  FsckLastCheckResponse,
+  FsckStatusResponse,
   EventsParams,
   GadgetStatus,
+  GadgetModeStatus,
   GroupInput,
   MediaHandoffResult,
   MediaList,
@@ -36,6 +51,8 @@ import type {
   SchedulerSnapshot,
   StorageHealth,
   StorageInfo,
+  RetentionStatusResponse,
+  RetentionPreviewResponse,
   StoredSchedule,
   SystemHealth,
   SystemMetrics,
@@ -72,7 +89,7 @@ export class ApiError extends Error {
   }
 }
 
-function qs(params: Record<string, string | number | undefined>): string {
+function qs(params: Record<string, string | number | boolean | undefined>): string {
   const entries = Object.entries(params).filter(
     ([, v]) => v !== undefined && v !== "",
   ) as [string, string | number][];
@@ -239,6 +256,8 @@ export const api = {
 
   eventById: (id: number, signal?: AbortSignal) =>
     getJson<EventItem>(`/api/events/${id}`, signal),
+  eventDetail: (id: number, signal?: AbortSignal) =>
+    getJson<EventDetail>(`/api/events/${id}/detail`, signal),
 
   clips: (params: ClipsParams = {}, signal?: AbortSignal) =>
     getJson<Page<Clip>>(`/api/clips${qs({ ...params })}`, signal),
@@ -246,10 +265,15 @@ export const api = {
   clip: (id: number, signal?: AbortSignal) =>
     getJson<Clip>(`/api/clips/${id}`, signal),
 
+  clipWaypoints: (id: number, signal?: AbortSignal) =>
+    getJson<ClipWaypoint[]>(`/api/clips/${id}/waypoints`, signal),
+
   analytics: (signal?: AbortSignal) =>
     getJson<Analytics>("/api/analytics", signal),
 
   settings: (signal?: AbortSignal) => getJson<Pref[]>("/api/settings", signal),
+  advancedSettings: (signal?: AbortSignal) =>
+    getJson<AdvancedSettingsResponse>("/api/settings/advanced", signal),
   putSetting: (key: string, value: string, signal?: AbortSignal): Promise<Pref> =>
     request<Pref>(
       "PUT",
@@ -261,6 +285,53 @@ export const api = {
 
   cloudCredentials: (signal?: AbortSignal) =>
     getJson<CloudCredentialsResponse>("/api/cloud/credentials", signal),
+
+  cloudStatus: (signal?: AbortSignal) =>
+    getJson<CloudStatusResponse>("/api/cloud", signal),
+
+  cloudQueue: (
+    params: { cursor?: string; limit?: number } = {},
+    signal?: AbortSignal,
+  ) => getJson<CloudQueuePageResponse>(`/api/cloud/queue${qs({ ...params })}`, signal),
+
+  cloudHistory: (
+    params: { cursor?: string; limit?: number } = {},
+    signal?: AbortSignal,
+  ) =>
+    getJson<CloudHistoryPageResponse>(
+      `/api/cloud/history${qs({ ...params })}`,
+      signal,
+    ),
+
+  failedJobs: (signal?: AbortSignal) =>
+    getJson<FailedJobsResponse>("/api/jobs/failed", signal),
+
+  fsckStatus: (signal?: AbortSignal) =>
+    getJson<FsckStatusResponse>("/api/fsck/status", signal),
+
+  fsckHistory: (signal?: AbortSignal) =>
+    getJson<FsckHistoryEntry[]>("/api/fsck/history", signal),
+
+  fsckLastCheck: (partition: 1 | 2 | 3, signal?: AbortSignal) =>
+    getJson<FsckLastCheckResponse>(`/api/fsck/last-check/${partition}`, signal),
+
+  indexStatus: (signal?: AbortSignal) =>
+    getJson<IndexStatusResponse>("/api/index/status", signal),
+  indexLifecycle: (signal?: AbortSignal) =>
+    getJson<IndexLifecycleResponse>("/api/index/lifecycle", signal),
+  indexDrivingStats: (signal?: AbortSignal) =>
+    getJson<IndexDrivingStatsResponse>("/api/index/driving-stats", signal),
+  indexEventChart: (signal?: AbortSignal) =>
+    getJson<IndexEventChartResponse>("/api/index/event-chart", signal),
+
+  retentionStatus: (signal?: AbortSignal) =>
+    getJson<RetentionStatusResponse>("/api/retention/status", signal),
+
+  retentionPreview: (limit?: number, signal?: AbortSignal) =>
+    getJson<RetentionPreviewResponse>(
+      `/api/retention/preview${qs({ limit })}`,
+      signal,
+    ),
 
   saveCloudCredentials: (
     body: SaveCloudCredentialsRequest,
@@ -371,6 +442,10 @@ export const api = {
    */
   gadgetStatus: (signal?: AbortSignal) =>
     getJson<GadgetStatus>("/api/gadget/status", signal),
+
+  /** Read-only bounded gadget/mode status for the Settings USB panel. */
+  gadgetModeStatus: (signal?: AbortSignal) =>
+    getJson<GadgetModeStatus>("/api/gadget/mode-status", signal),
 
   /**
    * Read which lock chime is installed on the p2 MEDIA partition

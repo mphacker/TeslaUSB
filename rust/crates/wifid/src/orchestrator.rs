@@ -392,7 +392,12 @@ where
         }
     }
 
-    fn reconcile_ap_tx_cap(&mut self, ap_active: bool, step: &crate::link::LinkStep, recovering: bool) {
+    fn reconcile_ap_tx_cap(
+        &mut self,
+        ap_active: bool,
+        step: &crate::link::LinkStep,
+        recovering: bool,
+    ) {
         // Cap uap0 only when it is concurrently up WHILE the STA is actually
         // uploading; otherwise there is nothing to protect and the AP may use
         // full bandwidth. Fail-safe is enforced downstream: if the cap is not
@@ -437,10 +442,7 @@ where
         }
         // Tear down on ANY footprint, not just a fully-`active` overlay, so a
         // partial/half-torn AP can never linger in ForceOff or emergency-stop.
-        if ap_obs.iface_exists
-            || ap_obs.hostapd_alive
-            || ap_obs.dnsmasq_alive
-            || ap_obs.ip_present
+        if ap_obs.iface_exists || ap_obs.hostapd_alive || ap_obs.dnsmasq_alive || ap_obs.ip_present
         {
             return self.overlay.ensure_down().is_ok();
         }
@@ -517,9 +519,7 @@ where
             self.ap_unknown_streak = 0;
             return;
         }
-        if ap_obs.hostapd_alive
-            && ap_obs.iface_exists
-            && ap_obs.iface_type == ApIfaceType::Unknown
+        if ap_obs.hostapd_alive && ap_obs.iface_exists && ap_obs.iface_type == ApIfaceType::Unknown
         {
             // uap0 exists and hostapd is alive but its type was unreadable this
             // tick (transient `iw` failure): do not tear down a possibly-healthy
@@ -995,8 +995,7 @@ mod tests {
             obs.ip_present = true;
             // Re-derive `active` now the IP is restored, mirroring observe():
             // active requires iface + hostapd + ip + `type AP`.
-            obs.active =
-                obs.iface_exists && obs.hostapd_alive && obs.iface_type == ApIfaceType::Ap;
+            obs.active = obs.iface_exists && obs.hostapd_alive && obs.iface_type == ApIfaceType::Ap;
             Ok(())
         }
 
@@ -1355,7 +1354,8 @@ mod tests {
         set_time(&d, t + 4_000);
         d.tick().unwrap();
         assert!(
-            d.overlay.ops
+            d.overlay
+                .ops
                 .borrow()
                 .iter()
                 .any(|op| matches!(op, OverlayOp::Up(_))),
@@ -1392,7 +1392,15 @@ mod tests {
             }
         );
         assert_eq!(
-            resolve_ap_overlay(ApMode::ForceOn, true, false, LinkMode::Sta, true, Some(11), 6),
+            resolve_ap_overlay(
+                ApMode::ForceOn,
+                true,
+                false,
+                LinkMode::Sta,
+                true,
+                Some(11),
+                6
+            ),
             ApPlan {
                 desired: true,
                 channel: Some(11),
@@ -1402,7 +1410,15 @@ mod tests {
             // 5GHz STA channel cannot be followed by a 2.4GHz (hw_mode=g) AP on
             // the single radio; withhold the channel so bring-up is skipped
             // instead of beaconing on a mismatched channel (firmware -52).
-            resolve_ap_overlay(ApMode::ForceOn, true, false, LinkMode::Sta, true, Some(36), 6),
+            resolve_ap_overlay(
+                ApMode::ForceOn,
+                true,
+                false,
+                LinkMode::Sta,
+                true,
+                Some(36),
+                6
+            ),
             ApPlan {
                 desired: true,
                 channel: None,
@@ -1423,21 +1439,45 @@ mod tests {
             }
         );
         assert_eq!(
-            resolve_ap_overlay(ApMode::ForceOff, true, false, LinkMode::Ap, false, Some(11), 6),
+            resolve_ap_overlay(
+                ApMode::ForceOff,
+                true,
+                false,
+                LinkMode::Ap,
+                false,
+                Some(11),
+                6
+            ),
             ApPlan {
                 desired: false,
                 channel: None,
             }
         );
         assert_eq!(
-            resolve_ap_overlay(ApMode::ForceOn, true, true, LinkMode::Ap, false, Some(11), 6),
+            resolve_ap_overlay(
+                ApMode::ForceOn,
+                true,
+                true,
+                LinkMode::Ap,
+                false,
+                Some(11),
+                6
+            ),
             ApPlan {
                 desired: false,
                 channel: None,
             }
         );
         assert_eq!(
-            resolve_ap_overlay(ApMode::ForceOn, false, false, LinkMode::Ap, false, Some(11), 6),
+            resolve_ap_overlay(
+                ApMode::ForceOn,
+                false,
+                false,
+                LinkMode::Ap,
+                false,
+                Some(11),
+                6
+            ),
             ApPlan {
                 desired: false,
                 channel: None,
@@ -1465,7 +1505,8 @@ mod tests {
         set_time(&d, t + 4_000);
         d.tick().unwrap();
         assert!(
-            d.overlay.ops
+            d.overlay
+                .ops
                 .borrow()
                 .iter()
                 .any(|op| matches!(op, OverlayOp::Up(6)))
@@ -1818,7 +1859,10 @@ mod tests {
                 break;
             }
         }
-        assert!(started, "STA start was not retried after teardown recovered");
+        assert!(
+            started,
+            "STA start was not retried after teardown recovered"
+        );
         assert!(d.net.link.borrow().sta_running);
     }
 
@@ -2225,7 +2269,13 @@ mod tests {
             d.ap_bringup_cooldown_until_ms + 1 + AP_BRINGUP_SETTLE_MS,
         );
         d.tick().unwrap();
-        assert!(d.overlay.ops.borrow().iter().any(|op| matches!(op, OverlayOp::Up(6))));
+        assert!(
+            d.overlay
+                .ops
+                .borrow()
+                .iter()
+                .any(|op| matches!(op, OverlayOp::Up(6)))
+        );
     }
 
     #[test]
@@ -2317,7 +2367,10 @@ mod tests {
         d.tick().unwrap();
         set_time(&d, 6_000);
         let st = d.tick().unwrap();
-        assert_eq!(st.throttle.body.reason, crate::throttle::PauseReason::ApConcurrent);
+        assert_eq!(
+            st.throttle.body.reason,
+            crate::throttle::PauseReason::ApConcurrent
+        );
         assert_eq!(
             st.throttle.body.max_tx_bytes_per_s,
             d.cfg.throttle.max_tx_bytes_per_s / d.cfg.throttle.ap_concurrent_divisor
@@ -2377,7 +2430,10 @@ mod tests {
         set_time(&d, 6_000);
         let st = d.tick().unwrap();
         assert!(st.throttle.body.uploads_allowed);
-        assert_ne!(st.throttle.body.reason, crate::throttle::PauseReason::ApConcurrent);
+        assert_ne!(
+            st.throttle.body.reason,
+            crate::throttle::PauseReason::ApConcurrent
+        );
     }
 
     #[test]
@@ -2432,7 +2488,10 @@ mod tests {
         set_time(&d, 6_000);
         let st = d.tick().unwrap();
         assert!(!st.throttle.body.uploads_allowed);
-        assert_eq!(st.throttle.body.reason, crate::throttle::PauseReason::ApConcurrent);
+        assert_eq!(
+            st.throttle.body.reason,
+            crate::throttle::PauseReason::ApConcurrent
+        );
     }
 
     #[test]

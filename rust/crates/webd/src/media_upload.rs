@@ -280,7 +280,9 @@ pub(crate) fn validate_plate_dimensions(bytes: &[u8]) -> Result<(), ApiError> {
     Err(ApiError::status(
         StatusCode::UNPROCESSABLE_ENTITY,
         "invalid_dimensions",
-        format!("license plate must be 420x200 (North America) or 420x100 (Europe/Italy); got {w}x{h}"),
+        format!(
+            "license plate must be 420x200 (North America) or 420x100 (Europe/Italy); got {w}x{h}"
+        ),
     ))
 }
 

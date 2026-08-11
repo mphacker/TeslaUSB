@@ -19,3 +19,4 @@ dnsmasq dnsmasq
 # system tuning: swap on zram (compressed RAM, no microSD wear) via zram-tools;
 # configure_swap drops /etc/default/zramswap and enables zramswap.service.
 zram-tools zramswap
+sudo visudo

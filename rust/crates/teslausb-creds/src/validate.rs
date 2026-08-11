@@ -326,7 +326,9 @@ pub fn parse_single_remote_conf(conf: &str) -> Result<ParsedRemoteConfig, CredsE
     if section_name.is_none() {
         return Err(CredsError::MissingRemoteSection);
     }
-    let backend_type = options.remove("type").ok_or(CredsError::MissingRemoteType)?;
+    let backend_type = options
+        .remove("type")
+        .ok_or(CredsError::MissingRemoteType)?;
     Ok(ParsedRemoteConfig {
         backend_type,
         options,

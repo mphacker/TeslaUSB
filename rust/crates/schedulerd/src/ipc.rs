@@ -28,7 +28,9 @@ use serde_json::{Value, json};
 use teslausb_core::chime::{Pick, civil_from_unix};
 
 use crate::library;
-use crate::model::{GroupInput, RandomMode, ScheduleInput, SchedulerMenus, validate_chime_filename};
+use crate::model::{
+    GroupInput, RandomMode, ScheduleInput, SchedulerMenus, validate_chime_filename,
+};
 use crate::store::Store;
 
 /// Maximum accepted frame size. Schedule/group payloads are tiny; library
@@ -360,7 +362,10 @@ fn dispatch(req: Request, state: &ServeState) -> Value {
             }
         }
         Request::RemoveChimeReferences { filenames } => {
-            if let Some(e) = filenames.iter().find_map(|f| validate_chime_filename(f).err()) {
+            if let Some(e) = filenames
+                .iter()
+                .find_map(|f| validate_chime_filename(f).err())
+            {
                 err_envelope(e.code, &e.message)
             } else {
                 with_store(state, |store| {
@@ -409,12 +414,7 @@ fn dispatch(req: Request, state: &ServeState) -> Value {
                 let now = civil_from_unix(unix_secs, tz_offset_secs);
                 let library = resolve_eval_library(library, &state.library_dir);
                 let pick = if clock_plausible == Some(false) {
-                    store.evaluate_boot_clockless(
-                        now,
-                        active_chime.as_deref(),
-                        &library,
-                        boot_seed,
-                    )
+                    store.evaluate_boot_clockless(now, active_chime.as_deref(), &library, boot_seed)
                 } else {
                     store.evaluate_boot(now, active_chime.as_deref(), &library, boot_seed)
                 };
@@ -430,7 +430,10 @@ fn dispatch(req: Request, state: &ServeState) -> Value {
 /// empty list, which legitimately means "no installable candidates" and must
 /// NOT silently fall back to the stale local scan. Only an **omitted** field
 /// (legacy callers) triggers the local `library_dir` scan.
-fn resolve_eval_library(supplied: Option<Vec<String>>, library_dir: &std::path::Path) -> Vec<String> {
+fn resolve_eval_library(
+    supplied: Option<Vec<String>>,
+    library_dir: &std::path::Path,
+) -> Vec<String> {
     match supplied {
         Some(v) => v,
         None => library::scan(library_dir)

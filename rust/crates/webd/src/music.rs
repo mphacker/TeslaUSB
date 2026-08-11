@@ -171,7 +171,9 @@ pub(crate) async fn stream_file_field_to_tempfile(
                 format!("file exceeds {max_bytes} bytes"),
             ));
         }
-        out.write_all(&chunk).await.map_err(|_| ApiError::Internal)?;
+        out.write_all(&chunk)
+            .await
+            .map_err(|_| ApiError::Internal)?;
         total += chunk.len();
     }
     out.flush().await.map_err(|_| ApiError::Internal)?;
@@ -292,7 +294,9 @@ pub(crate) async fn install_music(
                         "duplicate 'file' field",
                     ));
                 }
-                let fname = field.file_name().map_or_else(|| "upload".to_owned(), str::to_owned);
+                let fname = field
+                    .file_name()
+                    .map_or_else(|| "upload".to_owned(), str::to_owned);
                 let named =
                     crate::route::new_staging_tempfile(&staging).map_err(|_| ApiError::Internal)?;
                 stream_file_field_to_tempfile(field, &named, MUSIC_MAX_BYTES).await?;

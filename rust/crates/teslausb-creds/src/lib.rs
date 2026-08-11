@@ -17,7 +17,9 @@ pub use blob::{
     encrypt_with_nonce_for_test,
 };
 pub use error::CredsError;
-pub use hardware_root::{DOMAIN_SEPARATOR, HardwareRoot, ProcHardwareRoot, StaticHardwareRoot, derive_key};
+pub use hardware_root::{
+    DOMAIN_SEPARATOR, HardwareRoot, ProcHardwareRoot, StaticHardwareRoot, derive_key,
+};
 pub use schema::{
     CredentialDocument, CredentialFlow, CredentialValue, NasCredentials, OAuthProvider,
     S3StyleProvider,

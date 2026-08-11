@@ -26,6 +26,26 @@ TAMPERED="${FIXTURES_DIR}/tampered"
 run_setup()     { bash "$SETUP_SH" "$@"; }
 run_uninstall() { bash "$UNINSTALL_SH" "$@"; }
 
+# A0: discover delegates to the installed Rust utility without mutation.
+new_sandbox; sbx="$SANDBOX"
+legacy_root="${sbx}/legacy"; mkdir -p "$legacy_root"
+mkdir -p "${TESLAUSB_PREFIX}/usr/local/bin"
+cat > "${TESLAUSB_PREFIX}/usr/local/bin/teslausb-migrate" <<'EOF'
+#!/bin/sh
+[ "$1" = "discover" ] || [ "$1" = "plan" ] || exit 1
+[ "$2" = "--root" ] && [ -d "$3" ] || exit 1
+printf '{"schema":1,"installation_detected":false,"items":[],"blockers":[]}\n'
+EOF
+chmod 0755 "${TESLAUSB_PREFIX}/usr/local/bin/teslausb-migrate"
+rc=0; run_setup discover --root "$legacy_root" >/dev/null 2>&1 || rc=$?
+assert_eq "$rc" 0 "discover delegates to teslausb-migrate"
+rc=0; run_setup plan --root "$legacy_root" >/dev/null 2>&1 || rc=$?
+assert_eq "$rc" 0 "plan delegates to teslausb-migrate"
+rc=0; run_setup convert --root "$legacy_root" >/dev/null 2>&1 || rc=$?
+assert_eq "$rc" 0 "convert delegates to teslausb-migrate"
+assert_file_absent "${legacy_root}/config.yaml" "discover does not write legacy files"
+cleanup_sandbox "$sbx"
+
 # ============================================================================
 # A. Mode wiring + the §2 provisioning gate
 # ============================================================================

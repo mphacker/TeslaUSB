@@ -34,7 +34,9 @@ const SECTION_ORDER = [
   "Access Point",
   "Storage & Auto-Cleanup",
   "Mapping & Indexing",
+  "Advanced Settings",
   "Storage Health",
+  "Filesystem Health Check",
   "System",
 ];
 
@@ -75,6 +77,37 @@ const STORAGE_FIXTURE = {
   fs_errors: null,
   trim: null,
 };
+
+const FSCK_STATUS_FIXTURE = {
+  running: false,
+  partition: "part1",
+  mode: "quick",
+  progress: "Complete",
+  start_time: null,
+  result: "healthy",
+  details: "No structural errors found",
+  duration: 2.3,
+  error: null,
+};
+
+const FSCK_HISTORY_FIXTURE = [
+  {
+    timestamp: "2026-08-10T14:00:00Z",
+    partition: "part1",
+    mode: "quick",
+    result: "healthy",
+    details: "No structural errors found",
+    duration_seconds: 2.3,
+  },
+  {
+    timestamp: "2026-08-10T10:00:00Z",
+    partition: "part2",
+    mode: "repair",
+    result: "repaired",
+    details: "Recovered directory chain",
+    duration_seconds: 14.7,
+  },
+];
 // USB-gadget status fixture. Field names mirror webd's /api/gadget/status DTO.
 // gadgetd is NOT spawned in the UAT harness, so the live socket read 503s; we
 // mock the daemon-present (200) state — the normal production state — exactly as
@@ -94,6 +127,34 @@ const GADGET_FIXTURE = {
   media_ro_error: null,
   last_handoff_id: "h-42",
   last_result: "done",
+};
+
+const GADGET_MODE_FIXTURE = {
+  mode: "presented",
+  present: true,
+  bound: true,
+  bound_udc: "fe980000.usb",
+  udc_state: "configured",
+  handoff: {
+    state: "idle",
+    active: false,
+    pending_mutations: 0,
+    applying_mutations: 0,
+    last_handoff_id: "h-42",
+    last_result: "done",
+  },
+  lun: {
+    teslacam: { image: "/data/teslausb/cam.img", loaded: true },
+    media: { image: "/data/teslausb/media.img", loaded: true },
+  },
+  recovery: {
+    chime_reenum_pending: false,
+    last_reenum: { result: "done", disconnect_ms: 420, reason: "chime_apply" },
+    media_ro_mounted: true,
+    media_ro_path: "/run/teslausb/media-ro",
+    media_ro_error: null,
+  },
+  banner: null,
 };
 
 const WIFI_STATUS_FIXTURE = {
@@ -189,6 +250,39 @@ async function routeSystemProbes(page: Page) {
   await page.route("**/api/storage/health", (r) => r.fulfill(json(STORAGE_FIXTURE)));
 }
 
+async function routeFsckProbes(page: Page) {
+  const json = (body: unknown) => ({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify(body),
+  });
+  await page.route("**/api/fsck/status", (r) => r.fulfill(json(FSCK_STATUS_FIXTURE)));
+  await page.route("**/api/fsck/history", (r) => r.fulfill(json(FSCK_HISTORY_FIXTURE)));
+  await page.route("**/api/fsck/last-check/1", (r) =>
+    r.fulfill(
+      json({
+        timestamp: "2026-08-10T14:00:00Z",
+        result: "healthy",
+        details: "No structural errors found",
+        age_hours: 1.5,
+      }),
+    ),
+  );
+  await page.route("**/api/fsck/last-check/2", (r) =>
+    r.fulfill(
+      json({
+        timestamp: "2026-08-10T10:00:00Z",
+        result: "repaired",
+        details: "Recovered directory chain",
+        age_hours: 5.5,
+      }),
+    ),
+  );
+  await page.route("**/api/fsck/last-check/3", (r) =>
+    r.fulfill(json({ timestamp: null, result: "never_checked" })),
+  );
+}
+
 async function routeWifiProbes(
   page: Page,
   ap = { ...WIFI_AP_FIXTURE.ap },
@@ -268,7 +362,8 @@ async function routeApMutations(
   });
 }
 
-/** Mock gadgetd-present (200) for `/api/gadget/status`. gadgetd is not spawned
+/** Mock gadgetd-present (200) for `/api/gadget/status` + `/api/gadget/mode-status`.
+ *  gadgetd is not spawned
  *  in the harness, so the live socket read would 503; mocking the daemon-up
  *  state mirrors the established gadgetd-flow mocking and represents the normal
  *  production state. The `gadget-status — unavailable` test overrides this with
@@ -279,6 +374,13 @@ async function routeGadgetStatus(page: Page) {
       status: 200,
       contentType: "application/json",
       body: JSON.stringify(GADGET_FIXTURE),
+    }),
+  );
+  await page.route("**/api/gadget/mode-status", (r) =>
+    r.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(GADGET_MODE_FIXTURE),
     }),
   );
 }
@@ -327,6 +429,7 @@ test.describe("settings dashboard UAT", () => {
   test.beforeEach(async ({ page }) => {
     await routeGadgetStatus(page);
     await routeApStatus(page);
+    await routeFsckProbes(page);
   });
 
   // ── Gate 1: functional + structural parity ─────────────────────────────
@@ -460,11 +563,22 @@ test.describe("settings dashboard UAT", () => {
     await expect(page.locator("[data-testid=usb-bound]")).toHaveText(
       "Yes (configured)",
     );
-    await expect(page.locator("#usb-gadget-card")).toContainText(
-      "/data/teslausb/cam.img",
+    await expect(page.locator("[data-testid=usb-mode]")).toHaveText("Presented");
+    await expect(page.locator("[data-testid=usb-handoff]")).toContainText("Idle");
+    await expect(page.locator("[data-testid=usb-handoff]")).toContainText(
+      "Queue 0 pending / 0 applying",
+    );
+    await expect(page.locator("[data-testid=usb-handoff]")).toContainText(
+      "Last done (h-42)",
     );
     await expect(page.locator("#usb-gadget-card")).toContainText(
-      "/data/teslausb/media.img",
+      "Loaded (/data/teslausb/cam.img)",
+    );
+    await expect(page.locator("#usb-gadget-card")).toContainText(
+      "Loaded (/data/teslausb/media.img)",
+    );
+    await expect(page.locator("[data-testid=usb-recovery]")).toContainText(
+      "Last USB re-enumeration: done",
     );
     await expect(page.locator("[data-testid=usb-media-ro]")).toHaveText(
       "Mounted (/run/teslausb/media-ro)",
@@ -510,6 +624,13 @@ test.describe("settings dashboard UAT", () => {
       "—",
     ]);
 
+    await expect(page.locator("[data-testid=fsck-status-line]")).toContainText(
+      "Last result: healthy",
+    );
+    await expect(page.locator("[data-testid=fsck-last-part1]")).toContainText("Last checked");
+    await expect(page.locator("[data-testid=fsck-last-part3]")).toContainText("Never checked");
+    await expect(page.locator("[data-testid=fsck-history-table] tbody tr")).toHaveCount(2);
+
     // System — Hostname / IP / Platform / Uptime / Memory now come live from
     // the metrics fixture (webd reads them on-device); rendered, not fabricated.
     const sys = page.locator("details.settings-section", {
@@ -533,6 +654,15 @@ test.describe("settings dashboard UAT", () => {
     await expect(page.locator("#mapping-speed-units")).toHaveValue("kph");
     await expect(page.locator("#mapping-display-timezone")).toHaveValue(
       "America/Los_Angeles",
+    );
+    await expect(page.locator("[data-testid=advanced-setting-speed_unit]")).toContainText(
+      "Configured",
+    );
+    await expect(page.locator("[data-testid=advanced-setting-clock]")).toContainText(
+      "Defaulted (missing)",
+    );
+    await expect(page.locator("[data-testid=advanced-setting-display_timezone]")).toContainText(
+      "Allowed: IANA timezone or Auto",
     );
     // The Save button lives inside the collapsed Mapping <details>, so it is hidden
     // from the accessibility tree; assert enabled via a locator (works on attached,
@@ -962,6 +1092,10 @@ test.describe("settings dashboard UAT", () => {
     // The config bindings + the Video Indexer enrichment + the device-status
     // probes prove the catalog API is actually wired in.
     expect(apiSeen.has("/api/settings"), "/api/settings was never requested").toBe(true);
+    expect(
+      apiSeen.has("/api/settings/advanced"),
+      "/api/settings/advanced was never requested",
+    ).toBe(true);
     expect(apiSeen.has("/api/clips"), "/api/clips was never requested").toBe(true);
     expect(
       apiSeen.has("/api/system/health"),
@@ -974,6 +1108,15 @@ test.describe("settings dashboard UAT", () => {
     expect(
       apiSeen.has("/api/storage/health"),
       "/api/storage/health was never requested",
+    ).toBe(true);
+    expect(apiSeen.has("/api/fsck/status"), "/api/fsck/status was never requested").toBe(true);
+    expect(apiSeen.has("/api/fsck/history"), "/api/fsck/history was never requested").toBe(true);
+    expect(apiSeen.has("/api/fsck/last-check/1"), "/api/fsck/last-check/1 missing").toBe(true);
+    expect(apiSeen.has("/api/fsck/last-check/2"), "/api/fsck/last-check/2 missing").toBe(true);
+    expect(apiSeen.has("/api/fsck/last-check/3"), "/api/fsck/last-check/3 missing").toBe(true);
+    expect(
+      apiSeen.has("/api/gadget/mode-status"),
+      "/api/gadget/mode-status was never requested",
     ).toBe(true);
     expect(apiSeen.has("/api/wifi/status"), "/api/wifi/status was never requested").toBe(true);
     expect(
@@ -1056,7 +1199,17 @@ test.describe("settings dashboard UAT", () => {
     // show the honest unavailable copy — never a fabricated "connected" — and
     // the handled 503 must NOT leak a console error or pageerror.
     await page.unroute("**/api/gadget/status");
+    await page.unroute("**/api/gadget/mode-status");
     await page.route("**/api/gadget/status", (r) =>
+      r.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({
+          error: { code: "gadgetd_unavailable", message: "gadgetd is not reachable" },
+        }),
+      }),
+    );
+    await page.route("**/api/gadget/mode-status", (r) =>
       r.fulfill({
         status: 503,
         contentType: "application/json",
@@ -1076,14 +1229,22 @@ test.describe("settings dashboard UAT", () => {
     // 503 logs; assert nothing else leaked (no pageerror, no warning, no other
     // console error).
     const expected503 = probe.consoleErrors.filter(
-      (e) => e.text.includes("503") && e.location.includes("/api/gadget/status"),
+      (e) =>
+        e.text.includes("503") &&
+        (e.location.includes("/api/gadget/status") ||
+          e.location.includes("/api/gadget/mode-status")),
     );
     expect(
       expected503.length,
       "expected at least one 503 resource-load log",
     ).toBeGreaterThanOrEqual(1);
     const other = probe.consoleErrors.filter(
-      (e) => !(e.text.includes("503") && e.location.includes("/api/gadget/status")),
+      (e) =>
+        !(
+          e.text.includes("503") &&
+          (e.location.includes("/api/gadget/status") ||
+            e.location.includes("/api/gadget/mode-status"))
+        ),
     );
     expect(other, `unexpected console error(s): ${JSON.stringify(other)}`).toEqual([]);
     expect(probe.pageErrors, `pageerror(s): ${JSON.stringify(probe.pageErrors)}`).toEqual([]);

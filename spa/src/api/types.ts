@@ -19,9 +19,190 @@ export interface CloudCredentialsResponse {
   updated_at: number | null;
 }
 
+export interface CloudStatusResponse {
+  configured: boolean;
+  provider_type: string | null;
+  uploader_state: string;
+  sync_now_state: string;
+}
+
 export interface SaveCloudCredentialsRequest {
   provider: CloudCredentialProvider;
   token: string;
+}
+
+export interface CloudQueueItem {
+  archive_item_id: number;
+  child_key: string;
+  category: string;
+  seq: number;
+  total_bytes: number;
+  bytes_uploaded: number;
+  state: string;
+  attempts: number;
+  not_before: number | null;
+  last_error_class: string | null;
+  upload_set_id: string | null;
+}
+
+export interface CloudQueuePageResponse {
+  items: CloudQueueItem[];
+  next_cursor: string | null;
+  limit: number;
+}
+
+export interface CloudHistoryItem {
+  id: number;
+  completion_seq: number;
+  archive_item_id: number;
+  child_key: string;
+  outcome: string;
+  size_bytes: number;
+  at: number;
+  error_class: string | null;
+}
+
+export interface CloudHistoryPageResponse {
+  items: CloudHistoryItem[];
+  next_cursor: string | null;
+  limit: number;
+}
+
+export interface FailedJob {
+  job_id: number;
+  kind: string;
+  state: string;
+  progress: number | null;
+  detail?: string;
+  handoff_id?: string;
+}
+
+export interface FailedJobsResponse {
+  jobs: FailedJob[];
+}
+
+/** `GET /api/fsck/status` read-only maintenance snapshot. */
+export interface FsckStatusResponse {
+  running: boolean;
+  partition: "part1" | "part2" | "part3" | null;
+  mode: "quick" | "repair" | null;
+  progress: string | null;
+  start_time: string | null;
+  result:
+    | "healthy"
+    | "repaired"
+    | "recording"
+    | "errors"
+    | "failed"
+    | "timeout"
+    | "cancelled"
+    | "never_checked"
+    | null;
+  details: string | null;
+  duration: number | null;
+  error: string | null;
+}
+
+/** One validated history row from `GET /api/fsck/history`. */
+export interface FsckHistoryEntry {
+  timestamp: string;
+  partition: "part1" | "part2" | "part3";
+  mode: "quick" | "repair";
+  result: "healthy" | "repaired" | "recording" | "errors" | "failed" | "timeout" | "cancelled";
+  details: string;
+  duration_seconds: number;
+}
+
+/** `GET /api/fsck/last-check/:partition` read-only summary. */
+export interface FsckLastCheckResponse {
+  timestamp: string | null;
+  result: "healthy" | "repaired" | "recording" | "errors" | "failed" | "timeout" | "cancelled" | "never_checked";
+  details?: string;
+  age_hours?: number;
+}
+
+/** `GET /api/index/status` read-only catalog diagnostics. */
+export interface IndexStatusResponse {
+  schema_version: number;
+  trip_count: number;
+  event_count: number;
+  clip_count: number;
+  waypoint_count: number;
+}
+
+/** `GET /api/index/lifecycle` read-only index lifecycle diagnostics. */
+export interface IndexLifecycleResponse {
+  schema_version: number;
+  lifecycle_state: "empty" | "healthy" | "stale" | "error";
+  stale_clip_count: number;
+  front_parse_total: number;
+  front_parse_error_count: number;
+  front_parse_stale_count: number;
+  front_parse_retry_pending_count: number;
+  front_parse_missing_count: number;
+  last_derived_at: number | null;
+  last_front_parse_attempt_at: number | null;
+}
+
+/** `GET /api/index/driving-stats` read-only mapping aggregates. */
+export interface IndexDrivingStatsResponse {
+  total_trips: number;
+  total_distance_m: number;
+  total_drive_time_s: number;
+  warning_event_count: number;
+  sentry_event_count: number;
+  avg_speed_mps: number | null;
+  max_speed_mps: number | null;
+}
+
+export interface IndexEventTypeCount {
+  type: string;
+  count: number;
+}
+
+export interface IndexEventChartDayPoint {
+  day: string;
+  count: number;
+  sentry_count: number;
+  warning_count: number;
+}
+
+/** `GET /api/index/event-chart` read-only event distribution. */
+export interface IndexEventChartResponse {
+  total_events: number;
+  by_type: IndexEventTypeCount[];
+  by_day: IndexEventChartDayPoint[];
+}
+
+/** `GET /api/retention/status` read-only governor state. */
+export interface RetentionCleanupHistoryEntry {
+  at: number;
+  items: number;
+  bytes_freed: number;
+}
+
+export interface RetentionStatusResponse {
+  governor: Record<string, unknown> | null;
+  candidate_count: number | null;
+  candidate_count_truncated: boolean;
+  estimated_reclaimable_bytes: number | null;
+  estimated_reclaimable_bytes_truncated: boolean;
+  recent_cleanup: RetentionCleanupHistoryEntry[] | null;
+  recent_cleanup_truncated: boolean;
+  cloud_durability_required: boolean;
+  cloud_durability_disclosure: string;
+}
+
+export interface RetentionCandidate {
+  id: number;
+  size_bytes: number;
+  archived_at: number;
+  folder_class: string;
+}
+
+export interface RetentionPreviewResponse {
+  status: "ready" | "unavailable";
+  items: RetentionCandidate[];
 }
 
 /**
@@ -99,6 +280,29 @@ export interface EventItem {
   description: string | null;
 }
 
+export interface EventDetailClip {
+  id: number;
+  canonical_key: string;
+  folder_class: string;
+  is_sentry: boolean;
+  started_at: number;
+  ended_at: number | null;
+}
+
+export interface EventDetailSentry {
+  bucket: string;
+  timestamp_utc: number;
+  reason: string | null;
+  city: string | null;
+  camera: string | null;
+}
+
+/** `GET /api/events/:id/detail` (event row + optional clip/sentry context). */
+export interface EventDetail extends EventItem {
+  clip: EventDetailClip | null;
+  sentry: EventDetailSentry | null;
+}
+
 export interface EventsParams {
   cursor?: string;
   limit?: number;
@@ -134,6 +338,15 @@ export interface Clip {
   angles: Angle[];
 }
 
+/** `GET /api/clips/:id/waypoints` item. */
+export interface ClipWaypoint {
+  seq: number;
+  t: number;
+  lat: number;
+  lon: number;
+  has_gps_fix: boolean;
+}
+
 export interface ClipsParams {
   cursor?: string;
   limit?: number;
@@ -143,6 +356,7 @@ export interface ClipsParams {
 export interface TripsPageParams {
   cursor?: string;
   limit?: number;
+  playable?: boolean;
 }
 
 export interface EventTypeCount {
@@ -203,6 +417,34 @@ export interface EncryptionStatus {
 export interface Pref {
   key: string;
   value: string;
+}
+
+/** Source state for one bounded advanced-setting value. */
+export type AdvancedSettingSourceStatus =
+  | "stored"
+  | "default_missing"
+  | "default_invalid";
+
+/** Validation shape for one advanced-setting value. */
+export type AdvancedSettingValidation =
+  | { kind: "enum"; allowed: string[] }
+  | { kind: "integer_range"; min: number; max: number }
+  | { kind: "timezone_or_auto" };
+
+/** One read-only advanced-setting snapshot row. */
+export interface AdvancedSetting {
+  key: string;
+  label: string;
+  description: string;
+  value: string;
+  default_value: string;
+  source_status: AdvancedSettingSourceStatus;
+  validation: AdvancedSettingValidation;
+}
+
+/** `GET /api/settings/advanced` bounded read-only setting/status visibility. */
+export interface AdvancedSettingsResponse {
+  items: AdvancedSetting[];
 }
 
 /** One `{severity, message}` row of `GET /api/system/health`. */
@@ -518,6 +760,41 @@ export interface ReenumResult {
   disconnect_ms?: number | null;
   reason?: string | null;
   detail?: string | null;
+}
+
+/** Read-only banner severity/info from `GET /api/gadget/mode-status`. */
+export interface GadgetStatusBanner {
+  level: "info" | "warning";
+  code: string;
+  message: string;
+}
+
+export interface GadgetModeStatus {
+  mode: "presented" | "syncing" | "degraded" | "unavailable";
+  present: boolean;
+  bound: boolean;
+  bound_udc: string | null;
+  udc_state: string | null;
+  handoff: {
+    state: "active" | "idle";
+    active: boolean;
+    pending_mutations: number | null;
+    applying_mutations: number | null;
+    last_handoff_id: string | null;
+    last_result: string | null;
+  };
+  lun: {
+    teslacam: { image: string | null; loaded: boolean | null };
+    media: { image: string | null; loaded: boolean | null };
+  };
+  recovery: {
+    chime_reenum_pending: boolean;
+    last_reenum: ReenumResult | null;
+    media_ro_mounted: boolean | null;
+    media_ro_path: string | null;
+    media_ro_error: string | null;
+  };
+  banner: GadgetStatusBanner | null;
 }
 
 /**

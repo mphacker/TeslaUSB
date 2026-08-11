@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::unix::process::CommandExt;
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 use crate::error::SourceError;
 use crate::rclone::{CommandOutput, CommandRunner};
 use crate::source::{ArchivePath, ArchiveSource};
-use crate::throttle::{PauseAction, StoragePressure, ThrottleSnapshot, ThrottleSource, WifiThrottle};
+use crate::throttle::{
+    PauseAction, StoragePressure, ThrottleSnapshot, ThrottleSource, WifiThrottle,
+};
 use crate::time::{BootId, Clock, MonoMs, Waiter};
 
 const WIFID_SOCKET_PATH: &str = "/run/teslausb/wifid.sock";
@@ -25,12 +27,19 @@ pub struct LiveArchiveSource;
 
 impl ArchiveSource for LiveArchiveSource {
     fn size(&self, path: &ArchivePath) -> Result<u64, SourceError> {
-        let meta = std::fs::metadata(path.as_str()).map_err(|error| SourceError::Io(error.to_string()))?;
+        let meta =
+            std::fs::metadata(path.as_str()).map_err(|error| SourceError::Io(error.to_string()))?;
         Ok(meta.len())
     }
 
-    fn read_chunk(&self, path: &ArchivePath, offset: u64, len: usize) -> Result<Vec<u8>, SourceError> {
-        let mut file = File::open(path.as_str()).map_err(|error| SourceError::Io(error.to_string()))?;
+    fn read_chunk(
+        &self,
+        path: &ArchivePath,
+        offset: u64,
+        len: usize,
+    ) -> Result<Vec<u8>, SourceError> {
+        let mut file =
+            File::open(path.as_str()).map_err(|error| SourceError::Io(error.to_string()))?;
         file.seek(SeekFrom::Start(offset))
             .map_err(|error| SourceError::Io(error.to_string()))?;
         let mut buffer = vec![0_u8; len];
@@ -64,7 +73,10 @@ impl LiveThrottleSource {
 
     #[must_use]
     /// Build with explicit socket and governor paths.
-    pub fn with_paths(wifid_socket_path: impl Into<PathBuf>, governor_path: impl Into<PathBuf>) -> Self {
+    pub fn with_paths(
+        wifid_socket_path: impl Into<PathBuf>,
+        governor_path: impl Into<PathBuf>,
+    ) -> Self {
         Self {
             wifid_socket_path: wifid_socket_path.into(),
             governor_path: governor_path.into(),
@@ -73,8 +85,8 @@ impl LiveThrottleSource {
     }
 
     fn refresh_wifi(&self) -> Result<WifiThrottle, String> {
-        let mut stream =
-            UnixStream::connect(&self.wifid_socket_path).map_err(|err| format!("connect failed: {err}"))?;
+        let mut stream = UnixStream::connect(&self.wifid_socket_path)
+            .map_err(|err| format!("connect failed: {err}"))?;
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
             .map_err(|err| format!("set_read_timeout failed: {err}"))?;
@@ -85,8 +97,10 @@ impl LiveThrottleSource {
             cmd: "get_ap_status",
         })
         .map_err(|err| format!("encode request failed: {err}"))?;
-        write_frame(&mut stream, &request, WIFID_FRAME_CAP).map_err(|err| format!("write failed: {err}"))?;
-        let payload = read_frame(&mut stream, WIFID_FRAME_CAP).map_err(|err| format!("read failed: {err}"))?;
+        write_frame(&mut stream, &request, WIFID_FRAME_CAP)
+            .map_err(|err| format!("write failed: {err}"))?;
+        let payload = read_frame(&mut stream, WIFID_FRAME_CAP)
+            .map_err(|err| format!("read failed: {err}"))?;
         let status: WifidStatusWire =
             serde_json::from_slice(&payload).map_err(|err| format!("decode failed: {err}"))?;
         Ok(status.throttle)
@@ -97,12 +111,10 @@ impl LiveThrottleSource {
         let Ok(mut cache) = self.cache.lock() else {
             return WifiThrottle::closed();
         };
-        let cache_age = cache
-            .as_ref()
-            .map_or(u64::MAX, |cached| {
-                let millis = now.saturating_duration_since(cached.read_at).as_millis();
-                u64::try_from(millis).unwrap_or(u64::MAX)
-            });
+        let cache_age = cache.as_ref().map_or(u64::MAX, |cached| {
+            let millis = now.saturating_duration_since(cached.read_at).as_millis();
+            u64::try_from(millis).unwrap_or(u64::MAX)
+        });
         let should_refresh = cache.is_none() || cache_age > THROTTLE_REFRESH_AGE_MS;
         if should_refresh {
             match self.refresh_wifi() {
@@ -268,7 +280,9 @@ impl CommandRunner for LiveCommandRunner {
         let mut command = Command::new(program);
         command.args(args);
         command.process_group(0);
-        let output = command.output().map_err(|err| format!("spawn failed: {err}"))?;
+        let output = command
+            .output()
+            .map_err(|err| format!("spawn failed: {err}"))?;
         if let Some(after_run) = &self.after_run {
             after_run();
         }
@@ -289,7 +303,8 @@ fn read_frame(stream: &mut impl Read, cap: u32) -> std::io::Result<Vec<u8>> {
             "frame too large: {len_u32} > {cap}"
         )));
     }
-    let len = usize::try_from(len_u32).map_err(|_| std::io::Error::other("frame length overflow"))?;
+    let len =
+        usize::try_from(len_u32).map_err(|_| std::io::Error::other("frame length overflow"))?;
     let mut payload = vec![0_u8; len];
     stream.read_exact(&mut payload)?;
     Ok(payload)
@@ -303,8 +318,8 @@ fn write_frame(stream: &mut impl Write, payload: &[u8], cap: u32) -> std::io::Re
             payload.len()
         )));
     }
-    let len_u32 =
-        u32::try_from(payload.len()).map_err(|_| std::io::Error::other("payload length overflow"))?;
+    let len_u32 = u32::try_from(payload.len())
+        .map_err(|_| std::io::Error::other("payload length overflow"))?;
     stream.write_all(&len_u32.to_le_bytes())?;
     stream.write_all(payload)?;
     stream.flush()
@@ -335,11 +350,17 @@ mod tests {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).expect("create governor parent");
         }
-        fs::write(path, format!(r#"{{"uploads_allowed":{uploads_allowed},"seq":9}}"#))
-            .expect("write governor");
+        fs::write(
+            path,
+            format!(r#"{{"uploads_allowed":{uploads_allowed},"seq":9}}"#),
+        )
+        .expect("write governor");
     }
 
-    fn spawn_wifid_once(socket_path: PathBuf, response_json: serde_json::Value) -> thread::JoinHandle<()> {
+    fn spawn_wifid_once(
+        socket_path: PathBuf,
+        response_json: serde_json::Value,
+    ) -> thread::JoinHandle<()> {
         thread::spawn(move || {
             if let Some(parent) = socket_path.parent() {
                 let _ = fs::create_dir_all(parent);
@@ -505,7 +526,11 @@ mod tests {
             seen.fetch_add(1, Ordering::Relaxed);
         });
 
-        assert!(runner.run("/nonexistent/teslausb-missing-binary", &[]).is_err());
+        assert!(
+            runner
+                .run("/nonexistent/teslausb-missing-binary", &[])
+                .is_err()
+        );
         assert_eq!(calls.load(Ordering::Relaxed), 0);
     }
 }

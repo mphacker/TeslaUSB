@@ -13,8 +13,9 @@ import {
 // Cloud Archive UAT — v1 parity with live provider credentials. Drives the REAL
 // bundle webd serves at /cloud. Parity target: legacy cloud_archive.html (sync
 // status + stat cards + provider setup + sync settings + queue + history). In
-// B-1 only the provider credential lane is live (`GET/POST/DELETE
-// /api/cloud/credentials`); all other sections stay inert scaffolding.
+// B-1 currently has provider credentials plus read-only queue/history
+// observability (`GET /api/cloud`, `GET /api/cloud/credentials`, `GET /api/cloud/queue`,
+// `GET /api/cloud/history`); mutating sync controls remain inert scaffolding.
 
 const PATH = "/cloud";
 const SCREEN = "cloud-archive";
@@ -37,6 +38,36 @@ async function routeCloudGet(page: Page, state: unknown) {
   });
 }
 
+async function routeCloudStatus(page: Page, state: unknown) {
+  await page.route("**/api/cloud", async (route) => {
+    if (route.request().method() !== "GET") {
+      await route.continue();
+      return;
+    }
+    await route.fulfill(json(state));
+  });
+}
+
+async function routeCloudQueue(page: Page, state: unknown) {
+  await page.route("**/api/cloud/queue*", async (route) => {
+    if (route.request().method() !== "GET") {
+      await route.continue();
+      return;
+    }
+    await route.fulfill(json(state));
+  });
+}
+
+async function routeCloudHistory(page: Page, state: unknown) {
+  await page.route("**/api/cloud/history*", async (route) => {
+    if (route.request().method() !== "GET") {
+      await route.continue();
+      return;
+    }
+    await route.fulfill(json(state));
+  });
+}
+
 /** App-shell chrome: brand present + the CLOUD nav entry active. */
 async function assertChrome(page: Page, testInfo: TestInfo) {
   await expect(page.locator(".top-bar .top-bar-title")).toHaveText("TeslaUSB");
@@ -51,10 +82,26 @@ async function assertChrome(page: Page, testInfo: TestInfo) {
 
 test.describe("cloud-archive UAT", () => {
   test.beforeEach(async ({ page }) => {
+    await routeCloudStatus(page, {
+      configured: false,
+      provider_type: null,
+      uploader_state: "idle",
+      sync_now_state: "unsupported",
+    });
     await routeCloudGet(page, {
       state: "not_configured",
       provider: null,
       updated_at: null,
+    });
+    await routeCloudQueue(page, {
+      items: [],
+      next_cursor: null,
+      limit: 10,
+    });
+    await routeCloudHistory(page, {
+      items: [],
+      next_cursor: null,
+      limit: 10,
     });
   });
 
@@ -66,9 +113,12 @@ test.describe("cloud-archive UAT", () => {
 
     // Idle sync status banner.
     await expect(page.locator("#syncStatusCard")).toContainText("Cloud Sync");
-    await expect(
-      page.locator("[data-testid=cloud-sync-subtitle]"),
-    ).toContainText("Configure a provider below");
+    await expect(page.locator("[data-testid=cloud-sync-subtitle]")).toContainText(
+      "Uploader is not configured.",
+    );
+    await expect(page.locator("[data-testid=cloud-sync-subtitle]")).toContainText(
+      "No uploads are queued right now.",
+    );
     // The v1 section scaffolding is present.
     await expect(page.locator(".settings-section summary")).toHaveCount(4);
     await expect(
@@ -108,7 +158,12 @@ test.describe("cloud-archive UAT", () => {
     // but *mounting* it must still mutate nothing. Allow only the mount-time
     // credentials GET on top of the shell polls, and keep every other
     // read-only invariant (no forms, no submit buttons, no file inputs).
-    await assertReadOnly(page, probe, sockets, new Set(["/api/cloud/credentials"]));
+    await assertReadOnly(
+      page,
+      probe,
+      sockets,
+      new Set(["/api/cloud", "/api/cloud/credentials", "/api/cloud/queue", "/api/cloud/history"]),
+    );
     const cloudGets = probe.requests.filter(
       (r) => new URL(r.url).pathname === "/api/cloud/credentials",
     );
@@ -116,6 +171,18 @@ test.describe("cloud-archive UAT", () => {
       cloudGets.length,
       "cloud credentials should be fetched exactly once on mount",
     ).toBe(1);
+    const uploaderStatusGets = probe.requests.filter(
+      (r) => new URL(r.url).pathname === "/api/cloud",
+    );
+    expect(uploaderStatusGets.length, "uploader status should be fetched exactly once on mount").toBe(1);
+    const statusGets = probe.requests.filter(
+      (r) => new URL(r.url).pathname === "/api/cloud/queue",
+    );
+    expect(statusGets.length, "cloud queue should be fetched exactly once on mount").toBe(1);
+    const historyGets = probe.requests.filter(
+      (r) => new URL(r.url).pathname === "/api/cloud/history",
+    );
+    expect(historyGets.length, "cloud history should be fetched exactly once on mount").toBe(1);
   });
 
   test("credentials status — not_configured shows empty state", async ({ page }) => {
@@ -146,6 +213,59 @@ test.describe("cloud-archive UAT", () => {
     await expect(page.locator("#cloudRemoveBtn")).toHaveCount(1);
   });
 
+  test("queue surface — renders queue rows from durable API page", async ({ page }) => {
+    await page.unroute("**/api/cloud/queue*");
+    await routeCloudQueue(page, {
+      items: [
+        {
+          archive_item_id: 1,
+          child_key: "front",
+          destination_id: "dest-main",
+          remote_key: "TeslaUSB/event/front.mp4",
+          category: "event_sentry",
+          seq: 1,
+          total_bytes: 1000,
+          bytes_uploaded: 250,
+          state: "in_progress",
+          attempts: 2,
+          not_before: null,
+          last_error_class: null,
+          upload_set_id: null,
+        },
+      ],
+      next_cursor: null,
+      limit: 10,
+    });
+    await gotoScreen(page, PATH, SCREEN);
+    await expect(page.locator("[data-testid=cloud-queue-list]")).toContainText(
+      "front",
+    );
+    await expect(page.locator("[data-testid=cloud-queue-empty]")).toHaveCount(0);
+  });
+
+  test("history surface — renders history rows from durable API page", async ({ page }) => {
+    await page.unroute("**/api/cloud/history*");
+    await routeCloudHistory(page, {
+      items: [
+        {
+          archive_item_id: 5,
+          child_key: "rear",
+          outcome: "uploaded",
+          size_bytes: 1200,
+          at: 1730419200,
+          error_class: null,
+        },
+      ],
+      next_cursor: null,
+      limit: 10,
+    });
+    await gotoScreen(page, PATH, SCREEN);
+    await expect(page.locator("[data-testid=cloud-history-list]")).toContainText(
+      "uploaded",
+    );
+    await expect(page.locator("[data-testid=cloud-history-empty]")).toHaveCount(0);
+  });
+
   test("credentials status — unreadable explains re-paste flow", async ({ page }) => {
     await page.unroute("**/api/cloud/credentials");
     await routeCloudGet(page, {
@@ -167,6 +287,8 @@ test.describe("cloud-archive UAT", () => {
     page,
   }) => {
     await page.unroute("**/api/cloud/credentials");
+    await page.unroute("**/api/cloud/queue*");
+    await page.unroute("**/api/cloud/history*");
     await gotoScreen(page, PATH, SCREEN);
     await expect(page.locator("#cloudCredStatus")).toContainText(
       "No cloud provider configured.",
@@ -179,6 +301,22 @@ test.describe("cloud-archive UAT", () => {
       state: "not_configured",
       provider: null,
       updated_at: null,
+    });
+    const queueRes = await page.request.get(`${loadState().baseURL}/api/cloud/queue`);
+    expect(queueRes.status()).toBe(503);
+    expect(await queueRes.json()).toMatchObject({
+      error: {
+        code: "unavailable",
+      },
+    });
+    const historyRes = await page.request.get(
+      `${loadState().baseURL}/api/cloud/history`,
+    );
+    expect(historyRes.status()).toBe(503);
+    expect(await historyRes.json()).toMatchObject({
+      error: {
+        code: "unavailable",
+      },
     });
   });
 

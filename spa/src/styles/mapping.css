@@ -423,6 +423,41 @@ body.mapping-active .main-content {
     color: var(--text-primary);
     font-size: 0.75rem;
 }
+.event-detail-card {
+    position: absolute;
+    right: 64px;
+    bottom: 62px;
+    z-index: 1001;
+    width: min(320px, calc(100vw - 88px));
+    padding: 10px;
+    border: 1px solid var(--border-color, var(--border));
+    border-radius: var(--radius-lg, 12px);
+    background: var(--bg-secondary);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+}
+[data-theme="dark"] .event-detail-card {
+    background: rgba(30, 41, 59, 0.92);
+    border-color: var(--border-color, var(--mapping-panel-border-strong));
+}
+.event-detail-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+}
+.event-detail-header .close-btn {
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+}
+.event-detail-loading,
+.event-detail-error,
+.event-detail-row {
+    font-size: 0.75rem;
+    color: var(--text-primary);
+}
+.event-detail-row + .event-detail-row { margin-top: 4px; }
 #filterMinDistance {
     width: 100%;
 }
@@ -774,14 +809,16 @@ body.mapping-active .main-content {
     outline: none;
 }
 .st-card-link .st-type { color: var(--mapping-accent-primary, var(--text-primary)); }
-.map-watch-link {
+.map-watch-link,
+.map-detail-link {
     display: inline-block;
     margin-top: 6px;
     font-weight: 600;
     color: var(--mapping-accent-primary, #1d6fe0);
     text-decoration: none;
 }
-.map-watch-link:hover { text-decoration: underline; }
+.map-watch-link:hover,
+.map-detail-link:hover { text-decoration: underline; }
 .st-type { font-weight: 600; font-size: 13px; color: var(--text-primary); }
 .st-date { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
 .st-meta { font-size: 11px; color: var(--text-muted, var(--text-secondary)); margin-top: 4px; }
@@ -848,6 +885,12 @@ body.mapping-active .main-content {
         left: 12px;
         bottom: 12px;
         max-width: none;
+    }
+    .event-detail-card {
+        right: 12px;
+        left: 12px;
+        bottom: 62px;
+        width: auto;
     }
 }
 @media (prefers-reduced-motion: reduce) {

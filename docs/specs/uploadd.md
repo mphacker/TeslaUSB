@@ -204,6 +204,21 @@ mark the backend frozen before Phase 8.
 Today `main.rs serve` prints + exits `FAILURE`. P3 provides the **live seam
 implementations** and runs `serve::Scheduler` + `RcloneUploadEngine`.
 
+### 6.0 Read-only control channel (implemented first)
+Before any cloud mutation verbs, `uploadd` now exposes a minimal read-only Unix
+socket status verb for `webd`:
+
+- socket: `/run/teslausb/uploadd.sock` (configurable),
+- framing: 4-byte LE length + JSON (64 KiB cap),
+- timeout: 15 s read/write,
+- request: `{"cmd":"get_status"}`,
+- response: `{"status":"uploadd_status","configured", "provider_type",
+  "uploader_state","sync_now_state":"unsupported"}`.
+
+This channel is intentionally non-mutating and never returns secrets.
+`sync_now`/other control mutations are intentionally deferred until webd
+auth+CSRF exists and mutations have durable accepted/job semantics.
+
 ### 6.1 Persistence — indexd RPC clients
 Client seams over the indexd control socket (framed-JSON `{"cmd":…}`, mirror
 `webd::indexd_client::UnixIndexdClient`): **`QueueStore`** (`cloud_queue_load` +

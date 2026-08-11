@@ -95,8 +95,8 @@ impl WifiStatus {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::{ApStatus, WifiStatus};
-    use crate::creds::ApMode;
     use crate::config::WifidConfig;
+    use crate::creds::ApMode;
     use crate::link::{LinkMode, LinkObservation};
     use crate::throttle::{ThrottleInputs, ThrottlePublisher};
 

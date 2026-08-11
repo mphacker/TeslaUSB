@@ -12,16 +12,16 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+#[cfg(not(test))]
+use teslausb_creds::ProcHardwareRoot;
+#[cfg(test)]
+use teslausb_creds::StaticHardwareRoot;
 use teslausb_creds::{
     BlobKeyMaterial, CLOUD_PROVIDER_CREDS_FILENAME, CredentialDocument, CredentialFlow,
     OAuthProvider, TESLA_SALT_FILENAME, decrypt, derive_key, encrypt, normalize_oauth_token,
     read_blob, read_or_create_salt, read_salt, render_rclone_conf, validate_document,
     with_creds_lock, write_blob_atomic,
 };
-#[cfg(not(test))]
-use teslausb_creds::ProcHardwareRoot;
-#[cfg(test)]
-use teslausb_creds::StaticHardwareRoot;
 
 use crate::AppState;
 use crate::error::ApiError;
@@ -54,7 +54,6 @@ pub(crate) struct OnedriveDriveInfo {
     pub(crate) drive_id: String,
     pub(crate) drive_type: String,
 }
-
 pub(crate) type OnedriveDiscoverer =
     Arc<dyn Fn(&str) -> Result<OnedriveDriveInfo, ApiError> + Send + Sync>;
 
@@ -98,8 +97,7 @@ pub(crate) fn routes() -> Router<AppState> {
         )
         .route(
             "/cloud/credentials",
-            post(save_cloud_credentials)
-                .layer(DefaultBodyLimit::max(CLOUD_CREDENTIALS_BODY_LIMIT)),
+            post(save_cloud_credentials).layer(DefaultBodyLimit::max(CLOUD_CREDENTIALS_BODY_LIMIT)),
         )
 }
 
@@ -176,7 +174,9 @@ async fn delete_cloud_credentials(
             let blob_path = creds_blob_path(&creds_dir);
             match std::fs::remove_file(blob_path) {
                 Ok(()) => Ok(not_configured_state()),
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(not_configured_state()),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    Ok(not_configured_state())
+                }
                 Err(_) => Err(storage_error()),
             }
         })
@@ -276,13 +276,13 @@ fn read_cloud_credentials_state(creds_dir: &Path) -> Result<CloudCredentialsResp
         let provider = oauth_provider_string(&document);
         let _validated = validate_document(&document)?;
         match provider {
-            Some(provider) => Ok::<CloudCredentialsResp, teslausb_creds::CredsError>(
-                CloudCredentialsResp {
+            Some(provider) => {
+                Ok::<CloudCredentialsResp, teslausb_creds::CredsError>(CloudCredentialsResp {
                     state: "configured",
                     provider: Some(provider.to_owned()),
                     updated_at: Some(updated_at),
-                },
-            ),
+                })
+            }
             None => Err(teslausb_creds::CredsError::InvalidBlob(
                 "credential flow is not oauth",
             )),
@@ -551,12 +551,16 @@ fn onedrive_http_status_error(http_code: u16) -> ApiError {
         ),
         400..=499 => ApiError::bad_request(
             "onedrive_discovery_failed",
-            format!("Microsoft Graph returned HTTP {http_code} while discovering OneDrive drive metadata"),
+            format!(
+                "Microsoft Graph returned HTTP {http_code} while discovering OneDrive drive metadata"
+            ),
         ),
         _ => ApiError::status(
             StatusCode::BAD_GATEWAY,
             "onedrive_discovery_failed",
-            format!("Microsoft Graph returned HTTP {http_code} while discovering OneDrive drive metadata"),
+            format!(
+                "Microsoft Graph returned HTTP {http_code} while discovering OneDrive drive metadata"
+            ),
         ),
     }
 }
@@ -720,8 +724,7 @@ mod tests {
             "x\ttab",
             "x\u{0000}nul",
         ] {
-            let token_json =
-                serde_json::to_string(&json!({ "access_token": raw })).unwrap();
+            let token_json = serde_json::to_string(&json!({ "access_token": raw })).unwrap();
             let normalized = teslausb_creds::normalize_oauth_token(&token_json).unwrap();
             let err = extract_onedrive_access_token(&normalized).unwrap_err();
             assert!(
@@ -924,9 +927,7 @@ mod tests {
 
         let document = read_stored_document(&fx.creds_dir);
         let CredentialFlow::OAuth {
-            provider,
-            options,
-            ..
+            provider, options, ..
         } = document.flow
         else {
             panic!("expected oauth credential flow");
@@ -1220,4 +1221,3 @@ mod tests {
         assert_eq!(body["error"]["code"], "forbidden_origin");
     }
 }
-

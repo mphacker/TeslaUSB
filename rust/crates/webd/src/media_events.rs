@@ -161,7 +161,10 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        assert!(got, "expected a media-changed tick after an external commit");
+        assert!(
+            got,
+            "expected a media-changed tick after an external commit"
+        );
     }
 
     #[test]

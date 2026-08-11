@@ -2,6 +2,7 @@
 //!
 //! The wire contract mirrors `indexd::proto` but remains crate-local so
 //! `uploadd` and `indexd` stay decoupled.
+#![cfg_attr(not(unix), allow(dead_code))]
 
 use std::io::{self, Read, Write};
 
@@ -300,10 +301,7 @@ pub trait IndexdCloudClient {
     ///
     /// Returns [`IndexdClientError`] on transport, framing, decode, or
     /// server-reported failures.
-    fn cloud_queue_upsert(
-        &self,
-        item: &CloudQueueUpsertItem,
-    ) -> Result<String, IndexdClientError>;
+    fn cloud_queue_upsert(&self, item: &CloudQueueUpsertItem) -> Result<String, IndexdClientError>;
 
     /// Request one queue page.
     ///
@@ -370,7 +368,10 @@ pub trait IndexdCloudClient {
     ///
     /// Returns [`IndexdClientError`] on transport, framing, decode, or
     /// server-reported failures.
-    fn upload_lease_release(&self, token: &str) -> Result<UploadLeaseReleaseResult, IndexdClientError>;
+    fn upload_lease_release(
+        &self,
+        token: &str,
+    ) -> Result<UploadLeaseReleaseResult, IndexdClientError>;
 
     /// Record one failed upload attempt and return resulting state.
     ///
@@ -514,10 +515,7 @@ fn frame_cap_usize(cap: u32) -> Result<usize, IndexdClientError> {
 ///
 /// Returns [`IndexdClientError`] when I/O fails, the frame is torn, or its
 /// length exceeds `cap`.
-pub(crate) fn read_frame(
-    stream: &mut impl Read,
-    cap: u32,
-) -> Result<Vec<u8>, IndexdClientError> {
+pub(crate) fn read_frame(stream: &mut impl Read, cap: u32) -> Result<Vec<u8>, IndexdClientError> {
     let mut len_buf = [0_u8; 4];
     stream.read_exact(&mut len_buf)?;
     let len_u32 = u32::from_le_bytes(len_buf);
@@ -593,7 +591,9 @@ fn decode_response_frame(frame: &[u8]) -> Result<WireResponse, IndexdClientError
     decode_response_payload(&payload)
 }
 
-fn decode_page_discover(response: WireResponse) -> Result<Page<CloudDiscoverRow>, IndexdClientError> {
+fn decode_page_discover(
+    response: WireResponse,
+) -> Result<Page<CloudDiscoverRow>, IndexdClientError> {
     match response {
         WireResponse::CloudDiscoverPage { items, next_cursor } => Ok(Page { items, next_cursor }),
         other => Err(IndexdClientError::Decode(format!(
@@ -637,7 +637,9 @@ fn decode_upload_committed(
     }
 }
 
-fn decode_candidates_page(response: WireResponse) -> Result<Page<CloudCandidateRow>, IndexdClientError> {
+fn decode_candidates_page(
+    response: WireResponse,
+) -> Result<Page<CloudCandidateRow>, IndexdClientError> {
     match response {
         WireResponse::CloudCandidates { items, next_cursor } => Ok(Page { items, next_cursor }),
         other => Err(IndexdClientError::Decode(format!(
@@ -673,9 +675,13 @@ fn decode_upload_lease_renewed(
     response: WireResponse,
 ) -> Result<UploadLeaseRenewResult, IndexdClientError> {
     match response {
-        WireResponse::UploadLeaseRenewed { ok, expires_mono_ms } => {
-            Ok(UploadLeaseRenewResult { ok, expires_mono_ms })
-        }
+        WireResponse::UploadLeaseRenewed {
+            ok,
+            expires_mono_ms,
+        } => Ok(UploadLeaseRenewResult {
+            ok,
+            expires_mono_ms,
+        }),
         other => Err(IndexdClientError::Decode(format!(
             "unexpected response status: {}",
             wire_response_status(&other)
@@ -774,10 +780,7 @@ impl IndexdCloudClient for UnixIndexdClient {
         decode_page_discover(response)
     }
 
-    fn cloud_queue_upsert(
-        &self,
-        item: &CloudQueueUpsertItem,
-    ) -> Result<String, IndexdClientError> {
+    fn cloud_queue_upsert(&self, item: &CloudQueueUpsertItem) -> Result<String, IndexdClientError> {
         let response = self.send_request(&WireRequest::CloudQueueUpsert { item: item.clone() })?;
         decode_queue_state(response)
     }
@@ -848,7 +851,10 @@ impl IndexdCloudClient for UnixIndexdClient {
         decode_upload_lease_renewed(response)
     }
 
-    fn upload_lease_release(&self, token: &str) -> Result<UploadLeaseReleaseResult, IndexdClientError> {
+    fn upload_lease_release(
+        &self,
+        token: &str,
+    ) -> Result<UploadLeaseReleaseResult, IndexdClientError> {
         let response = self.send_request(&WireRequest::UploadLeaseRelease {
             token: token.to_owned(),
         })?;
@@ -899,9 +905,9 @@ mod tests {
         CloudCandidateRow, CloudDiscoverRow, CloudQueueCommitRequest, CloudQueueCommitResult,
         CloudQueueFailRequest, CloudQueueFailResult, CloudQueuePk, CloudQueueRetryRequest,
         CloudQueueRetryResolution, CloudQueueRow, CloudQueueUpsertItem, IndexdClientError,
-        MAX_REQUEST_FRAME, UploadLeaseAcquireResult, UploadLeaseReleaseResult, UploadLeaseRenewResult,
-        WireRequest, WireResponse, decode_response_frame, decode_response_payload,
-        encode_wire_request_frame, read_frame, write_frame,
+        MAX_REQUEST_FRAME, UploadLeaseAcquireResult, UploadLeaseReleaseResult,
+        UploadLeaseRenewResult, WireRequest, WireResponse, decode_response_frame,
+        decode_response_payload, encode_wire_request_frame, read_frame, write_frame,
     };
     use serde_json::json;
     use std::io::Cursor;
@@ -1108,7 +1114,8 @@ mod tests {
             durable_parent: false,
         })
         .expect("encode commit response");
-        let commit = decode_response_payload(&commit_payload).expect("decode queue commit response");
+        let commit =
+            decode_response_payload(&commit_payload).expect("decode queue commit response");
         assert_eq!(
             commit,
             WireResponse::CloudUploadCommitted {
@@ -1133,8 +1140,8 @@ mod tests {
             expires_mono_ms: Some(1200),
         })
         .expect("encode lease acquire response");
-        let lease_acquire = decode_response_payload(&lease_acquire_payload)
-            .expect("decode lease acquire response");
+        let lease_acquire =
+            decode_response_payload(&lease_acquire_payload).expect("decode lease acquire response");
         assert_eq!(
             lease_acquire,
             WireResponse::UploadLeaseAcquired {
@@ -1155,8 +1162,9 @@ mod tests {
             WireResponse::UploadLeaseRenewed { .. }
         ));
 
-        let lease_release_payload = serde_json::to_vec(&WireResponse::UploadLeaseReleased { ok: true })
-            .expect("encode lease release response");
+        let lease_release_payload =
+            serde_json::to_vec(&WireResponse::UploadLeaseReleased { ok: true })
+                .expect("encode lease release response");
         assert!(matches!(
             decode_response_payload(&lease_release_payload).expect("decode lease release response"),
             WireResponse::UploadLeaseReleased { .. }
@@ -1180,9 +1188,8 @@ mod tests {
                 destination_id: "dest-a".to_owned(),
                 remote_key: "remote/front.mp4".to_owned(),
                 size_bytes: 100,
-                content_sha256:
-                    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
-                        .to_owned(),
+                content_sha256: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                    .to_owned(),
                 state: "queued".to_owned(),
                 category: "trip".to_owned(),
                 seq: 1,

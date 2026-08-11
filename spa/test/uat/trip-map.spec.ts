@@ -185,9 +185,18 @@ const TRIPMAP_API = new Set([
   "/api/trips/page",
   "/api/events",
   "/api/clips",
+  "/api/index/status",
+  "/api/index/lifecycle",
+  "/api/index/driving-stats",
+  "/api/index/event-chart",
 ]);
 function apiAllowed(pathname: string): boolean {
-  return TRIPMAP_API.has(pathname) || /^\/api\/trips\/\d+$/.test(pathname);
+  return (
+    TRIPMAP_API.has(pathname) ||
+    /^\/api\/trips\/\d+$/.test(pathname) ||
+    /^\/api\/events\/\d+$/.test(pathname) ||
+    /^\/api\/events\/\d+\/detail$/.test(pathname)
+  );
 }
 
 interface MapHookSnapshot {
@@ -380,6 +389,13 @@ test.describe("trip map UAT", () => {
     await expect(page.locator("#dayCardDate")).toContainText("2024");
     await expect(page.locator("#dayCardStats")).toContainText("3 trips");
     await expect(page.locator("#dayCardStats")).toContainText("19.0 mi");
+    await expect(page.locator("#indexStatus")).toContainText("3 trips");
+    await expect(page.locator("#indexStatus")).toContainText("GPS points indexed");
+    await expect(page.locator("#indexLifecycle")).toContainText("Index lifecycle");
+    await expect(page.locator("#indexDrivingStats")).toContainText("drive time");
+    await expect(page.locator("#indexDrivingStats")).toContainText("warning+");
+    await expect(page.locator("#indexEventChart")).toContainText("indexed events");
+    await expect(page.locator("#indexEventChart")).toContainText("sentry");
     // Single-day boundary: both prev (older) and next (newer) are disabled.
     await expect(page.locator("#dayPrev")).toBeDisabled();
     await expect(page.locator("#dayNext")).toBeDisabled();
@@ -1455,6 +1471,10 @@ test.describe("trip map UAT", () => {
     await expect(page.locator("[data-testid=vp-trips]")).toBeVisible();
     await page.locator("#vpTabClips").click();
     await expect(page.locator("[data-testid=vp-clips]")).toBeVisible();
+    await page.locator("#videoPanel .close-btn").click();
+    await openEventMarkerPopup(page, /Harsh braking/i);
+    await page.locator(".leaflet-popup:visible .map-detail-link").last().click();
+    await expect(page.locator("[data-testid=event-detail-card]")).toBeVisible();
     await page.waitForLoadState("networkidle");
 
     // No mutating HTTP method, ever (webd is read-only).
@@ -1476,9 +1496,13 @@ test.describe("trip map UAT", () => {
     }
 
     // Each required endpoint was actually hit (defends against partial wiring).
-    for (const p of ["/api/days", "/api/settings", "/api/trips", "/api/trips/page", "/api/events", "/api/clips"]) {
+    for (const p of ["/api/days", "/api/settings", "/api/trips", "/api/trips/page", "/api/events", "/api/clips", "/api/index/lifecycle", "/api/index/driving-stats", "/api/index/event-chart"]) {
       expect(apiSeen.has(p), `required endpoint ${p} was never requested`).toBe(true);
     }
+    expect(
+      [...apiSeen.keys()].some((p) => /^\/api\/events\/\d+\/detail$/.test(p)),
+      "required endpoint /api/events/:id/detail was never requested",
+    ).toBe(true);
     // Per-trip detail (points + speed) was fetched for EVERY rendered trip —
     // proves the route geometry is wired per trip, not just for the first one.
     for (const id of [1, 2, 3]) {
@@ -1660,6 +1684,24 @@ test.describe("trip map UAT", () => {
       "src",
       /\/api\/clips\/2\/stream/,
     );
+  });
+
+  test("map details — marker detail-link opens read-only event detail card", async ({
+    page,
+  }) => {
+    await gotoMap(page);
+    await openEventMarkerPopup(page, /Harsh braking/i);
+
+    const detailLink = page.locator(".leaflet-popup:visible .map-detail-link").last();
+    await expect(detailLink).toHaveAttribute("href", "/events?event=1");
+    await detailLink.click();
+
+    const detailCard = page.locator("[data-testid=event-detail-card]");
+    await expect(detailCard).toBeVisible();
+    await expect(detailCard).toContainText("Event details");
+    await expect(page.locator("[data-testid=event-detail-type]")).toContainText("Harsh Braking");
+    await expect(detailCard).toContainText("Harsh braking");
+    await expect(detailCard).toContainText("Clip #");
   });
 
   test("map→video — marker watch-link opens overlay sequence and keeps fallback href", async ({

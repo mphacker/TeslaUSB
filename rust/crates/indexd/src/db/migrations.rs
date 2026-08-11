@@ -669,7 +669,9 @@ mod tests {
 
     use rusqlite::{Connection, params};
 
-    use super::{LATEST_VERSION, MIGRATIONS, V1_SQL, V2_SQL, V3_SQL, V4_SQL, V5_SQL, V6_SQL, V7_SQL};
+    use super::{
+        LATEST_VERSION, MIGRATIONS, V1_SQL, V2_SQL, V3_SQL, V4_SQL, V5_SQL, V6_SQL, V7_SQL,
+    };
     use crate::db::{DbError, apply_migrations};
 
     #[test]
@@ -953,7 +955,9 @@ mod tests {
                 "INSERT INTO archive_items
                     (folder_class, path, archived_at, created_at, updated_at)
                  VALUES ('RecentClips', ?1, 1700000000, 1700000000, 1700000000)",
-                params![format!("/data/teslausb/archive/RecentClips/2026-07-27/e{n}")],
+                params![format!(
+                    "/data/teslausb/archive/RecentClips/2026-07-27/e{n}"
+                )],
             )
             .unwrap();
         }
@@ -1161,7 +1165,8 @@ mod tests {
         )
         .unwrap();
 
-        let durable_without_complete = conn.execute("UPDATE archive_items SET durable=1 WHERE id=1", []);
+        let durable_without_complete =
+            conn.execute("UPDATE archive_items SET durable=1 WHERE id=1", []);
         assert!(durable_without_complete.is_err());
     }
 }

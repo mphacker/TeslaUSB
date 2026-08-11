@@ -10,7 +10,7 @@
 # §2). All filesystem/systemctl mutations route through the single run_mutation
 # wrapper in setup-lib/common.sh.
 #
-# Modes:    install [--bootstrap-image] | deploy-app | update | repair | rollback
+# Modes:    install [--bootstrap-image] | deploy-app | update | repair | rollback | discover | plan | convert
 # Exit:     0 ok/dry-run · 2 bad flags · 3 missing precondition · 4 step failed
 set -euo pipefail
 
@@ -53,11 +53,15 @@ Modes:
                   secrets, archive, index.
   repair          Re-assert perms / unit enablement; no data change.
   rollback        Restore the previous release's .b1-backup sidecars.
+  discover        Read-only inventory of a legacy installation.
+  plan            Read-only migration section ownership plan.
+  convert         Read-only migration conversion report.
 
 Flags:
   --artifact-dir DIR   Trusted local release dir (default trusted source).
   --release TAG        Fetch a GitHub release (HTTPS).
   --manifest-url URL   Fetch a release by manifest URL (HTTPS).
+  --root DIR            Legacy root for read-only discover mode.
   --bootstrap-image    Enable first-run image provisioning (install only).
   --allow-unverified   Skip integrity verification (DANGEROUS; needs --yes).
   --require-signature  Additionally require a valid SHA256SUMS.sig.
@@ -72,7 +76,7 @@ main() {
     local mode=""
     while [ "$#" -gt 0 ]; do
         case "$1" in
-            install|deploy-app|update|repair|rollback)
+             install|deploy-app|update|repair|rollback|discover|plan|convert)
                 [ -z "$mode" ] || die "$EX_USAGE" "multiple modes given: ${mode} and $1"
                 mode="$1"; shift ;;
             --dry-run)           DRY_RUN=1; shift ;;
@@ -83,6 +87,7 @@ main() {
             --artifact-dir)      [ "$#" -ge 2 ] || die "$EX_USAGE" "--artifact-dir requires a value"; ARTIFACT_DIR="$2"; shift 2 ;;
             --release)           [ "$#" -ge 2 ] || die "$EX_USAGE" "--release requires a value"; RELEASE_TAG="$2"; shift 2 ;;
             --manifest-url)      [ "$#" -ge 2 ] || die "$EX_USAGE" "--manifest-url requires a value"; MANIFEST_URL="$2"; shift 2 ;;
+            --root)              [ "$#" -ge 2 ] || die "$EX_USAGE" "--root requires a value"; MIGRATION_ROOT="$2"; shift 2 ;;
             --only)              [ "$#" -ge 2 ] || die "$EX_USAGE" "--only requires a value"; ONLY_STEPS="$2"; shift 2 ;;
             --skip)              [ "$#" -ge 2 ] || die "$EX_USAGE" "--skip requires a value"; SKIP_STEPS="$2"; shift 2 ;;
             -h|--help)           usage; exit "$EX_OK" ;;
@@ -108,6 +113,7 @@ main() {
         update)     mode_update ;;
         repair)     mode_repair ;;
         rollback)   mode_rollback ;;
+        discover|plan|convert) mode_migration_readonly "$mode" ;;
     esac
 }
 

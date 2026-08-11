@@ -7,6 +7,7 @@ import type {
   EncryptionStatus,
   FilesystemEntry,
   GovernorInfo,
+  RetentionStatusResponse,
   StorageHealth as StorageHealthDto,
   StorageInfo,
   SystemHealth,
@@ -586,6 +587,7 @@ export function Analytics() {
   // Storage state
   const [info, setInfo] = useState<StorageInfo | null>(null);
   const [health, setHealth] = useState<StorageHealthDto | null>(null);
+  const [retention, setRetention] = useState<RetentionStatusResponse | null>(null);
   const [enc, setEnc] = useState<EncryptionStatus | null>(null);
   const [metrics, setMetrics] = useState<SystemMetrics | null>(null);
   const [sysHealth, setSysHealth] = useState<SystemHealth | null>(null);
@@ -601,6 +603,7 @@ export function Analytics() {
     Promise.all([
       api.storage(ctrl.signal).then(setInfo).catch(() => {}),
       api.storageHealth(ctrl.signal).then(setHealth).catch(() => {}),
+      api.retentionStatus(ctrl.signal).then(setRetention).catch(() => {}),
       api.encryptionStatus(ctrl.signal).then(setEnc).catch(() => {}),
       api.systemMetrics(ctrl.signal).then(setMetrics).catch(() => {}),
       api.systemHealth(ctrl.signal).then(setSysHealth).catch(() => {}),
@@ -854,6 +857,11 @@ export function Analytics() {
                     Auto-cleanup:{" "}
                     {g.mode === "armed" ? "Armed" : "Dry-run (reporting only)"}
                   </p>
+                  <p class="storage-note" data-testid="governor-policy">
+                    {isDryRun
+                      ? "No files will be deleted in dry-run mode."
+                      : "Armed cleanup may evict local footage when space is low; it does not wait for cloud upload confirmation."}
+                  </p>
                   <div
                     class="cap-bar"
                     role="img"
@@ -901,6 +909,45 @@ export function Analytics() {
                   } \u00b7 ${humanBytesBinary(info.quarantined.bytes)}`}
             </p>
           )}
+          <p class="storage-note" data-testid="retention-candidate-count">
+            Eligible now:{" "}
+            {retention?.candidate_count != null
+              ? `${retention.candidate_count}${retention.candidate_count_truncated ? "+" : ""} clips`
+              : DASH}
+          </p>
+          <p class="storage-note" data-testid="retention-reclaimable-bytes">
+            Estimated reclaimable now:{" "}
+            {retention?.estimated_reclaimable_bytes != null
+              ? `${retention.estimated_reclaimable_bytes_truncated ? "\u2265 " : ""}${humanBytesBinary(retention.estimated_reclaimable_bytes)}`
+              : DASH}
+          </p>
+          {retention?.recent_cleanup == null ? (
+            <p class="storage-note" data-testid="retention-history-unavailable">
+              Recent cleanup history is unavailable.
+            </p>
+          ) : retention.recent_cleanup.length === 0 ? (
+            <p class="storage-note" data-testid="retention-history-empty">
+              No persisted cleanup runs yet.
+            </p>
+          ) : (
+            <div data-testid="retention-history-list">
+              {retention.recent_cleanup.map((entry) => (
+                <p class="storage-note" data-testid="retention-history-entry" key={`${entry.at}:${entry.bytes_freed}`}>
+                  {formatUpdated(entry.at)} · {entry.items} {entry.items === 1 ? "clip" : "clips"} ·{" "}
+                  {humanBytesBinary(entry.bytes_freed)} freed
+                </p>
+              ))}
+              {retention.recent_cleanup_truncated && (
+                <p class="storage-note" data-testid="retention-history-truncated">
+                  Showing the most recent cleanup samples only.
+                </p>
+              )}
+            </div>
+          )}
+          <p class="storage-note" data-testid="retention-cloud-disclosure">
+            {retention?.cloud_durability_disclosure ??
+              "Armed local cleanup may delete footage before cloud upload confirmation."}
+          </p>
         </section>
         </div>
       </details>

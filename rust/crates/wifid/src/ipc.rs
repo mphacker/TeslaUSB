@@ -231,7 +231,10 @@ mod tests {
 
     use serde_json::{Value, json};
 
-    use super::{IpcJob, MAX_FRAME, WireRequest, job_is_live, read_frame, socket_path_healthy, spawn_control_server, to_ipc_request, write_frame};
+    use super::{
+        IpcJob, MAX_FRAME, WireRequest, job_is_live, read_frame, socket_path_healthy,
+        spawn_control_server, to_ipc_request, write_frame,
+    };
     use crate::config::WifidConfig;
     use crate::creds::ApMode;
     use crate::link::{LinkMode, LinkObservation};
@@ -249,10 +252,8 @@ mod tests {
     impl TempSocket {
         fn new(tag: &str) -> Self {
             let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-            let dir = std::env::temp_dir().join(format!(
-                "wifid-ipc-{tag}-{}-{id}",
-                std::process::id()
-            ));
+            let dir =
+                std::env::temp_dir().join(format!("wifid-ipc-{tag}-{}-{id}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
             Self {
                 socket: dir.join("wifid.sock"),
@@ -305,7 +306,10 @@ mod tests {
     }
 
     fn call_json(socket: &Path, request: &Value) -> (Value, Vec<u8>) {
-        call_raw(socket, &serde_json::to_vec(request).expect("serialise request"))
+        call_raw(
+            socket,
+            &serde_json::to_vec(request).expect("serialise request"),
+        )
     }
 
     fn call_raw(socket: &Path, payload: &[u8]) -> (Value, Vec<u8>) {
@@ -426,13 +430,19 @@ mod tests {
                 .checked_sub(Duration::from_millis(1))
                 .expect("instant underflow"),
         };
-        assert!(!job_is_live(&expired), "a past-deadline job must be dropped");
+        assert!(
+            !job_is_live(&expired),
+            "a past-deadline job must be dropped"
+        );
         let live = IpcJob {
             request: IpcRequest::GetStatus,
             reply,
             deadline: Instant::now() + Duration::from_secs(5),
         };
-        assert!(job_is_live(&live), "a job within its deadline must be applied");
+        assert!(
+            job_is_live(&live),
+            "a job within its deadline must be applied"
+        );
     }
 
     #[test]
@@ -522,7 +532,9 @@ mod tests {
         let responder = std::thread::spawn(move || {
             if let Ok(job) = rx.recv_timeout(Duration::from_secs(2)) {
                 assert!(matches!(job.request, IpcRequest::GetStatus));
-                let _ = job.reply.send(IpcResponse::Status(Box::new(build_status())));
+                let _ = job
+                    .reply
+                    .send(IpcResponse::Status(Box::new(build_status())));
             }
         });
         let (resp, raw) = call_json(&fixture.socket, &json!({ "cmd": "get_ap_status" }));

@@ -83,7 +83,7 @@ pub const MANIFEST_DIGEST_V1_GOLDEN: &str = "cda62d2b9624b94bc04f823b50b2a17a";
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::{
-        manifest_digest_v1, manifest_digest_v1_hex, ManifestDigestEntry, MANIFEST_DIGEST_V1_GOLDEN,
+        MANIFEST_DIGEST_V1_GOLDEN, ManifestDigestEntry, manifest_digest_v1, manifest_digest_v1_hex,
     };
 
     fn e(rel_name: &str, size: u64, mtime_ms: i64, h: u8) -> ManifestDigestEntry<'_> {

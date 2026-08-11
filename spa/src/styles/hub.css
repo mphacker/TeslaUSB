@@ -67,3 +67,47 @@
   font-size: 0.8rem;
   color: var(--text-secondary);
 }
+
+.advanced-settings-list {
+  display: grid;
+  gap: 10px;
+}
+
+.advanced-setting-row {
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.advanced-setting-description {
+  margin: 4px 0 0;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+}
+
+.advanced-setting-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.advanced-setting-value {
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.advanced-setting-status {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.advanced-setting-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}

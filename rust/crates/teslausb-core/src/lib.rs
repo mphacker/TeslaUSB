@@ -15,6 +15,7 @@
 //!   framing + Tesla protobuf demarshal.
 
 pub mod chime;
+pub mod durable_mutation;
 pub mod fs;
 pub mod manifest_digest;
 pub mod sei;

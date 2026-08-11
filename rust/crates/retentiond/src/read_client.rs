@@ -389,7 +389,10 @@ impl VolumeReadFileClient {
             }
         }
         let parsed = parse_slot_params(reader, self.slot)?;
-        *slot_params = SlotParamsCache::Cached { identity, params: parsed };
+        *slot_params = SlotParamsCache::Cached {
+            identity,
+            params: parsed,
+        };
         Ok(parsed)
     }
 }
@@ -422,7 +425,8 @@ impl ReadFileClient for VolumeReadFileClient {
         let Some(resolved) = resolved else {
             return Err(ReadFileError::NotFound);
         };
-        if !resolved.record.set_checksum_ok || resolved.record.valid_data_length != resolved.record.data_length
+        if !resolved.record.set_checksum_ok
+            || resolved.record.valid_data_length != resolved.record.data_length
         {
             return Err(ReadFileError::NotFound);
         }
@@ -501,10 +505,11 @@ fn resolve_file(
 ) -> Result<Option<ResolvedFile>, ReadFileError> {
     use scannerd::walk::resolve_file_by_components;
 
-    let found =
-        resolve_file_by_components(volume, slot, components).map_err(|err| ReadFileError::Server {
+    let found = resolve_file_by_components(volume, slot, components).map_err(|err| {
+        ReadFileError::Server {
             message: format!("resolve failed: {err}"),
-        })?;
+        }
+    })?;
     Ok(found.map(|record| ResolvedFile { record }))
 }
 
@@ -526,11 +531,10 @@ fn parse_slot_params(
     let Some(slot_entry) = slot_entry else {
         return Ok(None);
     };
-    let params = parse_boot_sector(reader, slot_entry.start_lba).map_err(|err| {
-        ReadFileError::Server {
+    let params =
+        parse_boot_sector(reader, slot_entry.start_lba).map_err(|err| ReadFileError::Server {
             message: format!("boot parse failed: {err}"),
-        }
-    })?;
+        })?;
     Ok(Some(params))
 }
 
@@ -647,8 +651,10 @@ fn percent_decode_once(path: &str) -> Result<String, String> {
             let Some(lo_raw) = iter.next() else {
                 return Err("path has invalid percent escape".to_owned());
             };
-            let hi = hex_value(hi_raw).ok_or_else(|| "path has invalid percent escape".to_owned())?;
-            let lo = hex_value(lo_raw).ok_or_else(|| "path has invalid percent escape".to_owned())?;
+            let hi =
+                hex_value(hi_raw).ok_or_else(|| "path has invalid percent escape".to_owned())?;
+            let lo =
+                hex_value(lo_raw).ok_or_else(|| "path has invalid percent escape".to_owned())?;
             out.push((hi << 4) | lo);
         } else {
             out.push(byte);
@@ -681,9 +687,9 @@ mod tests {
     use std::io::Cursor;
 
     use super::{
-        ClipIdentity, MAX_REQUEST_FRAME, ReadFileClient, ReadFileError, ReadFileHeader,
-        ReadFileOk, ReadFileRequest, read_frame, read_full_file, read_full_file_to_writer,
-        read_raw_tail, write_frame, MAX_READ_LEN,
+        ClipIdentity, MAX_READ_LEN, MAX_REQUEST_FRAME, ReadFileClient, ReadFileError,
+        ReadFileHeader, ReadFileOk, ReadFileRequest, read_frame, read_full_file,
+        read_full_file_to_writer, read_raw_tail, write_frame,
     };
 
     #[test]

@@ -13,6 +13,7 @@ use axum::Json;
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::StatusCode;
+use axum::response::Redirect;
 use axum::response::Sse;
 use axum::response::sse::{Event, KeepAlive};
 use axum::routing::{delete, get, post};
@@ -26,8 +27,9 @@ use tower_http::services::{ServeDir, ServeFile};
 
 use crate::daybucket::{local_day_bounds, parse_tz};
 use crate::dto::{
-    AnalyticsDto, ClipDto, DaySummary, EncryptionStatusDto, EventDto, Page, PrefDto, TripDetailDto,
-    TripDto,
+    AdvancedSettingDto, AdvancedSettingValidationDto, AdvancedSettingsDto, AnalyticsDto, ClipDto,
+    DaySummary, DrivingStatsDto, EncryptionStatusDto, EventChartDto, EventDetailDto, EventDto,
+    IndexLifecycleDto, IndexStatusDto, Page, PrefDto, TripDetailDto, TripDto,
 };
 use crate::error::ApiError;
 use crate::gadget::{self, DeleteRefusal, MutationOutcome, TransportError};
@@ -64,9 +66,11 @@ pub(crate) fn router(state: AppState, static_dir: PathBuf) -> Router {
         .route("/trips/{id}/clips", get(trip_clips))
         .route("/events", get(events))
         .route("/events/{id}", get(event_detail))
+        .route("/events/{id}/detail", get(event_detail_enriched))
         .route("/media-events", get(media_events_stream))
         .route("/clips", get(clips))
         .route("/clips/{id}", get(clip_detail).delete(delete_clip))
+        .route("/clips/{id}/waypoints", get(clip_waypoints))
         .route("/clips/{id}/stream", get(crate::media::stream))
         .route("/clips/{id}/telemetry", get(crate::media::telemetry))
         .route("/clips/{id}/export", get(crate::media::export))
@@ -77,6 +81,7 @@ pub(crate) fn router(state: AppState, static_dir: PathBuf) -> Router {
         )
         .route("/handoff/{id}", get(handoff_status))
         .route("/gadget/status", get(gadget_status))
+        .route("/gadget/mode-status", get(gadget_mode_status))
         .route(
             "/chimes",
             post(crate::chimes::install_chime)
@@ -144,21 +149,47 @@ pub(crate) fn router(state: AppState, static_dir: PathBuf) -> Router {
         .route("/wraps/bulk-delete", post(crate::wraps::bulk_delete_wraps))
         .route("/jobs", get(jobs_stream))
         .route("/jobs/failed", get(jobs_failed))
+        .route("/jobs/capabilities", get(jobs_capabilities))
         .route("/analytics", get(analytics))
+        .route("/index/status", get(index_status))
+        .route("/index/lifecycle", get(index_lifecycle))
+        .route("/index/driving-stats", get(index_driving_stats))
+        .route("/index/event-chart", get(index_event_chart))
         .route("/recording/encryption", get(encryption_status))
         .route("/settings", get(settings).put(put_setting))
+        .route("/settings/advanced", get(settings_advanced))
         .merge(crate::chime_scheduler::routes())
         .merge(crate::chime_library::routes())
         .merge(crate::health::routes())
+        .merge(crate::retention::routes())
+        .merge(crate::fsck::routes())
         .merge(crate::timezone::routes())
         .merge(crate::wifi::routes())
         .merge(crate::wifi_ap::routes())
         .merge(crate::wifi_mutate::routes())
+        .merge(crate::cloud::routes())
         .merge(crate::cloud_creds::routes())
         .fallback(api_not_found)
         .with_state(state);
 
-    Router::new().nest("/api", api).fallback_service(spa)
+    Router::new()
+        .route("/hotspot-detect.html", get(captive_probe))
+        .route("/library/test/success.html", get(captive_probe))
+        .route("/generate_204", get(captive_probe))
+        .route("/gen_204", get(captive_probe))
+        .route("/connecttest.txt", get(captive_probe))
+        .route("/ncsi.txt", get(captive_probe))
+        .route("/redirect", get(captive_probe))
+        .route("/success.txt", get(captive_probe))
+        .route("/canonical.html", get(captive_probe))
+        .nest("/api", api)
+        .fallback_service(spa)
+}
+
+/// Redirect captive-network probes to the branded onboarding screen instead of
+/// letting them receive the SPA shell for an arbitrary probe path.
+async fn captive_probe() -> Redirect {
+    Redirect::temporary("/captive-portal")
 }
 
 /// Run a read query on a blocking task using a fresh read-only connection.
@@ -230,6 +261,8 @@ struct TripsPageQuery {
     cursor: Option<String>,
     /// Page size (clamped to [`MAX_LIMIT`]).
     limit: Option<i64>,
+    /// Return only trips with at least one currently playable clip.
+    playable: Option<bool>,
 }
 
 async fn days(
@@ -243,6 +276,26 @@ async fn days(
         read(state.catalog, query::list_days).await?
     };
     Ok(Json(out))
+}
+
+async fn index_status(State(state): State<AppState>) -> Result<Json<IndexStatusDto>, ApiError> {
+    Ok(Json(read(state.catalog, query::index_status).await?))
+}
+
+async fn index_lifecycle(
+    State(state): State<AppState>,
+) -> Result<Json<IndexLifecycleDto>, ApiError> {
+    Ok(Json(read(state.catalog, query::index_lifecycle).await?))
+}
+
+async fn index_driving_stats(
+    State(state): State<AppState>,
+) -> Result<Json<DrivingStatsDto>, ApiError> {
+    Ok(Json(read(state.catalog, query::index_driving_stats).await?))
+}
+
+async fn index_event_chart(State(state): State<AppState>) -> Result<Json<EventChartDto>, ApiError> {
+    Ok(Json(read(state.catalog, query::index_event_chart).await?))
 }
 
 async fn trips(
@@ -298,7 +351,10 @@ async fn trips_page(
         query::Keyset { snap, after: None }
     };
     let snap = keyset.snap;
-    let items = read(state.catalog, move |conn| query::list_trips_page(conn, keyset, limit)).await?;
+    let items = read(state.catalog, move |conn| {
+        query::list_trips_page(conn, keyset, limit, q.playable.unwrap_or(false))
+    })
+    .await?;
     Ok(Json(into_page(
         items,
         limit,
@@ -393,7 +449,10 @@ async fn events(
         query::Keyset { snap, after: None }
     };
     let snap = keyset.snap;
-    let items = read(state.catalog, move |conn| query::list_events(conn, keyset, limit, trip)).await?;
+    let items = read(state.catalog, move |conn| {
+        query::list_events(conn, keyset, limit, trip)
+    })
+    .await?;
     Ok(Json(into_page(
         items,
         limit,
@@ -409,6 +468,14 @@ async fn event_detail(
     Path(id): Path<i64>,
 ) -> Result<Json<EventDto>, ApiError> {
     let out = read(state.catalog, move |conn| query::get_event(conn, id)).await?;
+    out.map(Json).ok_or(ApiError::NotFound)
+}
+
+async fn event_detail_enriched(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<EventDetailDto>, ApiError> {
+    let out = read(state.catalog, move |conn| query::get_event_detail(conn, id)).await?;
     out.map(Json).ok_or(ApiError::NotFound)
 }
 
@@ -461,6 +528,14 @@ async fn clip_detail(
     out.map(Json).ok_or(ApiError::NotFound)
 }
 
+async fn clip_waypoints(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<Vec<crate::dto::ClipWaypointDto>>, ApiError> {
+    let out = read(state.catalog, move |conn| query::clip_waypoints(conn, id)).await?;
+    out.map(Json).ok_or(ApiError::NotFound)
+}
+
 async fn analytics(State(state): State<AppState>) -> Result<Json<AnalyticsDto>, ApiError> {
     let out = read(state.catalog, query::analytics).await?;
     Ok(Json(out))
@@ -476,6 +551,122 @@ async fn encryption_status(
 async fn settings(State(state): State<AppState>) -> Result<Json<Vec<PrefDto>>, ApiError> {
     let out = read(state.catalog, query::list_settings).await?;
     Ok(Json(out))
+}
+
+async fn settings_advanced(
+    State(state): State<AppState>,
+) -> Result<Json<AdvancedSettingsDto>, ApiError> {
+    let prefs = read(state.catalog, query::list_settings).await?;
+    Ok(Json(advanced_settings_snapshot(&prefs)))
+}
+
+#[derive(Clone, Copy)]
+enum AdvancedSettingValidationSpec {
+    Enum(&'static [&'static str]),
+    IntegerRange { min: u32, max: u32 },
+    TimezoneOrAuto,
+}
+
+#[derive(Clone, Copy)]
+struct AdvancedSettingSpec {
+    key: &'static str,
+    label: &'static str,
+    description: &'static str,
+    default_value: &'static str,
+    validation: AdvancedSettingValidationSpec,
+}
+
+const ADVANCED_SETTING_SPECS: [AdvancedSettingSpec; 5] = [
+    AdvancedSettingSpec {
+        key: "trip_gap_minutes",
+        label: "Trip gap (minutes)",
+        description: "Split trips when the parked gap reaches this many minutes.",
+        default_value: "5",
+        validation: AdvancedSettingValidationSpec::IntegerRange { min: 1, max: 60 },
+    },
+    AdvancedSettingSpec {
+        key: "speed_limit_mph",
+        label: "Speed alert (mph)",
+        description: "Driving-event speed threshold in miles per hour.",
+        default_value: "80",
+        validation: AdvancedSettingValidationSpec::IntegerRange { min: 0, max: 200 },
+    },
+    AdvancedSettingSpec {
+        key: "speed_unit",
+        label: "Map speed display units",
+        description: "Preferred speed units for map and analytics readouts.",
+        default_value: "mph",
+        validation: AdvancedSettingValidationSpec::Enum(&["mph", "kph"]),
+    },
+    AdvancedSettingSpec {
+        key: "display_timezone",
+        label: "Map day timezone",
+        description: "IANA timezone for day bucketing; empty value means auto.",
+        default_value: "",
+        validation: AdvancedSettingValidationSpec::TimezoneOrAuto,
+    },
+    AdvancedSettingSpec {
+        key: "clock",
+        label: "Clock mode",
+        description: "Timestamp display mode across map-oriented screens.",
+        default_value: "local",
+        validation: AdvancedSettingValidationSpec::Enum(&["local", "utc"]),
+    },
+];
+
+fn advanced_setting_matches(spec: &AdvancedSettingSpec, value: &str) -> bool {
+    match spec.validation {
+        AdvancedSettingValidationSpec::Enum(allowed) => allowed.contains(&value),
+        AdvancedSettingValidationSpec::IntegerRange { min, max } => value
+            .parse::<u32>()
+            .is_ok_and(|parsed| (min..=max).contains(&parsed)),
+        AdvancedSettingValidationSpec::TimezoneOrAuto => {
+            value.is_empty() || parse_tz(value).is_ok()
+        }
+    }
+}
+
+fn advanced_validation_dto(spec: &AdvancedSettingSpec) -> AdvancedSettingValidationDto {
+    match spec.validation {
+        AdvancedSettingValidationSpec::Enum(allowed) => AdvancedSettingValidationDto::Enum {
+            allowed: allowed.iter().map(|v| (*v).to_string()).collect(),
+        },
+        AdvancedSettingValidationSpec::IntegerRange { min, max } => {
+            AdvancedSettingValidationDto::IntegerRange { min, max }
+        }
+        AdvancedSettingValidationSpec::TimezoneOrAuto => {
+            AdvancedSettingValidationDto::TimezoneOrAuto
+        }
+    }
+}
+
+fn advanced_settings_snapshot(prefs: &[PrefDto]) -> AdvancedSettingsDto {
+    let items = ADVANCED_SETTING_SPECS
+        .iter()
+        .map(|spec| {
+            let raw = prefs
+                .iter()
+                .find(|pref| pref.key == spec.key)
+                .map(|pref| pref.value.as_str());
+            let (value, source_status) = match raw {
+                Some(candidate) if advanced_setting_matches(spec, candidate) => {
+                    (candidate.to_owned(), "stored")
+                }
+                Some(_) => (spec.default_value.to_owned(), "default_invalid"),
+                None => (spec.default_value.to_owned(), "default_missing"),
+            };
+            AdvancedSettingDto {
+                key: spec.key.to_owned(),
+                label: spec.label.to_owned(),
+                description: spec.description.to_owned(),
+                value,
+                default_value: spec.default_value.to_owned(),
+                source_status: source_status.to_owned(),
+                validation: advanced_validation_dto(spec),
+            }
+        })
+        .collect();
+    AdvancedSettingsDto { items }
 }
 
 #[derive(Deserialize)]
@@ -543,18 +734,10 @@ async fn put_setting(
 }
 
 fn validate_setting(key: &str, value: &str) -> bool {
-    match key {
-        "speed_unit" => matches!(value, "mph" | "kph"),
-        "trip_gap_minutes" => value
-            .parse::<u32>()
-            .is_ok_and(|minutes| (1..=60).contains(&minutes)),
-        "speed_limit_mph" => value
-            .parse::<u32>()
-            .is_ok_and(|mph| (0..=200).contains(&mph)),
-        "display_timezone" => value.is_empty() || crate::daybucket::parse_tz(value).is_ok(),
-        "clock" => matches!(value, "local" | "utc"),
-        _ => false,
-    }
+    ADVANCED_SETTING_SPECS
+        .iter()
+        .find(|spec| spec.key == key)
+        .is_some_and(|spec| advanced_setting_matches(spec, value))
 }
 
 /// Query parameters for `DELETE /api/clips/:id`.
@@ -703,7 +886,23 @@ fn stage_upload(dir: &std::path::Path, bytes: &[u8]) -> std::io::Result<tempfile
         tmp.as_file_mut().write_all(bytes)?;
         tmp.as_file_mut().sync_all()?;
     }
+    sync_staging_parent_dir(tmp.path())?;
     Ok(tmp)
+}
+
+#[cfg(unix)]
+fn sync_staging_parent_dir(path: &std::path::Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_staging_parent_dir(_path: &std::path::Path) -> std::io::Result<()> {
+    // Directory fsync semantics are platform-specific; on non-Unix test hosts we
+    // keep staging writable and rely on Unix-target durability validation.
+    Ok(())
 }
 
 pub(crate) fn keep_staged_tempfile(
@@ -764,7 +963,15 @@ fn enqueue_staged_blob(
     match client.call(request) {
         Ok(resp) => {
             let outcome = gadget::map_queue_outcome(&resp);
-            if !matches!(outcome, gadget::QueueOutcome::Queued { .. }) {
+            // Unlink only when gadgetd definitively did NOT accept ownership.
+            // Ambiguous durability responses retain the staged blob so gadgetd can
+            // still apply/reclaim it if the enqueue actually committed.
+            if matches!(
+                outcome,
+                gadget::QueueOutcome::Rejected(_)
+                    | gadget::QueueOutcome::Unavailable(_)
+                    | gadget::QueueOutcome::BadResponse(_)
+            ) {
                 let _ = std::fs::remove_file(&path);
             }
             jobs.publish_job(job_for_queue_outcome(job_id, kind, &outcome));
@@ -919,6 +1126,10 @@ pub(crate) async fn run_remove(
 /// time and rejects a `DeletePaths` whose set exceeds `MAX_DELETE_PATHS=16`
 /// (gadgetd `handoff.rs`). Without this chunking a folder delete or bulk delete
 /// with >16 files would be silently refused.
+/// 
+/// Safety gate: multi-chunk (>16 path) bulk removes are currently disabled
+/// fail-closed (`503 atomic_enqueue_required`) to avoid partial acceptance until
+/// an atomic batched enqueue contract exists.
 ///
 /// Returns the outcome of the LAST chunk. All chunks share one `job_id`; the
 /// terminal job-status event is published once after all chunks complete
@@ -933,6 +1144,14 @@ pub(crate) async fn run_remove_many(
     partition: u8,
     rel_paths: Vec<String>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
+    if rel_paths.len() > DELETE_CHUNK {
+        return Err(ApiError::status(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "atomic_enqueue_required",
+            "bulk delete over 16 paths is temporarily disabled until atomic enqueue is available",
+        ));
+    }
+
     let job_id = state.jobs.next_job_id();
     state.jobs.publish_job(JobStatus::running(job_id, kind));
 
@@ -989,8 +1208,7 @@ pub(crate) async fn run_remove_many(
         }
     }
 
-    let outcome = last_outcome
-        .expect("rel_paths was empty; caller must ensure non-empty input");
+    let outcome = last_outcome.expect("rel_paths was empty; caller must ensure non-empty input");
     state
         .jobs
         .publish_job(job_for_queue_outcome(job_id, kind, &outcome));
@@ -1009,9 +1227,12 @@ pub(crate) async fn run_remove_many(
 /// directory and empty-only, so it can never remove a file.
 ///
 /// `file_rel_paths` must be already sanitised/validated by the caller; this
-/// primitive does not re-validate path safety. Returns the outcome of the
-/// directory-prune enqueue (the terminal step). A rejected file-delete chunk or
-/// any transport error aborts early.
+/// primitive does not re-validate path safety.
+///
+/// Safety gate: any NON-EMPTY folder delete is currently rejected fail-closed
+/// (`503 atomic_enqueue_required`) until an atomic folder-delete enqueue exists.
+/// This prevents partial acceptance where child-file deletes queue but the
+/// directory-prune enqueue fails later.
 pub(crate) async fn run_folder_delete(
     state: AppState,
     kind: &'static str,
@@ -1019,6 +1240,14 @@ pub(crate) async fn run_folder_delete(
     file_rel_paths: Vec<String>,
     dir_rel_path: String,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
+    if !file_rel_paths.is_empty() {
+        return Err(ApiError::status(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "atomic_enqueue_required",
+            "folder delete with child files is temporarily disabled until atomic enqueue is available",
+        ));
+    }
+
     let job_id = state.jobs.next_job_id();
     state.jobs.publish_job(JobStatus::running(job_id, kind));
 
@@ -1159,6 +1388,63 @@ async fn jobs_failed(State(state): State<AppState>) -> Json<Value> {
     Json(json!({ "jobs": state.jobs.failed_snapshot() }))
 }
 
+/// `GET /api/jobs/capabilities`: read-only contract/capability disclosure for the
+/// durable-mutation foundation. No mutation commands are exposed by this route.
+async fn jobs_capabilities() -> Json<Value> {
+    Json(json!({
+        "jobs_endpoint": "/api/jobs",
+        "failed_jobs_endpoint": "/api/jobs/failed",
+        "capabilities_endpoint": "/api/jobs/capabilities",
+        "durable_job_store": {
+            "kind": "in_memory",
+            "restart_persistent": false,
+            "notes": "JobHub is process-local; owner daemons hold durable queues/state."
+        },
+        "durable_envelope": {
+            "fields": [
+                "requestId",
+                "idempotencyKey",
+                "requestHash",
+                "jobId",
+                "owner",
+                "kind",
+                "state",
+                "cancelRequested",
+                "sanitizedError",
+                "statusUrl"
+            ],
+            "states": [
+                "queued",
+                "running",
+                "done",
+                "failed",
+                "refused",
+                "busy",
+                "cancel_requested",
+                "cancelled"
+            ]
+        },
+        "idempotency": {
+            "same_key_same_hash": "replay",
+            "same_key_different_hash": 409
+        },
+        "csrf_hardening_non_get": {
+            "checks": ["Host", "Origin", "Sec-Fetch-Site"],
+            "is_authentication": false,
+            "currently_enforced_on": ["wifi_mutations_legacy"],
+            "current_behavior": {
+                "host_required": true,
+                "origin_required": false,
+                "sec_fetch_site_restricted": true
+            },
+            "planned_for": ["future durable mutation routes"]
+        },
+        "durable_mutation_routes_enabled": false,
+        "legacy_destructive_routes_exist": true,
+        "owner_durable_queues": ["gadgetd", "indexd", "uploadd", "retentiond"]
+    }))
+}
+
 /// Build the SSE frame for a [`JobEvent`], falling back to a comment frame if
 /// the payload somehow fails to serialize (it never does for our types).
 fn event_from(ev: &JobEvent) -> Event {
@@ -1258,6 +1544,30 @@ fn job_for_queue_outcome(job_id: u64, kind: &str, outcome: &gadget::QueueOutcome
             detail: Some(reason.clone()),
             handoff_id: None,
         },
+        gadget::QueueOutcome::Unavailable(detail) => JobStatus {
+            job_id,
+            kind: kind.to_owned(),
+            state: JobState::Failed,
+            progress: None,
+            detail: Some(detail.clone()),
+            handoff_id: None,
+        },
+        gadget::QueueOutcome::Ambiguous {
+            job_id: gadget_job,
+            detail,
+        } => JobStatus {
+            job_id,
+            kind: kind.to_owned(),
+            state: JobState::Failed,
+            progress: None,
+            detail: Some(match gadget_job {
+                Some(id) => format!(
+                    "{detail}; gadgetd may have accepted as {id} (staged blob retained for safety)"
+                ),
+                None => format!("{detail}; gadgetd acceptance is uncertain"),
+            }),
+            handoff_id: None,
+        },
         gadget::QueueOutcome::BadResponse(msg) => JobStatus {
             job_id,
             kind: kind.to_owned(),
@@ -1271,9 +1581,10 @@ fn job_for_queue_outcome(job_id: u64, kind: &str, outcome: &gadget::QueueOutcome
 
 /// Map an `enqueue_mutation` outcome to its HTTP response: accepted → `202`
 /// `{state:"queued", job_id}`; rejected (invalid mutation / full queue) → `422`;
+/// durability-unavailable (`gadgetd` could not persist queue state) → `503`;
 /// an unparseable `gadgetd` reply → `502`. A queued mutation is NOT an error —
-/// it is the frictionless success path that never surfaces a transient-busy
-/// `409` to the user.
+/// it is the frictionless success path that never surfaces a transient-busy `409`
+/// to the user.
 fn queue_outcome_to_response(
     outcome: &gadget::QueueOutcome,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
@@ -1286,6 +1597,19 @@ fn queue_outcome_to_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             "refused",
             reason.clone(),
+        )),
+        gadget::QueueOutcome::Unavailable(detail) => Err(ApiError::status(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            detail.clone(),
+        )),
+        gadget::QueueOutcome::Ambiguous { job_id, detail } => Err(ApiError::status(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "durability_ambiguous",
+            match job_id {
+                Some(id) => format!("{detail}; mutation may have been accepted as {id}"),
+                None => detail.clone(),
+            },
         )),
         gadget::QueueOutcome::BadResponse(msg) => Err(ApiError::status(
             StatusCode::BAD_GATEWAY,
@@ -1331,6 +1655,27 @@ async fn gadget_status(State(state): State<AppState>) -> Result<Json<Value>, Api
             "unparseable gadget_status response",
         )
     })
+}
+
+/// `GET /api/gadget/mode-status`: bounded, read-only gadget/mode snapshot for
+/// the settings dashboard (mode, handoff state, LUN/image status, recovery/banner
+/// facts). Sourced from `gadgetd`'s read-only `gadget_status` command only.
+async fn gadget_mode_status(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let client = state.gadget.clone();
+    let request = gadget::gadget_status_request();
+    let resp = tokio::task::spawn_blocking(move || client.call(request))
+        .await
+        .map_err(|_| ApiError::Internal)?
+        .map_err(transport_to_error)?;
+    gadget::map_gadget_mode_status(&resp)
+        .map(Json)
+        .ok_or_else(|| {
+            ApiError::status(
+                StatusCode::BAD_GATEWAY,
+                "gadgetd_protocol",
+                "unparseable gadget_status response",
+            )
+        })
 }
 
 /// Map a pre-handoff planning refusal to its HTTP error.
@@ -1496,7 +1841,8 @@ fn base64url_encode(data: &[u8]) -> String {
     let mut out = String::with_capacity((data.len() * 4).div_ceil(3));
     let mut i = 0usize;
     while i + 3 <= data.len() {
-        let chunk = (u32::from(data[i]) << 16) | (u32::from(data[i + 1]) << 8) | u32::from(data[i + 2]);
+        let chunk =
+            (u32::from(data[i]) << 16) | (u32::from(data[i + 1]) << 8) | u32::from(data[i + 2]);
         out.push(char::from(BASE64URL[((chunk >> 18) & 0x3f) as usize]));
         out.push(char::from(BASE64URL[((chunk >> 12) & 0x3f) as usize]));
         out.push(char::from(BASE64URL[((chunk >> 6) & 0x3f) as usize]));

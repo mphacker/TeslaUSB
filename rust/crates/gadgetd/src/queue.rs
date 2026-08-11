@@ -31,16 +31,17 @@
 //! delete-after-install (or install-after-delete) of the same path resolve to
 //! the single latest intent.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::fmt;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::handoff::Mutation;
 #[cfg(test)]
 use crate::handoff::MAX_DELETE_PATHS;
+use crate::handoff::Mutation;
 
 /// Hard cap on live (non-terminal) queue entries. An `enqueue` past this is
 /// refused with a real error so a runaway producer cannot fill the data fs with
@@ -123,6 +124,46 @@ pub(crate) struct MutationQueue {
     entries: Vec<QueuedMutation>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PersistErrorStage {
+    PreCommit,
+    PostCommit,
+}
+
+#[derive(Debug)]
+pub(crate) struct PersistError {
+    stage: PersistErrorStage,
+    source: io::Error,
+}
+
+impl PersistError {
+    fn pre_commit(source: io::Error) -> Self {
+        Self {
+            stage: PersistErrorStage::PreCommit,
+            source,
+        }
+    }
+
+    fn post_commit(source: io::Error) -> Self {
+        Self {
+            stage: PersistErrorStage::PostCommit,
+            source,
+        }
+    }
+
+    pub(crate) fn stage(&self) -> PersistErrorStage {
+        self.stage
+    }
+}
+
+impl fmt::Display for PersistError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} ({:?})", self.source, self.stage)
+    }
+}
+
+impl std::error::Error for PersistError {}
+
 /// The per-path effect a single entry contributes (for coalescing).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Effect {
@@ -154,6 +195,13 @@ impl MutationQueue {
     /// Look up an entry by its public id.
     pub(crate) fn find(&self, id: &str) -> Option<&QueuedMutation> {
         self.entries.iter().find(|e| e.id == id)
+    }
+
+    /// Look up a live entry by its idempotency key.
+    pub(crate) fn find_live_by_idempotency_key(&self, key: &str) -> Option<&QueuedMutation> {
+        self.entries
+            .iter()
+            .find(|e| !e.state.is_terminal() && e.idempotency_key.as_deref() == Some(key))
     }
 
     /// Accept a validated mutation. Returns the (possibly pre-existing, via
@@ -196,6 +244,19 @@ impl MutationQueue {
             state: MutationState::Queued,
         });
         Ok(id)
+    }
+
+    /// Roll back a newly-enqueued live entry by id.
+    ///
+    /// Returns true when an entry was removed.
+    pub(crate) fn rollback_enqueue(&mut self, job_id: &str) -> bool {
+        if let Some(pos) = self.entries.iter().position(|entry| {
+            entry.id == job_id && entry.state == MutationState::Queued
+        }) {
+            self.entries.remove(pos);
+            return true;
+        }
+        false
     }
 
     /// The partitions that currently have `Queued` work, lowest wire index first.
@@ -352,10 +413,38 @@ impl MutationQueue {
             .collect()
     }
 
+    /// Blob paths for every terminal entry currently tracked in memory.
+    ///
+    /// Used by retire/prune flows so older terminal entries left behind by a
+    /// prior partial persist warning are still reclaimed before terminal pruning.
+    pub(crate) fn reclaimable_terminal_blobs(&self) -> Vec<String> {
+        self.entries
+            .iter()
+            .filter(|e| e.state.is_terminal())
+            .filter_map(|e| e.blob_path.clone())
+            .collect()
+    }
+
     /// Drop terminal entries from the in-memory journal (after their blobs are
     /// reclaimed) so it does not grow unbounded.
     pub(crate) fn prune_terminal(&mut self) {
         self.entries.retain(|e| !e.state.is_terminal());
+    }
+
+    /// Drop only terminal entries whose blob is already absent (or had no blob).
+    ///
+    /// Terminal entries that still reference an on-disk blob are retained so a
+    /// later retire pass can retry reclaiming the blob before pruning the entry.
+    pub(crate) fn prune_terminal_reclaimed(&mut self, reclaimed_blobs: &HashSet<String>) {
+        self.entries.retain(|entry| {
+            if !entry.state.is_terminal() {
+                return true;
+            }
+            match entry.blob_path.as_deref() {
+                None => false,
+                Some(blob) => !reclaimed_blobs.contains(blob),
+            }
+        });
     }
 
     /// Crash-recovery: flip any entry left `Applying` by an interrupted handoff
@@ -403,22 +492,34 @@ impl MutationQueue {
     ///
     /// # Errors
     /// Propagates the first I/O error; the caller keeps the in-memory state.
-    pub(crate) fn persist(&self, path: &Path) -> io::Result<()> {
+    pub(crate) fn persist(&self, path: &Path) -> Result<(), PersistError> {
+        self.persist_with_parent_sync(path, sync_parent_dir)
+    }
+
+    fn persist_with_parent_sync<F>(&self, path: &Path, sync_parent: F) -> Result<(), PersistError>
+    where
+        F: FnOnce(&Path) -> io::Result<()>,
+    {
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent).map_err(PersistError::pre_commit)?;
         let tmp = with_tmp_suffix(path);
-        let bytes = serde_json::to_vec_pretty(self).map_err(io::Error::other)?;
+        let bytes = serde_json::to_vec_pretty(self)
+            .map_err(io::Error::other)
+            .map_err(PersistError::pre_commit)?;
         {
-            let mut f = std::fs::File::create(&tmp)?;
-            f.write_all(&bytes)?;
-            f.sync_all()?;
+            let mut f = std::fs::File::create(&tmp).map_err(PersistError::pre_commit)?;
+            f.write_all(&bytes).map_err(PersistError::pre_commit)?;
+            f.sync_all().map_err(PersistError::pre_commit)?;
         }
-        std::fs::rename(&tmp, path)?;
-        if let Ok(dir) = std::fs::File::open(parent) {
-            let _ = dir.sync_all();
-        }
+        std::fs::rename(&tmp, path).map_err(PersistError::pre_commit)?;
+        sync_parent(parent).map_err(PersistError::post_commit)?;
         Ok(())
     }
+}
+
+fn sync_parent_dir(parent: &Path) -> io::Result<()> {
+    let dir = std::fs::File::open(parent)?;
+    dir.sync_all()
 }
 
 fn debug_assert_group_coverage(groups: &[Vec<u64>], apply_seqs: &[u64]) {
@@ -525,6 +626,18 @@ mod tests {
             .unwrap();
         assert_eq!(first, again);
         assert_eq!(q.live_len(), 1);
+    }
+
+    #[test]
+    fn rollback_enqueue_removes_queued_entry_only() {
+        let mut q = MutationQueue::default();
+        let id = q
+            .enqueue(2, install("LockChime.wav", "/s/x"), None, Some("k1".into()))
+            .expect("queued");
+        assert!(q.rollback_enqueue(&id));
+        assert_eq!(q.live_len(), 0);
+        assert!(q.find(&id).is_none());
+        assert!(!q.rollback_enqueue(&id));
     }
 
     #[test]
@@ -738,6 +851,59 @@ mod tests {
         assert_eq!(next, "m-2");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn sync_parent_dir_propagates_open_error() {
+        let missing = std::path::PathBuf::from(format!(
+            "missing-parent-for-sync-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        assert!(sync_parent_dir(&missing).is_err());
+    }
+
+    #[test]
+    fn persist_reports_post_commit_error_when_parent_sync_fails() {
+        let dir = std::env::temp_dir().join(format!("gqtest-post-commit-{}", now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("queue.json");
+        let mut q = MutationQueue::default();
+        q.enqueue(2, delete("Music/z.mp3"), None, None).unwrap();
+
+        let err = q
+            .persist_with_parent_sync(&path, |_parent| {
+                Err(std::io::Error::other("sync failed"))
+            })
+            .expect_err("parent sync failure should be post-commit");
+        assert_eq!(err.stage(), PersistErrorStage::PostCommit);
+        assert!(path.exists(), "journal rename should already have happened");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn terminal_blob_scan_includes_entries_from_prior_post_commit_warning() {
+        let mut q = MutationQueue::default();
+        q.enqueue(
+            2,
+            install("Music/a.mp3", "/s/a"),
+            Some("/stage/a".to_owned()),
+            None,
+        )
+        .unwrap();
+        q.enqueue(
+            2,
+            install("Music/b.mp3", "/s/b"),
+            Some("/stage/b".to_owned()),
+            None,
+        )
+        .unwrap();
+        q.set_state(&[1], MutationState::Applied);
+        q.set_state(&[2], MutationState::Applied);
+        let mut blobs = q.reclaimable_terminal_blobs();
+        blobs.sort();
+        assert_eq!(blobs, vec!["/stage/a".to_owned(), "/stage/b".to_owned()]);
     }
 
     #[test]

@@ -659,10 +659,10 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::float_cmp, clippy::indexing_slicing)]
 
     use super::{
-        autopilot_to_u32, gear_to_u32, AngleRecord, Bucket, ClipAngleRecord, ClipEventRecord,
-        MediaFileRecord, ProducerStats, ScanBatch, WireWaypoint, MAX_CLIP_EVENT_RECORDS,
-        MAX_FRONT_CENSUS, MAX_FRONT_UNPLACEABLE, MAX_MEDIA_RECORDS, MAX_STRING_LEN, PARSER_VERSION,
-        PROTOCOL_VERSION,
+        AngleRecord, Bucket, ClipAngleRecord, ClipEventRecord, MAX_CLIP_EVENT_RECORDS,
+        MAX_FRONT_CENSUS, MAX_FRONT_UNPLACEABLE, MAX_MEDIA_RECORDS, MAX_STRING_LEN,
+        MediaFileRecord, PARSER_VERSION, PROTOCOL_VERSION, ProducerStats, ScanBatch, WireWaypoint,
+        autopilot_to_u32, gear_to_u32,
     };
     use teslausb_core::sei::tesla::{AutopilotState, Gear};
 

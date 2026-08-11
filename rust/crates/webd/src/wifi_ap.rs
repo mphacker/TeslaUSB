@@ -45,11 +45,7 @@ async fn set_ap_mode(
             "mode must be auto, force_on, or force_off",
         ));
     }
-    let resp = call(
-        &state,
-        json!({ "cmd": "set_ap_mode", "mode": body.mode }),
-    )
-    .await?;
+    let resp = call(&state, json!({ "cmd": "set_ap_mode", "mode": body.mode })).await?;
     Ok(Json(resp))
 }
 

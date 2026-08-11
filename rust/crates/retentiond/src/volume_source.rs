@@ -300,7 +300,9 @@ fn read_dir_entries<R: scannerd::reader::BlockReader + ?Sized>(
     let mut entries = Vec::new();
     let mut carry = None;
     for cluster in clusters {
-        let bytes = volume.read_cluster(cluster).map_err(|err| scanner_to_io(&err))?;
+        let bytes = volume
+            .read_cluster(cluster)
+            .map_err(|err| scanner_to_io(&err))?;
         let decoded = decode_directory_cluster(&bytes, carry)
             .map_err(|err| io::Error::other(err.to_string()))?;
         carry = decoded.trailing_partial_set;
@@ -492,14 +494,19 @@ fn clip_source_fingerprint(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 mod tests {
     use std::collections::HashMap;
 
     use super::{
-        DirNode, MAX_DIR_CLUSTERS, MAX_DIR_ENTRIES, cap_directory_clusters, chain_digests_for_records,
-        clip_source_fingerprint, extend_entries_with_cap, group_recent_candidates, read_dir_entries,
-        record_chain_key, select_stable_records,
+        DirNode, MAX_DIR_CLUSTERS, MAX_DIR_ENTRIES, cap_directory_clusters,
+        chain_digests_for_records, clip_source_fingerprint, extend_entries_with_cap,
+        group_recent_candidates, read_dir_entries, record_chain_key, select_stable_records,
     };
     use scannerd::boot::ExfatParams;
     use scannerd::reader::{BlockReader, ReaderError};
@@ -667,8 +674,13 @@ mod tests {
         let mut digest_b = HashMap::new();
         digest_b.insert(record_chain_key(&record), 0xaaaa_bbbb_cccc_dddd);
 
-        let fingerprint_a =
-            clip_source_fingerprint(0, 0x1234_abcd, "2026-06-19_10-00-00", &[record.clone()], &digest_a);
+        let fingerprint_a = clip_source_fingerprint(
+            0,
+            0x1234_abcd,
+            "2026-06-19_10-00-00",
+            &[record.clone()],
+            &digest_a,
+        );
         let fingerprint_b =
             clip_source_fingerprint(0, 0x1234_abcd, "2026-06-19_10-00-00", &[record], &digest_b);
         assert_ne!(fingerprint_a, fingerprint_b);
@@ -689,7 +701,8 @@ mod tests {
             no_fat_chain: false,
             contiguous_span: Some(0),
         };
-        let entries = read_dir_entries(&volume, &empty_dir).expect("empty directory must not error");
+        let entries =
+            read_dir_entries(&volume, &empty_dir).expect("empty directory must not error");
         assert!(entries.is_empty());
     }
 
@@ -714,8 +727,8 @@ mod tests {
 
     #[test]
     fn directory_cap_helpers_bound_clusters_and_entries() {
-        let mut clusters: Vec<u32> = (2..=u32::try_from(MAX_DIR_CLUSTERS + 10).expect("u32 cap"))
-            .collect();
+        let mut clusters: Vec<u32> =
+            (2..=u32::try_from(MAX_DIR_CLUSTERS + 10).expect("u32 cap")).collect();
         assert!(cap_directory_clusters(&mut clusters, 2));
         assert_eq!(clusters.len(), MAX_DIR_CLUSTERS);
 

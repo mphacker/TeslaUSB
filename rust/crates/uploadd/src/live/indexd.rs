@@ -6,10 +6,12 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::error::IndexError;
 use crate::indexd_client::{
-    CloudQueueCommitRequest, CloudQueueFailRequest, CloudQueueRow, IndexdClientError, IndexdCloudClient,
-    UploadLeaseAcquireResult, UploadLeaseReleaseResult, UploadLeaseRenewResult,
+    CloudQueueCommitRequest, CloudQueueFailRequest, CloudQueueRow, IndexdClientError,
+    IndexdCloudClient, UploadLeaseAcquireResult, UploadLeaseReleaseResult, UploadLeaseRenewResult,
 };
-use crate::lease::{LeaseClient, LeaseGen, LeaseGrant, LeaseId, LeaseKind, ReleaseResult, RenewResult};
+use crate::lease::{
+    LeaseClient, LeaseGen, LeaseGrant, LeaseId, LeaseKind, ReleaseResult, RenewResult,
+};
 use crate::priority::UploadCategory;
 use crate::queue::{CommitEvidence, QueueItem, QueueKey, QueueStore, UploadState, attempt_id_for};
 use crate::source::ArchiveItemId;
@@ -69,7 +71,7 @@ impl<C: IndexdCloudClient> LiveQueueStore<C> {
                 return Err(IndexError::new(
                     "load",
                     format!("unsupported queue state `{other}`"),
-                ))
+                ));
             }
         };
         // A `done` row (returned above) needs no source path. For any row we
@@ -90,13 +92,16 @@ impl<C: IndexdCloudClient> LiveQueueStore<C> {
                 return Err(IndexError::new(
                     "load",
                     format!("unsupported upload category `{other}`"),
-                ))
+                ));
             }
         };
         let seq = u64::try_from(row.seq)
             .map_err(|_| IndexError::new("load", format!("seq out of range: {}", row.seq)))?;
         let total_bytes = u64::try_from(row.total_bytes).map_err(|_| {
-            IndexError::new("load", format!("total_bytes out of range: {}", row.total_bytes))
+            IndexError::new(
+                "load",
+                format!("total_bytes out of range: {}", row.total_bytes),
+            )
         })?;
         let bytes_uploaded = u64::try_from(row.bytes_uploaded).map_err(|_| {
             IndexError::new(
@@ -104,8 +109,9 @@ impl<C: IndexdCloudClient> LiveQueueStore<C> {
                 format!("bytes_uploaded out of range: {}", row.bytes_uploaded),
             )
         })?;
-        let attempts = u32::try_from(row.attempts)
-            .map_err(|_| IndexError::new("load", format!("attempts out of range: {}", row.attempts)))?;
+        let attempts = u32::try_from(row.attempts).map_err(|_| {
+            IndexError::new("load", format!("attempts out of range: {}", row.attempts))
+        })?;
 
         let verify = if row.verify_alg == "none" {
             VerifySpec::CopyIntegrity
@@ -315,11 +321,19 @@ impl<C: IndexdCloudClient + Sync> LiveLeaseClient<C> {
         }
     }
 
-    fn acquire_inner(&self, archive_item_id: i64, ttl_ms: u32) -> Result<UploadLeaseAcquireResult, IndexdClientError> {
+    fn acquire_inner(
+        &self,
+        archive_item_id: i64,
+        ttl_ms: u32,
+    ) -> Result<UploadLeaseAcquireResult, IndexdClientError> {
         self.client.upload_lease_acquire(archive_item_id, ttl_ms)
     }
 
-    fn renew_inner(&self, token: &str, ttl_ms: u32) -> Result<UploadLeaseRenewResult, IndexdClientError> {
+    fn renew_inner(
+        &self,
+        token: &str,
+        ttl_ms: u32,
+    ) -> Result<UploadLeaseRenewResult, IndexdClientError> {
         self.client.upload_lease_renew(token, ttl_ms)
     }
 
@@ -329,7 +343,13 @@ impl<C: IndexdCloudClient + Sync> LiveLeaseClient<C> {
 }
 
 impl<C: IndexdCloudClient + Sync> LeaseClient for LiveLeaseClient<C> {
-    fn acquire(&self, item: ArchiveItemId, kind: LeaseKind, _holder: &str, ttl_ms: i64) -> LeaseGrant {
+    fn acquire(
+        &self,
+        item: ArchiveItemId,
+        kind: LeaseKind,
+        _holder: &str,
+        ttl_ms: i64,
+    ) -> LeaseGrant {
         if kind != LeaseKind::Upload {
             return LeaseGrant::Denied {
                 reason: "unsupported lease kind".to_owned(),
@@ -419,8 +439,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use crate::indexd_client::{
-        CloudCandidateRow, CloudDiscoverRow, CloudQueueCommitResult, CloudQueueFailResult, CloudQueueRetryRequest,
-        CloudQueueRow, CloudQueueUpsertItem, Page,
+        CloudCandidateRow, CloudDiscoverRow, CloudQueueCommitResult, CloudQueueFailResult,
+        CloudQueueRetryRequest, CloudQueueRow, CloudQueueUpsertItem, Page,
     };
 
     use super::*;
@@ -469,7 +489,10 @@ mod tests {
             panic!("unused")
         }
 
-        fn cloud_queue_upsert(&self, _item: &CloudQueueUpsertItem) -> Result<String, IndexdClientError> {
+        fn cloud_queue_upsert(
+            &self,
+            _item: &CloudQueueUpsertItem,
+        ) -> Result<String, IndexdClientError> {
             panic!("unused")
         }
 
@@ -514,7 +537,10 @@ mod tests {
             })
         }
 
-        fn cloud_queue_retry(&self, _request: &CloudQueueRetryRequest) -> Result<String, IndexdClientError> {
+        fn cloud_queue_retry(
+            &self,
+            _request: &CloudQueueRetryRequest,
+        ) -> Result<String, IndexdClientError> {
             panic!("unused")
         }
 
@@ -548,7 +574,10 @@ mod tests {
             })
         }
 
-        fn upload_lease_release(&self, _token: &str) -> Result<UploadLeaseReleaseResult, IndexdClientError> {
+        fn upload_lease_release(
+            &self,
+            _token: &str,
+        ) -> Result<UploadLeaseReleaseResult, IndexdClientError> {
             if self.lease_release_error {
                 return Err(IndexdClientError::Io(std::io::Error::other("offline")));
             }
@@ -640,7 +669,10 @@ mod tests {
         );
         let items = store.load().expect("a bad row must not fail the hydrate");
         assert_eq!(
-            items.iter().map(|i| i.archive_item_id.0).collect::<Vec<_>>(),
+            items
+                .iter()
+                .map(|i| i.archive_item_id.0)
+                .collect::<Vec<_>>(),
             vec![11],
             "the good row must still be worked"
         );
@@ -765,7 +797,9 @@ mod tests {
             size: 1,
             upload_set_id: None,
         };
-        let err = store.commit(&item, &evidence).expect_err("commit should fail");
+        let err = store
+            .commit(&item, &evidence)
+            .expect_err("commit should fail");
         assert!(err.reason.contains("rejected: fence mismatch"));
     }
 

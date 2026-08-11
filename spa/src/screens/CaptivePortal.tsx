@@ -1,5 +1,12 @@
 import { Icon } from "../components/Icon";
 import { useScreenHook } from "../components/screenHook";
+import { ApiError, api } from "../api/client";
+import type {
+  SavedWifiResponse,
+  WifiNetworksResponse,
+  WifiStatus,
+} from "../api/types";
+import { useEffect, useState } from "preact/hooks";
 import "../styles/captive-portal.css";
 
 /**
@@ -11,17 +18,39 @@ import "../styles/captive-portal.css";
  * Every control POSTs to a `captive_portal.*` Flask route (toggle AP, connect,
  * disconnect, forget).
  *
- * B-1 reality: wifid owns Wi-Fi, but webd exposes NO Wi-Fi read/scan/connect
- * endpoint yet (the `be-wifi-config` / `be-captive-portal` lanes are still
- * pending), and joining a network is a privileged operator action. So this
- * screen reproduces the v1 LOOK faithfully but is strictly READ-ONLY: the live
- * status degrades to an honest "not connected / pending" state, the network
- * lists render their v1 empty-states, and every form is replaced by inert
- * disabled controls (no `<form>`, no submit, zero mutation surface). It makes
- * NO API calls.
+ * B-1 reality: wifid owns Wi-Fi and webd exposes read-only status, discovered
+ * network, and saved-profile endpoints. Joining, forgetting, scanning, and AP
+ * changes remain privileged operator actions, so those controls stay inert.
  */
 export function CaptivePortal() {
   useScreenHook("captive-portal");
+  const [status, setStatus] = useState<WifiStatus | null>(null);
+  const [networks, setNetworks] = useState<WifiNetworksResponse | null>(null);
+  const [saved, setSaved] = useState<SavedWifiResponse | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    Promise.allSettled([
+      api.wifiStatus(ctrl.signal),
+      api.wifiNetworks(ctrl.signal),
+      api.wifiSaved(ctrl.signal),
+    ]).then(([statusResult, networksResult, savedResult]) => {
+      if (ctrl.signal.aborted) return;
+      const errors: string[] = [];
+      if (statusResult.status === "fulfilled") setStatus(statusResult.value);
+      else errors.push(statusResult.reason instanceof ApiError ? statusResult.reason.message : "Wi-Fi status unavailable.");
+      if (networksResult.status === "fulfilled") setNetworks(networksResult.value);
+      else errors.push(networksResult.reason instanceof ApiError ? networksResult.reason.message : "Wi-Fi scan unavailable.");
+      if (savedResult.status === "fulfilled") setSaved(savedResult.value);
+      else errors.push(savedResult.reason instanceof ApiError ? savedResult.reason.message : "Saved Wi-Fi profiles unavailable.");
+      setLoadError(errors.length > 0 ? errors[0] : null);
+    });
+    return () => ctrl.abort();
+  }, []);
+
+  const connected = status?.connected === true;
+  const statusChipClass = connected ? "captive-status-chip is-online" : "captive-status-chip is-offline";
 
   return (
     <div class="container" data-page="captive-portal" data-screen="captive-portal">
@@ -51,9 +80,8 @@ export function CaptivePortal() {
             </div>
             <p class="captive-copy">
               Wi-Fi onboarding joins a network and restarts the wireless client,
-              so it stays an operator-gated maintenance action. This always-on
-              page shows status read-only — it can&rsquo;t scan or change the
-              connection.
+              so it stays an operator-gated maintenance action. This page shows
+              live status read-only — it can&rsquo;t change the connection.
             </p>
           </div>
         </header>
@@ -71,30 +99,34 @@ export function CaptivePortal() {
                     setup access point.
                   </p>
                 </div>
-                <div class="captive-status-chip is-offline">
-                  <Icon name="alert-circle" class="captive-inline-icon" />
-                  <span>Not connected</span>
+                <div class={statusChipClass}>
+                  <Icon name={connected ? "check-circle" : "alert-circle"} class="captive-inline-icon" />
+                  <span>{connected ? "Connected" : "Not connected"}</span>
                 </div>
               </div>
               <div class="captive-status-list">
                 <div class="captive-stat-card">
                   <div class="captive-stat-row">
                     <strong>SSID</strong>
-                    <span>None</span>
+                    <span>{status?.ssid ?? "None"}</span>
                   </div>
-                  <p class="captive-status-copy">Signal Unknown</p>
+                  <p class="captive-status-copy">
+                    Signal {status?.signal != null ? `${status.signal}%` : "Unknown"}
+                  </p>
                 </div>
                 <div class="captive-stat-card">
                   <div class="captive-stat-row">
                     <strong>IP address</strong>
-                    <span>Unavailable</span>
+                    <span>{status?.ip ?? "Unavailable"}</span>
                   </div>
-                  <p class="captive-status-copy">Saved networks &mdash;</p>
+                  <p class="captive-status-copy">
+                    {saved ? `${saved.networks.length} saved network(s)` : "Saved networks —"}
+                  </p>
                 </div>
                 <div class="captive-stat-card">
                   <div class="captive-stat-row">
                     <strong>Setup AP</strong>
-                    <span>Offline</span>
+                    <span>{status ? "Available" : "Unknown"}</span>
                   </div>
                   <p class="captive-status-copy">SSID TeslaUSB</p>
                 </div>
@@ -124,14 +156,24 @@ export function CaptivePortal() {
                   </p>
                 </div>
               </div>
-              <div class="captive-empty" data-testid="captive-networks-empty">
-                <Icon name="search" class="captive-icon" />
-                <h3 class="captive-empty-title">No networks listed</h3>
-                <p class="captive-empty-copy">
-                  Live scanning will appear here once webd exposes the wifid
-                  status API. No networks can be listed in this build yet.
-                </p>
-              </div>
+              {networks && networks.networks.length > 0 ? (
+                <div class="captive-network-list" data-testid="captive-networks-list">
+                  {networks.networks.map((network) => (
+                    <div class="captive-network-item" key={network.ssid}>
+                      <strong>{network.ssid || "Hidden network"}</strong>
+                      <span>{network.signal}% · {network.security}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div class="captive-empty" data-testid="captive-networks-empty">
+                  <Icon name="search" class="captive-icon" />
+                  <h3 class="captive-empty-title">No networks listed</h3>
+                  <p class="captive-empty-copy">
+                    {loadError ?? "No networks were found by the Wi-Fi service."}
+                  </p>
+                </div>
+              )}
             </article>
           </div>
 
@@ -200,13 +242,24 @@ export function CaptivePortal() {
                   </p>
                 </div>
               </div>
-              <div class="captive-empty" data-testid="captive-saved-empty">
-                <Icon name="folder" class="captive-icon" />
-                <h3 class="captive-empty-title">No saved Wi-Fi profiles</h3>
-                <p class="captive-empty-copy">
-                  Profiles are stored after a successful connection.
-                </p>
-              </div>
+              {saved && saved.networks.length > 0 ? (
+                <div class="captive-network-list" data-testid="captive-saved-list">
+                  {saved.networks.map((network) => (
+                    <div class="captive-network-item" key={network.ssid}>
+                      <strong>{network.ssid}</strong>
+                      <span>{network.active ? "Connected" : "Saved"}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div class="captive-empty" data-testid="captive-saved-empty">
+                  <Icon name="folder" class="captive-icon" />
+                  <h3 class="captive-empty-title">No saved Wi-Fi profiles</h3>
+                  <p class="captive-empty-copy">
+                    Profiles are stored after a successful connection.
+                  </p>
+                </div>
+              )}
             </article>
           </div>
         </section>

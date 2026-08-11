@@ -349,7 +349,10 @@ impl RcloneUploadEngine<'_> {
             stop_renew.store(true, Ordering::Relaxed);
             result
         });
-        let lease_lost_reason = lease_lost_reason.lock().ok().and_then(|guard| guard.clone());
+        let lease_lost_reason = lease_lost_reason
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone());
         match transfer_result {
             Ok(mut verified) => {
                 verified.lease_lost_reason = lease_lost_reason;
@@ -490,11 +493,7 @@ impl RcloneUploadEngine<'_> {
         match self.queue_store.commit(item, &evidence) {
             Ok(()) => {}
             Err(err) if is_attempt_id_outcome_rejection(&err) => {
-                return self.fail(
-                    item,
-                    &format!("commit rejected: {}", err.reason),
-                    false,
-                );
+                return self.fail(item, &format!("commit rejected: {}", err.reason), false);
             }
             Err(err) => return Err(EngineError::Index(err)),
         }
@@ -596,7 +595,9 @@ mod tests {
         LeaseClient, LeaseGen, LeaseGrant, LeaseId, LeaseKind, ReleaseResult, RenewResult,
     };
     use crate::priority::UploadCategory;
-    use crate::queue::{CommitEvidence, QueueItem, QueueKey, QueueStore, UploadState, attempt_id_for};
+    use crate::queue::{
+        CommitEvidence, QueueItem, QueueKey, QueueStore, UploadState, attempt_id_for,
+    };
     use crate::source::{ArchiveItemId, ArchiveRoot};
     use crate::throttle::{
         LinkMode, PauseAction, PauseReason, StoragePressure, ThrottleSnapshot, ThrottleSource,
@@ -718,7 +719,10 @@ mod tests {
         }
 
         fn renew(&self, _lease_id: LeaseId, _gen_token: LeaseGen, _ttl_ms: i64) -> RenewResult {
-            let call = self.renew_calls.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+            let call = self
+                .renew_calls
+                .fetch_add(1, Ordering::Relaxed)
+                .saturating_add(1);
             if let Some((target, sleep_ms)) = self.sleep_ms_on_call {
                 if call == target {
                     std::thread::sleep(Duration::from_millis(sleep_ms));
@@ -730,8 +734,7 @@ mod tests {
                 }
             } else if self.always_unavailable || self.unavailable_on_call == Some(call) {
                 RenewResult::Unavailable {
-                    reason: "i/o error: Resource temporarily unavailable (os error 11)"
-                        .to_owned(),
+                    reason: "i/o error: Resource temporarily unavailable (os error 11)".to_owned(),
                 }
             } else {
                 RenewResult::Renewed {
@@ -1106,7 +1109,10 @@ mod tests {
             StepOutcome::Retry { reason, .. } => assert!(reason.contains("integrity")),
             other => panic!("expected retry, got {other:?}"),
         }
-        assert!(store.commits.borrow().is_empty(), "corrupt upload not committed");
+        assert!(
+            store.commits.borrow().is_empty(),
+            "corrupt upload not committed"
+        );
     }
 
     #[test]
@@ -1512,7 +1518,10 @@ mod tests {
             StepOutcome::Retry { reason, .. } => assert!(reason.contains("hashsum")),
             other => panic!("expected retry, got {other:?}"),
         }
-        assert!(store.commits.borrow().is_empty(), "missing hash does not commit");
+        assert!(
+            store.commits.borrow().is_empty(),
+            "missing hash does not commit"
+        );
     }
 
     #[test]
@@ -1547,7 +1556,11 @@ mod tests {
         assert!(matches!(outcome, StepOutcome::Uploaded { .. }));
         let calls = runner.calls.borrow();
         assert!(calls.iter().any(|args| args.contains(&"size".to_owned())));
-        assert!(!calls.iter().any(|args| args.contains(&"hashsum".to_owned())));
+        assert!(
+            !calls
+                .iter()
+                .any(|args| args.contains(&"hashsum".to_owned()))
+        );
         assert_eq!(
             store.commits.borrow().as_slice(),
             &[CommitEvidence {

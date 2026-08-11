@@ -117,7 +117,10 @@ pub(crate) fn routes() -> Router<AppState> {
             "/chime-scheduler/library/bulk-delete",
             post(bulk_delete_library),
         )
-        .route("/chime-scheduler/library/{filename}", delete(remove_library))
+        .route(
+            "/chime-scheduler/library/{filename}",
+            delete(remove_library),
+        )
         .route(
             "/chime-scheduler/library/{filename}/audio",
             get(serve_audio),
@@ -190,7 +193,8 @@ pub(crate) async fn rename_library(
     let src = resolve_library_file(&state, &req.from)?;
     let bytes = read_capped(&src).await?;
 
-    let root = std::fs::canonicalize(state.media.media_ro_root()).map_err(|_| ApiError::NotFound)?;
+    let root =
+        std::fs::canonicalize(state.media.media_ro_root()).map_err(|_| ApiError::NotFound)?;
     let dest_candidate = root.join(CHIMES_DIR).join(&req.to);
     if tokio::fs::metadata(&dest_candidate).await.is_ok() {
         return Err(ApiError::status(
@@ -224,11 +228,16 @@ pub(crate) async fn remove_library(
     }
     check_extension(&name, &["wav"])?;
     let rel_path = format!("{CHIMES_DIR}/{name}");
-    let result =
-        crate::route::run_remove(state.clone(), "chime_library_remove", PARTITION_MEDIA, rel_path)
-            .await?;
+    let result = crate::route::run_remove(
+        state.clone(),
+        "chime_library_remove",
+        PARTITION_MEDIA,
+        rel_path,
+    )
+    .await?;
     if params.cascade {
-        crate::chime_scheduler::remove_chime_references(&state, std::slice::from_ref(&name)).await?;
+        crate::chime_scheduler::remove_chime_references(&state, std::slice::from_ref(&name))
+            .await?;
     }
     Ok(result)
 }
@@ -296,7 +305,14 @@ pub(crate) async fn install_library_chime_as_active(
     let bytes = read_capped(&path).await?;
     crate::chimes::validate_lock_chime_wav(&bytes)
         .map_err(|msg| ApiError::status(StatusCode::UNPROCESSABLE_ENTITY, "invalid_wav", msg))?;
-    crate::route::run_install(state, kind, PARTITION_MEDIA, CHIME_REL_PATH.to_owned(), bytes).await
+    crate::route::run_install(
+        state,
+        kind,
+        PARTITION_MEDIA,
+        CHIME_REL_PATH.to_owned(),
+        bytes,
+    )
+    .await
 }
 
 /// `POST …/library/{filename}/activate`: install the named library chime as the
@@ -689,13 +705,17 @@ mod handler_tests {
         let scheduler_calls = fx.scheduler_calls.lock().unwrap().clone();
         assert_eq!(scheduler_calls.len(), 1);
         assert_eq!(scheduler_calls[0]["cmd"], "remove_chime_references");
-        assert_eq!(scheduler_calls[0]["filenames"], serde_json::json!(["Horn.wav"]));
+        assert_eq!(
+            scheduler_calls[0]["filenames"],
+            serde_json::json!(["Horn.wav"])
+        );
     }
 
     #[tokio::test]
     async fn remove_library_cascade_false_skips_scheduler() {
         let fx = fixture();
-        let (status, body) = delete_json(&fx.app, "/api/chimes/library/Horn.wav?cascade=false").await;
+        let (status, body) =
+            delete_json(&fx.app, "/api/chimes/library/Horn.wav?cascade=false").await;
         assert_eq!(status, StatusCode::ACCEPTED);
         assert_eq!(body["state"], "queued");
         assert!(fx.scheduler_calls.lock().unwrap().is_empty());
@@ -716,7 +736,10 @@ mod handler_tests {
         let scheduler_calls = fx.scheduler_calls.lock().unwrap().clone();
         assert_eq!(scheduler_calls.len(), 1);
         assert_eq!(scheduler_calls[0]["cmd"], "remove_chime_references");
-        assert_eq!(scheduler_calls[0]["filenames"], serde_json::json!(["A.wav", "B.wav"]));
+        assert_eq!(
+            scheduler_calls[0]["filenames"],
+            serde_json::json!(["A.wav", "B.wav"])
+        );
     }
 
     #[tokio::test]
@@ -734,6 +757,9 @@ mod handler_tests {
         // never the raw path-y request name, so the real reference is scrubbed.
         let scheduler_calls = fx.scheduler_calls.lock().unwrap().clone();
         assert_eq!(scheduler_calls.len(), 1);
-        assert_eq!(scheduler_calls[0]["filenames"], serde_json::json!(["Horn.wav"]));
+        assert_eq!(
+            scheduler_calls[0]["filenames"],
+            serde_json::json!(["Horn.wav"])
+        );
     }
 }

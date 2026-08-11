@@ -1,5 +1,7 @@
 //! Live Unix adapters for `uploadd` seams.
 
+/// Live read-only control socket (`get_status`) for `webd`.
+pub mod control;
 /// Live discover→enqueue producer and archive child hashing seam.
 pub mod enqueue;
 /// Live `indexd`-backed queue and lease adapters.

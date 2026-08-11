@@ -1,5 +1,7 @@
 //! indexd read-side queries for eviction and crash-recovery workflows.
 
+use std::collections::HashMap;
+
 use rusqlite::{Connection, params};
 
 use crate::db::{DbError, PROVEN_DURABLE_PROOF_SQL};
@@ -35,6 +37,28 @@ pub struct RecoveryRow {
     pub size_bytes: i64,
     /// Delete generation token (if present).
     pub delete_gen: Option<String>,
+}
+
+/// One stable exclusion-reason aggregate row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvictionExclusionReason {
+    /// Stable exclusion reason code.
+    pub reason: String,
+    /// Number of sampled rows carrying this reason.
+    pub count: i64,
+    /// Summed sampled bytes for this reason.
+    pub size_bytes: i64,
+}
+
+/// Bounded eviction exclusion report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvictionExclusionReport {
+    /// Number of sampled rows included before grouping.
+    pub sample_size: i64,
+    /// True when more rows existed than the sample limit.
+    pub sample_truncated: bool,
+    /// Stable grouped reason aggregates.
+    pub reasons: Vec<EvictionExclusionReason>,
 }
 
 /// List strict hard-delete allowlist candidates with value-tiered ordering:
@@ -138,13 +162,145 @@ pub fn list_recovery_rows(conn: &Connection) -> Result<Vec<RecoveryRow>, DbError
     Ok(out)
 }
 
+/// Build a bounded exclusion-reason report from the same server-side gates used
+/// by eviction claim/candidate selection, including the active-lease gate.
+///
+/// # Errors
+///
+/// Returns [`DbError`] if the query fails.
+pub fn eviction_exclusion_report(
+    conn: &Connection,
+    recency_floor_epoch: i64,
+    now_epoch: i64,
+    allow_undurable: bool,
+    boot_id: &str,
+    mono_now_ms: i64,
+    limit: u32,
+) -> Result<EvictionExclusionReport, DbError> {
+    let capped_u32 = limit.min(MAX_LIST_ROWS);
+    let capped = usize::try_from(capped_u32).unwrap_or(MAX_LIST_ROWS as usize);
+    let sql = format!(
+            "WITH classified AS (
+                 SELECT ai.id,
+                        MAX(CASE WHEN ai.size_bytes >= 0 THEN ai.size_bytes ELSE 0 END) AS size_bytes,
+                        CASE
+                          WHEN EXISTS (
+                                 SELECT 1 FROM leases l
+                                  WHERE l.archive_item_id = ai.id
+                                    AND l.boot_id = ?4
+                                    AND l.expires_mono_ms > ?5
+                               ) THEN 'lease_active'
+                          WHEN ai.delete_state <> 'LIVE' THEN 'not_live'
+                          WHEN ai.pinned <> 0 THEN 'pinned'
+                          WHEN ai.folder_class <> 'RecentClips' THEN 'item_not_recentclips'
+                          WHEN ai.suppress_until IS NOT NULL AND ai.suppress_until >= ?2 THEN 'suppressed'
+                          WHEN (?3 = 0 AND NOT ({PROVEN_DURABLE_PROOF_SQL})) THEN 'not_durable'
+                          WHEN COUNT(c.id) = 0 THEN 'no_linked_clip'
+                          WHEN MIN(CASE WHEN c.folder_class = 'RecentClips' THEN 1 ELSE 0 END) = 0 THEN 'linked_not_recentclips'
+                          WHEN MAX(c.is_sentry) = 1 THEN 'linked_sentry'
+                          WHEN MIN(CASE WHEN c.started_at > 0 THEN 1 ELSE 0 END) = 0 THEN 'missing_started_at'
+                          WHEN MAX(c.started_at) >= ?1 THEN 'too_recent'
+                          ELSE 'eligible'
+                        END AS reason,
+                        MIN(COALESCE(NULLIF(c.started_at, 0), 9223372036854775807)) AS oldest_started_at
+                   FROM archive_items ai
+                   LEFT JOIN archive_item_clips aic ON aic.archive_item_id = ai.id
+                   LEFT JOIN clips c ON c.id = aic.clip_id
+                  GROUP BY ai.id
+            )
+            SELECT id, reason, size_bytes
+              FROM classified
+             WHERE reason <> 'eligible'
+             ORDER BY
+               CASE reason
+                 WHEN 'lease_active' THEN 0
+                 WHEN 'not_live' THEN 1
+                 WHEN 'pinned' THEN 2
+                 WHEN 'item_not_recentclips' THEN 3
+                 WHEN 'suppressed' THEN 4
+                 WHEN 'not_durable' THEN 5
+                 WHEN 'no_linked_clip' THEN 6
+                 WHEN 'linked_not_recentclips' THEN 7
+                 WHEN 'linked_sentry' THEN 8
+                 WHEN 'missing_started_at' THEN 9
+                 WHEN 'too_recent' THEN 10
+                 ELSE 99
+               END ASC,
+               oldest_started_at ASC,
+               id ASC
+             LIMIT ?6"
+        );
+    let mut stmt = conn.prepare(&sql)?;
+    let sample_plus_one = i64::from(capped_u32.saturating_add(1));
+    let rows = stmt.query_map(
+        params![
+            recency_floor_epoch,
+            now_epoch,
+            i64::from(allow_undurable),
+            boot_id,
+            mono_now_ms,
+            sample_plus_one
+        ],
+        |row| Ok((row.get::<_, String>(1)?, row.get::<_, i64>(2)?)),
+    )?;
+    let mut sampled = Vec::new();
+    for row in rows {
+        sampled.push(row?);
+    }
+    let sample_truncated = sampled.len() > capped;
+    sampled.truncate(capped);
+    let sample_size = i64::try_from(sampled.len()).unwrap_or(i64::MAX);
+
+    let mut grouped: HashMap<String, EvictionExclusionReason> = HashMap::new();
+    for (reason, size_bytes) in sampled {
+        let entry = grouped
+            .entry(reason.clone())
+            .or_insert(EvictionExclusionReason {
+                reason,
+                count: 0,
+                size_bytes: 0,
+            });
+        entry.count = entry.count.saturating_add(1);
+        entry.size_bytes = entry.size_bytes.saturating_add(size_bytes.max(0));
+    }
+
+    let stable_order = [
+        "lease_active",
+        "not_live",
+        "pinned",
+        "item_not_recentclips",
+        "suppressed",
+        "not_durable",
+        "no_linked_clip",
+        "linked_not_recentclips",
+        "linked_sentry",
+        "missing_started_at",
+        "too_recent",
+    ];
+    let mut reasons = Vec::new();
+    for reason in stable_order {
+        if let Some(item) = grouped.remove(reason) {
+            reasons.push(item);
+        }
+    }
+    let mut remaining = grouped.into_values().collect::<Vec<_>>();
+    remaining.sort_by(|a, b| a.reason.cmp(&b.reason));
+    reasons.extend(remaining);
+
+    Ok(EvictionExclusionReport {
+        sample_size,
+        sample_truncated,
+        reasons,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
     use rusqlite::{Connection, params};
 
-    use super::{list_eviction_candidates, list_recovery_rows};
+    use super::{eviction_exclusion_report, list_eviction_candidates, list_recovery_rows};
     use crate::db::open_in_memory;
 
     #[derive(Debug, Clone)]
@@ -1685,6 +1841,135 @@ mod tests {
         let rows = list_eviction_candidates(&conn, recency_floor, now, false, 100).expect("query");
         let ids: Vec<i64> = rows.iter().map(|row| row.id).collect();
         assert_eq!(ids, vec![outside_grace]);
+    }
+
+    #[test]
+    fn eviction_exclusion_report_includes_lease_gate_and_stable_reasons() {
+        let conn = open_in_memory().expect("open db");
+        let lease_active = insert_archive_item_unlinked(
+            &conn,
+            &ArchiveSeed {
+                folder_class: "RecentClips",
+                path: "archive/lease-active",
+                size_bytes: 100,
+                archived_at: 100,
+                delete_state: "LIVE",
+                durable: 1,
+                pinned: 0,
+                suppress_until: None,
+                delete_gen: None,
+            },
+        );
+        let _ = insert_linked_clip(&conn, lease_active, "clip:lease-active", 100, "RecentClips");
+        conn.execute(
+            "INSERT INTO leases
+                (archive_item_id, kind, holder, gen, boot_id, expires_mono_ms)
+             VALUES (?1, 'playback', 'webd:test', 'lease-gen', ?2, ?3)",
+            params![lease_active, "boot-lease", 5_000i64],
+        )
+        .expect("insert active lease");
+
+        let not_live = insert_archive_item_unlinked(
+            &conn,
+            &ArchiveSeed {
+                folder_class: "RecentClips",
+                path: "archive/not-live",
+                size_bytes: 200,
+                archived_at: 100,
+                delete_state: "DELETE_CLAIMED",
+                durable: 1,
+                pinned: 0,
+                suppress_until: None,
+                delete_gen: Some("g"),
+            },
+        );
+        let _ = insert_linked_clip(&conn, not_live, "clip:not-live", 100, "RecentClips");
+
+        let pinned = insert_archive_item_unlinked(
+            &conn,
+            &ArchiveSeed {
+                folder_class: "RecentClips",
+                path: "archive/pinned",
+                size_bytes: 300,
+                archived_at: 100,
+                delete_state: "LIVE",
+                durable: 1,
+                pinned: 1,
+                suppress_until: None,
+                delete_gen: None,
+            },
+        );
+        let _ = insert_linked_clip(&conn, pinned, "clip:pinned", 100, "RecentClips");
+
+        let too_recent = insert_archive_item_unlinked(
+            &conn,
+            &ArchiveSeed {
+                folder_class: "RecentClips",
+                path: "archive/too-recent",
+                size_bytes: 400,
+                archived_at: 100,
+                delete_state: "LIVE",
+                durable: 1,
+                pinned: 0,
+                suppress_until: None,
+                delete_gen: None,
+            },
+        );
+        let _ = insert_linked_clip(&conn, too_recent, "clip:too-recent", 950, "RecentClips");
+
+        let report = eviction_exclusion_report(&conn, 900, 1_000, false, "boot-lease", 100, 256)
+            .expect("exclusion report");
+        assert_eq!(report.sample_size, 4);
+        assert!(!report.sample_truncated);
+        assert_eq!(
+            report
+                .reasons
+                .iter()
+                .map(|reason| reason.reason.as_str())
+                .collect::<Vec<_>>(),
+            vec!["lease_active", "not_live", "pinned", "too_recent"]
+        );
+        assert_eq!(
+            report
+                .reasons
+                .iter()
+                .map(|reason| (reason.count, reason.size_bytes))
+                .collect::<Vec<_>>(),
+            vec![(1, 100), (1, 200), (1, 300), (1, 400)]
+        );
+    }
+
+    #[test]
+    fn eviction_exclusion_report_respects_allow_undurable_gate() {
+        let conn = open_in_memory().expect("open db");
+        let undurable = insert_archive_item_unlinked(
+            &conn,
+            &ArchiveSeed {
+                folder_class: "RecentClips",
+                path: "archive/undurable",
+                size_bytes: 777,
+                archived_at: 100,
+                delete_state: "LIVE",
+                durable: 0,
+                pinned: 0,
+                suppress_until: None,
+                delete_gen: None,
+            },
+        );
+        let _ = insert_linked_clip(&conn, undurable, "clip:undurable", 100, "RecentClips");
+
+        let denied = eviction_exclusion_report(&conn, 900, 1_000, false, "boot-none", 0, 256)
+            .expect("denied report");
+        assert_eq!(denied.sample_size, 1);
+        assert_eq!(denied.reasons.len(), 1);
+        assert_eq!(denied.reasons[0].reason, "not_durable");
+        assert_eq!(denied.reasons[0].count, 1);
+        assert_eq!(denied.reasons[0].size_bytes, 777);
+
+        let allowed = eviction_exclusion_report(&conn, 900, 1_000, true, "boot-none", 0, 256)
+            .expect("allowed report");
+        assert_eq!(allowed.sample_size, 0);
+        assert!(allowed.reasons.is_empty());
     }
 
     #[test]

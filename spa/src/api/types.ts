@@ -213,12 +213,26 @@ export interface RetentionCleanupHistoryEntry {
   bytes_freed: number;
 }
 
+export interface RetentionExclusionReason {
+  reason: string;
+  count: number;
+  size_bytes: number;
+}
+
+export interface RetentionExclusionReport {
+  sample_limit: number;
+  sample_size: number;
+  sample_truncated: boolean;
+  reasons: RetentionExclusionReason[];
+}
+
 export interface RetentionStatusResponse {
   governor: Record<string, unknown> | null;
   candidate_count: number | null;
   candidate_count_truncated: boolean;
   estimated_reclaimable_bytes: number | null;
   estimated_reclaimable_bytes_truncated: boolean;
+  exclusion_report?: RetentionExclusionReport | null;
   recent_cleanup: RetentionCleanupHistoryEntry[] | null;
   recent_cleanup_truncated: boolean;
   cloud_durability_required: boolean;

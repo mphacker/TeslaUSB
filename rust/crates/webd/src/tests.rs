@@ -1710,7 +1710,10 @@ async fn cloud_failed_upload_retry_rejects_missing_origin_without_forwarding() {
             "idempotencyKey": "idem-retry-0001",
             "requestHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         }),
-        &[("host", "cybertruckusb.local"), ("sec-fetch-site", "same-origin")],
+        &[
+            ("host", "cybertruckusb.local"),
+            ("sec-fetch-site", "same-origin"),
+        ],
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -2143,6 +2146,7 @@ async fn retention_status_reports_candidate_bytes_and_disclosure() {
     assert_eq!(body["candidate_count_truncated"], false);
     assert_eq!(body["estimated_reclaimable_bytes"], 3072);
     assert_eq!(body["estimated_reclaimable_bytes_truncated"], false);
+    assert_eq!(body["exclusion_report"], Value::Null);
     assert_eq!(body["cloud_durability_required"], false);
     assert_eq!(
         body["cloud_durability_disclosure"],
@@ -2218,6 +2222,99 @@ async fn retention_status_reads_bounded_recent_cleanup_history() {
     assert_eq!(body["recent_cleanup"][1]["at"], 1_700_000_050);
     assert_eq!(body["recent_cleanup"][1]["items"], 1);
     assert_eq!(body["recent_cleanup"][1]["bytes_freed"], 128);
+}
+
+#[tokio::test]
+async fn retention_status_reports_exclusion_reasons() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_secs() as i64)
+        .unwrap_or(1_700_000_000);
+    let governor = json!({
+        "schema": 1,
+        "updated_at": now,
+        "uploads_allowed": true,
+        "seq": 1,
+        "interval_secs": 20,
+        "publisher_instance": "abcd",
+        "mode": "armed",
+        "drain_only": false,
+        "free_bytes": 50,
+        "total_bytes": 100,
+        "target_free_frac": 0.08,
+        "target_exit_frac": 0.10,
+        "recency_floor_secs": 3600,
+        "last_stop": "already_healthy",
+        "last_bytes_freed": 0,
+        "last_items": 0
+    });
+    let fx = retention_settings_fixture(
+        json!({
+            "status": "eviction_exclusion_report",
+            "sample_size": 2,
+            "sample_truncated": false,
+            "reasons": [
+                { "reason": "too_recent", "count": 1, "size_bytes": 200 },
+                { "reason": "pinned", "count": 1, "size_bytes": 100 }
+            ]
+        }),
+        false,
+        Some(governor.to_string()),
+    );
+    let conn = Connection::open(fx._dir.path().join("catalog.db")).unwrap();
+    conn.execute(
+        "INSERT INTO archive_items
+         (id, folder_class, path, size_bytes, file_count, archived_at, delete_state, bytes_freed, durable, pinned, user_disposable, has_event_json, has_geo, sentry_flood, created_at, updated_at)
+         VALUES (?1, 'RecentClips', ?2, 100, 1, 1, 'LIVE', NULL, 0, 1, 0, 0, 0, 0, 1, 1)",
+        params![501i64, "archive/pinned"],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO archive_items
+         (id, folder_class, path, size_bytes, file_count, archived_at, delete_state, bytes_freed, durable, pinned, user_disposable, has_event_json, has_geo, sentry_flood, created_at, updated_at)
+         VALUES (?1, 'RecentClips', ?2, 200, 1, 1, 'LIVE', NULL, 0, 0, 0, 0, 0, 0, 1, 1)",
+        params![502i64, "archive/too-recent"],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO clips
+         (id, canonical_key, started_at, ended_at, partition, folder_class, is_sentry, duration_s, availability, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, 'p1', 'RecentClips', 0, 60.0, 'present', 1, 1)",
+        params![601i64, "clip-pinned", now - 7_200, now - 7_140],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO clips
+         (id, canonical_key, started_at, ended_at, partition, folder_class, is_sentry, duration_s, availability, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, 'p1', 'RecentClips', 0, 60.0, 'present', 1, 1)",
+        params![602i64, "clip-too-recent", now - 120, now - 60],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO archive_item_clips (archive_item_id, clip_id) VALUES (?1, ?2)",
+        params![501i64, 601i64],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO archive_item_clips (archive_item_id, clip_id) VALUES (?1, ?2)",
+        params![502i64, 602i64],
+    )
+    .unwrap();
+
+    let (status, body) = get_json(&fx.app, "/api/retention/status").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["exclusion_report"],
+        json!({
+            "sample_limit": 256,
+            "sample_size": 2,
+            "sample_truncated": false,
+            "reasons": [
+                { "reason": "too_recent", "count": 1, "size_bytes": 200 },
+                { "reason": "pinned", "count": 1, "size_bytes": 100 }
+            ]
+        })
+    );
 }
 
 #[tokio::test]
@@ -4722,7 +4819,11 @@ fn canonical_failed_upload_retry_hash_for_test(
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"teslausb.cloud_failed_upload_retry.v1\0");
-    append_retry_hash_field(&mut hasher, b"archive_item_id", &archive_item_id.to_string());
+    append_retry_hash_field(
+        &mut hasher,
+        b"archive_item_id",
+        &archive_item_id.to_string(),
+    );
     append_retry_hash_field(&mut hasher, b"child_key", child_key);
     append_retry_hash_field(
         &mut hasher,

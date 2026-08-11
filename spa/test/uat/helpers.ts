@@ -125,6 +125,7 @@ export const test = base.extend<{ probe: Probe }>({
           candidate_count_truncated: false,
           estimated_reclaimable_bytes: 0,
           estimated_reclaimable_bytes_truncated: false,
+          exclusion_report: null,
           recent_cleanup: [],
           recent_cleanup_truncated: false,
           cloud_durability_required: false,

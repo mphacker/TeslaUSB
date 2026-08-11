@@ -136,6 +136,15 @@ const RETENTION_STATUS_FIXTURE = {
   candidate_count_truncated: false,
   estimated_reclaimable_bytes: 6 * GIB,
   estimated_reclaimable_bytes_truncated: false,
+  exclusion_report: {
+    sample_limit: 256,
+    sample_size: 6,
+    sample_truncated: false,
+    reasons: [
+      { reason: "too_recent", count: 5, size_bytes: 5 * GIB },
+      { reason: "pinned", count: 1, size_bytes: 512 * MIB },
+    ],
+  },
   recent_cleanup: [
     { at: 1700000040, items: 2, bytes_freed: 2 * GIB },
     { at: 1700000000, items: 1, bytes_freed: 1 * GIB },
@@ -352,6 +361,12 @@ test.describe("storage health UAT", () => {
     await expect(page.locator('[data-testid="retention-reclaimable-bytes"]')).toContainText(
       "6.0 GB",
     );
+    await expect(page.locator('[data-testid="retention-exclusions-list"]')).toBeVisible();
+    await expect(page.locator('[data-testid="retention-exclusions-entry"]')).toHaveCount(2);
+    await expect(page.locator('[data-testid="retention-exclusions-entry"]')).toContainText([
+      "Inside protection window: 5 clips",
+      "Pinned: 1 clip",
+    ]);
     await expect(page.locator('[data-testid="retention-history-list"]')).toBeVisible();
     await expect(page.locator('[data-testid="retention-history-entry"]')).toHaveCount(2);
     await expect(page.locator('[data-testid="retention-cloud-disclosure"]')).toContainText(

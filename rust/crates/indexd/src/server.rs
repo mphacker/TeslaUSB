@@ -36,7 +36,7 @@ use crate::db::mutations::{
     BootContext, has_unexpired_lease, mark_deleted, mark_deleting, quarantine,
     release_delete_claim, set_pref,
 };
-use crate::db::reads::{list_eviction_candidates, list_recovery_rows};
+use crate::db::reads::{eviction_exclusion_report, list_eviction_candidates, list_recovery_rows};
 use crate::db::{DbError, now_epoch_s};
 use crate::model::FolderClass;
 use crate::proto::{
@@ -44,9 +44,9 @@ use crate::proto::{
     CloudFinalizeParentUploadResponse, CloudHistoryRowWire, CloudPendingUploadSetWire,
     CloudPrepareParentUploadChildWire, CloudPrepareParentUploadRequest,
     CloudPrepareParentUploadResponse, CloudQueueRetryResolutionWire, CloudQueueRowWire,
-    CloudQueueUpsertWire, EvictionCandidateWire, FinalizeEventArchiveRequest,
-    FinalizeEventArchiveResponse, MAX_REQUEST_FRAME, RecoveryRowWire, RegisterArchivedClip,
-    Request, Response, read_request, write_response,
+    CloudQueueUpsertWire, EvictionCandidateWire, EvictionExclusionReasonWire,
+    FinalizeEventArchiveRequest, FinalizeEventArchiveResponse, MAX_REQUEST_FRAME, RecoveryRowWire,
+    RegisterArchivedClip, Request, Response, read_request, write_response,
 };
 
 /// Start the indexd registration server thread.
@@ -182,6 +182,24 @@ fn handle_connection(
                 limit,
             ) {
                 Ok(items) => Response::EvictionCandidates { items },
+                Err(message) => Response::Error { message },
+            },
+            Request::ListEvictionExclusionReport {
+                recency_floor_epoch,
+                allow_undurable,
+                limit,
+            } => match handle_list_eviction_exclusion_report(
+                conn,
+                boot,
+                recency_floor_epoch,
+                allow_undurable,
+                limit,
+            ) {
+                Ok((sample_size, sample_truncated, reasons)) => Response::EvictionExclusionReport {
+                    sample_size,
+                    sample_truncated,
+                    reasons,
+                },
                 Err(message) => Response::Error { message },
             },
             Request::ListRecoveryRows {} => match handle_list_recovery_rows(conn) {
@@ -591,6 +609,43 @@ fn handle_list_recovery_rows(
             delete_gen: row.delete_gen,
         })
         .collect())
+}
+
+fn handle_list_eviction_exclusion_report(
+    conn: &Arc<Mutex<Connection>>,
+    boot: &Arc<BootContext>,
+    recency_floor_epoch: i64,
+    allow_undurable: bool,
+    limit: u32,
+) -> Result<(i64, bool, Vec<EvictionExclusionReasonWire>), String> {
+    let now_epoch = now_epoch_s();
+    let mono_now_ms = boot.mono_now_ms();
+    let locked = conn
+        .lock()
+        .map_err(|_| "index database mutex is poisoned".to_owned())?;
+    let report = eviction_exclusion_report(
+        &locked,
+        recency_floor_epoch,
+        now_epoch,
+        allow_undurable,
+        boot.boot_id(),
+        mono_now_ms,
+        limit,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok((
+        report.sample_size,
+        report.sample_truncated,
+        report
+            .reasons
+            .into_iter()
+            .map(|reason| EvictionExclusionReasonWire {
+                reason: reason.reason,
+                count: reason.count,
+                size_bytes: reason.size_bytes,
+            })
+            .collect(),
+    ))
 }
 
 fn map_db_error(error: DbError) -> HandlerError {
@@ -5375,6 +5430,59 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn socket_exclusion_report_roundtrip_includes_lease_gate() {
+        let conn = open_in_memory().expect("open db");
+        let leased_id = insert_archive_item(
+            &conn,
+            "archive/recent/leased-report",
+            "RecentClips",
+            100,
+            1,
+            0,
+        );
+        {
+            let boot = BootContext::new();
+            conn.execute(
+                "INSERT INTO leases
+                    (archive_item_id, kind, holder, gen, boot_id, expires_mono_ms)
+                 VALUES (?1, 'playback', 'webd:test', 'lease-gen', ?2, ?3)",
+                params![leased_id, boot.boot_id(), boot.mono_now_ms() + 120_000],
+            )
+            .expect("insert lease");
+            let conn = Arc::new(Mutex::new(conn));
+            let boot = Arc::new(boot);
+            let dir = new_temp_dir();
+            let socket_path = dir.join("indexd.sock");
+            let _server = spawn(&conn, &boot, &socket_path, Duration::from_secs(2))
+                .expect("spawn indexd server");
+
+            let report = send(
+                &socket_path,
+                &Request::ListEvictionExclusionReport {
+                    recency_floor_epoch: 500,
+                    allow_undurable: false,
+                    limit: 256,
+                },
+            );
+            let Response::EvictionExclusionReport {
+                sample_size,
+                sample_truncated,
+                reasons,
+            } = report
+            else {
+                panic!("unexpected response for exclusion report");
+            };
+            assert_eq!(sample_size, 1);
+            assert!(!sample_truncated);
+            assert_eq!(reasons.len(), 1);
+            assert_eq!(reasons[0].reason, "lease_active");
+            assert_eq!(reasons[0].count, 1);
+            assert_eq!(reasons[0].size_bytes, 100);
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[test]

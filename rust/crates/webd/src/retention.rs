@@ -20,6 +20,7 @@ struct RetentionStatus {
     candidate_count_truncated: bool,
     estimated_reclaimable_bytes: Option<i64>,
     estimated_reclaimable_bytes_truncated: bool,
+    exclusion_report: Option<ExclusionReport>,
     recent_cleanup: Option<Vec<CleanupHistoryEntry>>,
     recent_cleanup_truncated: bool,
     cloud_durability_required: bool,
@@ -59,26 +60,61 @@ struct CandidateSummary {
     estimated_reclaimable_bytes: i64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct ExclusionReport {
+    // Lease-protected rows are claim-blocked even when they appear in the
+    // read-only candidate list, so the report describes both eligibility and
+    // the final claim gate.
+    sample_limit: u32,
+    sample_size: i64,
+    sample_truncated: bool,
+    reasons: Vec<ExclusionReasonSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ExclusionReasonSummary {
+    reason: String,
+    count: i64,
+    size_bytes: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EligibilityArgs {
+    recency_floor_epoch: i64,
+    allow_undurable: bool,
+}
+
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/retention/status", get(status))
         .route("/retention/preview", get(preview))
 }
 
-fn candidate_request(
-    indexd: &dyn crate::indexd_client::IndexdClient,
-    governor: &serde_json::Value,
-    limit: u32,
-) -> Option<serde_json::Value> {
+fn eligibility_args(governor: &serde_json::Value) -> Option<EligibilityArgs> {
     let floor_secs = governor.get("recency_floor_secs")?.as_i64()?;
     let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
-    let floor = i64::try_from(now).ok()?.saturating_sub(floor_secs);
-    let allow_undurable = governor.get("mode").and_then(|mode| mode.as_str()) == Some("armed");
+    let now_epoch = i64::try_from(now).ok()?;
+    let recency_floor_epoch = now_epoch.saturating_sub(floor_secs);
+    let allow_undurable = matches!(
+        governor.get("mode").and_then(|mode| mode.as_str()),
+        Some("armed" | "dryrun")
+    );
+    Some(EligibilityArgs {
+        recency_floor_epoch,
+        allow_undurable,
+    })
+}
+
+fn candidate_request(
+    indexd: &dyn crate::indexd_client::IndexdClient,
+    eligibility: EligibilityArgs,
+    limit: u32,
+) -> Option<serde_json::Value> {
     indexd
         .call(json!({
             "cmd": "list_eviction_candidates",
-            "recency_floor_epoch": floor,
-            "allow_undurable": allow_undurable,
+            "recency_floor_epoch": eligibility.recency_floor_epoch,
+            "allow_undurable": eligibility.allow_undurable,
             "limit": limit
         }))
         .ok()
@@ -147,6 +183,48 @@ fn cleanup_history(
     Some((rows, truncated))
 }
 
+fn exclusion_report_request(
+    indexd: &dyn crate::indexd_client::IndexdClient,
+    eligibility: EligibilityArgs,
+    limit: u32,
+) -> Option<ExclusionReport> {
+    let response = indexd
+        .call(json!({
+            "cmd": "list_eviction_exclusion_report",
+            "recency_floor_epoch": eligibility.recency_floor_epoch,
+            "allow_undurable": eligibility.allow_undurable,
+            "limit": limit,
+        }))
+        .ok()?;
+    if response.get("status").and_then(|value| value.as_str()) != Some("eviction_exclusion_report")
+    {
+        return None;
+    }
+    let sample_size = response.get("sample_size")?.as_i64()?;
+    if sample_size < 0 {
+        return None;
+    }
+    let sample_truncated = response.get("sample_truncated")?.as_bool()?;
+    let reasons = response
+        .get("reasons")?
+        .as_array()?
+        .iter()
+        .map(|reason| {
+            Some(ExclusionReasonSummary {
+                reason: reason.get("reason")?.as_str()?.to_owned(),
+                count: reason.get("count")?.as_i64()?,
+                size_bytes: reason.get("size_bytes")?.as_i64()?,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(ExclusionReport {
+        sample_limit: limit,
+        sample_size,
+        sample_truncated,
+        reasons,
+    })
+}
+
 async fn status(State(state): State<AppState>) -> Json<RetentionStatus> {
     let sys = state.sys;
     let governor = tokio::task::spawn_blocking(move || {
@@ -155,11 +233,26 @@ async fn status(State(state): State<AppState>) -> Json<RetentionStatus> {
     .await
     .ok()
     .flatten();
-    let governor_for_count = governor.clone();
+    let governor_for_exclusions = governor.clone();
     let indexd = state.indexd;
+    let indexd_for_exclusions = indexd.clone();
+    let exclusions = tokio::task::spawn_blocking(move || {
+        let governor = governor_for_exclusions.as_ref()?;
+        let eligibility = eligibility_args(governor)?;
+        exclusion_report_request(
+            indexd_for_exclusions.as_ref(),
+            eligibility,
+            CANDIDATE_SAMPLE_LIMIT,
+        )
+    })
+    .await
+    .ok()
+    .flatten();
+    let governor_for_count = governor.clone();
     let candidate = tokio::task::spawn_blocking(move || {
         let governor = governor_for_count.as_ref()?;
-        let response = candidate_request(indexd.as_ref(), governor, CANDIDATE_SAMPLE_LIMIT)?;
+        let eligibility = eligibility_args(governor)?;
+        let response = candidate_request(indexd.as_ref(), eligibility, CANDIDATE_SAMPLE_LIMIT)?;
         summarize_candidates(&response, CANDIDATE_SAMPLE_LIMIT)
     })
     .await
@@ -186,6 +279,7 @@ async fn status(State(state): State<AppState>) -> Json<RetentionStatus> {
             .as_ref()
             .map(|summary| summary.count_truncated)
             .unwrap_or(false),
+        exclusion_report: exclusions,
         recent_cleanup: recent_cleanup.as_ref().map(|(rows, _)| rows.clone()),
         recent_cleanup_truncated: recent_cleanup
             .as_ref()
@@ -211,7 +305,8 @@ async fn preview(
     let indexd = state.indexd;
     let result = tokio::task::spawn_blocking(move || {
         let governor = governor.as_ref()?;
-        let response = candidate_request(indexd.as_ref(), governor, limit)?;
+        let eligibility = eligibility_args(governor)?;
+        let response = candidate_request(indexd.as_ref(), eligibility, limit)?;
         let items = response.get("items")?.as_array()?;
         Some(
             items

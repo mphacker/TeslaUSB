@@ -72,6 +72,16 @@ pub enum Request {
         /// Max rows requested.
         limit: u32,
     },
+    /// Summarize exclusion reasons from a bounded eviction-eligibility sample.
+    ListEvictionExclusionReport {
+        /// Items newer than or equal to this floor are ineligible.
+        recency_floor_epoch: i64,
+        /// Opt-in: include rows that are not cloud-durable.
+        #[serde(default)]
+        allow_undurable: bool,
+        /// Max rows requested.
+        limit: u32,
+    },
     /// List rows that need delete-state crash recovery.
     ListRecoveryRows {},
     /// Paginated cloud upload candidates.
@@ -288,6 +298,17 @@ pub struct EvictionCandidateWire {
     pub archived_at: i64,
     /// Source folder class.
     pub folder_class: String,
+}
+
+/// One exclusion-reason aggregate row over the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvictionExclusionReasonWire {
+    /// Stable reason code.
+    pub reason: String,
+    /// Number of sampled archive items with this exclusion reason.
+    pub count: i64,
+    /// Summed bytes across sampled items for this reason.
+    pub size_bytes: i64,
 }
 
 /// One delete-state recovery row over the wire.
@@ -706,6 +727,15 @@ pub enum Response {
         /// Candidate rows.
         items: Vec<EvictionCandidateWire>,
     },
+    /// Bounded exclusion-report query result.
+    EvictionExclusionReport {
+        /// Number of sampled rows included before grouping.
+        sample_size: i64,
+        /// True when more rows existed than the requested sample limit.
+        sample_truncated: bool,
+        /// Stable exclusion-reason aggregates.
+        reasons: Vec<EvictionExclusionReasonWire>,
+    },
     /// Delete-state recovery rows query result.
     RecoveryRows {
         /// Rows needing recovery.
@@ -930,10 +960,10 @@ mod tests {
         CloudPendingUploadSetWire, CloudPrepareParentUploadChildWire,
         CloudPrepareParentUploadRequest, CloudPrepareParentUploadResponse, CloudQueuePkWire,
         CloudQueueRetryResolutionWire, CloudQueueRowWire, CloudQueueUpsertWire,
-        EvictionCandidateWire, FinalizeEventArchiveAngleWire, FinalizeEventArchiveClipWire,
-        FinalizeEventArchiveRequest, FinalizeEventArchiveResponse, FinalizeEventArchiveSegmentWire,
-        MAX_REQUEST_FRAME, RecoveryRowWire, RegisterArchivedClip, Request, Response, read_frame,
-        read_request, write_frame, write_response,
+        EvictionCandidateWire, EvictionExclusionReasonWire, FinalizeEventArchiveAngleWire,
+        FinalizeEventArchiveClipWire, FinalizeEventArchiveRequest, FinalizeEventArchiveResponse,
+        FinalizeEventArchiveSegmentWire, MAX_REQUEST_FRAME, RecoveryRowWire, RegisterArchivedClip,
+        Request, Response, read_frame, read_request, write_frame, write_response,
     };
 
     #[test]
@@ -1110,6 +1140,14 @@ mod tests {
             (
                 "list_eviction_candidates",
                 Request::ListEvictionCandidates {
+                    recency_floor_epoch: 1_700_000_000,
+                    allow_undurable: false,
+                    limit: 100,
+                },
+            ),
+            (
+                "list_eviction_exclusion_report",
+                Request::ListEvictionExclusionReport {
                     recency_floor_epoch: 1_700_000_000,
                     allow_undurable: false,
                     limit: 100,
@@ -1395,6 +1433,18 @@ mod tests {
                         size_bytes: 1_024,
                         archived_at: 1_700_000_000,
                         folder_class: "RecentClips".to_owned(),
+                    }],
+                },
+            ),
+            (
+                "eviction_exclusion_report",
+                Response::EvictionExclusionReport {
+                    sample_size: 2,
+                    sample_truncated: false,
+                    reasons: vec![EvictionExclusionReasonWire {
+                        reason: "too_recent".to_owned(),
+                        count: 2,
+                        size_bytes: 2_048,
                     }],
                 },
             ),

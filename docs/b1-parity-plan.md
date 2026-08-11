@@ -110,7 +110,13 @@ bounded eviction-candidate view used by retentiond, reports estimated
 reclaimable bytes, and includes bounded recent cleanup/freed-byte history from
 persisted catalog rows when present. The Storage diagnostics card now renders
 that operator-facing retention report (including explicit cloud-durability
-disclosure) without enabling policy edits or cleanup execution. A read-only
+disclosure) without enabling policy edits or cleanup execution. The same status
+response now also includes an additive optional `exclusion_report` (for example
+`too_recent`, `pinned`, `linked_sentry`, `lease_active`) produced by an indexd
+classifier over a bounded sample, derived from the same server-side eligibility
+and claim gates used by retention/indexd candidate selection. An active lease is
+reported as claim-blocked even if the row appears in the read-only candidate
+list. A read-only
 `GET /api/retention/preview?limit=` continues to return a capped, redacted
 candidate summary. Policy editing and deletion execution remain pending.
 
@@ -134,9 +140,9 @@ candidate summary. Policy editing and deletion execution remain pending.
 **Dependencies:** Workstream 0; existing retention and indexd delete code;
 cloud semantics from Workstream 1 if cloud-gated deletion is approved.
 
-**Next safe slice:** add read-only retention exclusion-reason visibility (why a
-clip is protected/filtered out) aligned with the same server-side eligibility
-predicate, without exposing delete execution.
+**Next safe slice:** add a read-only retention policy snapshot endpoint (mode +
+caps/floor + source) so operators can see effective thresholds without enabling
+edits or execution.
 
 **Acceptance**
 

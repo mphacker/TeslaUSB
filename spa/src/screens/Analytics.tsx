@@ -114,6 +114,20 @@ const GOV_STOP_LABEL: Record<string, string> = {
   stat_check_failed: "disk re-check failed",
 };
 
+const RETENTION_EXCLUSION_LABEL: Record<string, string> = {
+  lease_active: "Blocked by active lease",
+  not_live: "Not live",
+  not_durable: "Not cloud-durable in dry-run mode",
+  pinned: "Pinned",
+  item_not_recentclips: "Not from RecentClips",
+  suppressed: "Manually suppressed",
+  no_linked_clip: "Missing clip linkage",
+  linked_not_recentclips: "Linked to non-RecentClips footage",
+  linked_sentry: "Contains Sentry footage",
+  missing_started_at: "Missing clip start time",
+  too_recent: "Inside protection window",
+};
+
 /** recency_floor_secs → "1 h" / "45 min" protection window. */
 function formatProtectWindow(secs: number | null | undefined): string {
   if (secs == null || !Number.isFinite(secs) || secs <= 0) return DASH;
@@ -921,6 +935,29 @@ export function Analytics() {
               ? `${retention.estimated_reclaimable_bytes_truncated ? "\u2265 " : ""}${humanBytesBinary(retention.estimated_reclaimable_bytes)}`
               : DASH}
           </p>
+          {retention?.exclusion_report == null ? (
+            <p class="storage-note" data-testid="retention-exclusions-unavailable">
+              Exclusion-reason report is unavailable.
+            </p>
+          ) : retention.exclusion_report.reasons.length === 0 ? (
+            <p class="storage-note" data-testid="retention-exclusions-empty">
+              No excluded archive items are currently reported.
+            </p>
+          ) : (
+            <div data-testid="retention-exclusions-list">
+              {retention.exclusion_report.reasons.map((entry) => (
+                <p class="storage-note" data-testid="retention-exclusions-entry" key={entry.reason}>
+                  {RETENTION_EXCLUSION_LABEL[entry.reason] ?? entry.reason}: {entry.count}{" "}
+                  {entry.count === 1 ? "clip" : "clips"} · {humanBytesBinary(entry.size_bytes)}
+                </p>
+              ))}
+              {retention.exclusion_report.sample_truncated && (
+                <p class="storage-note" data-testid="retention-exclusions-truncated">
+                  Showing the largest exclusion reasons only.
+                </p>
+              )}
+            </div>
+          )}
           {retention?.recent_cleanup == null ? (
             <p class="storage-note" data-testid="retention-history-unavailable">
               Recent cleanup history is unavailable.

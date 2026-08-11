@@ -226,12 +226,23 @@ export interface RetentionExclusionReport {
   reasons: RetentionExclusionReason[];
 }
 
+export interface RetentionOperatorSignal {
+  status: string;
+  free_frac: number | null;
+  target_exit_frac: number | null;
+  pressure_below_target_exit: boolean | null;
+  retention_non_progress: boolean | null;
+  no_eligible_candidates: boolean | null;
+  stop_indicates_no_progress: boolean | null;
+}
+
 export interface RetentionStatusResponse {
   governor: Record<string, unknown> | null;
   candidate_count: number | null;
   candidate_count_truncated: boolean;
   estimated_reclaimable_bytes: number | null;
   estimated_reclaimable_bytes_truncated: boolean;
+  operator_signal?: RetentionOperatorSignal | null;
   exclusion_report?: RetentionExclusionReport | null;
   recent_cleanup: RetentionCleanupHistoryEntry[] | null;
   recent_cleanup_truncated: boolean;

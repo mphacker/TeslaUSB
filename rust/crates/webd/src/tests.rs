@@ -2146,6 +2146,18 @@ async fn retention_status_reports_candidate_bytes_and_disclosure() {
     assert_eq!(body["candidate_count_truncated"], false);
     assert_eq!(body["estimated_reclaimable_bytes"], 3072);
     assert_eq!(body["estimated_reclaimable_bytes_truncated"], false);
+    assert_eq!(
+        body["operator_signal"],
+        json!({
+            "status": "ok",
+            "free_frac": 0.5,
+            "target_exit_frac": 0.10,
+            "pressure_below_target_exit": false,
+            "retention_non_progress": false,
+            "no_eligible_candidates": false,
+            "stop_indicates_no_progress": false
+        })
+    );
     assert_eq!(body["exclusion_report"], Value::Null);
     assert_eq!(body["cloud_durability_required"], false);
     assert_eq!(
@@ -2156,6 +2168,82 @@ async fn retention_status_reports_candidate_bytes_and_disclosure() {
     assert_eq!(req["cmd"], "list_eviction_candidates");
     assert_eq!(req["allow_undurable"], true);
     assert_eq!(req["limit"], 256);
+}
+
+#[tokio::test]
+async fn retention_status_warns_when_low_space_has_no_progress() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_secs() as i64)
+        .unwrap_or(1_700_000_000);
+    let governor = json!({
+        "schema": 1,
+        "updated_at": now,
+        "uploads_allowed": true,
+        "seq": 1,
+        "interval_secs": 20,
+        "publisher_instance": "abcd",
+        "mode": "armed",
+        "drain_only": false,
+        "free_bytes": 5,
+        "total_bytes": 100,
+        "target_free_frac": 0.08,
+        "target_exit_frac": 0.10,
+        "recency_floor_secs": 3600,
+        "last_stop": "no_safe_candidate",
+        "last_bytes_freed": 0,
+        "last_items": 0
+    });
+    let fx = retention_settings_fixture(
+        json!({
+            "status": "eviction_candidates",
+            "items": []
+        }),
+        false,
+        Some(governor.to_string()),
+    );
+
+    let (status, body) = get_json(&fx.app, "/api/retention/status").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["operator_signal"],
+        json!({
+            "status": "warning",
+            "free_frac": 0.05,
+            "target_exit_frac": 0.10,
+            "pressure_below_target_exit": true,
+            "retention_non_progress": true,
+            "no_eligible_candidates": true,
+            "stop_indicates_no_progress": true
+        })
+    );
+}
+
+#[tokio::test]
+async fn retention_status_marks_operator_signal_unavailable_without_governor() {
+    let fx = retention_settings_fixture(
+        json!({
+            "status": "eviction_candidates",
+            "items": []
+        }),
+        false,
+        None,
+    );
+
+    let (status, body) = get_json(&fx.app, "/api/retention/status").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["operator_signal"],
+        json!({
+            "status": "unavailable",
+            "free_frac": Value::Null,
+            "target_exit_frac": Value::Null,
+            "pressure_below_target_exit": Value::Null,
+            "retention_non_progress": Value::Null,
+            "no_eligible_candidates": Value::Null,
+            "stop_indicates_no_progress": Value::Null
+        })
+    );
 }
 
 #[tokio::test]

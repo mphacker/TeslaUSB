@@ -137,6 +137,15 @@ const RETENTION_STATUS_FIXTURE = {
   candidate_count_truncated: false,
   estimated_reclaimable_bytes: 6 * GIB,
   estimated_reclaimable_bytes_truncated: false,
+  operator_signal: {
+    status: "ok",
+    free_frac: 0.10638297872340426,
+    target_exit_frac: 0.1,
+    pressure_below_target_exit: false,
+    retention_non_progress: false,
+    no_eligible_candidates: false,
+    stop_indicates_no_progress: false,
+  },
   exclusion_report: {
     sample_limit: 256,
     sample_size: 6,
@@ -154,6 +163,42 @@ const RETENTION_STATUS_FIXTURE = {
   cloud_durability_required: false,
   cloud_durability_disclosure:
     "Armed local cleanup may delete footage before cloud upload confirmation.",
+};
+
+const RETENTION_STATUS_WARNING_FIXTURE = {
+  ...RETENTION_STATUS_FIXTURE,
+  governor: {
+    ...GOVERNOR_FIXTURE,
+    free_bytes: 20 * GIB,
+    last_stop: "no_safe_candidate",
+  },
+  candidate_count: 0,
+  estimated_reclaimable_bytes: 0,
+  operator_signal: {
+    status: "warning",
+    free_frac: 0.0425531914893617,
+    target_exit_frac: 0.1,
+    pressure_below_target_exit: true,
+    retention_non_progress: true,
+    no_eligible_candidates: true,
+    stop_indicates_no_progress: true,
+  },
+};
+
+const RETENTION_STATUS_SIGNAL_UNAVAILABLE_FIXTURE = {
+  ...RETENTION_STATUS_FIXTURE,
+  governor: null,
+  candidate_count: null,
+  estimated_reclaimable_bytes: null,
+  operator_signal: {
+    status: "unavailable",
+    free_frac: null,
+    target_exit_frac: null,
+    pressure_below_target_exit: null,
+    retention_non_progress: null,
+    no_eligible_candidates: null,
+    stop_indicates_no_progress: null,
+  },
 };
 
 const RETENTION_POLICY_FIXTURE = {
@@ -402,6 +447,69 @@ test.describe("storage health UAT", () => {
     await expect(page.locator('[data-testid="retention-history-entry"]')).toHaveCount(2);
     await expect(page.locator('[data-testid="retention-cloud-disclosure"]')).toContainText(
       "before cloud upload confirmation",
+    );
+    await expect(page.locator('[data-testid="retention-operator-warning"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="retention-operator-unavailable"]')).toHaveCount(0);
+
+    assertCleanConsole(probe);
+  });
+
+  test("renders low-space/no-progress operator warning without controls", async ({
+    page,
+    probe,
+  }) => {
+    await routeProbes(page);
+    const json = (body: unknown) => ({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(body),
+    });
+    await page.route("**/api/retention/status", (r) =>
+      r.fulfill(json(RETENTION_STATUS_WARNING_FIXTURE)),
+    );
+
+    await gotoStorage(page);
+    const details = page.locator("#storage-device-health");
+    await details.locator("summary").click();
+
+    await expect(page.locator('[data-testid="retention-operator-warning"]')).toBeVisible();
+    await expect(page.locator('[data-testid="retention-operator-warning"]')).toContainText(
+      "Low-space warning",
+    );
+    await expect(page.locator('[data-testid="retention-operator-warning"]')).toContainText(
+      "below the 10.0% target exit threshold",
+    );
+    await expect(page.locator('[data-testid="retention-operator-warning"]')).toContainText(
+      "no eligible clips",
+    );
+    await expect(page.locator('[data-testid="retention-operator-unavailable"]')).toHaveCount(0);
+    await expect(page.locator("[data-screen=storage-health] button")).toHaveCount(0);
+
+    assertCleanConsole(probe);
+  });
+
+  test("keeps operator signal degraded when diagnostics are unavailable", async ({
+    page,
+    probe,
+  }) => {
+    await routeProbes(page);
+    const json = (body: unknown) => ({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(body),
+    });
+    await page.route("**/api/retention/status", (r) =>
+      r.fulfill(json(RETENTION_STATUS_SIGNAL_UNAVAILABLE_FIXTURE)),
+    );
+
+    await gotoStorage(page);
+    const details = page.locator("#storage-device-health");
+    await details.locator("summary").click();
+
+    await expect(page.locator('[data-testid="retention-operator-warning"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="retention-operator-unavailable"]')).toBeVisible();
+    await expect(page.locator('[data-testid="retention-operator-unavailable"]')).toContainText(
+      "signal unavailable",
     );
 
     assertCleanConsole(probe);

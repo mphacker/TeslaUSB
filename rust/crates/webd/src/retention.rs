@@ -20,6 +20,7 @@ struct RetentionStatus {
     candidate_count_truncated: bool,
     estimated_reclaimable_bytes: Option<i64>,
     estimated_reclaimable_bytes_truncated: bool,
+    operator_signal: RetentionOperatorSignal,
     exclusion_report: Option<ExclusionReport>,
     recent_cleanup: Option<Vec<CleanupHistoryEntry>>,
     recent_cleanup_truncated: bool,
@@ -76,6 +77,17 @@ struct CandidateSummary {
     count: i64,
     count_truncated: bool,
     estimated_reclaimable_bytes: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RetentionOperatorSignal {
+    status: &'static str,
+    free_frac: Option<f64>,
+    target_exit_frac: Option<f64>,
+    pressure_below_target_exit: Option<bool>,
+    retention_non_progress: Option<bool>,
+    no_eligible_candidates: Option<bool>,
+    stop_indicates_no_progress: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -176,6 +188,77 @@ fn summarize_candidates(response: &serde_json::Value, limit: u32) -> Option<Cand
         count_truncated: items.len() >= limit as usize,
         estimated_reclaimable_bytes,
     })
+}
+
+fn stop_indicates_no_progress(last_stop: &str) -> Option<bool> {
+    match last_stop {
+        "no_safe_candidate" | "anomaly_refused" | "delete_failed" | "stat_check_failed"
+        | "shutdown" => Some(true),
+        "already_healthy" | "target_reached" | "byte_cap" | "count_cap" | "wall_cap" => Some(false),
+        _ => None,
+    }
+}
+
+fn operator_signal(
+    governor: Option<&serde_json::Value>,
+    candidate: Option<&CandidateSummary>,
+) -> RetentionOperatorSignal {
+    let governor = match governor {
+        Some(value) => value,
+        None => {
+            return RetentionOperatorSignal {
+                status: "unavailable",
+                free_frac: None,
+                target_exit_frac: None,
+                pressure_below_target_exit: None,
+                retention_non_progress: None,
+                no_eligible_candidates: None,
+                stop_indicates_no_progress: None,
+            };
+        }
+    };
+
+    let free_bytes = governor.get("free_bytes").and_then(|value| value.as_f64());
+    let total_bytes = governor.get("total_bytes").and_then(|value| value.as_f64());
+    let free_frac = match (free_bytes, total_bytes) {
+        (Some(free), Some(total)) if total > 0.0 => Some((free / total).clamp(0.0, 1.0)),
+        _ => None,
+    };
+    let target_exit_frac = governor
+        .get("target_exit_frac")
+        .and_then(|value| value.as_f64())
+        .filter(|value| (0.0..=1.0).contains(value));
+    let pressure_below_target_exit = free_frac
+        .zip(target_exit_frac)
+        .map(|(free, target_exit)| free < target_exit);
+
+    let no_eligible_candidates = candidate.map(|summary| summary.count == 0);
+    let stop_indicates_no_progress = governor
+        .get("last_stop")
+        .and_then(|value| value.as_str())
+        .and_then(stop_indicates_no_progress);
+    let retention_non_progress = candidate.map(|summary| {
+        summary.count == 0 || stop_indicates_no_progress.unwrap_or(false)
+    });
+
+    let status = if pressure_below_target_exit == Some(true) && retention_non_progress == Some(true)
+    {
+        "warning"
+    } else if pressure_below_target_exit.is_some() && retention_non_progress.is_some() {
+        "ok"
+    } else {
+        "unavailable"
+    };
+
+    RetentionOperatorSignal {
+        status,
+        free_frac,
+        target_exit_frac,
+        pressure_below_target_exit,
+        retention_non_progress,
+        no_eligible_candidates,
+        stop_indicates_no_progress,
+    }
 }
 
 fn cleanup_history(
@@ -302,6 +385,7 @@ async fn status(State(state): State<AppState>) -> Json<RetentionStatus> {
             .await
             .ok()
             .flatten();
+    let operator_signal = operator_signal(governor.as_ref(), candidate.as_ref());
 
     Json(RetentionStatus {
         governor,
@@ -317,6 +401,7 @@ async fn status(State(state): State<AppState>) -> Json<RetentionStatus> {
             .as_ref()
             .map(|summary| summary.count_truncated)
             .unwrap_or(false),
+        operator_signal,
         exclusion_report: exclusions,
         recent_cleanup: recent_cleanup.as_ref().map(|(rows, _)| rows.clone()),
         recent_cleanup_truncated: recent_cleanup
@@ -406,7 +491,7 @@ async fn policy(State(state): State<AppState>) -> Json<RetentionPolicyResponse> 
     clippy::indexing_slicing
 )]
 mod tests {
-    use super::{cleanup_history, summarize_candidates};
+    use super::{cleanup_history, operator_signal, summarize_candidates};
     use crate::Catalog;
     use serde_json::json;
 
@@ -467,5 +552,50 @@ mod tests {
         assert_eq!(history[0].at, 1_700_000_100);
         assert_eq!(history[0].items, 2);
         assert_eq!(history[0].bytes_freed, 1000);
+    }
+
+    #[test]
+    fn operator_signal_warns_on_low_space_and_no_progress() {
+        let governor = json!({
+            "free_bytes": 5,
+            "total_bytes": 100,
+            "target_exit_frac": 0.10,
+            "last_stop": "no_safe_candidate"
+        });
+        let candidate = super::CandidateSummary {
+            count: 0,
+            count_truncated: false,
+            estimated_reclaimable_bytes: 0,
+        };
+        let signal = operator_signal(Some(&governor), Some(&candidate));
+        assert_eq!(signal.status, "warning");
+        assert_eq!(signal.pressure_below_target_exit, Some(true));
+        assert_eq!(signal.retention_non_progress, Some(true));
+        assert_eq!(signal.no_eligible_candidates, Some(true));
+        assert_eq!(signal.stop_indicates_no_progress, Some(true));
+    }
+
+    #[test]
+    fn operator_signal_is_unavailable_when_governor_missing() {
+        let signal = operator_signal(None, None);
+        assert_eq!(signal.status, "unavailable");
+        assert_eq!(signal.pressure_below_target_exit, None);
+        assert_eq!(signal.retention_non_progress, None);
+        assert_eq!(signal.no_eligible_candidates, None);
+        assert_eq!(signal.stop_indicates_no_progress, None);
+    }
+
+    #[test]
+    fn operator_signal_is_unavailable_when_candidates_missing() {
+        let governor = json!({
+            "free_bytes": 5,
+            "total_bytes": 100,
+            "target_exit_frac": 0.10,
+            "last_stop": "no_safe_candidate"
+        });
+        let signal = operator_signal(Some(&governor), None);
+        assert_eq!(signal.status, "unavailable");
+        assert_eq!(signal.pressure_below_target_exit, Some(true));
+        assert_eq!(signal.retention_non_progress, None);
     }
 }

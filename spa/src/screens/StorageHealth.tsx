@@ -162,6 +162,22 @@ function formatProtectWindow(secs: number | null | undefined): string {
   return `${Math.round(secs / 60)} min`;
 }
 
+function formatFracPct(frac: number | null | undefined): string {
+  if (frac == null || !Number.isFinite(frac)) return DASH;
+  return `${(frac * 100).toFixed(1)}%`;
+}
+
+function operatorWarningText(retention: RetentionStatusResponse): string {
+  const signal = retention.operator_signal;
+  if (!signal || signal.status !== "warning") return "";
+  const reasonBits: string[] = [];
+  if (signal.no_eligible_candidates) reasonBits.push("no eligible clips");
+  if (signal.stop_indicates_no_progress) reasonBits.push("the last governor stop reported no progress");
+  const reasonSuffix =
+    reasonBits.length === 0 ? "" : ` (${reasonBits.join("; ")})`;
+  return `Low-space warning: ${formatFracPct(signal.free_frac)} free is below the ${formatFracPct(signal.target_exit_frac)} target exit threshold, and retention is not making progress${reasonSuffix}.`;
+}
+
 /** Severity → human label + the CSS modifier suffix used by the badge/dot. */
 const SEV_LABEL: Record<string, string> = {
   ok: "Healthy",
@@ -596,6 +612,10 @@ export function StorageHealth() {
   const load = metrics?.load ?? null;
   const mem = memTile(metrics?.mem ?? null, "");
   const swap = memTile(metrics?.swap ?? null, "none");
+  const operatorSignal = retention?.operator_signal ?? null;
+  const showOperatorWarning = operatorSignal?.status === "warning";
+  const showOperatorUnavailable =
+    operatorSignal == null || operatorSignal.status === "unavailable";
 
   return (
     <section class="storage-page container" data-screen="storage-health">
@@ -860,6 +880,17 @@ export function StorageHealth() {
         ) : (
           <p class="storage-note" data-testid="retention-policy-unavailable">
             Effective retention policy snapshot unavailable.
+          </p>
+        )}
+        {showOperatorWarning && (
+          <p class="storage-note storage-note-warn" data-testid="retention-operator-warning">
+            {retention ? operatorWarningText(retention) : ""}
+          </p>
+        )}
+        {showOperatorUnavailable && (
+          <p class="storage-note" data-testid="retention-operator-unavailable">
+            Low-space/no-progress signal unavailable until both governor and candidate
+            diagnostics are reporting.
           </p>
         )}
         <p class="storage-note" data-testid="retention-candidate-count">

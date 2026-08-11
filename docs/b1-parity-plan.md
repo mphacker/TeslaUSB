@@ -124,7 +124,12 @@ candidate summary. B-1 now also exposes a read-only
 caps, and a stable source tag), with explicit `unavailable`/`snapshot:null`
 degradation when the governor is absent or malformed. Storage diagnostics now
 renders that policy snapshot with explicit read-only wording and no policy
-controls. Policy editing and deletion execution remain pending.
+controls. `GET /api/retention/status` now also ships an additive
+`operator_signal` object so the UI can show a read-only low-space/no-progress
+warning only when storage pressure is below `target_exit_frac` **and** retention
+is not making progress (for example no eligible candidates or a no-progress stop
+state), while explicitly degrading to `unavailable` when governor/candidate
+diagnostics are missing. Policy editing and deletion execution remain pending.
 
 **Implementation**
 
@@ -146,9 +151,8 @@ controls. Policy editing and deletion execution remain pending.
 **Dependencies:** Workstream 0; existing retention and indexd delete code;
 cloud semantics from Workstream 1 if cloud-gated deletion is approved.
 
-**Next safe slice:** keep cleanup control read-only, then add a low-space/no-progress
-operator signal that combines storage pressure with retention non-progress
-without enabling deletion actions.
+**Next safe slice:** keep cleanup control read-only while adding bounded
+retention report/preview affordances (no delete/policy mutation controls).
 
 **Acceptance**
 

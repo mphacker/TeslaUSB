@@ -115,22 +115,57 @@ pub enum ReleaseResult {
     NoOp,
 }
 
-/// Generates dependency-free 128-bit hex tokens for `boot_id` and lease /
-/// delete generations. The lease protocol needs **uniqueness and
-/// monotonicity** (defeating replay from a crashed-then-restarted holder),
-/// not cryptographic unpredictability, so a time+counter-seeded splitmix64
-/// stream suffices. No `rand`/`getrandom` is available in this workspace.
+/// Generates dependency-free 128-bit hex tokens for `boot_id` and lease
+/// generations. The lease protocol needs **uniqueness and monotonicity**
+/// (defeating replay from a crashed-then-restarted holder), not cryptographic
+/// unpredictability, so a time+counter-seeded splitmix64 stream suffices.
+///
+/// Delete generations are intentionally separate: they become trash path
+/// material and therefore must come from OS entropy.
 mod token {
+    #[cfg(test)]
+    use std::cell::Cell;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[cfg(test)]
+    thread_local! {
+        static FORCE_DELETE_GEN_ENTROPY_FAILURE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    #[cfg(test)]
+    pub struct ScopedDeleteGenEntropyFailure;
+
+    #[cfg(test)]
+    impl Drop for ScopedDeleteGenEntropyFailure {
+        fn drop(&mut self) {
+            FORCE_DELETE_GEN_ENTROPY_FAILURE.with(|flag| flag.set(false));
+        }
+    }
+
+    #[cfg(test)]
+    pub fn fail_delete_gen_entropy_for_scope() -> ScopedDeleteGenEntropyFailure {
+        FORCE_DELETE_GEN_ENTROPY_FAILURE.with(|flag| flag.set(true));
+        ScopedDeleteGenEntropyFailure
+    }
 
     fn splitmix64(seed: u64) -> u64 {
         let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         z ^ (z >> 31)
+    }
+
+    fn lower_hex(bytes: &[u8]) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            out.push(HEX[usize::from(byte >> 4)] as char);
+            out.push(HEX[usize::from(byte & 0x0f)] as char);
+        }
+        out
     }
 
     /// A fresh 128-bit token as a 32-char lowercase hex string.
@@ -147,6 +182,17 @@ mod token {
         let hi = splitmix64(nanos ^ stack ^ counter.rotate_left(32));
         let lo = splitmix64(counter ^ nanos.rotate_left(17) ^ stack.rotate_left(40));
         format!("{hi:016x}{lo:016x}")
+    }
+
+    pub fn delete_gen_128() -> Result<String, getrandom::Error> {
+        #[cfg(test)]
+        if FORCE_DELETE_GEN_ENTROPY_FAILURE.with(Cell::get) {
+            return Err(getrandom::Error::UNSUPPORTED);
+        }
+
+        let mut bytes = [0_u8; 16];
+        getrandom::getrandom(&mut bytes)?;
+        Ok(lower_hex(&bytes))
     }
 }
 
@@ -573,7 +619,7 @@ pub fn claim_for_delete(
         drop(tx);
         return Ok(None);
     }
-    let generation = token::token_128();
+    let generation = token::delete_gen_128().map_err(delete_gen_entropy_error)?;
     tx.execute(
         "UPDATE archive_items
             SET delete_state = 'DELETE_CLAIMED', delete_gen = ?2, updated_at = ?3
@@ -655,7 +701,7 @@ pub fn claim_eviction_candidate(
         drop(tx);
         return Ok(None);
     }
-    let generation = token::token_128();
+    let generation = token::delete_gen_128().map_err(delete_gen_entropy_error)?;
     tx.execute(
         "UPDATE archive_items
             SET delete_state = 'DELETE_CLAIMED', delete_gen = ?2, updated_at = ?3
@@ -666,9 +712,13 @@ pub fn claim_eviction_candidate(
     Ok(Some(generation))
 }
 
-/// Idempotently set an archive item's `delete_state`. Used by the
-/// `retentiond` single-deleter finishers and the startup recovery matrix
-/// (D3 §4, §4.1); each is safe to re-apply after a crash.
+fn delete_gen_entropy_error(err: getrandom::Error) -> DbError {
+    DbError::Sqlite(rusqlite::Error::InvalidParameterName(format!(
+        "failed to obtain OS entropy for delete_gen: {err}"
+    )))
+}
+
+/// Set an archive item's `delete_state` without precondition checks.
 ///
 /// # Errors
 ///
@@ -690,12 +740,63 @@ fn set_delete_state(
     Ok(())
 }
 
+fn reject_transition(message: String) -> DbError {
+    DbError::Sqlite(rusqlite::Error::InvalidParameterName(message))
+}
+
+fn transition_delete_state(
+    conn: &Connection,
+    archive_item_id: i64,
+    from_state: &str,
+    to_state: &str,
+    bytes_freed: Option<i64>,
+) -> Result<(), DbError> {
+    let changed = conn.execute(
+        "UPDATE archive_items
+            SET delete_state = ?3,
+                bytes_freed  = COALESCE(?4, bytes_freed),
+                updated_at   = ?5
+          WHERE id = ?1
+            AND delete_state = ?2",
+        params![
+            archive_item_id,
+            from_state,
+            to_state,
+            bytes_freed,
+            now_epoch_s()
+        ],
+    )?;
+    if changed == 1 {
+        return Ok(());
+    }
+    if changed != 0 {
+        return Err(reject_transition(format!(
+            "archive item {archive_item_id} transition {from_state}->{to_state} touched {changed} rows"
+        )));
+    }
+    let current_state: Option<String> = conn
+        .query_row(
+            "SELECT delete_state FROM archive_items WHERE id = ?1",
+            params![archive_item_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match current_state {
+        Some(current_state) => Err(reject_transition(format!(
+            "archive item {archive_item_id} transition {from_state}->{to_state} rejected from state {current_state}"
+        ))),
+        None => Err(reject_transition(format!(
+            "archive item {archive_item_id} not found"
+        ))),
+    }
+}
+
 /// `DELETE_CLAIMED → DELETING` (D3 §4 step 4).
 ///
 /// # Errors
 /// Returns [`DbError`] on failure.
 pub fn mark_deleting(conn: &Connection, archive_item_id: i64) -> Result<(), DbError> {
-    set_delete_state(conn, archive_item_id, "DELETING", None)
+    transition_delete_state(conn, archive_item_id, "DELETE_CLAIMED", "DELETING", None)
 }
 
 /// `DELETING → DELETED(bytes_freed)` (D3 §4 step 6).
@@ -707,7 +808,16 @@ pub fn mark_deleted(
     archive_item_id: i64,
     bytes_freed: i64,
 ) -> Result<(), DbError> {
-    set_delete_state(conn, archive_item_id, "DELETED", Some(bytes_freed))
+    if bytes_freed < 0 {
+        return Err(reject_transition("bytes_freed must be >= 0".to_owned()));
+    }
+    transition_delete_state(
+        conn,
+        archive_item_id,
+        "DELETING",
+        "DELETED",
+        Some(bytes_freed),
+    )
 }
 
 /// Release a delete claim back to `LIVE` (D3 §4.1 recovery).
@@ -715,7 +825,7 @@ pub fn mark_deleted(
 /// # Errors
 /// Returns [`DbError`] on failure.
 pub fn release_delete_claim(conn: &Connection, archive_item_id: i64) -> Result<(), DbError> {
-    set_delete_state(conn, archive_item_id, "LIVE", None)
+    transition_delete_state(conn, archive_item_id, "DELETE_CLAIMED", "LIVE", None)
 }
 
 /// Mark a delete attempt failed (`DELETE_FAILED`).
@@ -815,7 +925,7 @@ mod tests {
         ClipLeaseGrant, LeaseGrant, LeaseKind, ReleaseResult, RenewResult,
         claim_eviction_candidate, claim_for_delete, get_pref, has_unexpired_lease, lease_acquire,
         lease_acquire_for_clip, lease_release, lease_renew, mark_deleted, mark_deleting,
-        reap_stale_leases, set_pref, wal_checkpoint_truncate,
+        reap_stale_leases, release_delete_claim, set_pref, wal_checkpoint_truncate,
     };
     use crate::db::open_in_memory;
 
@@ -1331,6 +1441,28 @@ mod tests {
     }
 
     #[test]
+    fn claim_for_delete_entropy_failure_keeps_row_live_and_unset() {
+        let mut conn = open_in_memory().unwrap();
+        let item = insert_archive_item(&conn, "/a");
+
+        let _entropy_guard = super::token::fail_delete_gen_entropy_for_scope();
+        let err = claim_for_delete(&mut conn, BOOT, 1_000, item)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("failed to obtain OS entropy for delete_gen"));
+
+        let (state, generation): (String, Option<String>) = conn
+            .query_row(
+                "SELECT delete_state, delete_gen FROM archive_items WHERE id = ?1",
+                params![item],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(state, "LIVE");
+        assert_eq!(generation, None);
+    }
+
+    #[test]
     fn claim_eviction_candidate_claims_eligible_old_durable_row() {
         let mut conn = open_in_memory().unwrap();
         let item = insert_eviction_item(&conn, "RecentClips", 100, 1, 0, None, "LIVE");
@@ -1346,6 +1478,28 @@ mod tests {
             )
             .unwrap();
         assert_eq!(state, "DELETE_CLAIMED");
+    }
+
+    #[test]
+    fn claim_eviction_candidate_entropy_failure_keeps_row_live_and_unset() {
+        let mut conn = open_in_memory().unwrap();
+        let item = insert_eviction_item(&conn, "RecentClips", 100, 1, 0, None, "LIVE");
+
+        let _entropy_guard = super::token::fail_delete_gen_entropy_for_scope();
+        let err = claim_eviction_candidate(&mut conn, BOOT, 1_000, 1_000, item, 500, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("failed to obtain OS entropy for delete_gen"));
+
+        let (state, generation): (String, Option<String>) = conn
+            .query_row(
+                "SELECT delete_state, delete_gen FROM archive_items WHERE id = ?1",
+                params![item],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(state, "LIVE");
+        assert_eq!(generation, None);
     }
 
     #[test]
@@ -1757,6 +1911,13 @@ mod tests {
     fn delete_state_finishers() {
         let conn = open_in_memory().unwrap();
         let item = insert_archive_item(&conn, "/a");
+        conn.execute(
+            "UPDATE archive_items
+                SET delete_state = 'DELETE_CLAIMED', delete_gen = 'g1'
+              WHERE id = ?1",
+            params![item],
+        )
+        .unwrap();
         mark_deleting(&conn, item).unwrap();
         mark_deleted(&conn, item, 4096).unwrap();
         let (state, bytes): (String, i64) = conn
@@ -1768,8 +1929,46 @@ mod tests {
             .unwrap();
         assert_eq!(state, "DELETED");
         assert_eq!(bytes, 4096);
-        // Idempotent re-apply.
-        mark_deleted(&conn, item, 4096).unwrap();
+    }
+
+    #[test]
+    fn guarded_delete_transitions_reject_wrong_states_and_missing_rows() {
+        let conn = open_in_memory().unwrap();
+        let live = insert_archive_item(&conn, "/live");
+        let claimed = insert_archive_item(&conn, "/claimed");
+        conn.execute(
+            "UPDATE archive_items
+                SET delete_state = 'DELETE_CLAIMED', delete_gen = 'g2'
+              WHERE id = ?1",
+            params![claimed],
+        )
+        .unwrap();
+        let deleted = insert_archive_item(&conn, "/deleted");
+        conn.execute(
+            "UPDATE archive_items
+                SET delete_state = 'DELETED'
+              WHERE id = ?1",
+            params![deleted],
+        )
+        .unwrap();
+
+        let err = mark_deleting(&conn, live).unwrap_err().to_string();
+        assert!(err.contains("DELETE_CLAIMED->DELETING rejected from state LIVE"));
+        let err = mark_deleting(&conn, 9_999).unwrap_err().to_string();
+        assert!(err.contains("not found"));
+
+        mark_deleting(&conn, claimed).unwrap();
+        let err = mark_deleted(&conn, deleted, 10).unwrap_err().to_string();
+        assert!(err.contains("DELETING->DELETED rejected from state DELETED"));
+        let err = mark_deleted(&conn, 9_999, 10).unwrap_err().to_string();
+        assert!(err.contains("not found"));
+        let err = mark_deleted(&conn, claimed, -1).unwrap_err().to_string();
+        assert!(err.contains("bytes_freed must be >= 0"));
+
+        let err = release_delete_claim(&conn, live).unwrap_err().to_string();
+        assert!(err.contains("DELETE_CLAIMED->LIVE rejected from state LIVE"));
+        let err = release_delete_claim(&conn, 9_999).unwrap_err().to_string();
+        assert!(err.contains("not found"));
     }
 
     #[test]

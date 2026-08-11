@@ -313,7 +313,7 @@ impl IndexClient for LiveIndexClient {
             allow_undurable: self.client.allow_undurable(),
         };
         match self.client.send_delete_request(&req) {
-            Ok(DeleteWireResponse::Claimed {}) => ClaimResult::Claimed,
+            Ok(DeleteWireResponse::Claimed { delete_gen }) => ClaimResult::Claimed { delete_gen },
             Ok(DeleteWireResponse::ClaimDenied { reason }) => ClaimResult::Denied { reason },
             Ok(DeleteWireResponse::NotFound {}) => ClaimResult::NotFound,
             Ok(
@@ -487,13 +487,20 @@ impl Catalog for LiveCatalog {
                 .into_owned();
             let delete_state = parse_delete_state(&row.delete_state)?;
             let trash_path = if let Some(delete_gen) = row.delete_gen {
-                let gen_token = u128::from_str_radix(&delete_gen, 16).map_err(|err| {
-                    io::Error::new(
+                if delete_gen.len() != 32
+                    || !delete_gen.bytes().all(|byte| byte.is_ascii_hexdigit())
+                {
+                    return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
-                        format!("invalid delete_gen hex for id {}: {err}", row.id),
-                    )
-                })?;
-                retentiond::delete::trash_path(&self.trash_dir, ArchiveItemId(row.id), gen_token)
+                        format!("invalid delete_gen hex for id {}", row.id),
+                    ));
+                }
+                retentiond::delete::trash_path(&self.trash_dir, ArchiveItemId(row.id), &delete_gen)
+            } else if matches!(delete_state, DeleteState::DeleteClaimed | DeleteState::Deleting) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("missing delete_gen for transitional row id {}", row.id),
+                ));
             } else {
                 String::new()
             };
@@ -874,14 +881,19 @@ mod tests {
             let server = thread::spawn(move || {
                 let (mut stream, _) = listener.accept().expect("accept");
                 let _payload = read_frame(&mut stream, MAX_REQUEST_FRAME).expect("read request");
-                let payload = serde_json::to_vec(&DeleteWireResponse::Claimed {}).expect("encode");
+                let payload = serde_json::to_vec(&DeleteWireResponse::Claimed {
+                    delete_gen: "0000000000000000000000000000000f".to_owned(),
+                })
+                .expect("encode");
                 write_frame(&mut stream, &payload, MAX_REQUEST_FRAME).expect("write response");
             });
             let shared = Rc::new(IndexDeleteClient::new(socket_path));
             let client = LiveIndexClient::new(shared);
             assert_eq!(
                 client.claim_archive_delete(ArchiveItemId(7)),
-                retentiond::delete::ClaimResult::Claimed
+                retentiond::delete::ClaimResult::Claimed {
+                    delete_gen: "0000000000000000000000000000000f".to_owned()
+                }
             );
             server.join().expect("join");
             let _ = fs::remove_dir_all(temp_dir);
@@ -968,7 +980,10 @@ mod tests {
                     req_json,
                     "{\"cmd\":\"claim_eviction_candidate\",\"id\":7,\"recency_floor_epoch\":12345,\"allow_undurable\":true}"
                 );
-                let payload = serde_json::to_vec(&DeleteWireResponse::Claimed {}).expect("encode");
+                let payload = serde_json::to_vec(&DeleteWireResponse::Claimed {
+                    delete_gen: "feedfacefeedfacefeedfacefeedface".to_owned(),
+                })
+                .expect("encode");
                 write_frame(&mut stream, &payload, MAX_REQUEST_FRAME).expect("write response");
             });
             let shared = Rc::new(IndexDeleteClient::new(socket_path));
@@ -976,7 +991,9 @@ mod tests {
             let client = LiveIndexClient::new(shared);
             assert_eq!(
                 client.claim_archive_delete(ArchiveItemId(7)),
-                retentiond::delete::ClaimResult::Claimed
+                retentiond::delete::ClaimResult::Claimed {
+                    delete_gen: "feedfacefeedfacefeedfacefeedface".to_owned()
+                }
             );
             server.join().expect("join");
             let _ = fs::remove_dir_all(temp_dir);
@@ -1242,6 +1259,38 @@ mod tests {
             let shared = Rc::new(IndexDeleteClient::new(socket_path));
             let catalog = LiveCatalog::new(shared, &archive_root, "/archive/.retention-trash");
             assert!(catalog.recovery_rows().is_err());
+            server.join().expect("join");
+            let _ = fs::remove_dir_all(temp_dir);
+
+            let temp_dir = new_temp_dir();
+            let archive_root = temp_dir.join("archive");
+            fs::create_dir_all(&archive_root).expect("archive root");
+            let socket_path = temp_dir.join("indexd.sock");
+            let listener = UnixListener::bind(&socket_path).expect("bind listener");
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let _payload = read_frame(&mut stream, MAX_REQUEST_FRAME).expect("read request");
+                let response = DeleteWireResponse::RecoveryRows {
+                    rows: vec![RecoveryRowWire {
+                        id: 9,
+                        delete_state: "DELETE_CLAIMED".to_owned(),
+                        path: "RecentClips/older/9".to_owned(),
+                        size_bytes: 99,
+                        delete_gen: None,
+                    }],
+                };
+                let encoded = serde_json::to_vec(&response).expect("encode");
+                write_frame(&mut stream, &encoded, MAX_REQUEST_FRAME).expect("write response");
+            });
+            let shared = Rc::new(IndexDeleteClient::new(socket_path));
+            let catalog = LiveCatalog::new(shared, &archive_root, "/archive/.retention-trash");
+            let err = catalog
+                .recovery_rows()
+                .expect_err("missing delete_gen must fail closed");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+            assert!(err
+                .to_string()
+                .contains("missing delete_gen for transitional row id 9"));
             server.join().expect("join");
             let _ = fs::remove_dir_all(temp_dir);
         }

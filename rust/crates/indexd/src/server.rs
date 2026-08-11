@@ -149,10 +149,12 @@ fn handle_connection(
                 Ok(response) => response,
                 Err(message) => Response::Error { message },
             },
-            Request::MarkArchiveDeleting { id } => match handle_mark_archive_deleting(conn, id) {
-                Ok(()) => Response::Acked {},
-                Err(message) => Response::Error { message },
-            },
+            Request::MarkArchiveDeleting { id } => {
+                match handle_mark_archive_deleting(conn, id) {
+                    Ok(response) => response,
+                    Err(message) => Response::Error { message },
+                }
+            }
             Request::MarkArchiveDeleted { id, bytes_freed } => {
                 match handle_mark_archive_deleted(conn, id, bytes_freed) {
                     Ok(response) => response,
@@ -161,7 +163,7 @@ fn handle_connection(
             }
             Request::ReleaseArchiveDeleteClaim { id } => {
                 match handle_release_archive_delete_claim(conn, id) {
-                    Ok(()) => Response::Acked {},
+                    Ok(response) => response,
                     Err(message) => Response::Error { message },
                 }
             }
@@ -500,8 +502,8 @@ fn handle_claim_eviction_candidate(
     let claimed = boot
         .claim_eviction_candidate(&mut locked, id, recency_floor_epoch, allow_undurable)
         .map_err(|e| e.to_string())?;
-    if claimed.is_some() {
-        return Ok(Response::Claimed {});
+    if let Some(delete_gen) = claimed {
+        return Ok(Response::Claimed { delete_gen });
     }
 
     let leased = has_unexpired_lease(&locked, boot.boot_id(), boot.mono_now_ms(), id)
@@ -517,11 +519,14 @@ fn handle_claim_eviction_candidate(
     }
 }
 
-fn handle_mark_archive_deleting(conn: &Arc<Mutex<Connection>>, id: i64) -> Result<(), String> {
+fn handle_mark_archive_deleting(
+    conn: &Arc<Mutex<Connection>>,
+    id: i64,
+) -> Result<Response, String> {
     let locked = conn
         .lock()
         .map_err(|_| "index database mutex is poisoned".to_owned())?;
-    mark_deleting(&locked, id).map_err(|e| e.to_string())
+    Ok(map_delete_write_result(mark_deleting(&locked, id)))
 }
 
 fn handle_mark_archive_deleted(
@@ -537,18 +542,17 @@ fn handle_mark_archive_deleted(
     let locked = conn
         .lock()
         .map_err(|_| "index database mutex is poisoned".to_owned())?;
-    mark_deleted(&locked, id, bytes_freed).map_err(|e| e.to_string())?;
-    Ok(Response::Acked {})
+    Ok(map_delete_write_result(mark_deleted(&locked, id, bytes_freed)))
 }
 
 fn handle_release_archive_delete_claim(
     conn: &Arc<Mutex<Connection>>,
     id: i64,
-) -> Result<(), String> {
+) -> Result<Response, String> {
     let locked = conn
         .lock()
         .map_err(|_| "index database mutex is poisoned".to_owned())?;
-    release_delete_claim(&locked, id).map_err(|e| e.to_string())
+    Ok(map_delete_write_result(release_delete_claim(&locked, id)))
 }
 
 fn handle_quarantine_archive_item(
@@ -560,6 +564,22 @@ fn handle_quarantine_archive_item(
         .lock()
         .map_err(|_| "index database mutex is poisoned".to_owned())?;
     quarantine(&locked, id, reason).map_err(|e| e.to_string())
+}
+
+fn map_delete_write_result(result: Result<(), DbError>) -> Response {
+    match result {
+        Ok(()) => Response::Acked {},
+        Err(DbError::Sqlite(rusqlite::Error::InvalidParameterName(message))) => {
+            if message.starts_with("archive item ") && message.ends_with(" not found") {
+                Response::NotFound {}
+            } else {
+                Response::Rejected { message }
+            }
+        }
+        Err(error) => Response::Error {
+            message: error.to_string(),
+        },
+    }
 }
 
 fn handle_list_eviction_candidates(
@@ -5304,17 +5324,30 @@ mod tests {
             unreachable!();
         };
         assert!(items.iter().any(|item| item.id == candidate_id));
-        assert_eq!(
-            send(
-                &socket_path,
-                &Request::ClaimEvictionCandidate {
-                    id: candidate_id,
-                    recency_floor_epoch: 500,
-                    allow_undurable: false,
-                }
-            ),
-            Response::Claimed {}
+        let claimed = send(
+            &socket_path,
+            &Request::ClaimEvictionCandidate {
+                id: candidate_id,
+                recency_floor_epoch: 500,
+                allow_undurable: false,
+            },
         );
+        let delete_gen = match claimed {
+            Response::Claimed { delete_gen } => delete_gen,
+            other => panic!("expected claimed, got {other:?}"),
+        };
+        assert_eq!(delete_gen.len(), 32);
+        assert!(delete_gen.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        let persisted_gen: String = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT delete_gen FROM archive_items WHERE id = ?1",
+                params![candidate_id],
+                |row| row.get(0),
+            )
+            .expect("query persisted delete_gen");
+        assert_eq!(persisted_gen, delete_gen);
         assert_eq!(
             send(
                 &socket_path,
@@ -5417,16 +5450,111 @@ mod tests {
                 reason: "ineligible".to_owned()
             }
         );
+        let claim = send(
+            &socket_path,
+            &Request::ClaimEvictionCandidate {
+                id: undurable_id,
+                recency_floor_epoch: 500,
+                allow_undurable: true,
+            },
+        );
+        assert!(matches!(claim, Response::Claimed { .. }));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn socket_delete_transition_guards_reject_invalid_and_missing_rows() {
+        let conn = open_in_memory().expect("open db");
+        let live_id = insert_archive_item(&conn, "archive/recent/live", "RecentClips", 100, 1, 0);
+        let claimed_id =
+            insert_archive_item(&conn, "archive/recent/claimed", "RecentClips", 99, 1, 0);
+        conn.execute(
+            "UPDATE archive_items
+                SET delete_state = 'DELETE_CLAIMED', delete_gen = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+              WHERE id = ?1",
+            params![claimed_id],
+        )
+        .expect("seed claimed row");
+        let deleted_id =
+            insert_archive_item(&conn, "archive/recent/deleted", "RecentClips", 98, 1, 0);
+        conn.execute(
+            "UPDATE archive_items SET delete_state = 'DELETED' WHERE id = ?1",
+            params![deleted_id],
+        )
+        .expect("seed deleted row");
+        let conn = Arc::new(Mutex::new(conn));
+        let boot = Arc::new(BootContext::new());
+        let dir = new_temp_dir();
+        let socket_path = dir.join("indexd.sock");
+        let _server =
+            spawn(&conn, &boot, &socket_path, Duration::from_secs(2)).expect("spawn indexd server");
+
+        match send(
+            &socket_path,
+            &Request::MarkArchiveDeleting { id: live_id },
+        ) {
+            Response::Rejected { message } => assert!(message.contains("DELETE_CLAIMED->DELETING")),
+            other => panic!("expected rejected, got {other:?}"),
+        }
+        assert_eq!(
+            send(&socket_path, &Request::MarkArchiveDeleting { id: 9_999 }),
+            Response::NotFound {}
+        );
+
+        match send(
+            &socket_path,
+            &Request::MarkArchiveDeleted {
+                id: deleted_id,
+                bytes_freed: 4096,
+            },
+        ) {
+            Response::Rejected { message } => assert!(message.contains("DELETING->DELETED")),
+            other => panic!("expected rejected, got {other:?}"),
+        }
         assert_eq!(
             send(
                 &socket_path,
-                &Request::ClaimEvictionCandidate {
-                    id: undurable_id,
-                    recency_floor_epoch: 500,
-                    allow_undurable: true,
+                &Request::MarkArchiveDeleted {
+                    id: 9_999,
+                    bytes_freed: 4096,
                 }
             ),
-            Response::Claimed {}
+            Response::NotFound {}
+        );
+        assert_eq!(
+            send(
+                &socket_path,
+                &Request::MarkArchiveDeleted {
+                    id: claimed_id,
+                    bytes_freed: -1,
+                }
+            ),
+            Response::Rejected {
+                message: "bytes_freed must be >= 0".to_owned()
+            }
+        );
+
+        match send(
+            &socket_path,
+            &Request::ReleaseArchiveDeleteClaim { id: live_id },
+        ) {
+            Response::Rejected { message } => assert!(message.contains("DELETE_CLAIMED->LIVE")),
+            other => panic!("expected rejected, got {other:?}"),
+        }
+        assert_eq!(
+            send(
+                &socket_path,
+                &Request::ReleaseArchiveDeleteClaim { id: 9_999 },
+            ),
+            Response::NotFound {}
+        );
+        assert_eq!(
+            send(
+                &socket_path,
+                &Request::ReleaseArchiveDeleteClaim { id: claimed_id },
+            ),
+            Response::Acked {}
         );
 
         let _ = std::fs::remove_dir_all(dir);

@@ -151,8 +151,14 @@ diagnostics are missing. Policy editing and deletion execution remain pending.
 **Dependencies:** Workstream 0; existing retention and indexd delete code;
 cloud semantics from Workstream 1 if cloud-gated deletion is approved.
 
-**Next safe slice:** keep cleanup control read-only while adding bounded
-retention report/preview affordances (no delete/policy mutation controls).
+**Next safe slice:** keep cleanup control read-only while repairing the internal
+delete protocol. The claim response must carry the persisted OS-random
+`delete_gen` used for the trash filename, and indexd must state-guard
+`DELETE_CLAIMED -> DELETING -> DELETED` plus claim release transitions.
+Transitional recovery rows without a generation fail closed. Public archive and
+combined deletion remain disabled until durable job persistence, stale-plan
+fencing, restart recovery, reconciliation, and the approved same-origin/auth
+boundary are complete.
 
 **Acceptance**
 

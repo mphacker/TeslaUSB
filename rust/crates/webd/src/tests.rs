@@ -4221,6 +4221,17 @@ async fn delete_archive_target_is_not_implemented() {
 }
 
 #[tokio::test]
+async fn delete_both_target_is_not_implemented() {
+    let fx = delete_fixture(Reply::Json(
+        json!({ "handoff_id": "h-1", "result": "done" }),
+    ));
+    let (status, body) = delete_json(&fx.app, "/api/clips/10?target=both").await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(body["error"]["code"], "not_implemented");
+    assert!(fx.last.lock().unwrap().is_none());
+}
+
+#[tokio::test]
 async fn delete_unknown_clip_is_404() {
     let fx = delete_fixture(Reply::Json(
         json!({ "handoff_id": "h-1", "result": "done" }),

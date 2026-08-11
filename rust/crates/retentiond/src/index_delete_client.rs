@@ -71,7 +71,10 @@ pub enum DeleteWireRequest {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum DeleteWireResponse {
     /// Claim succeeded.
-    Claimed {},
+    Claimed {
+        /// Persisted delete generation token for trash naming.
+        delete_gen: String,
+    },
     /// Claim denied.
     ClaimDenied {
         /// Human-readable reason.

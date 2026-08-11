@@ -712,7 +712,10 @@ pub enum Response {
         key: String,
     },
     /// Claim succeeded (`LIVE → DELETE_CLAIMED`).
-    Claimed {},
+    Claimed {
+        /// Persisted delete generation token for trash naming.
+        delete_gen: String,
+    },
     /// Claim was denied.
     ClaimDenied {
         /// Human-readable reason.
@@ -1415,7 +1418,12 @@ mod tests {
     #[test]
     fn delete_control_responses_serialize_with_expected_status_tags() {
         let cases = vec![
-            ("claimed", Response::Claimed {}),
+            (
+                "claimed",
+                Response::Claimed {
+                    delete_gen: "0000000000000000000000000000000f".to_owned(),
+                },
+            ),
             (
                 "claim_denied",
                 Response::ClaimDenied {

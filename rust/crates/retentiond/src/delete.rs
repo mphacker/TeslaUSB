@@ -19,8 +19,7 @@
 //!    `DELETE_CLAIMED`). This is the delete-vs-lease race gate — a denied claim
 //!    performs **no filesystem mutation at all**.
 //! 2. `rename` the source into `.retention-trash/<id>.<gen>.deleting`, where
-//!    `<gen>` is a **random 128-bit token, never wall-clock** (the Pi has no RTC;
-//!    a clock reset must not collide trash names).
+//!    `<gen>` is the persisted `delete_gen` minted by `indexd` at claim time.
 //! 3. `fsync` the **source** parent dir — makes the rename durable.
 //! 4. only **now** mark `DELETING` (hazard: never advance the DB past a rename
 //!    that is not yet on disk).
@@ -62,11 +61,8 @@ pub trait ArchiveDeleteOps {
     fn recursive_delete(&self, path: &str) -> io::Result<()>;
 }
 
-/// `indexd` RPC seam. Every method is **idempotent** so it is safe to re-apply
-/// if power is lost again mid-recovery (contract §4.1). None carry a token: the
-/// single-deleter invariant (exactly one `retentiond`) plus the `delete_state`
-/// column itself are the gate, so no per-claim token is needed here. (The
-/// 128-bit lease `gen` is a *separate* concept and lives in [`crate::lease`].)
+/// `indexd` RPC seam. Recovery verbs are re-invoked after power loss, and claim
+/// returns the persisted `delete_gen` token used for the trash filename.
 pub trait IndexClient {
     /// Atomically claim an item for deletion (contract §3 gate): abort if the
     /// item has any unexpired lease or is not `LIVE`, else advance it to
@@ -104,7 +100,10 @@ pub trait IndexClient {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClaimResult {
     /// The item was `LIVE` and unleased; it is now `DELETE_CLAIMED`.
-    Claimed,
+    Claimed {
+        /// Persisted delete generation token for trash naming.
+        delete_gen: String,
+    },
     /// The item could not be claimed (an unexpired lease, or already
     /// `DELETE_CLAIMED`+). **No filesystem mutation must follow.**
     Denied {
@@ -115,8 +114,8 @@ pub enum ClaimResult {
     NotFound,
 }
 
-/// Source of the random 128-bit trash generation token. The live impl reads the
-/// OS CSPRNG; tests inject a deterministic sequence.
+/// Source of random values used by retentiond outside the delete claim protocol
+/// (for example, verified-pass IDs).
 pub trait RandGen {
     /// A fresh random 128-bit value. Must **never** be derived from wall-clock.
     fn next_u128(&self) -> u128;
@@ -157,12 +156,24 @@ pub enum DeleteOutcome {
     },
 }
 
-/// Build the trash path for an item: `<trash_dir>/<id>.<gen>.deleting`. The
-/// `gen_token` is rendered as zero-padded lowercase hex of the random 128-bit
-/// token (the contract calls this `<gen>`; Rust 2024 reserves `gen`).
+fn validate_delete_gen(delete_gen: &str) -> Result<(), String> {
+    if delete_gen.len() != 32 {
+        return Err(format!(
+            "delete_gen must be exactly 32 hex chars, got {}",
+            delete_gen.len()
+        ));
+    }
+    if delete_gen.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Ok(());
+    }
+    Err("delete_gen must be hexadecimal".to_owned())
+}
+
+/// Build the trash path for an item: `<trash_dir>/<id>.<gen>.deleting`, where
+/// `<gen>` is the persisted `indexd` delete generation token.
 #[must_use]
-pub fn trash_path(trash_dir: &str, id: ArchiveItemId, gen_token: u128) -> String {
-    format!("{trash_dir}/{}.{gen_token:032x}.deleting", id.0)
+pub fn trash_path(trash_dir: &str, id: ArchiveItemId, delete_gen: &str) -> String {
+    format!("{trash_dir}/{}.{delete_gen}.deleting", id.0)
 }
 
 /// Execute the crash-safe single-deleter protocol for one item.
@@ -176,23 +187,26 @@ pub fn run_delete(
     trash_dir: &str,
     fs: &dyn ArchiveDeleteOps,
     index: &dyn IndexClient,
-    rand: &dyn RandGen,
 ) -> DeleteOutcome {
     // Step 1: atomic claim (also the lease-honoring gate). On denial, STOP —
     // no rename, no unlink. This is what makes a delete-vs-lease race safe.
-    match index.claim_archive_delete(req.id) {
-        ClaimResult::Claimed => {}
+    let delete_gen = match index.claim_archive_delete(req.id) {
+        ClaimResult::Claimed { delete_gen } => delete_gen,
         ClaimResult::Denied { reason } => return DeleteOutcome::Skipped { reason },
         ClaimResult::NotFound => {
             return DeleteOutcome::Skipped {
                 reason: "item not found".to_string(),
             };
         }
+    };
+    if let Err(message) = validate_delete_gen(&delete_gen) {
+        return DeleteOutcome::Failed {
+            reason: format!("claim delete_gen: {message}"),
+        };
     }
 
-    // Step 2: rename into trash under a random gen token.
-    let gen_token = rand.next_u128();
-    let trash = trash_path(trash_dir, req.id, gen_token);
+    // Step 2: rename into trash under the persisted claim delete_gen.
+    let trash = trash_path(trash_dir, req.id, &delete_gen);
     if let Err(e) = fs.rename_into_trash(&req.source_path, &trash) {
         // Nothing moved. Bring the row back to LIVE so the governor can retry.
         let _ = index.release_delete_claim(req.id);
@@ -297,8 +311,9 @@ pub fn recovery_action(db: DeleteState, fs: FsPresence) -> RecoveryAction {
         (D::DeleteClaimed, F::OriginalPresent) => RecoveryAction::ReleaseToLive,
         // Claimed and renamed → continue the delete.
         (D::DeleteClaimed, F::TrashPresent) => RecoveryAction::ContinueDelete,
-        // Claimed, nothing on disk → row with no file → mark deleted.
-        (D::DeleteClaimed, F::Neither) => RecoveryAction::MarkDeleted,
+        // Claimed, nothing on disk → continue finishers to reconcile through the
+        // guarded transition chain.
+        (D::DeleteClaimed, F::Neither) => RecoveryAction::ContinueDelete,
 
         // Deleting with trash present → finish the delete.
         (D::Deleting, F::TrashPresent) => RecoveryAction::FinishDelete,
@@ -312,8 +327,8 @@ pub fn recovery_action(db: DeleteState, fs: FsPresence) -> RecoveryAction {
         (D::Live, F::TrashPresent) => RecoveryAction::Quarantine,
         // LIVE present and well → nothing to do.
         (D::Live, F::OriginalPresent) => RecoveryAction::NoOp,
-        // LIVE with no file → row with no file → mark deleted (matrix catch-all).
-        (D::Live, F::Neither) => RecoveryAction::MarkDeleted,
+        // LIVE with no file is inconsistent bookkeeping.
+        (D::Live, F::Neither) => RecoveryAction::Quarantine,
 
         // DELETED but the original reappeared → quarantine.
         (D::Deleted, F::OriginalPresent) => RecoveryAction::Quarantine,
@@ -323,14 +338,12 @@ pub fn recovery_action(db: DeleteState, fs: FsPresence) -> RecoveryAction {
         // DELETED and gone → consistent.
         (D::Deleted, F::Neither) => RecoveryAction::NoOp,
 
-        // A prior failed attempt: reconcile by what is on disk.
-        (D::DeleteFailed, F::OriginalPresent) => RecoveryAction::ReleaseToLive,
-        (D::DeleteFailed, F::TrashPresent) => RecoveryAction::ContinueDelete,
-        (D::DeleteFailed, F::Neither) => RecoveryAction::MarkDeleted,
+        // A prior failed attempt is an anomaly under guarded transitions.
+        (D::DeleteFailed, _) => RecoveryAction::Quarantine,
 
-        // Quarantined but the bytes are already gone: stale bookkeeping, not an
-        // anomaly to investigate. Reconcile it like the LIVE/Neither case.
-        (D::Quarantined, F::Neither) => RecoveryAction::MarkDeleted,
+        // Keep quarantined rows quarantined unless the operator explicitly
+        // resolves them.
+        (D::Quarantined, F::Neither) => RecoveryAction::NoOp,
         // Still quarantined with bytes on disk → leave for the operator.
         (D::Quarantined, _) => RecoveryAction::NoOp,
     }
@@ -353,10 +366,17 @@ pub fn run_recovery(
 ) -> io::Result<()> {
     match action {
         RecoveryAction::ReleaseToLive => index.release_delete_claim(id),
-        RecoveryAction::ContinueDelete | RecoveryAction::FinishDelete => {
-            // Idempotent: advance to DELETING (no-op if already), unlink the
-            // trash entry if still there, fsync, then mark deleted.
+        RecoveryAction::ContinueDelete => {
+            // Continue from DELETE_CLAIMED: advance to DELETING, then finish.
             index.mark_deleting(id)?;
+            if fs.exists(trash_path_str) {
+                fs.recursive_delete(trash_path_str)?;
+                fs.fsync_parent(trash_path_str)?;
+            }
+            index.mark_deleted(id, size_bytes)
+        }
+        RecoveryAction::FinishDelete => {
+            // Already DELETING: only finish the filesystem + final marker.
             if fs.exists(trash_path_str) {
                 fs.recursive_delete(trash_path_str)?;
                 fs.fsync_parent(trash_path_str)?;
@@ -385,22 +405,10 @@ mod tests {
 
     use super::{
         ArchiveDeleteOps, ClaimResult, DeleteOutcome, DeleteRequest, FsPresence, IndexClient,
-        RandGen, RecoveryAction, recovery_action, run_delete, trash_path,
+        RecoveryAction, recovery_action, run_delete, trash_path,
     };
     use crate::io::ArchiveItemId;
     use crate::lease::DeleteState;
-
-    #[derive(Default)]
-    struct FakeRand {
-        next: RefCell<u128>,
-    }
-    impl RandGen for FakeRand {
-        fn next_u128(&self) -> u128 {
-            let v = *self.next.borrow();
-            *self.next.borrow_mut() = v.wrapping_add(1);
-            v
-        }
-    }
 
     /// Records the ordered sequence of side effects, and can be told to fail at
     /// a named step to simulate a crash/IO error.
@@ -460,7 +468,9 @@ mod tests {
     impl FakeIndex {
         fn claimed() -> Self {
             Self {
-                claim: Some(ClaimResult::Claimed),
+                claim: Some(ClaimResult::Claimed {
+                    delete_gen: "00000000000000000000000000000007".to_owned(),
+                }),
                 ..Self::default()
             }
         }
@@ -510,13 +520,14 @@ mod tests {
     fn happy_path_executes_steps_in_safe_order() {
         let fs = Recorder::default();
         let index = FakeIndex::claimed();
-        let rand = FakeRand::default();
-        let out = run_delete(&req(), "/archive/.retention-trash", &fs, &index, &rand);
+        let out = run_delete(&req(), "/archive/.retention-trash", &fs, &index);
         assert_eq!(out, DeleteOutcome::Deleted { bytes_freed: 1234 });
 
         let ops = fs.ops.borrow().clone();
         // rename, fsync source, unlink, fsync trash — in this exact order.
-        assert!(ops[0].starts_with("rename"));
+        assert!(ops[0].starts_with(
+            "rename /archive/SentryClips/event-1 -> /archive/.retention-trash/42.00000000000000000000000000000007.deleting"
+        ));
         assert!(ops[1].starts_with("fsync_parent /archive/SentryClips"));
         assert!(ops[2].starts_with("unlink"));
         assert!(ops[3].ends_with(".deleting"));
@@ -538,8 +549,7 @@ mod tests {
             }),
             ..FakeIndex::default()
         };
-        let rand = FakeRand::default();
-        let out = run_delete(&req(), "/t", &fs, &index, &rand);
+        let out = run_delete(&req(), "/t", &fs, &index);
         assert!(matches!(out, DeleteOutcome::Skipped { .. }));
         // CRITICAL: a lease race must cause ZERO filesystem mutation.
         assert!(fs.ops.borrow().is_empty());
@@ -550,8 +560,7 @@ mod tests {
     fn rename_failure_releases_claim_back_to_live() {
         let fs = Recorder::with_fail("rename");
         let index = FakeIndex::claimed();
-        let rand = FakeRand::default();
-        let out = run_delete(&req(), "/t", &fs, &index, &rand);
+        let out = run_delete(&req(), "/t", &fs, &index);
         assert!(matches!(out, DeleteOutcome::Failed { .. }));
         // Nothing moved durably; row returned to LIVE for a later retry.
         assert_eq!(index.transitions.borrow().clone(), vec!["LIVE".to_string()]);
@@ -562,8 +571,7 @@ mod tests {
         // fsync source parent fails → trash present, DB still DELETE_CLAIMED.
         let fs = Recorder::with_fail("fsync_source");
         let index = FakeIndex::claimed();
-        let rand = FakeRand::default();
-        let out = run_delete(&req(), "/t", &fs, &index, &rand);
+        let out = run_delete(&req(), "/t", &fs, &index);
         assert!(matches!(out, DeleteOutcome::Failed { .. }));
         // DB did NOT advance to DELETING (hazard avoided) and was NOT released.
         assert!(index.transitions.borrow().is_empty());
@@ -579,8 +587,7 @@ mod tests {
         // fsync trash parent fails → file gone, DB still DELETING.
         let fs = Recorder::with_fail("fsync_trash");
         let index = FakeIndex::claimed();
-        let rand = FakeRand::default();
-        let out = run_delete(&req(), "/t", &fs, &index, &rand);
+        let out = run_delete(&req(), "/t", &fs, &index);
         assert!(matches!(out, DeleteOutcome::Failed { .. }));
         // DELETING was set, DELETED was not.
         assert_eq!(
@@ -595,12 +602,31 @@ mod tests {
     }
 
     #[test]
-    fn trash_path_is_hex_and_never_wall_clock() {
-        let p = trash_path("/a/.retention-trash", ArchiveItemId(7), 0xdead_beef);
+    fn trash_path_uses_claim_generation_verbatim() {
+        let p = trash_path(
+            "/a/.retention-trash",
+            ArchiveItemId(7),
+            "000000000000000000000000deadbeef",
+        );
         assert_eq!(
             p,
             "/a/.retention-trash/7.000000000000000000000000deadbeef.deleting"
         );
+    }
+
+    #[test]
+    fn malformed_claim_generation_fails_closed_before_filesystem_mutation() {
+        let fs = Recorder::default();
+        let index = FakeIndex {
+            claim: Some(ClaimResult::Claimed {
+                delete_gen: "not-hex".to_owned(),
+            }),
+            ..FakeIndex::default()
+        };
+        let out = run_delete(&req(), "/t", &fs, &index);
+        assert!(matches!(out, DeleteOutcome::Failed { .. }));
+        assert!(fs.ops.borrow().is_empty());
+        assert!(index.transitions.borrow().is_empty());
     }
 
     #[test]
@@ -627,17 +653,18 @@ mod tests {
             recovery_action(D::Deleted, F::OriginalPresent),
             R::Quarantine
         );
-        // row | no file → mark deleted.
+        // Claimed + no file continues finishers so guarded transitions still hold.
         assert_eq!(
             recovery_action(D::DeleteClaimed, F::Neither),
-            R::MarkDeleted
+            R::ContinueDelete
         );
-        assert_eq!(recovery_action(D::Live, F::Neither), R::MarkDeleted);
+        assert_eq!(recovery_action(D::Live, F::Neither), R::Quarantine);
         // Healthy no-ops.
         assert_eq!(recovery_action(D::Live, F::OriginalPresent), R::NoOp);
         assert_eq!(recovery_action(D::Deleted, F::Neither), R::NoOp);
-        // Quarantined rows with missing bytes are stale and are reconciled.
-        assert_eq!(recovery_action(D::Quarantined, F::Neither), R::MarkDeleted);
+        assert_eq!(recovery_action(D::DeleteFailed, F::Neither), R::Quarantine);
+        // Quarantined rows remain quarantined unless an operator resolves them.
+        assert_eq!(recovery_action(D::Quarantined, F::Neither), R::NoOp);
         // Quarantined rows with bytes still on disk stay quarantined.
         assert_eq!(recovery_action(D::Quarantined, F::TrashPresent), R::NoOp);
         assert_eq!(recovery_action(D::Quarantined, F::OriginalPresent), R::NoOp);

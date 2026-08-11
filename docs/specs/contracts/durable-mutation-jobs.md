@@ -1,6 +1,6 @@
 # Contract: shared durable mutation job foundation (B-1)
 
-Status: **Foundation + failed cloud-upload retry enabled (no delete/destructive mutations).**
+Status: **Foundation + failed cloud-upload retry enabled (delete protocol groundwork only; no delete/destructive mutations).**
 
 This contract defines the shared job/idempotency/error semantics that
 state-changing APIs must use. It enables only the child-specific failed
@@ -112,6 +112,25 @@ Read-only disclosure endpoints are allowed in this foundation slice:
 
 They must not trigger mutations. `capabilities` should explicitly disclose that
 current `JobHub` retention is in-memory and not restart durable.
+
+## 7.1 Archive-delete protocol prerequisites (internal only)
+
+The internal retentiond/indexd delete path is being repaired before any public
+archive or combined delete route is enabled:
+
+- indexd atomically persists a fresh OS-random `delete_gen` when claiming an
+  item and returns that exact token to retentiond;
+- retentiond uses the returned token for the trash filename and never mints a
+  second token;
+- indexd accepts only `DELETE_CLAIMED -> DELETING`,
+  `DELETING -> DELETED`, and `DELETE_CLAIMED -> LIVE` transitions, checking
+  affected-row counts and rejecting missing or wrong-state rows;
+- transitional recovery rows without a valid generation fail closed rather
+  than guessing a trash path.
+
+These repairs do not add durable public delete jobs, manual archive claims,
+stale-plan fencing, or SPA delete controls. Public `archive` and `both` delete
+targets remain disabled.
 
 ## 8. Required tests for this foundation slice
 

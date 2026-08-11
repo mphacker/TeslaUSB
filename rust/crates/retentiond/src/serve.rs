@@ -453,7 +453,7 @@ pub struct Seams<'a> {
     pub index: &'a dyn IndexClient,
     /// The `indexd` catalog query seam.
     pub catalog: &'a dyn Catalog,
-    /// Random token source for trash generation tokens / pass ids.
+    /// Random token source for verified-pass ids.
     pub rand: &'a dyn RandGen,
 }
 
@@ -692,7 +692,6 @@ impl<'a> RetentionLoop<'a> {
                     &self.trash_dir,
                     self.seams.fs,
                     self.seams.index,
-                    self.seams.rand,
                 ) {
                     evicted.push(EvictedItem {
                         id: row.id,
@@ -855,7 +854,6 @@ impl<'a> RetentionLoop<'a> {
                 &self.trash_dir,
                 self.seams.fs,
                 self.seams.index,
-                self.seams.rand,
             ) {
                 DeleteOutcome::Deleted { bytes_freed } => {
                     records.push(DrainRecord {
@@ -935,7 +933,6 @@ impl<'a> RetentionLoop<'a> {
             &self.trash_dir,
             self.seams.fs,
             self.seams.index,
-            self.seams.rand,
         ) {
             DeleteOutcome::Deleted { bytes_freed } => Ok((
                 vec![EvictedItem {
@@ -1488,7 +1485,9 @@ mod tests {
                 calls: RefCell::new(Vec::new()),
             },
             fs: FakeFs::new(&[]),
-            index: FakeIndex::new(ClaimResult::Claimed),
+            index: FakeIndex::new(ClaimResult::Claimed {
+                delete_gen: "00000000000000000000000000000001".to_owned(),
+            }),
             catalog: FakeCatalog::default(),
             rand: SeqRand(Cell::new(0)),
         }
@@ -1749,7 +1748,9 @@ mod tests {
         let free = Rc::new(Cell::new(100));
         let statfs = RisingStatfs::new(free.clone(), 1_000);
         let fs = FakeFs::new(&[]).with_free_bump(free.clone(), 150);
-        let index = FakeIndex::new(ClaimResult::Claimed);
+        let index = FakeIndex::new(ClaimResult::Claimed {
+            delete_gen: "00000000000000000000000000000001".to_owned(),
+        });
         let (eviction, delete_reqs) = recent_mirror_items_with_reqs(&[1, 2, 3, 4], 150);
         let catalog = FakeCatalog {
             recovery: Vec::new(),
@@ -1813,7 +1814,9 @@ mod tests {
         let free = Rc::new(Cell::new(100));
         let statfs = RisingStatfs::new(free.clone(), 1_000);
         let fs = FakeFs::new(&[]).with_free_bump(free.clone(), 150);
-        let index = FakeIndex::new(ClaimResult::Claimed);
+        let index = FakeIndex::new(ClaimResult::Claimed {
+            delete_gen: "00000000000000000000000000000001".to_owned(),
+        });
         let (mut eviction, delete_reqs) = recent_mirror_items_with_reqs(&[1, 2, 3, 4], 150);
         for (item, size) in eviction.iter_mut().zip([100u64, 200, 300, 400]) {
             item.size = size;
@@ -2098,7 +2101,9 @@ mod tests {
             Err(io::Error::other("post-delete restat failed")),
         ]);
         let fs = FakeFs::new(&[]);
-        let index = FakeIndex::new(ClaimResult::Claimed);
+        let index = FakeIndex::new(ClaimResult::Claimed {
+            delete_gen: "00000000000000000000000000000001".to_owned(),
+        });
         let (eviction, delete_reqs) = recent_mirror_items_with_reqs(&[1, 2], 100);
         let catalog = FakeCatalog {
             recovery: Vec::new(),
@@ -2286,7 +2291,7 @@ mod tests {
         let report = rl.recover().unwrap();
         assert_eq!(report.actions.len(), 1);
         let log = h.index.log.borrow();
-        assert!(log.contains(&"mark_deleting".to_string()));
+        assert!(!log.contains(&"mark_deleting".to_string()));
         assert!(log.contains(&"mark_deleted 2048".to_string()));
     }
 

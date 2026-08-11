@@ -133,6 +133,13 @@ export const test = base.extend<{ probe: Probe }>({
         }),
       }),
     );
+    await page.route("**/api/retention/policy", (r) =>
+      r.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ status: "unavailable", snapshot: null }),
+      }),
+    );
     await use(probe);
   },
 });

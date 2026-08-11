@@ -251,6 +251,23 @@ export interface RetentionPreviewResponse {
   items: RetentionCandidate[];
 }
 
+/** Read-only typed retention policy snapshot (`GET /api/retention/policy`). */
+export interface RetentionPolicySnapshot {
+  effective_mode: string;
+  target_exit_frac: number;
+  target_free_frac: number | null;
+  recency_floor_secs: number;
+  per_cycle_evict_bytes: number;
+  per_cycle_evict_count: number;
+  per_cycle_wall_ms: number | null;
+  source: string;
+}
+
+export interface RetentionPolicyResponse {
+  status: "ready" | "unavailable";
+  snapshot: RetentionPolicySnapshot | null;
+}
+
 /**
  * Wire DTO types for the webd read API (contract D2).
  *

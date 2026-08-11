@@ -46,6 +46,24 @@ struct RetentionPreview {
     items: Vec<RetentionCandidate>,
 }
 
+#[derive(Debug, Serialize)]
+struct RetentionPolicyResponse {
+    status: &'static str,
+    snapshot: Option<RetentionPolicySnapshot>,
+}
+
+#[derive(Debug, Serialize)]
+struct RetentionPolicySnapshot {
+    effective_mode: String,
+    target_exit_frac: f64,
+    target_free_frac: Option<f64>,
+    recency_floor_secs: i64,
+    per_cycle_evict_bytes: u64,
+    per_cycle_evict_count: u64,
+    per_cycle_wall_ms: Option<u64>,
+    source: &'static str,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct CleanupHistoryEntry {
     at: i64,
@@ -87,7 +105,27 @@ struct EligibilityArgs {
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/retention/status", get(status))
+        .route("/retention/policy", get(policy))
         .route("/retention/preview", get(preview))
+}
+
+fn retention_policy_snapshot(governor: &serde_json::Value) -> Option<RetentionPolicySnapshot> {
+    let per_cycle_evict_bytes = governor.get("per_cycle_evict_bytes")?.as_u64()?;
+    let per_cycle_evict_count = governor.get("per_cycle_evict_count")?.as_u64()?;
+    Some(RetentionPolicySnapshot {
+        effective_mode: governor.get("mode")?.as_str()?.to_owned(),
+        target_exit_frac: governor.get("target_exit_frac")?.as_f64()?,
+        target_free_frac: governor
+            .get("target_free_frac")
+            .and_then(|value| value.as_f64()),
+        recency_floor_secs: governor.get("recency_floor_secs")?.as_i64()?,
+        per_cycle_evict_bytes,
+        per_cycle_evict_count,
+        per_cycle_wall_ms: governor
+            .get("per_cycle_wall_ms")
+            .and_then(|value| value.as_u64()),
+        source: "retentiond_governor",
+    })
 }
 
 fn eligibility_args(governor: &serde_json::Value) -> Option<EligibilityArgs> {
@@ -334,6 +372,28 @@ async fn preview(
         None => Json(RetentionPreview {
             status: "unavailable",
             items: Vec::new(),
+        }),
+    }
+}
+
+async fn policy(State(state): State<AppState>) -> Json<RetentionPolicyResponse> {
+    let sys = state.sys;
+    let snapshot = tokio::task::spawn_blocking(move || {
+        let governor = crate::sysinfo::retention_governor(sys.probe.as_ref(), sys.paths.as_ref())?;
+        retention_policy_snapshot(&governor)
+    })
+    .await
+    .ok()
+    .flatten();
+
+    match snapshot {
+        Some(snapshot) => Json(RetentionPolicyResponse {
+            status: "ready",
+            snapshot: Some(snapshot),
+        }),
+        None => Json(RetentionPolicyResponse {
+            status: "unavailable",
+            snapshot: None,
         }),
     }
 }

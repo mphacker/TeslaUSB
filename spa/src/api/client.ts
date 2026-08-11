@@ -54,6 +54,7 @@ import type {
   SchedulerSnapshot,
   StorageHealth,
   StorageInfo,
+  RetentionPolicyResponse,
   RetentionStatusResponse,
   RetentionPreviewResponse,
   StoredSchedule,
@@ -396,6 +397,9 @@ export const api = {
 
   retentionStatus: (signal?: AbortSignal) =>
     getJson<RetentionStatusResponse>("/api/retention/status", signal),
+
+  retentionPolicy: (signal?: AbortSignal) =>
+    getJson<RetentionPolicyResponse>("/api/retention/policy", signal),
 
   retentionPreview: (limit?: number, signal?: AbortSignal) =>
     getJson<RetentionPreviewResponse>(

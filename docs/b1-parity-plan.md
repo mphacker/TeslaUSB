@@ -118,7 +118,13 @@ and claim gates used by retention/indexd candidate selection. An active lease is
 reported as claim-blocked even if the row appears in the read-only candidate
 list. A read-only
 `GET /api/retention/preview?limit=` continues to return a capped, redacted
-candidate summary. Policy editing and deletion execution remain pending.
+candidate summary. B-1 now also exposes a read-only
+`GET /api/retention/policy` typed snapshot sourced from the live
+`retentiond.governor.json` facts (effective mode, thresholds/floor, per-cycle
+caps, and a stable source tag), with explicit `unavailable`/`snapshot:null`
+degradation when the governor is absent or malformed. Storage diagnostics now
+renders that policy snapshot with explicit read-only wording and no policy
+controls. Policy editing and deletion execution remain pending.
 
 **Implementation**
 
@@ -140,9 +146,9 @@ candidate summary. Policy editing and deletion execution remain pending.
 **Dependencies:** Workstream 0; existing retention and indexd delete code;
 cloud semantics from Workstream 1 if cloud-gated deletion is approved.
 
-**Next safe slice:** add a read-only retention policy snapshot endpoint (mode +
-caps/floor + source) so operators can see effective thresholds without enabling
-edits or execution.
+**Next safe slice:** keep cleanup control read-only, then add a low-space/no-progress
+operator signal that combines storage pressure with retention non-progress
+without enabling deletion actions.
 
 **Acceptance**
 

@@ -35,6 +35,7 @@ const ANALYTICS_API = new Set([
   "/api/system/metrics",
   "/api/system/health",
   "/api/retention/status",
+  "/api/retention/policy",
 ]);
 
 interface ChartSnapshot {

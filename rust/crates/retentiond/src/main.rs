@@ -95,6 +95,9 @@ struct GovernorStatus {
     target_free_frac: f64,
     target_exit_frac: f64,
     recency_floor_secs: i64,
+    per_cycle_evict_bytes: u64,
+    per_cycle_evict_count: u64,
+    per_cycle_wall_ms: u64,
     /// Stable snake_case tag of the last drain stop reason.
     last_stop: &'static str,
     last_bytes_freed: u64,
@@ -972,6 +975,9 @@ fn write_governor_status_best_effort(
         target_free_frac: cfg.target_drain.target_free_frac,
         target_exit_frac: cfg.target_drain.target_exit_frac,
         recency_floor_secs: cfg.target_drain.recency_floor_secs,
+        per_cycle_evict_bytes: cfg.target_drain.per_cycle_evict_bytes,
+        per_cycle_evict_count: cfg.target_drain.per_cycle_evict_count,
+        per_cycle_wall_ms: cfg.target_drain.per_cycle_wall_ms,
         last_stop,
         last_bytes_freed,
         last_items,
@@ -1591,6 +1597,9 @@ mod tests {
         assert_eq!(value["target_free_frac"], 0.08);
         assert_eq!(value["target_exit_frac"], 0.10);
         assert_eq!(value["recency_floor_secs"], 3_600);
+        assert_eq!(value["per_cycle_evict_bytes"], 8 << 30);
+        assert_eq!(value["per_cycle_evict_count"], 256);
+        assert_eq!(value["per_cycle_wall_ms"], 5_000);
         assert_eq!(value["last_stop"], "already_healthy");
         assert_eq!(value["last_bytes_freed"], 0);
         assert_eq!(value["last_items"], 0);

@@ -6,6 +6,7 @@ import type {
   EncryptionStatus,
   FilesystemEntry,
   GovernorInfo,
+  RetentionPolicyResponse,
   RetentionStatusResponse,
   StorageHealth as StorageHealthDto,
   StorageInfo,
@@ -560,6 +561,7 @@ export function StorageHealth() {
   const [info, setInfo] = useState<StorageInfo | null>(null);
   const [health, setHealth] = useState<StorageHealthDto | null>(null);
   const [retention, setRetention] = useState<RetentionStatusResponse | null>(null);
+  const [retentionPolicy, setRetentionPolicy] = useState<RetentionPolicyResponse | null>(null);
   const [enc, setEnc] = useState<EncryptionStatus | null>(null);
   const [metrics, setMetrics] = useState<SystemMetrics | null>(null);
   const [sysHealth, setSysHealth] = useState<SystemHealth | null>(null);
@@ -571,6 +573,7 @@ export function StorageHealth() {
     api.storage(ctrl.signal).then(setInfo).catch(() => {});
     api.storageHealth(ctrl.signal).then(setHealth).catch(() => {});
     api.retentionStatus(ctrl.signal).then(setRetention).catch(() => {});
+    api.retentionPolicy(ctrl.signal).then(setRetentionPolicy).catch(() => {});
     api.encryptionStatus(ctrl.signal).then(setEnc).catch(() => {});
     api.systemMetrics(ctrl.signal).then(setMetrics).catch(() => {});
     api.systemHealth(ctrl.signal).then(setSysHealth).catch(() => {});
@@ -821,6 +824,42 @@ export function StorageHealth() {
               : `Quarantined (never auto-deleted): ${info.quarantined.count} ${
                   info.quarantined.count === 1 ? "clip" : "clips"
                 } \u00b7 ${humanBytes(info.quarantined.bytes)}`}
+          </p>
+        )}
+        <p class="storage-note" data-testid="retention-policy-readonly">
+          Effective retention policy snapshot (read-only): this screen does not
+          offer policy edits or cleanup controls.
+        </p>
+        {retentionPolicy?.status === "ready" && retentionPolicy.snapshot != null ? (
+          <dl class="storage-dl" id="retention-policy-grid" data-testid="retention-policy-grid">
+            <dt>Effective mode</dt>
+            <dd>{retentionPolicy.snapshot.effective_mode}</dd>
+            <dt>Target exit free</dt>
+            <dd>{(retentionPolicy.snapshot.target_exit_frac * 100).toFixed(1)}%</dd>
+            <dt>Target free</dt>
+            <dd>
+              {retentionPolicy.snapshot.target_free_frac == null
+                ? DASH
+                : `${(retentionPolicy.snapshot.target_free_frac * 100).toFixed(1)}%`}
+            </dd>
+            <dt>Recency floor</dt>
+            <dd>{retentionPolicy.snapshot.recency_floor_secs}s</dd>
+            <dt>Per-cycle byte cap</dt>
+            <dd>{humanBytes(retentionPolicy.snapshot.per_cycle_evict_bytes)}</dd>
+            <dt>Per-cycle clip cap</dt>
+            <dd>{retentionPolicy.snapshot.per_cycle_evict_count}</dd>
+            <dt>Per-cycle wall cap</dt>
+            <dd>
+              {retentionPolicy.snapshot.per_cycle_wall_ms == null
+                ? DASH
+                : `${retentionPolicy.snapshot.per_cycle_wall_ms} ms`}
+            </dd>
+            <dt>Source</dt>
+            <dd>{retentionPolicy.snapshot.source}</dd>
+          </dl>
+        ) : (
+          <p class="storage-note" data-testid="retention-policy-unavailable">
+            Effective retention policy snapshot unavailable.
           </p>
         )}
         <p class="storage-note" data-testid="retention-candidate-count">

@@ -425,6 +425,12 @@ struct GovernorDto {
     target_free_frac: f64,
     target_exit_frac: f64,
     recency_floor_secs: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    per_cycle_evict_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    per_cycle_evict_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    per_cycle_wall_ms: Option<u64>,
     last_stop: String,
     last_bytes_freed: u64,
     last_items: u64,
@@ -1016,6 +1022,12 @@ fn validate_governor(dto: GovernorDto, now: i64) -> Option<GovernorDto> {
     if dto.recency_floor_secs < 0 {
         return None;
     }
+    if dto.per_cycle_evict_bytes == Some(0) || dto.per_cycle_evict_count == Some(0) {
+        return None;
+    }
+    if dto.per_cycle_wall_ms == Some(0) {
+        return None;
+    }
     if dto.last_stop.is_empty() {
         return None;
     }
@@ -1442,6 +1454,9 @@ mod tests {
             target_free_frac: 0.08,
             target_exit_frac: 0.1,
             recency_floor_secs: 3600,
+            per_cycle_evict_bytes: Some(8 << 30),
+            per_cycle_evict_count: Some(256),
+            per_cycle_wall_ms: Some(5_000),
             last_stop: "already_healthy".to_owned(),
             last_bytes_freed: 0,
             last_items: 0,

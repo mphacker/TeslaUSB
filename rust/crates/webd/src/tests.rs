@@ -2318,6 +2318,92 @@ async fn retention_status_reports_exclusion_reasons() {
 }
 
 #[tokio::test]
+async fn retention_policy_reports_typed_snapshot_when_governor_valid() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_secs() as i64)
+        .unwrap_or(1_700_000_000);
+    let governor = json!({
+        "schema": 2,
+        "updated_at": now,
+        "uploads_allowed": true,
+        "seq": 1,
+        "interval_secs": 20,
+        "publisher_instance": "abcd",
+        "mode": "armed",
+        "drain_only": false,
+        "free_bytes": 50,
+        "total_bytes": 100,
+        "target_free_frac": 0.08,
+        "target_exit_frac": 0.10,
+        "recency_floor_secs": 3600,
+        "per_cycle_evict_bytes": 8_589_934_592u64,
+        "per_cycle_evict_count": 256,
+        "per_cycle_wall_ms": 5000,
+        "last_stop": "already_healthy",
+        "last_bytes_freed": 0,
+        "last_items": 0
+    });
+    let fx = retention_settings_fixture(
+        json!({ "status": "eviction_candidates", "items": [] }),
+        false,
+        Some(governor.to_string()),
+    );
+
+    let (status, body) = get_json(&fx.app, "/api/retention/policy").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "ready");
+    assert_eq!(
+        body["snapshot"],
+        json!({
+            "effective_mode": "armed",
+            "target_exit_frac": 0.10,
+            "target_free_frac": 0.08,
+            "recency_floor_secs": 3600,
+            "per_cycle_evict_bytes": 8_589_934_592u64,
+            "per_cycle_evict_count": 256,
+            "per_cycle_wall_ms": 5000,
+            "source": "retentiond_governor"
+        })
+    );
+}
+
+#[tokio::test]
+async fn retention_policy_reports_unavailable_when_governor_missing() {
+    let fx = retention_settings_fixture(
+        json!({ "status": "eviction_candidates", "items": [] }),
+        false,
+        None,
+    );
+
+    let (status, body) = get_json(&fx.app, "/api/retention/policy").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "unavailable");
+    assert_eq!(body["snapshot"], Value::Null);
+}
+
+#[tokio::test]
+async fn retention_policy_reports_unavailable_when_governor_malformed() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_secs() as i64)
+        .unwrap_or(1_700_000_000);
+    let malformed = format!(
+        "{{\"schema\":2,\"updated_at\":{now},\"uploads_allowed\":true,\"seq\":1,\"interval_secs\":20,\"publisher_instance\":\"abcd\",\"mode\":\"armed\",\"drain_only\":false,\"free_bytes\":50,\"total_bytes\":100,\"target_free_frac\":0.08,\"target_exit_frac\":0.10,\"recency_floor_secs\":3600,\"per_cycle_evict_bytes\":8589934592,\"per_cycle_evict_count\":\"oops\",\"per_cycle_wall_ms\":5000,\"last_stop\":\"already_healthy\",\"last_bytes_freed\":0,\"last_items\":0}}"
+    );
+    let fx = retention_settings_fixture(
+        json!({ "status": "eviction_candidates", "items": [] }),
+        false,
+        Some(malformed),
+    );
+
+    let (status, body) = get_json(&fx.app, "/api/retention/policy").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "unavailable");
+    assert_eq!(body["snapshot"], Value::Null);
+}
+
+#[tokio::test]
 async fn spa_host_serves_index_and_falls_back() {
     let fx = fixture();
     let (status, content_type, body) = get_raw(&fx.app, "/").await;

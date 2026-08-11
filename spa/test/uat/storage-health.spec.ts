@@ -34,6 +34,7 @@ const ALLOWED_API = new Set([
   "/api/storage",
   "/api/storage/health",
   "/api/retention/status",
+  "/api/retention/policy",
   "/api/recording/encryption",
   "/api/system/metrics",
   "/api/system/health",
@@ -155,6 +156,20 @@ const RETENTION_STATUS_FIXTURE = {
     "Armed local cleanup may delete footage before cloud upload confirmation.",
 };
 
+const RETENTION_POLICY_FIXTURE = {
+  status: "ready",
+  snapshot: {
+    effective_mode: "armed",
+    target_exit_frac: 0.1,
+    target_free_frac: 0.08,
+    recency_floor_secs: 3600,
+    per_cycle_evict_bytes: 8 * GIB,
+    per_cycle_evict_count: 256,
+    per_cycle_wall_ms: 5000,
+    source: "retentiond_governor",
+  },
+};
+
 const METRICS_FIXTURE = {
   uptime_s: 123456,
   load: { one: 0.15, five: 0.22, fifteen: 0.18 },
@@ -189,6 +204,9 @@ async function routeProbes(page: Page) {
   await page.route("**/api/system/health", (r) => r.fulfill(json(SYS_HEALTH_FIXTURE)));
   await page.route("**/api/retention/status", (r) =>
     r.fulfill(json(RETENTION_STATUS_FIXTURE)),
+  );
+  await page.route("**/api/retention/policy", (r) =>
+    r.fulfill(json(RETENTION_POLICY_FIXTURE)),
   );
   await page.route("**/api/recording/encryption", (r) =>
     r.fulfill(
@@ -355,6 +373,19 @@ test.describe("storage health UAT", () => {
 
     // Retention headroom — governor is null ⇒ degraded note (no fabricated figure).
     await expect(page.locator('[data-testid="retention-degraded"]')).toBeVisible();
+    await expect(page.locator('[data-testid="retention-policy-readonly"]')).toContainText(
+      "read-only",
+    );
+    await expect(page.locator('[data-testid="retention-policy-grid"] dd')).toHaveText([
+      "armed",
+      "10.0%",
+      "8.0%",
+      "3600s",
+      "8.0 GB",
+      "256",
+      "5000 ms",
+      "retentiond_governor",
+    ]);
     await expect(page.locator('[data-testid="retention-candidate-count"]')).toContainText(
       "3 clips",
     );
@@ -395,6 +426,7 @@ test.describe("storage health UAT", () => {
     await details.locator("summary").click();
 
     await expect(page.locator('[data-testid="retention-degraded"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="retention-policy-grid"]')).toBeVisible();
     await expect(page.locator("#storage-governor")).toBeVisible();
     await expect(page.locator('[data-testid="governor-mode"]')).toContainText("Armed");
     await expect(page.locator('[data-testid="governor-policy"]')).toContainText(
@@ -429,6 +461,7 @@ test.describe("storage health UAT", () => {
     await details.locator("summary").click();
 
     await expect(page.locator('[data-testid="retention-degraded"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="retention-policy-grid"]')).toBeVisible();
     await expect(page.locator("#storage-governor")).toBeVisible();
     await expect(page.locator('[data-testid="governor-mode"]')).toContainText(
       "Dry-run (reporting only)",
@@ -532,6 +565,7 @@ test.describe("storage health UAT", () => {
     expect(seen.has("/api/storage"), "/api/storage was never requested").toBe(true);
     expect(seen.has("/api/storage/health"), "/api/storage/health never requested").toBe(true);
     expect(seen.has("/api/retention/status"), "/api/retention/status never requested").toBe(true);
+    expect(seen.has("/api/retention/policy"), "/api/retention/policy never requested").toBe(true);
     expect(seen.has("/api/recording/encryption"), "/api/recording/encryption never requested").toBe(
       true,
     );

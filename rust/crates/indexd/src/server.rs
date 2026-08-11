@@ -16,6 +16,10 @@ use teslausb_core::durable_mutation::{
 };
 use teslausb_core::manifest_digest::{ManifestDigestEntry, manifest_digest_v1_hex};
 
+use crate::db::archive_delete_requests::{
+    ArchiveDeleteRequestRecord, CreateOrLoadArchiveDeleteRequestResult, NewArchiveDeleteRequestRow,
+    archive_delete_request_create_or_load_tx, archive_delete_request_inspect_by_job_id,
+};
 use crate::db::cloud::{
     CloudConfig, CloudQueuePk, CloudQueueRetryResolution, CloudQueueUpsertItem, cloud_candidates,
     cloud_config_get, cloud_config_put, cloud_discover, cloud_failed_history_load,
@@ -149,12 +153,10 @@ fn handle_connection(
                 Ok(response) => response,
                 Err(message) => Response::Error { message },
             },
-            Request::MarkArchiveDeleting { id } => {
-                match handle_mark_archive_deleting(conn, id) {
-                    Ok(response) => response,
-                    Err(message) => Response::Error { message },
-                }
-            }
+            Request::MarkArchiveDeleting { id } => match handle_mark_archive_deleting(conn, id) {
+                Ok(response) => response,
+                Err(message) => Response::Error { message },
+            },
             Request::MarkArchiveDeleted { id, bytes_freed } => {
                 match handle_mark_archive_deleted(conn, id, bytes_freed) {
                     Ok(response) => response,
@@ -294,6 +296,41 @@ fn handle_connection(
                 Err(HandlerError::Rejected(message)) => Response::Rejected { message },
                 Err(HandlerError::Internal(message)) => Response::Error { message },
             },
+            Request::ArchiveDeleteCreateOrLoad {
+                job_id,
+                request_id,
+                idempotency_key,
+                request_hash,
+                target_archive_item_id,
+                target_archive_path,
+                target_archive_size_bytes,
+                target_archive_file_count,
+                target_clip_canonical_key,
+                target_manifest_digest,
+            } => match handle_archive_delete_create_or_load(
+                conn,
+                &job_id,
+                &request_id,
+                &idempotency_key,
+                &request_hash,
+                target_archive_item_id,
+                &target_archive_path,
+                target_archive_size_bytes,
+                target_archive_file_count,
+                target_clip_canonical_key.as_deref(),
+                target_manifest_digest.as_deref(),
+            ) {
+                Ok(response) => response,
+                Err(HandlerError::Rejected(message)) => Response::Rejected { message },
+                Err(HandlerError::Internal(message)) => Response::Error { message },
+            },
+            Request::ArchiveDeleteInspect { job_id } => {
+                match handle_archive_delete_inspect(conn, &job_id) {
+                    Ok(response) => response,
+                    Err(HandlerError::Rejected(message)) => Response::Rejected { message },
+                    Err(HandlerError::Internal(message)) => Response::Error { message },
+                }
+            }
             Request::UploadLeaseAcquire {
                 archive_item_id,
                 ttl_ms,
@@ -542,7 +579,11 @@ fn handle_mark_archive_deleted(
     let locked = conn
         .lock()
         .map_err(|_| "index database mutex is poisoned".to_owned())?;
-    Ok(map_delete_write_result(mark_deleted(&locked, id, bytes_freed)))
+    Ok(map_delete_write_result(mark_deleted(
+        &locked,
+        id,
+        bytes_freed,
+    )))
 }
 
 fn handle_release_archive_delete_claim(
@@ -887,6 +928,10 @@ const FAILED_UPLOAD_RETRY_OWNER: &str = "indexd";
 const FAILED_UPLOAD_RETRY_KIND: &str = "cloud_failed_upload_retry";
 const FAILED_UPLOAD_RETRY_CONFLICT_MESSAGE: &str =
     "idempotency key already used with a different failed-upload retry request";
+const ARCHIVE_DELETE_OWNER: &str = "indexd";
+const ARCHIVE_DELETE_KIND: &str = "archive_delete";
+const ARCHIVE_DELETE_CONFLICT_MESSAGE: &str =
+    "idempotency key already used with a different archive-delete request";
 
 fn replay_outcome(status: Option<&str>) -> String {
     match status {
@@ -896,6 +941,20 @@ fn replay_outcome(status: Option<&str>) -> String {
         Some("conflict") => "conflict",
         Some("replay") => "replay",
         _ => "accepted",
+    }
+    .to_owned()
+}
+
+fn durable_state_wire(state: DurableMutationState) -> String {
+    match state {
+        DurableMutationState::Queued => "queued",
+        DurableMutationState::Running => "running",
+        DurableMutationState::Done => "done",
+        DurableMutationState::Failed => "failed",
+        DurableMutationState::Refused => "refused",
+        DurableMutationState::Busy => "busy",
+        DurableMutationState::CancelRequested => "cancel_requested",
+        DurableMutationState::Cancelled => "cancelled",
     }
     .to_owned()
 }
@@ -1005,6 +1064,111 @@ fn handle_cloud_failed_upload_retry(
             })
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_archive_delete_create_or_load(
+    conn: &Arc<Mutex<Connection>>,
+    job_id: &str,
+    request_id: &str,
+    idempotency_key: &str,
+    request_hash: &str,
+    target_archive_item_id: i64,
+    target_archive_path: &str,
+    target_archive_size_bytes: i64,
+    target_archive_file_count: i64,
+    target_clip_canonical_key: Option<&str>,
+    target_manifest_digest: Option<&str>,
+) -> Result<Response, HandlerError> {
+    let request = ArchiveDeleteRequestRecord::new(
+        request_id.to_owned(),
+        idempotency_key.to_owned(),
+        request_hash.to_owned(),
+        target_archive_item_id,
+        target_archive_path.to_owned(),
+        target_archive_size_bytes,
+        target_archive_file_count,
+        target_clip_canonical_key.map(str::to_owned),
+        target_manifest_digest.map(str::to_owned),
+    )
+    .map_err(|reason| HandlerError::Rejected(reason.to_owned()))?;
+
+    let locked = conn
+        .lock()
+        .map_err(|_| HandlerError::Internal("index database mutex is poisoned".to_owned()))?;
+    let tx = locked
+        .unchecked_transaction()
+        .map_err(DbError::from)
+        .map_err(map_db_error)?;
+    let result = archive_delete_request_create_or_load_tx(
+        &tx,
+        &NewArchiveDeleteRequestRow {
+            job_id: job_id.to_owned(),
+            owner: ARCHIVE_DELETE_OWNER.to_owned(),
+            kind: ARCHIVE_DELETE_KIND.to_owned(),
+            request,
+        },
+    )
+    .map_err(map_db_error)?;
+    match result {
+        CreateOrLoadArchiveDeleteRequestResult::Inserted(inserted) => {
+            tx.commit().map_err(DbError::from).map_err(map_db_error)?;
+            if inserted.state == DurableMutationState::Refused {
+                return Ok(Response::ArchiveDeleteRefused {
+                    job_id: inserted.job_id,
+                    request_id: inserted.request.request_id,
+                    message: inserted
+                        .sanitized_error
+                        .unwrap_or_else(|| "archive delete request refused".to_owned()),
+                });
+            }
+            Ok(Response::ArchiveDeleteAccepted {
+                job_id: inserted.job_id,
+                request_id: inserted.request.request_id,
+                state: durable_state_wire(inserted.state),
+            })
+        }
+        CreateOrLoadArchiveDeleteRequestResult::Replay(existing) => {
+            tx.commit().map_err(DbError::from).map_err(map_db_error)?;
+            Ok(Response::ArchiveDeleteReplay {
+                job_id: existing.job_id,
+                request_id: existing.request.request_id,
+                outcome: replay_outcome(existing.response_status.as_deref()),
+                response_status: existing.response_status,
+                response_code: existing.response_code,
+                detail: existing.sanitized_error,
+            })
+        }
+        CreateOrLoadArchiveDeleteRequestResult::Conflict409(existing) => {
+            tx.commit().map_err(DbError::from).map_err(map_db_error)?;
+            Ok(Response::ArchiveDeleteConflict {
+                job_id: existing.job_id,
+                request_id: existing.request.request_id,
+                message: ARCHIVE_DELETE_CONFLICT_MESSAGE.to_owned(),
+            })
+        }
+    }
+}
+
+fn handle_archive_delete_inspect(
+    conn: &Arc<Mutex<Connection>>,
+    job_id: &str,
+) -> Result<Response, HandlerError> {
+    let locked = conn
+        .lock()
+        .map_err(|_| HandlerError::Internal("index database mutex is poisoned".to_owned()))?;
+    let row = archive_delete_request_inspect_by_job_id(&locked, job_id).map_err(map_db_error)?;
+    let Some(row) = row else {
+        return Ok(Response::NotFound {});
+    };
+    Ok(Response::ArchiveDeleteInspect {
+        job_id: row.job_id,
+        request_id: row.request.request_id,
+        state: durable_state_wire(row.state),
+        response_status: row.response_status,
+        response_code: row.response_code,
+        detail: row.sanitized_error,
+    })
 }
 
 fn handle_upload_lease_acquire(
@@ -5490,10 +5654,7 @@ mod tests {
         let _server =
             spawn(&conn, &boot, &socket_path, Duration::from_secs(2)).expect("spawn indexd server");
 
-        match send(
-            &socket_path,
-            &Request::MarkArchiveDeleting { id: live_id },
-        ) {
+        match send(&socket_path, &Request::MarkArchiveDeleting { id: live_id }) {
             Response::Rejected { message } => assert!(message.contains("DELETE_CLAIMED->DELETING")),
             other => panic!("expected rejected, got {other:?}"),
         }
@@ -6063,6 +6224,222 @@ mod tests {
             )
             .expect("count retry rows");
         assert_eq!(request_rows, 2);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn socket_archive_delete_create_or_load_and_inspect_roundtrip() {
+        let conn = open_in_memory().expect("open db");
+        let archive_item_id = insert_archive_item(
+            &conn,
+            "archive/manual-delete/item-a",
+            "RecentClips",
+            100,
+            1,
+            0,
+        );
+        let conn = Arc::new(Mutex::new(conn));
+        let boot = Arc::new(BootContext::new());
+        let dir = new_temp_dir();
+        let socket_path = dir.join("indexd.sock");
+        let _server =
+            spawn(&conn, &boot, &socket_path, Duration::from_secs(2)).expect("spawn indexd server");
+
+        let accepted_hash =
+            "9191919191919191919191919191919191919191919191919191919191919191".to_owned();
+        let conflict_hash =
+            "8282828282828282828282828282828282828282828282828282828282828282".to_owned();
+
+        let accepted = send(
+            &socket_path,
+            &Request::ArchiveDeleteCreateOrLoad {
+                job_id: "m-8801".to_owned(),
+                request_id: "req-8801".to_owned(),
+                idempotency_key: "idem-8801".to_owned(),
+                request_hash: accepted_hash.clone(),
+                target_archive_item_id: archive_item_id,
+                target_archive_path: "archive/manual-delete/item-a".to_owned(),
+                target_archive_size_bytes: 4096,
+                target_archive_file_count: 1,
+                target_clip_canonical_key: Some("archive/manual-delete/item-a".to_owned()),
+                target_manifest_digest: None,
+            },
+        );
+        assert_eq!(
+            accepted,
+            Response::ArchiveDeleteAccepted {
+                job_id: "m-8801".to_owned(),
+                request_id: "req-8801".to_owned(),
+                state: "queued".to_owned(),
+            }
+        );
+
+        let replay = send(
+            &socket_path,
+            &Request::ArchiveDeleteCreateOrLoad {
+                job_id: "m-8802".to_owned(),
+                request_id: "req-8802".to_owned(),
+                idempotency_key: "idem-8801".to_owned(),
+                request_hash: accepted_hash,
+                target_archive_item_id: archive_item_id,
+                target_archive_path: "archive/manual-delete/item-a".to_owned(),
+                target_archive_size_bytes: 4096,
+                target_archive_file_count: 1,
+                target_clip_canonical_key: Some("archive/manual-delete/item-a".to_owned()),
+                target_manifest_digest: None,
+            },
+        );
+        assert_eq!(
+            replay,
+            Response::ArchiveDeleteReplay {
+                job_id: "m-8801".to_owned(),
+                request_id: "req-8801".to_owned(),
+                outcome: "accepted".to_owned(),
+                response_status: Some("accepted".to_owned()),
+                response_code: Some(202),
+                detail: Some("queued".to_owned()),
+            }
+        );
+
+        let conflict_same_hash_different_target = send(
+            &socket_path,
+            &Request::ArchiveDeleteCreateOrLoad {
+                job_id: "m-8802b".to_owned(),
+                request_id: "req-8802b".to_owned(),
+                idempotency_key: "idem-8801".to_owned(),
+                request_hash: "9191919191919191919191919191919191919191919191919191919191919191"
+                    .to_owned(),
+                target_archive_item_id: archive_item_id,
+                target_archive_path: "archive/manual-delete/item-a".to_owned(),
+                target_archive_size_bytes: 4097,
+                target_archive_file_count: 1,
+                target_clip_canonical_key: Some("archive/manual-delete/item-a".to_owned()),
+                target_manifest_digest: None,
+            },
+        );
+        assert_eq!(
+            conflict_same_hash_different_target,
+            Response::ArchiveDeleteConflict {
+                job_id: "m-8801".to_owned(),
+                request_id: "req-8801".to_owned(),
+                message: "idempotency key already used with a different archive-delete request"
+                    .to_owned(),
+            }
+        );
+
+        let conflict = send(
+            &socket_path,
+            &Request::ArchiveDeleteCreateOrLoad {
+                job_id: "m-8803".to_owned(),
+                request_id: "req-8803".to_owned(),
+                idempotency_key: "idem-8801".to_owned(),
+                request_hash: conflict_hash,
+                target_archive_item_id: archive_item_id,
+                target_archive_path: "archive/manual-delete/item-a".to_owned(),
+                target_archive_size_bytes: 4096,
+                target_archive_file_count: 1,
+                target_clip_canonical_key: Some("archive/manual-delete/item-a".to_owned()),
+                target_manifest_digest: None,
+            },
+        );
+        assert_eq!(
+            conflict,
+            Response::ArchiveDeleteConflict {
+                job_id: "m-8801".to_owned(),
+                request_id: "req-8801".to_owned(),
+                message: "idempotency key already used with a different archive-delete request"
+                    .to_owned(),
+            }
+        );
+
+        let duplicate_request_id = send(
+            &socket_path,
+            &Request::ArchiveDeleteCreateOrLoad {
+                job_id: "m-8804".to_owned(),
+                request_id: "req-8801".to_owned(),
+                idempotency_key: "idem-8804".to_owned(),
+                request_hash: "7373737373737373737373737373737373737373737373737373737373737373"
+                    .to_owned(),
+                target_archive_item_id: archive_item_id,
+                target_archive_path: "archive/manual-delete/item-a".to_owned(),
+                target_archive_size_bytes: 4096,
+                target_archive_file_count: 1,
+                target_clip_canonical_key: Some("archive/manual-delete/item-a".to_owned()),
+                target_manifest_digest: None,
+            },
+        );
+        assert_eq!(
+            duplicate_request_id,
+            Response::ArchiveDeleteConflict {
+                job_id: "m-8801".to_owned(),
+                request_id: "req-8801".to_owned(),
+                message: "idempotency key already used with a different archive-delete request"
+                    .to_owned(),
+            }
+        );
+
+        let stale = send(
+            &socket_path,
+            &Request::ArchiveDeleteCreateOrLoad {
+                job_id: "m-8805".to_owned(),
+                request_id: "req-8805".to_owned(),
+                idempotency_key: "idem-8805".to_owned(),
+                request_hash: "6464646464646464646464646464646464646464646464646464646464646464"
+                    .to_owned(),
+                target_archive_item_id: archive_item_id,
+                target_archive_path: "archive/manual-delete/item-a".to_owned(),
+                target_archive_size_bytes: 9999,
+                target_archive_file_count: 1,
+                target_clip_canonical_key: Some("archive/manual-delete/item-a".to_owned()),
+                target_manifest_digest: None,
+            },
+        );
+        assert_eq!(
+            stale,
+            Response::ArchiveDeleteRefused {
+                job_id: "m-8805".to_owned(),
+                request_id: "req-8805".to_owned(),
+                message: "archive delete request stale; refresh required".to_owned(),
+            }
+        );
+
+        let inspect = send(
+            &socket_path,
+            &Request::ArchiveDeleteInspect {
+                job_id: "m-8801".to_owned(),
+            },
+        );
+        assert_eq!(
+            inspect,
+            Response::ArchiveDeleteInspect {
+                job_id: "m-8801".to_owned(),
+                request_id: "req-8801".to_owned(),
+                state: "queued".to_owned(),
+                response_status: Some("accepted".to_owned()),
+                response_code: Some(202),
+                detail: Some("queued".to_owned()),
+            }
+        );
+
+        let not_found = send(
+            &socket_path,
+            &Request::ArchiveDeleteInspect {
+                job_id: "m-8999".to_owned(),
+            },
+        );
+        assert_eq!(not_found, Response::NotFound {});
+
+        let delete_state: String = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT delete_state FROM archive_items WHERE id = ?1",
+                params![archive_item_id],
+                |r| r.get(0),
+            )
+            .expect("load delete_state");
+        assert_eq!(delete_state, "LIVE");
 
         let _ = std::fs::remove_dir_all(dir);
     }

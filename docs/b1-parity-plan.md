@@ -158,7 +158,9 @@ delete protocol. The claim response must carry the persisted OS-random
 Transitional recovery rows without a generation fail closed. Public archive and
 combined deletion remain disabled until durable job persistence, stale-plan
 fencing, restart recovery, reconciliation, and the approved same-origin/auth
-boundary are complete.
+boundary are complete. The internal v11/v12 archive-delete request scaffold now
+stores idempotency identity and target fences, with restart projection that
+distinguishes owned in-flight work from stale plans and terminal outcomes.
 
 **Acceptance**
 

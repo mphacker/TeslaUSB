@@ -6,6 +6,7 @@
 //! mutations funnel through here. Readers (webd / retentiond / uploadd)
 //! never write directly.
 
+pub mod archive_delete_requests;
 pub mod cloud;
 pub mod cloud_retry_requests;
 pub mod ingest;
@@ -102,6 +103,7 @@ pub fn open<P: AsRef<Path>>(path: P) -> Result<Connection, DbError> {
     let mut conn = Connection::open(path)?;
     apply_pragmas(&conn)?;
     apply_migrations(&mut conn)?;
+    archive_delete_requests::archive_delete_request_project_restart(&conn)?;
     Ok(conn)
 }
 
@@ -115,6 +117,7 @@ pub fn open_in_memory() -> Result<Connection, DbError> {
     let mut conn = Connection::open_in_memory()?;
     apply_pragmas(&conn)?;
     apply_migrations(&mut conn)?;
+    archive_delete_requests::archive_delete_request_project_restart(&conn)?;
     Ok(conn)
 }
 
@@ -271,6 +274,7 @@ mod tests {
             "cloud_provider_config",
             "cloud_upload_attempts",
             "cloud_failed_upload_retry_requests",
+            "archive_delete_requests",
         ] {
             let found: i64 = conn
                 .query_row(

@@ -127,6 +127,12 @@ archive or combined delete route is enabled:
   affected-row counts and rejecting missing or wrong-state rows;
 - transitional recovery rows without a valid generation fail closed rather
   than guessing a trash path.
+- indexd persists internal archive-delete request identity in schema v11/v12,
+  including the complete target fence and an optional owned `delete_gen`;
+  idempotency replay requires both the request hash and the full fence to match;
+- restart projection requeues only owned `DELETE_CLAIMED`/`DELETING` work,
+  preserves completed deletes as terminal, and marks failed deletes as
+  reconciliation-required rather than silently retrying.
 
 These repairs do not add durable public delete jobs, manual archive claims,
 stale-plan fencing, or SPA delete controls. Public `archive` and `both` delete

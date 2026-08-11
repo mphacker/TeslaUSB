@@ -29,7 +29,7 @@ pub const SCHEMA_VERSION_NOTE: &str = "v1 (PROVISIONAL — pre-OP-3 freeze)";
 /// The highest schema version this binary knows how to produce. A DB
 /// reporting a higher version was written by a newer `indexd` and must
 /// not be opened read-write.
-pub const LATEST_VERSION: i64 = 10;
+pub const LATEST_VERSION: i64 = 12;
 
 /// The ordered migration ladder. Index order MUST match ascending
 /// `version`; [`MIGRATIONS`] is validated by a test.
@@ -83,6 +83,16 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 10,
         note: "v10 — failed-history upload-set fencing",
         sql: V10_SQL,
+    },
+    Migration {
+        version: 11,
+        note: "v11 — internal archive-delete request persistence scaffold",
+        sql: V11_SQL,
+    },
+    Migration {
+        version: 12,
+        note: "v12 — archive-delete request owned delete-gen marker",
+        sql: V12_SQL,
     },
 ];
 
@@ -589,6 +599,94 @@ UPDATE cloud_sync_history
    ) = 1;
 ";
 
+/// v11 DDL: internal archive-delete request idempotency and stale-plan fences.
+const V11_SQL: &str = "
+CREATE TABLE archive_delete_requests (
+    job_id                      TEXT PRIMARY KEY
+                                    CHECK(length(job_id) BETWEEN 1 AND 32
+                                          AND (
+                                              (job_id NOT GLOB '*[^0-9]*')
+                                              OR (
+                                                  substr(job_id, 1, 2) = 'm-'
+                                                  AND length(job_id) > 2
+                                                  AND substr(job_id, 3) NOT GLOB '*[^0-9]*'
+                                              )
+                                          )),
+    request_id                  TEXT NOT NULL
+                                    CHECK(length(request_id) BETWEEN 8 AND 128
+                                          AND request_id NOT GLOB '*[^0-9A-Za-z_.:-]*'),
+    idempotency_key             TEXT NOT NULL
+                                    CHECK(length(idempotency_key) BETWEEN 8 AND 128
+                                          AND idempotency_key NOT GLOB '*[^0-9A-Za-z_.:-]*'),
+    request_hash                TEXT NOT NULL
+                                    CHECK(length(request_hash)=64
+                                          AND request_hash = lower(request_hash)
+                                          AND request_hash NOT GLOB '*[^0-9a-f]*'),
+    owner                       TEXT NOT NULL
+                                    CHECK(length(owner) BETWEEN 1 AND 32
+                                          AND owner NOT GLOB '*[^0-9A-Za-z_.-]*'),
+    kind                        TEXT NOT NULL
+                                    CHECK(length(kind) BETWEEN 1 AND 64
+                                          AND kind NOT GLOB '*[^0-9A-Za-z_.-]*'),
+    state                       TEXT NOT NULL
+                                    CHECK(state IN (
+                                        'queued', 'running', 'done', 'failed',
+                                        'refused', 'busy', 'cancel_requested', 'cancelled'
+                                    )),
+    target_archive_item_id      INTEGER NOT NULL CHECK(target_archive_item_id > 0),
+    target_archive_path         TEXT NOT NULL CHECK(length(target_archive_path) BETWEEN 1 AND 1024),
+    target_archive_size_bytes   INTEGER NOT NULL CHECK(target_archive_size_bytes >= 0),
+    target_archive_file_count   INTEGER NOT NULL CHECK(target_archive_file_count > 0),
+    target_clip_canonical_key   TEXT
+                                    CHECK(target_clip_canonical_key IS NULL
+                                          OR length(target_clip_canonical_key) BETWEEN 1 AND 512),
+    target_manifest_digest      TEXT
+                                    CHECK(target_manifest_digest IS NULL
+                                          OR (length(target_manifest_digest)=32
+                                              AND target_manifest_digest = lower(target_manifest_digest)
+                                              AND target_manifest_digest NOT GLOB '*[^0-9a-f]*')),
+    response_status             TEXT
+                                    CHECK(response_status IS NULL
+                                          OR response_status IN (
+                                              'accepted', 'replay', 'conflict', 'rejected', 'error'
+                                          )),
+    response_code               INTEGER
+                                    CHECK(response_code IS NULL
+                                          OR response_code BETWEEN 100 AND 599),
+    sanitized_error             TEXT
+                                    CHECK(sanitized_error IS NULL
+                                          OR length(sanitized_error) BETWEEN 1 AND 160),
+    created_at                  INTEGER NOT NULL CHECK(created_at >= 0),
+    updated_at                  INTEGER NOT NULL CHECK(updated_at >= created_at),
+    completed_at                INTEGER
+                                    CHECK(completed_at IS NULL
+                                          OR (completed_at >= 0 AND completed_at >= updated_at)),
+    CHECK(target_clip_canonical_key IS NOT NULL OR target_manifest_digest IS NOT NULL),
+    UNIQUE(owner, kind, idempotency_key),
+    UNIQUE(request_id)
+);
+
+CREATE INDEX idx_archive_delete_requests_target
+    ON archive_delete_requests(
+        target_archive_item_id,
+        target_archive_path,
+        target_archive_size_bytes,
+        target_archive_file_count
+    );
+CREATE INDEX idx_archive_delete_requests_state_updated
+    ON archive_delete_requests(state, updated_at);
+";
+
+/// v12 DDL: add optional owned delete-generation marker for in-flight claim resume.
+const V12_SQL: &str = "
+ALTER TABLE archive_delete_requests
+    ADD COLUMN owned_delete_gen TEXT
+        CHECK(owned_delete_gen IS NULL
+              OR (length(owned_delete_gen)=32
+                  AND owned_delete_gen = lower(owned_delete_gen)
+                  AND owned_delete_gen NOT GLOB '*[^0-9a-f]*'));
+";
+
 /// v1 DDL: contract D1's proposed schema, plus two internal additions
 /// flagged in the build notes:
 ///   * `trips.polyline` BLOB — the RDP-simplified cached polyline (OQ-2
@@ -793,7 +891,7 @@ mod tests {
 
     use super::{
         LATEST_VERSION, MIGRATIONS, V1_SQL, V2_SQL, V3_SQL, V4_SQL, V5_SQL, V6_SQL, V7_SQL, V8_SQL,
-        V9_SQL,
+        V9_SQL, V10_SQL, V11_SQL, V12_SQL,
     };
     use crate::db::{DbError, apply_migrations};
 
@@ -1161,8 +1259,182 @@ mod tests {
     }
 
     #[test]
+    fn v11_adds_archive_delete_request_persistence_schema() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(V1_SQL).unwrap();
+        conn.execute_batch(V2_SQL).unwrap();
+        conn.execute_batch(V3_SQL).unwrap();
+        conn.execute_batch(V4_SQL).unwrap();
+        conn.execute_batch(V5_SQL).unwrap();
+        conn.execute_batch(V6_SQL).unwrap();
+        conn.execute_batch(V7_SQL).unwrap();
+        conn.execute_batch(V8_SQL).unwrap();
+        conn.execute_batch(V9_SQL).unwrap();
+        conn.execute_batch(V10_SQL).unwrap();
+        conn.execute_batch(V11_SQL).unwrap();
+
+        let table_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                      WHERE type='table'
+                        AND name='archive_delete_requests'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_exists, 1);
+
+        conn.execute(
+            "INSERT INTO archive_items
+                (id, folder_class, path, size_bytes, file_count, archived_at, created_at, updated_at)
+             VALUES (1, 'RecentClips', 'archive/v11-a', 4096, 4, 0, 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO clips
+                (id, canonical_key, started_at, partition, folder_class, created_at, updated_at)
+             VALUES (1, 'slot0:TeslaCam/archive/v11-a', 0, 'slot0', 'RecentClips', 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO archive_item_clips(archive_item_id, clip_id) VALUES (1, 1)",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO archive_delete_requests
+                (job_id, request_id, idempotency_key, request_hash, owner, kind, state,
+                 target_archive_item_id, target_archive_path, target_archive_size_bytes,
+                 target_archive_file_count, target_clip_canonical_key, target_manifest_digest,
+                 response_status, response_code, sanitized_error, created_at, updated_at, completed_at)
+             VALUES
+                ('m-11001', 'req-11001', 'idem-11001',
+                 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                 'indexd', 'archive_delete', 'queued',
+                 1, 'archive/v11-a', 4096, 4, 'slot0:TeslaCam/archive/v11-a', NULL,
+                 'accepted', 202, 'queued', 10, 10, NULL)",
+            [],
+        )
+        .unwrap();
+
+        let duplicate_scope = conn.execute(
+            "INSERT INTO archive_delete_requests
+                (job_id, request_id, idempotency_key, request_hash, owner, kind, state,
+                 target_archive_item_id, target_archive_path, target_archive_size_bytes,
+                 target_archive_file_count, target_clip_canonical_key, target_manifest_digest,
+                 response_status, response_code, sanitized_error, created_at, updated_at, completed_at)
+             VALUES
+                ('m-11002', 'req-11002', 'idem-11001',
+                 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                 'indexd', 'archive_delete', 'queued',
+                 1, 'archive/v11-a', 4096, 4, 'slot0:TeslaCam/archive/v11-a', NULL,
+                 'accepted', 202, 'queued', 11, 11, NULL)",
+            [],
+        );
+        assert!(duplicate_scope.is_err());
+
+        let duplicate_request_id = conn.execute(
+            "INSERT INTO archive_delete_requests
+                (job_id, request_id, idempotency_key, request_hash, owner, kind, state,
+                 target_archive_item_id, target_archive_path, target_archive_size_bytes,
+                 target_archive_file_count, target_clip_canonical_key, target_manifest_digest,
+                 response_status, response_code, sanitized_error, created_at, updated_at, completed_at)
+             VALUES
+                ('m-11003', 'req-11001', 'idem-11003',
+                 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+                 'indexd', 'archive_delete', 'queued',
+                 1, 'archive/v11-a', 4096, 4, 'slot0:TeslaCam/archive/v11-a', NULL,
+                 'accepted', 202, 'queued', 12, 12, NULL)",
+            [],
+        );
+        assert!(duplicate_request_id.is_err());
+
+        let missing_clip_and_manifest = conn.execute(
+            "INSERT INTO archive_delete_requests
+                (job_id, request_id, idempotency_key, request_hash, owner, kind, state,
+                 target_archive_item_id, target_archive_path, target_archive_size_bytes,
+                 target_archive_file_count, target_clip_canonical_key, target_manifest_digest,
+                 response_status, response_code, sanitized_error, created_at, updated_at, completed_at)
+             VALUES
+                ('m-11004', 'req-11004', 'idem-11004',
+                 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+                 'indexd', 'archive_delete', 'queued',
+                 1, 'archive/v11-a', 4096, 4, NULL, NULL,
+                 'accepted', 202, 'queued', 13, 13, NULL)",
+            [],
+        );
+        assert!(missing_clip_and_manifest.is_err());
+    }
+
+    #[test]
+    fn v12_adds_archive_delete_owned_delete_gen_column() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(V1_SQL).unwrap();
+        conn.execute_batch(V2_SQL).unwrap();
+        conn.execute_batch(V3_SQL).unwrap();
+        conn.execute_batch(V4_SQL).unwrap();
+        conn.execute_batch(V5_SQL).unwrap();
+        conn.execute_batch(V6_SQL).unwrap();
+        conn.execute_batch(V7_SQL).unwrap();
+        conn.execute_batch(V8_SQL).unwrap();
+        conn.execute_batch(V9_SQL).unwrap();
+        conn.execute_batch(V10_SQL).unwrap();
+        conn.execute_batch(V11_SQL).unwrap();
+        conn.execute_batch(V12_SQL).unwrap();
+
+        let owned_delete_gen_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('archive_delete_requests')
+                  WHERE name='owned_delete_gen'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(owned_delete_gen_exists, 1);
+
+        conn.execute(
+            "INSERT INTO archive_items
+                (id, folder_class, path, size_bytes, file_count, archived_at, created_at, updated_at)
+             VALUES (1, 'RecentClips', 'archive/v12-a', 4096, 4, 0, 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO clips
+                (id, canonical_key, started_at, partition, folder_class, created_at, updated_at)
+             VALUES (1, 'slot0:TeslaCam/archive/v12-a', 0, 'slot0', 'RecentClips', 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO archive_item_clips(archive_item_id, clip_id) VALUES (1, 1)",
+            [],
+        )
+        .unwrap();
+
+        let bad_owned_delete_gen = conn.execute(
+            "INSERT INTO archive_delete_requests
+                (job_id, request_id, idempotency_key, request_hash, owner, kind, state,
+                 target_archive_item_id, target_archive_path, target_archive_size_bytes,
+                 target_archive_file_count, target_clip_canonical_key, target_manifest_digest,
+                 owned_delete_gen, response_status, response_code, sanitized_error, created_at, updated_at, completed_at)
+             VALUES
+                ('m-12001', 'req-12001', 'idem-12001',
+                 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+                 'indexd', 'archive_delete', 'running',
+                 1, 'archive/v12-a', 4096, 4, 'slot0:TeslaCam/archive/v12-a', NULL,
+                 'BAD', 'accepted', 202, 'queued', 14, 14, NULL)",
+            [],
+        );
+        assert!(bad_owned_delete_gen.is_err());
+    }
+
+    #[test]
     fn migrates_from_v5_with_existing_rows_to_latest() {
-        // The deployed device sits at v5, so the next release applies v6+v7+v8+v9 in
+        // The deployed device sits at v5, so the next release applies v6+ in
         // a single transaction. Seed real rows first: migrating an empty
         // table would not show that the ADD COLUMNs and the new partial UNIQUE
         // index tolerate pre-existing data.

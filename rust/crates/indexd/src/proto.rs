@@ -152,6 +152,36 @@ pub enum Request {
         /// Stable durable job id.
         job_id: String,
     },
+    /// Internal archive-delete request create-or-load (durable idempotency only).
+    ArchiveDeleteCreateOrLoad {
+        /// Stable durable job id.
+        job_id: String,
+        /// Logical request id.
+        request_id: String,
+        /// Durable idempotency key.
+        idempotency_key: String,
+        /// Canonical request hash.
+        request_hash: String,
+        /// Target archive item id.
+        target_archive_item_id: i64,
+        /// Target archive relative path fence.
+        target_archive_path: String,
+        /// Target archive size fence.
+        target_archive_size_bytes: i64,
+        /// Target archive file-count fence.
+        target_archive_file_count: i64,
+        /// Optional linked clip canonical key fence.
+        #[serde(default)]
+        target_clip_canonical_key: Option<String>,
+        /// Optional manifest digest fence.
+        #[serde(default)]
+        target_manifest_digest: Option<String>,
+    },
+    /// Internal archive-delete request inspect by job id.
+    ArchiveDeleteInspect {
+        /// Stable durable job id.
+        job_id: String,
+    },
     /// Acquire upload lease token.
     UploadLeaseAcquire {
         /// Parent archive item id.
@@ -812,6 +842,63 @@ pub enum Response {
         /// Deterministic refusal reason.
         message: String,
     },
+    /// Archive-delete request accepted/persisted.
+    ArchiveDeleteAccepted {
+        /// Stable durable job id.
+        job_id: String,
+        /// Logical request id.
+        request_id: String,
+        /// Persisted lifecycle state.
+        state: String,
+    },
+    /// Archive-delete request idempotent replay.
+    ArchiveDeleteReplay {
+        /// Stable durable job id.
+        job_id: String,
+        /// Logical request id.
+        request_id: String,
+        /// Replayed prior outcome.
+        outcome: String,
+        /// Stored prior response status discriminator.
+        response_status: Option<String>,
+        /// Stored prior status code.
+        response_code: Option<i64>,
+        /// Optional replay detail.
+        detail: Option<String>,
+    },
+    /// Archive-delete request idempotency conflict.
+    ArchiveDeleteConflict {
+        /// Existing durable job id.
+        job_id: String,
+        /// Existing logical request id.
+        request_id: String,
+        /// Human-readable conflict reason.
+        message: String,
+    },
+    /// Archive-delete request refused without side effects.
+    ArchiveDeleteRefused {
+        /// Stable durable job id.
+        job_id: String,
+        /// Logical request id.
+        request_id: String,
+        /// Deterministic refusal reason.
+        message: String,
+    },
+    /// Archive-delete request inspect result.
+    ArchiveDeleteInspect {
+        /// Stable durable job id.
+        job_id: String,
+        /// Logical request id.
+        request_id: String,
+        /// Persisted lifecycle state.
+        state: String,
+        /// Stored response status discriminator.
+        response_status: Option<String>,
+        /// Stored response status code.
+        response_code: Option<i64>,
+        /// Stored sanitized detail.
+        detail: Option<String>,
+    },
     /// Upload lease acquire response.
     UploadLeaseAcquired {
         /// Lease granted.
@@ -1247,6 +1334,31 @@ mod tests {
                 },
             ),
             (
+                "archive_delete_create_or_load",
+                Request::ArchiveDeleteCreateOrLoad {
+                    job_id: "m-124".to_owned(),
+                    request_id: "req-124".to_owned(),
+                    idempotency_key: "idem-124".to_owned(),
+                    request_hash:
+                        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                            .to_owned(),
+                    target_archive_item_id: 7,
+                    target_archive_path: "archive/recent/sample".to_owned(),
+                    target_archive_size_bytes: 4096,
+                    target_archive_file_count: 4,
+                    target_clip_canonical_key: Some(
+                        "slot0:TeslaCam/RecentClips/2026-08-11/sample".to_owned(),
+                    ),
+                    target_manifest_digest: Some("0123456789abcdef0123456789abcdef".to_owned()),
+                },
+            ),
+            (
+                "archive_delete_inspect",
+                Request::ArchiveDeleteInspect {
+                    job_id: "m-124".to_owned(),
+                },
+            ),
+            (
                 "upload_lease_acquire",
                 Request::UploadLeaseAcquire {
                     archive_item_id: 1,
@@ -1584,6 +1696,52 @@ mod tests {
                     job_id: "m-502".to_owned(),
                     request_id: "req-502".to_owned(),
                     message: "cannot retry a queued queue row".to_owned(),
+                },
+            ),
+            (
+                "archive_delete_accepted",
+                Response::ArchiveDeleteAccepted {
+                    job_id: "m-601".to_owned(),
+                    request_id: "req-601".to_owned(),
+                    state: "queued".to_owned(),
+                },
+            ),
+            (
+                "archive_delete_replay",
+                Response::ArchiveDeleteReplay {
+                    job_id: "m-601".to_owned(),
+                    request_id: "req-601".to_owned(),
+                    outcome: "accepted".to_owned(),
+                    response_status: Some("accepted".to_owned()),
+                    response_code: Some(202),
+                    detail: Some("queued".to_owned()),
+                },
+            ),
+            (
+                "archive_delete_conflict",
+                Response::ArchiveDeleteConflict {
+                    job_id: "m-601".to_owned(),
+                    request_id: "req-601".to_owned(),
+                    message: "idempotency key conflict".to_owned(),
+                },
+            ),
+            (
+                "archive_delete_refused",
+                Response::ArchiveDeleteRefused {
+                    job_id: "m-602".to_owned(),
+                    request_id: "req-602".to_owned(),
+                    message: "archive delete request stale; refresh required".to_owned(),
+                },
+            ),
+            (
+                "archive_delete_inspect",
+                Response::ArchiveDeleteInspect {
+                    job_id: "m-603".to_owned(),
+                    request_id: "req-603".to_owned(),
+                    state: "refused".to_owned(),
+                    response_status: Some("rejected".to_owned()),
+                    response_code: Some(409),
+                    detail: Some("archive delete request stale; refresh required".to_owned()),
                 },
             ),
             (

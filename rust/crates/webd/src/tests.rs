@@ -989,7 +989,10 @@ async fn index_status_reports_catalog_health() {
     let fx = fixture();
     let (status, body) = get_json(&fx.app, "/api/index/status").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["schema_version"], 7);
+    assert_eq!(
+        body["schema_version"],
+        json!(indexd::db::migrations::LATEST_VERSION)
+    );
     assert_eq!(body["trip_count"], 2);
     assert_eq!(body["event_count"], 3);
     assert_eq!(body["clip_count"], 2);
@@ -1047,7 +1050,10 @@ async fn index_lifecycle_reports_parse_and_last_run_diagnostics() {
 
     let (status, body) = get_json(&fx.app, "/api/index/lifecycle").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["schema_version"], 7);
+    assert_eq!(
+        body["schema_version"],
+        json!(indexd::db::migrations::LATEST_VERSION)
+    );
     assert_eq!(body["lifecycle_state"], "error");
     assert_eq!(body["front_parse_total"], 1);
     assert_eq!(body["front_parse_error_count"], 1);
@@ -1615,6 +1621,74 @@ async fn cloud_history_happy_path_and_redacts_internal_fields() {
 }
 
 #[tokio::test]
+async fn jobs_failed_uploads_happy_path_forwards_failed_command() {
+    let fx = settings_fixture(
+        json!({
+            "status": "cloud_history_page",
+            "items": [
+                {
+                    "id": 31,
+                    "completion_seq": 901,
+                    "archive_item_id": 77,
+                    "child_key": "front",
+                    "destination_id": "dest-main",
+                    "outcome": "failed",
+                    "size_bytes": 4096,
+                    "at": 1700000555,
+                    "error_class": "timeout"
+                }
+            ],
+            "next_cursor": "f-next"
+        }),
+        false,
+    );
+    let (status, body) = get_json(&fx.app, "/api/jobs/failed/uploads?cursor=prev&limit=32").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["limit"], 16);
+    assert_eq!(body["next_cursor"], "f-next");
+    assert_eq!(body["items"][0]["archive_item_id"], 77);
+    assert_eq!(body["items"][0]["child_key"], "front");
+    assert_eq!(body["items"][0]["size_bytes"], 4096);
+    assert_eq!(body["items"][0]["at"], 1700000555);
+    assert_eq!(body["items"][0]["error_class"], "timeout");
+    assert!(body["items"][0].get("outcome").is_none());
+    assert!(body["items"][0].get("id").is_none());
+    assert!(body["items"][0].get("completion_seq").is_none());
+    assert!(body["items"][0].get("destination_id").is_none());
+    let req = fx.indexd_last.lock().unwrap().clone().unwrap();
+    assert_eq!(
+        req,
+        json!({
+            "cmd": "cloud_failed_history_load",
+            "after_cursor": "prev",
+            "limit": 16
+        })
+    );
+}
+
+#[tokio::test]
+async fn jobs_failed_uploads_maps_unavailable_to_service_unavailable() {
+    let fx = settings_fixture(
+        json!({ "status": "cloud_history_page", "items": [], "next_cursor": null }),
+        true,
+    );
+    let (status, body) = get_json(&fx.app, "/api/jobs/failed/uploads").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"]["code"], "unavailable");
+}
+
+#[tokio::test]
+async fn jobs_failed_uploads_maps_rejected_cursor_to_bad_request() {
+    let fx = settings_fixture(
+        json!({ "status": "rejected", "message": "invalid cursor" }),
+        false,
+    );
+    let (status, body) = get_json(&fx.app, "/api/jobs/failed/uploads?cursor=not-a-cursor").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_cursor");
+}
+
+#[tokio::test]
 async fn cloud_history_maps_unavailable_to_service_unavailable() {
     let fx = settings_fixture(
         json!({ "status": "cloud_history_page", "items": [], "next_cursor": null }),
@@ -1819,7 +1893,8 @@ fn catalog_accepts_current_indexd_schema() {
     // Regression guard for indexd<->webd schema drift: `seed` applies indexd's
     // full migration ladder (up to its `LATEST_VERSION`), so a stale
     // `SUPPORTED_SCHEMA_VERSION` here fails this test rather than shipping a
-    // webd that crash-loops against every live catalog.
+    // webd that crash-loops against every live catalog (including v8 index-only
+    // schema bumps).
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("catalog.db");
     seed(&path);
@@ -3698,6 +3773,7 @@ async fn jobs_capabilities_reports_read_only_foundation() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["jobs_endpoint"], "/api/jobs");
     assert_eq!(body["failed_jobs_endpoint"], "/api/jobs/failed");
+    assert_eq!(body["failed_uploads_endpoint"], "/api/jobs/failed/uploads");
     assert_eq!(body["durable_mutation_routes_enabled"], false);
     assert_eq!(body["legacy_destructive_routes_exist"], true);
     assert_eq!(body["durable_job_store"]["kind"], "in_memory");
@@ -6591,7 +6667,8 @@ async fn folder_delete_with_more_than_16_files_is_gated_before_enqueue() {
 async fn bulk_delete_with_more_than_16_paths_is_gated_before_enqueue() {
     let fx = delete_fixture(Reply::Json(json!({ "job_id": "m-25", "state": "queued" })));
     let names: Vec<String> = (0..20).map(|i| format!("track{i:02}.mp3")).collect();
-    let (status, body) = post_json(&fx.app, "/api/music/bulk-delete", json!({ "names": names })).await;
+    let (status, body) =
+        post_json(&fx.app, "/api/music/bulk-delete", json!({ "names": names })).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"]["code"], "atomic_enqueue_required");
     assert!(

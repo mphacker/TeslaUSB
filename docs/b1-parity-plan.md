@@ -196,9 +196,12 @@ disclosed as such. B-1 now also exposes
 read-only `GET /api/jobs/capabilities` to disclose this contract and current
 limits (`JobHub` remains in-memory).
 
-The `/api/jobs` + `/api/jobs/failed` path remains read-only. Retry/delete
-commands are still intentionally disabled pending operator-approved auth/CSRF
-and daemon ownership wiring.
+The `/api/jobs` + `/api/jobs/failed` path remains read-only, and B-1 now adds
+read-only durable failed-upload history at `GET /api/jobs/failed/uploads`
+(indexd-backed `cloud_sync_history` rows with `outcome='failed'`) so operators
+can triage upload failures without mutating queue state. Retry/delete commands
+remain intentionally disabled pending operator-approved auth/CSRF and daemon
+ownership wiring.
 
 Next step: add typed webd retry/delete commands by subsystem and job ID, enforce
 ownership/state checks, and expose them in `FailedJobs.tsx`. Retry must create a

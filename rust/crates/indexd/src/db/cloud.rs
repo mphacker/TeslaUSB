@@ -2086,54 +2086,77 @@ pub fn cloud_config_put(conn: &Connection, config: &CloudConfig) -> Result<Cloud
     cloud_config_get(conn)
 }
 
-/// Load history rows in stable keyset order.
-///
-/// Ordering key: `(completion_seq, id)`.
-pub fn cloud_history_load(
+fn map_cloud_history_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CloudHistoryRow> {
+    Ok(CloudHistoryRow {
+        id: row.get(0)?,
+        completion_seq: row.get(1)?,
+        archive_item_id: row.get(2)?,
+        child_key: row.get(3)?,
+        destination_id: row.get(4)?,
+        outcome: row.get(5)?,
+        size_bytes: row.get(6)?,
+        at: row.get(7)?,
+        error_class: row.get(8)?,
+    })
+}
+
+/// Shared loader for history rows in stable keyset order.
+fn cloud_history_load_filtered(
     conn: &Connection,
     after_cursor: Option<&str>,
     limit: u32,
+    failed_only: bool,
 ) -> Result<CloudPage<CloudHistoryRow>, DbError> {
     let page_size = page_limit(limit)?;
     let cursor = after_cursor
         .map(|value| decode_cursor::<HistoryCursor>("hist-v1", value))
         .transpose()?;
-    let (completion_seq, id) = cursor.map_or((None, None), |value| {
-        (Some(value.completion_seq), Some(value.id))
-    });
-
-    let mut stmt = conn.prepare(
-        "SELECT id, completion_seq, archive_item_id, child_key, destination_id, outcome, size_bytes, at, error_class
-           FROM cloud_sync_history
-          WHERE (?1 IS NULL
-                 OR completion_seq > ?1
-                 OR (completion_seq = ?1 AND id > ?2))
-          ORDER BY completion_seq ASC, id ASC
-          LIMIT ?3",
-    )?;
-    let rows = stmt.query_map(
-        params![
-            completion_seq,
-            id,
-            i64::try_from(page_size + 1).unwrap_or(i64::MAX),
-        ],
-        |row| {
-            Ok(CloudHistoryRow {
-                id: row.get(0)?,
-                completion_seq: row.get(1)?,
-                archive_item_id: row.get(2)?,
-                child_key: row.get(3)?,
-                destination_id: row.get(4)?,
-                outcome: row.get(5)?,
-                size_bytes: row.get(6)?,
-                at: row.get(7)?,
-                error_class: row.get(8)?,
-            })
-        },
-    )?;
+    let page_size_plus_one = i64::try_from(page_size + 1).unwrap_or(i64::MAX);
     let mut queried = Vec::new();
-    for row in rows {
-        queried.push(row?);
+    match cursor {
+        Some(HistoryCursor { completion_seq, id }) => {
+            let sql = if failed_only {
+                "SELECT id, completion_seq, archive_item_id, child_key, destination_id, outcome, size_bytes, at, error_class
+                   FROM cloud_sync_history
+                  WHERE outcome = 'failed'
+                    AND (completion_seq > ?1
+                         OR (completion_seq = ?1 AND id > ?2))
+                  ORDER BY completion_seq ASC, id ASC
+                  LIMIT ?3"
+            } else {
+                "SELECT id, completion_seq, archive_item_id, child_key, destination_id, outcome, size_bytes, at, error_class
+                   FROM cloud_sync_history
+                  WHERE completion_seq > ?1
+                     OR (completion_seq = ?1 AND id > ?2)
+                  ORDER BY completion_seq ASC, id ASC
+                  LIMIT ?3"
+            };
+            let mut stmt = conn.prepare(sql)?;
+            let rows =
+                stmt.query_map(params![completion_seq, id, page_size_plus_one], map_cloud_history_row)?;
+            for row in rows {
+                queried.push(row?);
+            }
+        }
+        None => {
+            let sql = if failed_only {
+                "SELECT id, completion_seq, archive_item_id, child_key, destination_id, outcome, size_bytes, at, error_class
+                   FROM cloud_sync_history
+                  WHERE outcome = 'failed'
+                  ORDER BY completion_seq ASC, id ASC
+                  LIMIT ?1"
+            } else {
+                "SELECT id, completion_seq, archive_item_id, child_key, destination_id, outcome, size_bytes, at, error_class
+                   FROM cloud_sync_history
+                  ORDER BY completion_seq ASC, id ASC
+                  LIMIT ?1"
+            };
+            let mut stmt = conn.prepare(sql)?;
+            let rows = stmt.query_map(params![page_size_plus_one], map_cloud_history_row)?;
+            for row in rows {
+                queried.push(row?);
+            }
+        }
     }
     let (items, has_more) =
         paginate_with_budget(queried, page_size, cloud_history_row_estimated_size);
@@ -2154,6 +2177,28 @@ pub fn cloud_history_load(
     Ok(CloudPage { items, next_cursor })
 }
 
+/// Load history rows in stable keyset order.
+///
+/// Ordering key: `(completion_seq, id)`.
+pub fn cloud_history_load(
+    conn: &Connection,
+    after_cursor: Option<&str>,
+    limit: u32,
+) -> Result<CloudPage<CloudHistoryRow>, DbError> {
+    cloud_history_load_filtered(conn, after_cursor, limit, false)
+}
+
+/// Load only failed upload history rows in stable keyset order.
+///
+/// Ordering key: `(completion_seq, id)`.
+pub fn cloud_failed_history_load(
+    conn: &Connection,
+    after_cursor: Option<&str>,
+    limit: u32,
+) -> Result<CloudPage<CloudHistoryRow>, DbError> {
+    cloud_history_load_filtered(conn, after_cursor, limit, true)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -2164,12 +2209,12 @@ mod tests {
         CloudCandidateRow, CloudDiscoverRow, CloudHistoryRow, CloudPendingUploadSet, CloudQueuePk,
         CloudQueueRetryResolution, CloudQueueRow, CloudQueueUpsertItem,
         cloud_candidate_row_estimated_size, cloud_candidates, cloud_config_get, cloud_config_put,
-        cloud_discover, cloud_discover_row_estimated_size, cloud_history_load,
-        cloud_history_row_estimated_size, cloud_pending_upload_set_estimated_size,
-        cloud_pending_upload_sets_load, cloud_queue_load, cloud_queue_retry,
-        cloud_queue_row_estimated_size, cloud_queue_upsert, cloud_stats_get, cloud_stats_reset,
-        cloud_upload_commit, cloud_upload_fail, json_escaped_len, upload_lease_acquire,
-        upload_lease_release, upload_lease_renew,
+        cloud_discover, cloud_discover_row_estimated_size, cloud_failed_history_load,
+        cloud_history_load, cloud_history_row_estimated_size,
+        cloud_pending_upload_set_estimated_size, cloud_pending_upload_sets_load, cloud_queue_load,
+        cloud_queue_retry, cloud_queue_row_estimated_size, cloud_queue_upsert, cloud_stats_get,
+        cloud_stats_reset, cloud_upload_commit, cloud_upload_fail, json_escaped_len,
+        upload_lease_acquire, upload_lease_release, upload_lease_renew,
     };
     use crate::db::mutations::BootContext;
     use crate::db::open_in_memory;
@@ -4263,6 +4308,75 @@ mod tests {
         assert_eq!(first.items.len(), 1);
         let second = cloud_history_load(&conn, first.next_cursor.as_deref(), 10).unwrap();
         assert_eq!(second.items.len(), 1);
+    }
+
+    #[test]
+    fn failed_history_load_filters_uploaded_rows() {
+        let mut conn = open_in_memory().unwrap();
+        let parent = insert_archive_item(&conn, "archive/history-failed-only");
+        let ok_hash = "abababababababababababababababababababababababababababababababab";
+        let bad_hash = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
+        upsert_item(&conn, parent, "dest", "ok", "ok-child", 1, 10, ok_hash);
+        upsert_item(&conn, parent, "dest", "bad", "bad-child", 2, 10, bad_hash);
+        cloud_upload_commit(
+            &mut conn,
+            &CloudQueuePk {
+                destination_id: "dest".to_owned(),
+                remote_key: "ok".to_owned(),
+            },
+            "attempt-ok",
+            ok_hash,
+            "sha256",
+            10,
+            None,
+        )
+        .unwrap();
+        cloud_upload_fail(
+            &mut conn,
+            &CloudQueuePk {
+                destination_id: "dest".to_owned(),
+                remote_key: "bad".to_owned(),
+            },
+            "attempt-bad",
+            "timeout",
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+
+        let page = cloud_failed_history_load(&conn, None, 10).unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].outcome, "failed");
+        assert_eq!(page.items[0].child_key, "bad-child");
+    }
+
+    #[test]
+    fn failed_history_query_plan_uses_failed_index() {
+        let conn = open_in_memory().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN
+                 SELECT id, completion_seq, archive_item_id, child_key, destination_id, outcome, size_bytes, at, error_class
+                   FROM cloud_sync_history
+                  WHERE outcome = 'failed'
+                    AND (completion_seq > ?1
+                         OR (completion_seq = ?1 AND id > ?2))
+                  ORDER BY completion_seq ASC, id ASC
+                  LIMIT ?3",
+            )
+            .unwrap();
+        let details = stmt
+            .query_map(params![0_i64, 0_i64, 16_i64], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.contains("idx_cloud_sync_history_failed_completion_seq_id")),
+            "expected failed-history query to use partial index, got {details:?}"
+        );
     }
 
     #[test]

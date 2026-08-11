@@ -15,9 +15,9 @@ use teslausb_core::manifest_digest::{ManifestDigestEntry, manifest_digest_v1_hex
 
 use crate::db::cloud::{
     CloudConfig, CloudQueuePk, CloudQueueRetryResolution, CloudQueueUpsertItem, cloud_candidates,
-    cloud_config_get, cloud_config_put, cloud_discover, cloud_history_load,
-    cloud_pending_upload_sets_load, cloud_queue_load, cloud_queue_retry, cloud_queue_upsert,
-    cloud_stats_get, cloud_stats_reset, cloud_upload_commit, cloud_upload_fail,
+    cloud_config_get, cloud_config_put, cloud_discover, cloud_failed_history_load,
+    cloud_history_load, cloud_pending_upload_sets_load, cloud_queue_load, cloud_queue_retry,
+    cloud_queue_upsert, cloud_stats_get, cloud_stats_reset, cloud_upload_commit, cloud_upload_fail,
     upload_lease_acquire, upload_lease_release, upload_lease_renew,
 };
 use crate::db::ingest::{
@@ -347,6 +347,14 @@ fn handle_connection(
                 after_cursor,
                 limit,
             } => match handle_cloud_history_load(conn, after_cursor.as_deref(), limit) {
+                Ok((items, next_cursor)) => Response::CloudHistoryPage { items, next_cursor },
+                Err(HandlerError::Rejected(message)) => Response::Rejected { message },
+                Err(HandlerError::Internal(message)) => Response::Error { message },
+            },
+            Request::CloudFailedHistoryLoad {
+                after_cursor,
+                limit,
+            } => match handle_cloud_failed_history_load(conn, after_cursor.as_deref(), limit) {
                 Ok((items, next_cursor)) => Response::CloudHistoryPage { items, next_cursor },
                 Err(HandlerError::Rejected(message)) => Response::Rejected { message },
                 Err(HandlerError::Internal(message)) => Response::Error { message },
@@ -918,6 +926,34 @@ fn handle_cloud_history_load(
         .lock()
         .map_err(|_| HandlerError::Internal("index database mutex is poisoned".to_owned()))?;
     let page = cloud_history_load(&locked, after_cursor, limit).map_err(map_db_error)?;
+    Ok((
+        page.items
+            .into_iter()
+            .map(|row| CloudHistoryRowWire {
+                id: row.id,
+                completion_seq: row.completion_seq,
+                archive_item_id: row.archive_item_id,
+                child_key: row.child_key,
+                destination_id: row.destination_id,
+                outcome: row.outcome,
+                size_bytes: row.size_bytes,
+                at: row.at,
+                error_class: row.error_class,
+            })
+            .collect(),
+        page.next_cursor,
+    ))
+}
+
+fn handle_cloud_failed_history_load(
+    conn: &Arc<Mutex<Connection>>,
+    after_cursor: Option<&str>,
+    limit: u32,
+) -> Result<(Vec<CloudHistoryRowWire>, Option<String>), HandlerError> {
+    let locked = conn
+        .lock()
+        .map_err(|_| HandlerError::Internal("index database mutex is poisoned".to_owned()))?;
+    let page = cloud_failed_history_load(&locked, after_cursor, limit).map_err(map_db_error)?;
     Ok((
         page.items
             .into_iter()
@@ -5411,6 +5447,14 @@ mod tests {
             },
         );
         assert!(matches!(history, Response::CloudHistoryPage { .. }));
+        let failed_history = send(
+            &socket_path,
+            &Request::CloudFailedHistoryLoad {
+                after_cursor: None,
+                limit: 10,
+            },
+        );
+        assert!(matches!(failed_history, Response::CloudHistoryPage { .. }));
         let stats = send(&socket_path, &Request::CloudStatsGet {});
         assert!(matches!(stats, Response::CloudStats { .. }));
         let reset = send(&socket_path, &Request::CloudStatsReset {});

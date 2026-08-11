@@ -13,11 +13,12 @@ import { SHELL_POLL_ALLOWLIST } from "./screen-helpers";
 // ── Failed jobs screen UAT (fe-failed-jobs) ───────────────────────────────
 // Each test drives the REAL bundle served by webd against the seeded read-only
 // catalog (global-setup). The screen at /failed-jobs is a read-only snapshot of
-// the jobs webd retained as FAILED (contract D2 webd-api.md §2.1/§3): it issues
-// exactly ONE GET — /api/jobs/failed — which returns a WRAPPED envelope
-// { "jobs": JobStatus[] }, a bounded ring (≤100) of failures, OLDEST-first.
-// The screen renders newest-failure-first (reverse of the ring), with states
-// loading / error(+Retry) / empty("No failed jobs") / populated.
+// the jobs webd retained as FAILED (contract D2 webd-api.md §2.1/§3) plus durable
+// failed cloud-upload history: it issues read-only GETs to /api/jobs/failed and
+// /api/jobs/failed/uploads. The jobs endpoint returns a WRAPPED envelope
+// { "jobs": JobStatus[] }, a bounded ring (≤100) of failures, OLDEST-first. The
+// screen renders newest-failure-first (reverse of the ring), with states loading /
+// error(+Retry) / empty("No failed jobs") / populated.
 //
 // The functional / ordering / cap / error tests intercept /api/jobs/failed with
 // deterministic fixtures so assertions never depend on the build host. The
@@ -25,9 +26,9 @@ import { SHELL_POLL_ALLOWLIST } from "./screen-helpers";
 // has no failed jobs, so it returns {jobs:[]} → the empty state) to prove it
 // returns 2xx with a clean console. Screenshots are captured as artifacts.
 
-// The only read API this screen may call. webd is read-only; anything outside
+// The only read APIs this screen may call. webd is read-only; anything outside
 // this set (or any non-GET) is a hard failure.
-const ALLOWED_API = new Set(["/api/jobs/failed"]);
+const ALLOWED_API = new Set(["/api/jobs/failed", "/api/jobs/failed/uploads"]);
 
 // Deterministic fixture — the ring is OLDEST-first on the wire (job_ids
 // ascending). Field names mirror the webd serde DTO exactly. One job carries a
@@ -60,11 +61,35 @@ const FAILED_FIXTURE = {
 };
 
 const EMPTY_FIXTURE = { jobs: [] };
+const EMPTY_UPLOAD_FIXTURE = { items: [], next_cursor: null, limit: 16 };
+const FAILED_UPLOAD_FIXTURE = {
+  items: [
+    {
+      archive_item_id: 123,
+      child_key: "front",
+      size_bytes: 4096,
+      at: 1700000500,
+      error_class: "timeout",
+    },
+  ],
+  next_cursor: null,
+  limit: 16,
+};
 
 /** Intercept the screen's single probe with a deterministic body. Must run
  *  BEFORE the navigation that triggers the mount-time fetch. */
 async function routeJobs(page: Page, body: unknown, status = 200) {
   await page.route("**/api/jobs/failed", (r) =>
+    r.fulfill({
+      status,
+      contentType: "application/json",
+      body: JSON.stringify(body),
+    }),
+  );
+}
+
+async function routeFailedUploads(page: Page, body: unknown, status = 200) {
+  await page.route("**/api/jobs/failed/uploads*", (r) =>
     r.fulfill({
       status,
       contentType: "application/json",
@@ -99,6 +124,7 @@ test.describe("failed jobs UAT", () => {
     probe,
   }, testInfo) => {
     await routeJobs(page, FAILED_FIXTURE);
+    await routeFailedUploads(page, FAILED_UPLOAD_FIXTURE);
     await gotoFailedJobs(page);
 
     // App shell parity: brand + toast region.
@@ -149,6 +175,11 @@ test.describe("failed jobs UAT", () => {
     // No empty/error states while populated.
     await expect(page.locator('[data-testid="failed-jobs-empty"]')).toHaveCount(0);
     await expect(page.locator('[data-testid="failed-jobs-error"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="failed-upload-history-list"] .fj-upload-item')).toHaveCount(1);
+    await expect(page.locator('[data-testid="failed-upload-history-list"]')).toContainText("front");
+    await expect(page.locator('[data-testid="failed-upload-history-status"]')).toHaveText(
+      "1 failed cloud upload.",
+    );
 
     assertCleanConsole(probe);
   });
@@ -158,7 +189,8 @@ test.describe("failed jobs UAT", () => {
     page,
     probe,
   }) => {
-    // No interception: a fresh seeded catalog has no failed jobs, so the REAL
+    await routeFailedUploads(page, EMPTY_UPLOAD_FIXTURE);
+    // Leave jobs real: a fresh seeded catalog has no failed jobs, so the REAL
     // /api/jobs/failed returns {jobs:[]} ⇒ the empty state (not an error).
     await gotoFailedJobs(page);
     await page.waitForLoadState("networkidle");
@@ -170,6 +202,9 @@ test.describe("failed jobs UAT", () => {
     await expect(page.locator('[data-testid="fj-status"]')).toHaveText("No failed jobs.");
     // Empty is distinct from error — no error card.
     await expect(page.locator('[data-testid="failed-jobs-error"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="failed-upload-history-status"]')).toHaveText(
+      "No failed cloud uploads.",
+    );
 
     assertCleanConsole(probe);
   });
@@ -179,6 +214,7 @@ test.describe("failed jobs UAT", () => {
     // First load fails (500). The screen must show a handled error state, not a
     // pageerror, and offer Retry.
     await routeJobs(page, { error: { code: "boom", message: "server boom" } }, 500);
+    await routeFailedUploads(page, EMPTY_UPLOAD_FIXTURE);
     await gotoFailedJobs(page);
 
     await expect(page.locator('[data-testid="failed-jobs-error"]')).toBeVisible();
@@ -208,6 +244,7 @@ test.describe("failed jobs UAT", () => {
       })),
     };
     await routeJobs(page, full);
+    await routeFailedUploads(page, EMPTY_UPLOAD_FIXTURE);
     await gotoFailedJobs(page);
 
     await expect(page.locator('[data-testid="failed-jobs-list"] .fj-item')).toHaveCount(100);
@@ -245,8 +282,8 @@ test.describe("failed jobs UAT", () => {
     }
   });
 
-  // ── Gate 6: read-only — only the whitelisted GET; no mutation ───────────
-  test("read-only — only /api/jobs/failed GET, Refresh re-GETs, no mutation", async ({
+  // ── Gate 6: read-only — only the whitelisted GETs; no mutation ───────────
+  test("read-only — only failed-jobs and failed-upload-history GETs, no mutation", async ({
     page,
     probe,
   }) => {
@@ -260,6 +297,7 @@ test.describe("failed jobs UAT", () => {
 
     const seen = new Set<string>();
     let jobsGets = 0;
+    let uploadHistoryGets = 0;
     for (const req of probe.requests) {
       const u = new URL(req.url);
       expect(u.origin, `off-origin request to ${req.url}`).toBe(origin);
@@ -268,11 +306,20 @@ test.describe("failed jobs UAT", () => {
       expect(req.method.toUpperCase(), `${req.method} ${u.pathname}`).toBe("GET");
       expect(ALLOWED_API.has(u.pathname), `unexpected API path ${u.pathname}`).toBe(true);
       if (u.pathname === "/api/jobs/failed") jobsGets += 1;
+      if (u.pathname === "/api/jobs/failed/uploads") uploadHistoryGets += 1;
       seen.add(u.pathname);
     }
     expect(seen.has("/api/jobs/failed"), "/api/jobs/failed was never requested").toBe(true);
+    expect(
+      seen.has("/api/jobs/failed/uploads"),
+      "/api/jobs/failed/uploads was never requested",
+    ).toBe(true);
     // Mount fetch + the Refresh click ⇒ at least two GETs.
     expect(jobsGets, "Refresh should re-GET the snapshot").toBeGreaterThanOrEqual(2);
+    expect(
+      uploadHistoryGets,
+      "Refresh should re-GET failed upload history",
+    ).toBeGreaterThanOrEqual(2);
 
     const mutating = probe.requests.filter((r) =>
       ["POST", "PUT", "PATCH", "DELETE"].includes(r.method.toUpperCase()),
@@ -289,7 +336,9 @@ test.describe("failed jobs UAT", () => {
     probe,
   }) => {
     const origin = new URL(loadState().baseURL).origin;
-    // No interception: drive the REAL webd endpoint (empty {jobs:[]}). The
+    await routeFailedUploads(page, EMPTY_UPLOAD_FIXTURE);
+    // Keep jobs real (empty {jobs:[]}), while stubbing failed-upload history to
+    // the read-only empty shape for deterministic network cleanliness. The
     // screen must render with a clean console and 2xx everywhere.
     await gotoFailedJobs(page);
     await page.waitForLoadState("networkidle");
@@ -394,6 +443,7 @@ test.describe("failed jobs UAT", () => {
     page,
   }, testInfo) => {
     await routeJobs(page, FAILED_FIXTURE);
+    await routeFailedUploads(page, EMPTY_UPLOAD_FIXTURE);
     await gotoFailedJobs(page);
 
     // Content present regardless of breakpoint.

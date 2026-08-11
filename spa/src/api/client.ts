@@ -24,6 +24,7 @@ import type {
   CloudQueuePageResponse,
   CloudStatusResponse,
   CloudCredentialsResponse,
+  FailedUploadHistoryPageResponse,
   FailedJobsResponse,
   IndexEventChartResponse,
   IndexDrivingStatsResponse,
@@ -300,6 +301,15 @@ export const api = {
   ) =>
     getJson<CloudHistoryPageResponse>(
       `/api/cloud/history${qs({ ...params })}`,
+      signal,
+    ),
+
+  cloudFailedUploadHistory: (
+    params: { cursor?: string; limit?: number } = {},
+    signal?: AbortSignal,
+  ) =>
+    getJson<FailedUploadHistoryPageResponse>(
+      `/api/jobs/failed/uploads${qs({ ...params })}`,
       signal,
     ),
 

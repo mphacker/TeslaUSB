@@ -193,6 +193,13 @@ pub enum Request {
         /// Page size (server capped).
         limit: u32,
     },
+    /// Paginated failed-history load.
+    CloudFailedHistoryLoad {
+        /// Optional opaque keyset cursor.
+        after_cursor: Option<String>,
+        /// Page size (server capped).
+        limit: u32,
+    },
     /// Finalize one immutable verified event archive generation.
     FinalizeEventArchive(FinalizeEventArchiveRequest),
     /// Prepare and seal one parent upload set.
@@ -1196,6 +1203,13 @@ mod tests {
                 Request::CloudHistoryLoad {
                     after_cursor: None,
                     limit: 25,
+                },
+            ),
+            (
+                "cloud_failed_history_load",
+                Request::CloudFailedHistoryLoad {
+                    after_cursor: Some("failed-cursor".to_owned()),
+                    limit: 8,
                 },
             ),
             (

@@ -25,10 +25,11 @@ use rusqlite::{Connection, OpenFlags};
 /// `cloud_meta`, `cloud_provider_config`, `cloud_upload_attempts`); v7 adds the
 /// sealed-upload-set durability tables (`cloud_parent_upload_sets`,
 /// `cloud_parent_upload_set_children`), nullable `archive_items` durability
-/// columns, and the durable-guard triggers. `webd` never reads any of them (and
-/// opens the catalog read-only, so the triggers never fire), so v4–v7 are fully
-/// read-compatible with the v3 surface this build queries.
-const SUPPORTED_SCHEMA_VERSION: i64 = 7;
+/// columns, and the durable-guard triggers; v8 adds a partial failed-history
+/// paging index. `webd` never reads any of them (and opens the catalog read-only,
+/// so the triggers never fire), so v4–v8 are fully read-compatible with the v3
+/// surface this build queries.
+const SUPPORTED_SCHEMA_VERSION: i64 = 8;
 
 /// How long a read-only connection waits on a locked database before erroring.
 /// WAL readers rarely block, but this is cheap insurance against a checkpoint

@@ -29,7 +29,7 @@ pub const SCHEMA_VERSION_NOTE: &str = "v1 (PROVISIONAL — pre-OP-3 freeze)";
 /// The highest schema version this binary knows how to produce. A DB
 /// reporting a higher version was written by a newer `indexd` and must
 /// not be opened read-write.
-pub const LATEST_VERSION: i64 = 7;
+pub const LATEST_VERSION: i64 = 8;
 
 /// The ordered migration ladder. Index order MUST match ascending
 /// `version`; [`MIGRATIONS`] is validated by a test.
@@ -68,6 +68,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 7,
         note: "v7 — sealed upload set durability schema + guards",
         sql: V7_SQL,
+    },
+    Migration {
+        version: 8,
+        note: "v8 — failed history keyset index",
+        sql: V8_SQL,
     },
 ];
 
@@ -467,6 +472,13 @@ BEGIN
 END;
 ";
 
+/// v8 DDL: partial keyset index for failed-history paging.
+const V8_SQL: &str = "
+CREATE INDEX idx_cloud_sync_history_failed_completion_seq_id
+    ON cloud_sync_history(completion_seq, id)
+    WHERE outcome = 'failed';
+";
+
 /// v1 DDL: contract D1's proposed schema, plus two internal additions
 /// flagged in the build notes:
 ///   * `trips.polyline` BLOB — the RDP-simplified cached polyline (OQ-2
@@ -671,6 +683,7 @@ mod tests {
 
     use super::{
         LATEST_VERSION, MIGRATIONS, V1_SQL, V2_SQL, V3_SQL, V4_SQL, V5_SQL, V6_SQL, V7_SQL,
+        V8_SQL,
     };
     use crate::db::{DbError, apply_migrations};
 
@@ -928,12 +941,43 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM schema_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(rows, LATEST_VERSION);
+        let failed_history_idx: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index'
+                  AND name='idx_cloud_sync_history_failed_completion_seq_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(failed_history_idx, 1);
+    }
+
+    #[test]
+    fn v8_adds_failed_history_index() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(V1_SQL).unwrap();
+        conn.execute_batch(V2_SQL).unwrap();
+        conn.execute_batch(V3_SQL).unwrap();
+        conn.execute_batch(V4_SQL).unwrap();
+        conn.execute_batch(V5_SQL).unwrap();
+        conn.execute_batch(V6_SQL).unwrap();
+        conn.execute_batch(V7_SQL).unwrap();
+        conn.execute_batch(V8_SQL).unwrap();
+        let failed_history_idx: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index'
+                  AND name='idx_cloud_sync_history_failed_completion_seq_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(failed_history_idx, 1);
     }
 
     #[test]
     fn migrates_from_v5_with_existing_rows_to_latest() {
-        // The deployed device sits at v5, so the next release applies BOTH v6 and
-        // v7 in a single transaction. Seed real rows first: migrating an empty
+        // The deployed device sits at v5, so the next release applies v6+v7+v8 in
+        // a single transaction. Seed real rows first: migrating an empty
         // table would not show that the ADD COLUMNs and the new partial UNIQUE
         // index tolerate pre-existing data.
         let mut conn = Connection::open_in_memory().unwrap();

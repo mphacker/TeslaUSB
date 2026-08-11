@@ -61,6 +61,10 @@ state/config/history and an **uploadd control socket** for actions (D6, §4).
   (`cloud_queue_load`); `limit` **server-capped** (m2).
 - `GET /api/cloud/history?cursor=&limit=` → paginated history
   (`cloud_history_load`); `limit` server-capped (m2).
+- `GET /api/jobs/failed/uploads?cursor=&limit=` → paginated **failed-upload
+  history** only (`cloud_failed_history_load`), derived from durable
+  `cloud_sync_history` rows where `outcome='failed'`; same cursor/limit rules
+  and redaction as `/api/cloud/history`.
 
 ### Mutations (all auth + CSRF gated — §0)
 - `PUT /api/cloud/config` → validate (like `set_pref`) → `cloud_config_put`.

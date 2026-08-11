@@ -106,6 +106,7 @@ Read-only disclosure endpoints are allowed in this foundation slice:
 
 - `GET /api/jobs`
 - `GET /api/jobs/failed`
+- `GET /api/jobs/failed/uploads`
 - `GET /api/jobs/capabilities`
 
 They must not trigger mutations. `capabilities` should explicitly disclose that

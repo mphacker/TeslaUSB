@@ -68,6 +68,20 @@ export interface CloudHistoryPageResponse {
   limit: number;
 }
 
+export interface FailedUploadHistoryItem {
+  archive_item_id: number;
+  child_key: string;
+  size_bytes: number;
+  at: number;
+  error_class: string | null;
+}
+
+export interface FailedUploadHistoryPageResponse {
+  items: FailedUploadHistoryItem[];
+  next_cursor: string | null;
+  limit: number;
+}
+
 export interface FailedJob {
   job_id: number;
   kind: string;

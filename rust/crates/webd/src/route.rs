@@ -1126,7 +1126,7 @@ pub(crate) async fn run_remove(
 /// time and rejects a `DeletePaths` whose set exceeds `MAX_DELETE_PATHS=16`
 /// (gadgetd `handoff.rs`). Without this chunking a folder delete or bulk delete
 /// with >16 files would be silently refused.
-/// 
+///
 /// Safety gate: multi-chunk (>16 path) bulk removes are currently disabled
 /// fail-closed (`503 atomic_enqueue_required`) to avoid partial acceptance until
 /// an atomic batched enqueue contract exists.
@@ -1394,6 +1394,7 @@ async fn jobs_capabilities() -> Json<Value> {
     Json(json!({
         "jobs_endpoint": "/api/jobs",
         "failed_jobs_endpoint": "/api/jobs/failed",
+        "failed_uploads_endpoint": "/api/jobs/failed/uploads",
         "capabilities_endpoint": "/api/jobs/capabilities",
         "durable_job_store": {
             "kind": "in_memory",

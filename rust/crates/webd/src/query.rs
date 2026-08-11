@@ -1477,7 +1477,7 @@ mod tests {
         );
 
         let status = index_status(&conn).unwrap();
-        assert_eq!(status.schema_version, 7);
+        assert_eq!(status.schema_version, indexd::db::migrations::LATEST_VERSION);
         assert_eq!(status.trip_count, 1);
         assert_eq!(status.event_count, 1);
         assert_eq!(status.clip_count, 1);
@@ -1591,7 +1591,10 @@ mod tests {
 
         let lifecycle = index_lifecycle(&conn).unwrap();
         assert_eq!(lifecycle.lifecycle_state, "error");
-        assert_eq!(lifecycle.schema_version, 7);
+        assert_eq!(
+            lifecycle.schema_version,
+            indexd::db::migrations::LATEST_VERSION
+        );
         assert_eq!(lifecycle.stale_clip_count, 1);
         assert_eq!(lifecycle.front_parse_total, 2);
         assert_eq!(lifecycle.front_parse_error_count, 1);

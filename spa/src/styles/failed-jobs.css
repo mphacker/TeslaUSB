@@ -41,6 +41,12 @@
   font-weight: 600;
 }
 
+.failed-jobs-page .fj-subtitle {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: var(--text-xl);
+}
+
 /* Refresh / Retry buttons — neutral, touch-friendly (>=44px tap target). */
 .failed-jobs-page .fj-refresh,
 .failed-jobs-page .fj-retry {
@@ -74,6 +80,11 @@
 
 /* List of failed-job cards. */
 .failed-jobs-page .fj-list { display: grid; gap: var(--space-4); }
+
+.failed-jobs-page .fj-upload-history { gap: var(--space-3); }
+.failed-jobs-page .fj-upload-item .fj-kind {
+  font-family: var(--font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+}
 
 .failed-jobs-page .fj-cap-note {
   margin: 0;

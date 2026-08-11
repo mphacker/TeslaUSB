@@ -101,6 +101,22 @@ struct CloudHistoryPageResp {
     limit: u32,
 }
 
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct FailedUploadHistoryRowResp {
+    archive_item_id: i64,
+    child_key: String,
+    size_bytes: i64,
+    at: i64,
+    error_class: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct FailedUploadHistoryPageResp {
+    items: Vec<FailedUploadHistoryRowResp>,
+    next_cursor: Option<String>,
+    limit: u32,
+}
+
 #[derive(Debug, Deserialize)]
 struct CloudHistoryRowWire {
     id: i64,
@@ -125,6 +141,7 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/cloud", get(get_cloud_status))
         .route("/cloud/queue", get(get_cloud_queue))
         .route("/cloud/history", get(get_cloud_history))
+        .route("/jobs/failed/uploads", get(get_cloud_failed_history))
 }
 
 async fn get_cloud_status(
@@ -299,6 +316,71 @@ async fn get_cloud_history(
             StatusCode::BAD_GATEWAY,
             "indexd_protocol",
             "unexpected cloud history response",
+        )),
+    }
+}
+
+async fn get_cloud_failed_history(
+    State(state): State<AppState>,
+    Query(query): Query<CloudQueueQuery>,
+) -> Result<Json<FailedUploadHistoryPageResp>, ApiError> {
+    let limit = validate_queue_limit(query.limit)?;
+    let cursor = validate_cursor(query.cursor)?;
+    let request = json!({
+        "cmd": "cloud_failed_history_load",
+        "after_cursor": cursor,
+        "limit": limit
+    });
+    let response = call_indexd(&state, request).await?;
+    match response
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+    {
+        "cloud_history_page" => {
+            let page: CloudHistoryPageWire = serde_json::from_value(response).map_err(|_| {
+                ApiError::status(
+                    StatusCode::BAD_GATEWAY,
+                    "indexd_protocol",
+                    "malformed failed cloud history response",
+                )
+            })?;
+            if page.status != "cloud_history_page" {
+                return Err(ApiError::status(
+                    StatusCode::BAD_GATEWAY,
+                    "indexd_protocol",
+                    "malformed failed cloud history response",
+                ));
+            }
+            Ok(Json(FailedUploadHistoryPageResp {
+                items: page
+                    .items
+                    .into_iter()
+                    .map(|row| FailedUploadHistoryRowResp {
+                        archive_item_id: row.archive_item_id,
+                        child_key: row.child_key,
+                        size_bytes: row.size_bytes,
+                        at: row.at,
+                        error_class: row.error_class,
+                    })
+                    .collect(),
+                next_cursor: page.next_cursor,
+                limit,
+            }))
+        }
+        "error" => Err(ApiError::status(
+            StatusCode::BAD_GATEWAY,
+            "indexd_error",
+            indexd_error_message(&response, "failed cloud history request failed in indexd"),
+        )),
+        "rejected" => Err(ApiError::bad_request(
+            "invalid_cursor",
+            indexd_error_message(&response, "invalid cursor"),
+        )),
+        _ => Err(ApiError::status(
+            StatusCode::BAD_GATEWAY,
+            "indexd_protocol",
+            "unexpected failed cloud history response",
         )),
     }
 }

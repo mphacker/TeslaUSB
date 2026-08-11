@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import { Icon } from "../components/Icon";
 import { ApiError, api } from "../api/client";
-import type { FailedJob } from "../api/types";
+import type { FailedJob, FailedUploadHistoryItem } from "../api/types";
 import "../styles/failed-jobs.css";
 
 /**
@@ -9,13 +9,15 @@ import "../styles/failed-jobs.css";
  * read-only operator-triage view of the background jobs `webd` has retained as
  * FAILED (parity `failed_jobs.html`, contract D2 `webd-api.md` §2.1/§3).
  *
- * Data boundary: webd is **read-only**. This screen issues exactly ONE GET —
- * `GET /api/jobs/failed` — and never mutates. The realized contract returns a
- * WRAPPED snapshot `{ "jobs": JobStatus[] }` (verified against
- * rust/crates/webd/src/route.rs `jobs_failed`), a bounded ring of at most 100
- * retained failures. A `JobStatus` is
- * `{ job_id, kind, state, progress, detail?, handoff_id? }` (jobs.rs); there is
- * NO timestamp field, so this screen does not invent one.
+ * Data boundary: webd is **read-only**. This screen issues only read GETs and
+ * never mutates: `GET /api/jobs/failed` plus
+ * `GET /api/jobs/failed/uploads?limit=...`. The jobs snapshot is a WRAPPED
+ * `{ "jobs": JobStatus[] }` ring (verified against
+ * rust/crates/webd/src/route.rs `jobs_failed`), bounded at 100 retained
+ * failures. A `JobStatus` is `{ job_id, kind, state, progress, detail?,
+ * handoff_id? }` (jobs.rs); there is no timestamp field, so this screen does
+ * not invent one. The cloud failed-upload endpoint is durable history from
+ * `indexd` and *does* carry `at` timestamps.
  *
  * Ordering: the ring is returned OLDEST-first (a FIFO `VecDeque`, eviction at
  * the head). Insertion order is the true failure-retention order, so we render
@@ -43,11 +45,17 @@ const DASH = "\u2014";
  * UI notes the snapshot is bounded.
  */
 const RING_CAP = 100;
+const FAILED_UPLOAD_HISTORY_LIMIT = 16;
 
 type LoadState =
   | { status: "loading" }
   | { status: "error"; message: string }
-  | { status: "ready"; jobs: FailedJob[] };
+  | {
+      status: "ready";
+      jobs: FailedJob[];
+      uploadFailures: FailedUploadHistoryItem[];
+      uploadFailuresError: string | null;
+    };
 
 /**
  * Fetch the failed-jobs snapshot through the shared typed API client.
@@ -60,11 +68,27 @@ async function fetchFailedJobs(signal?: AbortSignal): Promise<FailedJob[]> {
   return response.jobs;
 }
 
+async function fetchFailedUploads(signal?: AbortSignal): Promise<FailedUploadHistoryItem[]> {
+  const response = await api.cloudFailedUploadHistory(
+    { limit: FAILED_UPLOAD_HISTORY_LIMIT },
+    signal,
+  );
+  if (!Array.isArray(response.items)) {
+    throw new ApiError(200, "bad_shape", "unexpected response shape");
+  }
+  return response.items;
+}
+
 /** Fractional progress (0..1) → a clamped percent, or "—" when unknown. */
 function progressText(progress: number | null | undefined): string {
   if (progress == null || !Number.isFinite(progress)) return DASH;
   const pct = Math.min(100, Math.max(0, progress * 100));
   return `${Math.round(pct)}%`;
+}
+
+function formatAt(at: number): string {
+  if (!Number.isFinite(at)) return DASH;
+  return new Date(at * 1000).toLocaleString();
 }
 
 /** A single failed-job card. */
@@ -100,6 +124,32 @@ function JobItem({ job }: { job: FailedJob }) {
   );
 }
 
+function UploadFailureItem({ item }: { item: FailedUploadHistoryItem }) {
+  return (
+    <article class="fj-item fj-upload-item">
+      <div class="fj-item-head">
+        <span class="fj-kind">cloud_upload</span>
+        <span class="fj-badge" data-severity="error">
+          <span class="fj-dot" aria-hidden="true" />
+          Failed
+        </span>
+      </div>
+      <dl class="fj-dl">
+        <dt>Archive item</dt>
+        <dd class="fj-mono">{item.archive_item_id}</dd>
+        <dt>Child key</dt>
+        <dd class="fj-mono fj-wrap">{item.child_key || DASH}</dd>
+        <dt>When</dt>
+        <dd>{formatAt(item.at)}</dd>
+        <dt>Bytes</dt>
+        <dd>{item.size_bytes}</dd>
+        <dt>Error class</dt>
+        <dd class="fj-wrap">{item.error_class || DASH}</dd>
+      </dl>
+    </article>
+  );
+}
+
 export function FailedJobs() {
   const [state, setState] = useState<LoadState>({ status: "loading" });
   const reqSeq = useRef(0);
@@ -112,19 +162,33 @@ export function FailedJobs() {
     abortRef.current = ctrl;
     const seq = ++reqSeq.current;
     setState({ status: "loading" });
-    fetchFailedJobs(ctrl.signal)
-      .then((jobs) => {
+    Promise.allSettled([fetchFailedJobs(ctrl.signal), fetchFailedUploads(ctrl.signal)])
+      .then(([jobsResult, uploadResult]) => {
         if (!mounted.current || seq !== reqSeq.current) return;
-        setState({ status: "ready", jobs });
-      })
-      .catch((err) => {
-        // A superseded/aborted request is not an error the user should see.
-        if (!mounted.current || seq !== reqSeq.current || ctrl.signal.aborted) return;
-        const message =
-          err instanceof ApiError && err.message
-            ? err.message
-            : "Could not load failed jobs.";
-        setState({ status: "error", message });
+        if (jobsResult.status === "rejected") {
+          if (ctrl.signal.aborted) return;
+          const err = jobsResult.reason;
+          const message =
+            err instanceof ApiError && err.message
+              ? err.message
+              : "Could not load failed jobs.";
+          setState({ status: "error", message });
+          return;
+        }
+        const uploadFailuresError =
+          uploadResult.status === "rejected"
+            ? uploadResult.reason instanceof ApiError &&
+              uploadResult.reason.message
+              ? uploadResult.reason.message
+              : "Could not load failed upload history."
+            : null;
+        setState({
+          status: "ready",
+          jobs: jobsResult.value,
+          uploadFailures:
+            uploadResult.status === "fulfilled" ? uploadResult.value : [],
+          uploadFailuresError,
+        });
       });
   }, []);
 
@@ -144,6 +208,9 @@ export function FailedJobs() {
     state.status === "ready"
       ? state.jobs.filter((j) => j.state === "failed").reverse()
       : [];
+  const uploadFailures = state.status === "ready" ? state.uploadFailures : [];
+  const uploadFailuresError =
+    state.status === "ready" ? state.uploadFailuresError : null;
   const atCap = state.status === "ready" && state.jobs.length >= RING_CAP;
 
   const statusLine =
@@ -152,7 +219,9 @@ export function FailedJobs() {
       : state.status === "error"
         ? "Couldn't load failed jobs."
         : jobs.length === 0
-          ? "No failed jobs."
+          ? uploadFailures.length > 0
+            ? "No retained in-memory failures."
+            : "No failed jobs."
           : `${jobs.length} failed job${jobs.length === 1 ? "" : "s"}.`;
 
   return (
@@ -207,9 +276,13 @@ export function FailedJobs() {
       ) : jobs.length === 0 ? (
         <div class="fj-card fj-empty" data-testid="failed-jobs-empty">
           <Icon name="check-circle" class="fj-empty-icon" />
-          <p class="fj-empty-title">No failed jobs</p>
+          <p class="fj-empty-title">
+            {uploadFailures.length > 0 ? "No retained in-memory failures" : "No failed jobs"}
+          </p>
           <p class="fj-empty-copy">
-            Every background job has completed without error.
+            {uploadFailures.length > 0
+              ? "Durable failed cloud uploads, if any, are listed below."
+              : "Every retained in-memory job has completed without error."}
           </p>
         </div>
       ) : (
@@ -225,6 +298,42 @@ export function FailedJobs() {
           ))}
         </div>
       )}
+
+      {state.status === "ready" ? (
+        <section class="fj-card fj-upload-history" data-testid="failed-upload-history">
+          <h2 class="fj-subtitle">Failed cloud uploads</h2>
+          <p
+            class="fj-status"
+            data-testid="failed-upload-history-status"
+            role="status"
+            aria-live="polite"
+          >
+            {uploadFailuresError
+              ? "Failed-upload history is unavailable."
+              : uploadFailures.length === 0
+                ? "No failed cloud uploads."
+                : `${uploadFailures.length} failed cloud upload${uploadFailures.length === 1 ? "" : "s"}.`}
+          </p>
+          {uploadFailuresError ? (
+            <p class="fj-note" data-testid="failed-upload-history-error">
+              {uploadFailuresError}
+            </p>
+          ) : uploadFailures.length === 0 ? (
+            <p class="fj-note" data-testid="failed-upload-history-empty">
+              No durable failed-upload rows were returned.
+            </p>
+          ) : (
+            <div class="fj-list" data-testid="failed-upload-history-list">
+              {uploadFailures.map((item) => (
+                <UploadFailureItem
+                  key={`${item.archive_item_id}-${item.child_key}-${item.at}`}
+                  item={item}
+                />
+              ))}
+            </div>
+          )}
+        </section>
+      ) : null}
     </section>
   );
 }

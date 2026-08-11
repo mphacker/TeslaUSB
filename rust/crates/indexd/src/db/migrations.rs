@@ -29,7 +29,7 @@ pub const SCHEMA_VERSION_NOTE: &str = "v1 (PROVISIONAL — pre-OP-3 freeze)";
 /// The highest schema version this binary knows how to produce. A DB
 /// reporting a higher version was written by a newer `indexd` and must
 /// not be opened read-write.
-pub const LATEST_VERSION: i64 = 8;
+pub const LATEST_VERSION: i64 = 9;
 
 /// The ordered migration ladder. Index order MUST match ascending
 /// `version`; [`MIGRATIONS`] is validated by a test.
@@ -73,6 +73,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 8,
         note: "v8 — failed history keyset index",
         sql: V8_SQL,
+    },
+    Migration {
+        version: 9,
+        note: "v9 — failed-upload retry request persistence scaffold",
+        sql: V9_SQL,
     },
 ];
 
@@ -479,6 +484,77 @@ CREATE INDEX idx_cloud_sync_history_failed_completion_seq_id
     WHERE outcome = 'failed';
 ";
 
+/// v9 DDL: durable failed-upload retry request idempotency records.
+const V9_SQL: &str = "
+CREATE TABLE cloud_failed_upload_retry_requests (
+    job_id                  TEXT PRIMARY KEY
+                                CHECK(length(job_id) BETWEEN 1 AND 32
+                                      AND (
+                                          (job_id NOT GLOB '*[^0-9]*')
+                                          OR (
+                                              substr(job_id, 1, 2) = 'm-'
+                                              AND length(job_id) > 2
+                                              AND substr(job_id, 3) NOT GLOB '*[^0-9]*'
+                                          )
+                                      )),
+    request_id              TEXT NOT NULL
+                                CHECK(length(request_id) BETWEEN 8 AND 128
+                                      AND request_id NOT GLOB '*[^0-9A-Za-z_.:-]*'),
+    idempotency_key         TEXT NOT NULL
+                                CHECK(length(idempotency_key) BETWEEN 8 AND 128
+                                      AND idempotency_key NOT GLOB '*[^0-9A-Za-z_.:-]*'),
+    request_hash            TEXT NOT NULL
+                                CHECK(length(request_hash)=64
+                                      AND request_hash = lower(request_hash)
+                                      AND request_hash NOT GLOB '*[^0-9a-f]*'),
+    owner                   TEXT NOT NULL
+                                CHECK(length(owner) BETWEEN 1 AND 32
+                                      AND owner NOT GLOB '*[^0-9A-Za-z_.-]*'),
+    kind                    TEXT NOT NULL
+                                CHECK(length(kind) BETWEEN 1 AND 64
+                                      AND kind NOT GLOB '*[^0-9A-Za-z_.-]*'),
+    state                   TEXT NOT NULL
+                                CHECK(state IN (
+                                    'queued', 'running', 'done', 'failed',
+                                    'refused', 'busy', 'cancel_requested', 'cancelled'
+                                )),
+    target_archive_item_id  INTEGER NOT NULL CHECK(target_archive_item_id > 0),
+    target_child_key        TEXT NOT NULL CHECK(length(target_child_key) BETWEEN 1 AND 512),
+    target_upload_set_id    TEXT
+                                CHECK(target_upload_set_id IS NULL
+                                      OR (length(target_upload_set_id)=32
+                                          AND target_upload_set_id = lower(target_upload_set_id)
+                                          AND target_upload_set_id NOT GLOB '*[^0-9a-f]*')),
+    response_status         TEXT
+                                CHECK(response_status IS NULL
+                                      OR response_status IN (
+                                          'accepted', 'replay', 'conflict', 'rejected', 'error'
+                                      )),
+    response_code           INTEGER
+                                CHECK(response_code IS NULL
+                                      OR response_code BETWEEN 100 AND 599),
+    sanitized_response      TEXT
+                                CHECK(sanitized_response IS NULL
+                                      OR length(sanitized_response) BETWEEN 1 AND 160),
+    created_at              INTEGER NOT NULL CHECK(created_at >= 0),
+    updated_at              INTEGER NOT NULL CHECK(updated_at >= created_at),
+    completed_at            INTEGER
+                                CHECK(completed_at IS NULL
+                                      OR (completed_at >= 0 AND completed_at >= updated_at)),
+    UNIQUE(owner, kind, idempotency_key),
+    UNIQUE(request_id)
+);
+
+CREATE INDEX idx_cloud_failed_upload_retry_requests_target
+    ON cloud_failed_upload_retry_requests(
+        target_archive_item_id,
+        target_child_key,
+        target_upload_set_id
+    );
+CREATE INDEX idx_cloud_failed_upload_retry_requests_state_updated
+    ON cloud_failed_upload_retry_requests(state, updated_at);
+";
+
 /// v1 DDL: contract D1's proposed schema, plus two internal additions
 /// flagged in the build notes:
 ///   * `trips.polyline` BLOB — the RDP-simplified cached polyline (OQ-2
@@ -682,8 +758,8 @@ mod tests {
     use rusqlite::{Connection, params};
 
     use super::{
-        LATEST_VERSION, MIGRATIONS, V1_SQL, V2_SQL, V3_SQL, V4_SQL, V5_SQL, V6_SQL, V7_SQL,
-        V8_SQL,
+        LATEST_VERSION, MIGRATIONS, V1_SQL, V2_SQL, V3_SQL, V4_SQL, V5_SQL, V6_SQL, V7_SQL, V8_SQL,
+        V9_SQL,
     };
     use crate::db::{DbError, apply_migrations};
 
@@ -975,8 +1051,84 @@ mod tests {
     }
 
     #[test]
+    fn v9_adds_failed_upload_retry_request_persistence_schema() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(V1_SQL).unwrap();
+        conn.execute_batch(V2_SQL).unwrap();
+        conn.execute_batch(V3_SQL).unwrap();
+        conn.execute_batch(V4_SQL).unwrap();
+        conn.execute_batch(V5_SQL).unwrap();
+        conn.execute_batch(V6_SQL).unwrap();
+        conn.execute_batch(V7_SQL).unwrap();
+        conn.execute_batch(V8_SQL).unwrap();
+        conn.execute_batch(V9_SQL).unwrap();
+
+        let table_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                      WHERE type='table'
+                        AND name='cloud_failed_upload_retry_requests'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_exists, 1);
+
+        conn.execute(
+            "INSERT INTO cloud_failed_upload_retry_requests
+                    (job_id, request_id, idempotency_key, request_hash, owner, kind, state,
+                     target_archive_item_id, target_child_key, target_upload_set_id,
+                     response_status, response_code, sanitized_response,
+                     created_at, updated_at, completed_at)
+                 VALUES
+                    ('m-9001', 'req-9001', 'idem-9001',
+                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                     'indexd', 'cloud_failed_upload_retry', 'queued',
+                     7, 'cam/front.mp4', NULL,
+                     'accepted', 202, 'queued',
+                     10, 10, NULL)",
+            [],
+        )
+        .unwrap();
+
+        let duplicate_scope = conn.execute(
+            "INSERT INTO cloud_failed_upload_retry_requests
+                    (job_id, request_id, idempotency_key, request_hash, owner, kind, state,
+                     target_archive_item_id, target_child_key, target_upload_set_id,
+                     response_status, response_code, sanitized_response,
+                     created_at, updated_at, completed_at)
+                 VALUES
+                    ('m-9002', 'req-9002', 'idem-9001',
+                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                     'indexd', 'cloud_failed_upload_retry', 'queued',
+                     7, 'cam/front.mp4', NULL,
+                     'accepted', 202, 'queued',
+                     11, 11, NULL)",
+            [],
+        );
+        assert!(duplicate_scope.is_err());
+
+        let bad_upload_set_id = conn.execute(
+            "INSERT INTO cloud_failed_upload_retry_requests
+                    (job_id, request_id, idempotency_key, request_hash, owner, kind, state,
+                     target_archive_item_id, target_child_key, target_upload_set_id,
+                     response_status, response_code, sanitized_response,
+                     created_at, updated_at, completed_at)
+                 VALUES
+                    ('m-9003', 'req-9003', 'idem-9003',
+                     'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                     'indexd', 'cloud_failed_upload_retry', 'queued',
+                     8, 'cam/rear.mp4', 'BAD',
+                     'accepted', 202, 'queued',
+                     12, 12, NULL)",
+            [],
+        );
+        assert!(bad_upload_set_id.is_err());
+    }
+
+    #[test]
     fn migrates_from_v5_with_existing_rows_to_latest() {
-        // The deployed device sits at v5, so the next release applies v6+v7+v8 in
+        // The deployed device sits at v5, so the next release applies v6+v7+v8+v9 in
         // a single transaction. Seed real rows first: migrating an empty
         // table would not show that the ADD COLUMNs and the new partial UNIQUE
         // index tolerate pre-existing data.

@@ -140,5 +140,9 @@ current `JobHub` retention is in-memory and not restart durable.
   shape so same key+same hash can replay deterministically and same key+different
   hash yields `409`. Target identity includes `upload_set_id`, so retrying with a
   different fence is a deterministic conflict.
+- indexd now carries persistence scaffolding (`cloud_failed_upload_retry_requests`,
+  migration v9) for this idempotency lane: stable `job_id`/`request_id`,
+  idempotency scope, owner/kind/state, target fence identity, sanitized
+  response/status metadata, and timestamps.
 - indexd remains the single writer for queue-state mutations; groundwork here is
   validation/contract/persistence scaffolding only.

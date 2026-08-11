@@ -7,6 +7,7 @@
 //! never write directly.
 
 pub mod cloud;
+pub mod cloud_retry_requests;
 pub mod ingest;
 pub mod migrations;
 pub mod mutations;
@@ -269,6 +270,7 @@ mod tests {
             "cloud_meta",
             "cloud_provider_config",
             "cloud_upload_attempts",
+            "cloud_failed_upload_retry_requests",
         ] {
             let found: i64 = conn
                 .query_row(

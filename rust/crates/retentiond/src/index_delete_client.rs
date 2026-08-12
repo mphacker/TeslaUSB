@@ -11,8 +11,10 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::register_client::{
-    IO_TIMEOUT_SECS, MAX_REQUEST_FRAME, RegisterError, read_frame, write_frame,
+    MAX_REQUEST_FRAME, RegisterError, read_frame, write_frame,
 };
+#[cfg(unix)]
+use crate::register_client::IO_TIMEOUT_SECS;
 
 /// Delete-path request wire mirror for `indexd::proto::Request`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

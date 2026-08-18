@@ -40,8 +40,9 @@ These specs incorporate the decisions from a Tier-3 adversarial contract review
 (audit trail: `files/cloud-p0-review-reconciliation.md`, decisions D1–D10 /
 M1–M7). Two review outcomes changed scope and are called out where they land:
 the unit of work is a **parent event + child objects** (not one file per event),
-and **webd gains an authenticated-operator + CSRF layer** as a hard prerequisite
-for the cloud mutation routes (`webd-cloud-api.md` §0) — webd has no auth today.
+and the product is permanently anonymous on the local network. Mutations use
+strict same-origin/request-forgery checks, explicit confirmation, validation,
+idempotency, and fail-closed durable jobs; authentication is not part of B-1.
 
 ## Retention
 
@@ -54,4 +55,3 @@ for the cloud mutation routes (`webd-cloud-api.md` §0) — webd has no auth tod
 > bypassed** — deliberately, because the archive is the only unbounded-growth
 > consumer and a full card stops recording. Footage is deleted whether or not it
 > was ever backed up. Earlier notes in this repo claimed eviction was inert.
-

@@ -24,7 +24,7 @@ use teslausb_core::sei::tesla::{AutopilotState, Gear};
 
 /// Wire-format version stamped into every [`ScanBatch`]. Bump on any
 /// breaking change to the record shape.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Front-clip parser version stamped on front records. Bump only when
 /// front parse semantics change.
@@ -220,7 +220,8 @@ pub struct ClipAngleRecord {
     /// This file's angle facts.
     pub angle: AngleRecord,
     /// Front parse outcome (`parsed_with_waypoints` / `no_waypoints` /
-    /// `parse_error` / `read_error`). `None` for non-front records.
+    /// `parse_error` / `read_error` / `encrypted`). `None` for non-front
+    /// records.
     #[serde(default)]
     pub parse_state: Option<String>,
     /// Fingerprint of the front file entry fields that participate in
@@ -324,7 +325,7 @@ pub struct FrontUnplaceableRecord {
     pub canonical_key: String,
     /// Front angle metadata fingerprint from stability tracking fields.
     pub front_fingerprint: u64,
-    /// Wire parse-state: `"read_error"` or `"parse_error"`.
+    /// Wire parse-state: `"read_error"`, `"parse_error"`, or `"encrypted"`.
     pub reason: String,
 }
 

@@ -1397,7 +1397,10 @@ fn retire_seqs_with_cleanup<F>(
     F: FnMut(&str) -> io::Result<()>,
 {
     let blobs = if let Ok(mut queue) = state.queue.lock() {
-        let has_terminal = queue.entries().iter().any(|entry| entry.state.is_terminal());
+        let has_terminal = queue
+            .entries()
+            .iter()
+            .any(|entry| entry.state.is_terminal());
         if !has_terminal && seqs.is_empty() {
             return;
         }
@@ -1435,7 +1438,12 @@ fn retire_seqs_with_cleanup<F>(
 }
 
 fn sweep_terminal_cleanup(state: &ServeState) {
-    retire_seqs_with_cleanup(state, &[], MutationState::Applied, remove_blob_and_sync_parent);
+    retire_seqs_with_cleanup(
+        state,
+        &[],
+        MutationState::Applied,
+        remove_blob_and_sync_parent,
+    );
 }
 
 fn remove_blob_and_sync_parent(blob: &str) -> io::Result<()> {
@@ -1481,11 +1489,10 @@ fn finalize_record(state: &ServeState, id: &str, outcome: &HandoffOutcome) {
 #[allow(clippy::panic, clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::{
-        ChimeReenumState, MAX_FRAME, Request, ServeState, busy_backoff_delay, dispatch,
-        drain_once, enqueue_mutation, fatal_split, mutation_requires_chime_reenum, note_reenum_failure_backoff, read_frame,
-        reenum_failure_backoff_active, request_reenumerate, requeue_suffix, retire_seqs,
-        retire_seqs_with_cleanup, staged_precheck,
-        startup_needs_connect, write_frame,
+        ChimeReenumState, MAX_FRAME, Request, ServeState, busy_backoff_delay, dispatch, drain_once,
+        enqueue_mutation, fatal_split, mutation_requires_chime_reenum, note_reenum_failure_backoff,
+        read_frame, reenum_failure_backoff_active, request_reenumerate, requeue_suffix,
+        retire_seqs, retire_seqs_with_cleanup, staged_precheck, startup_needs_connect, write_frame,
     };
     use crate::config::GadgetConfig;
     use crate::handoff::{Mutation, Partition};
@@ -1723,11 +1730,18 @@ mod tests {
             Some(&serde_json::json!("queue unavailable"))
         );
         assert!(
-            response.get("detail").and_then(serde_json::Value::as_str).is_some(),
+            response
+                .get("detail")
+                .and_then(serde_json::Value::as_str)
+                .is_some(),
             "expected queue-unavailable detail"
         );
         let queue = state.queue.lock().expect("lock");
-        assert_eq!(queue.live_len(), 0, "failed persist must not leave live entry");
+        assert_eq!(
+            queue.live_len(),
+            0,
+            "failed persist must not leave live entry"
+        );
     }
 
     #[test]
@@ -1760,7 +1774,11 @@ mod tests {
         assert_eq!(response.get("job_id"), Some(&serde_json::json!("m-1")));
         assert_eq!(response.get("state"), Some(&serde_json::json!("queued")));
         let queue = state.queue.lock().expect("lock");
-        assert_eq!(queue.live_len(), 1, "replay must keep the original live entry");
+        assert_eq!(
+            queue.live_len(),
+            1,
+            "replay must keep the original live entry"
+        );
     }
 
     #[test]
@@ -1800,7 +1818,9 @@ mod tests {
                 .expect("enqueue new");
             // Simulate an already-terminal residue entry from an earlier cycle.
             queue.set_state(&[1], MutationState::Applied);
-            queue.persist(&state.queue_path).expect("persist prior residue");
+            queue
+                .persist(&state.queue_path)
+                .expect("persist prior residue");
         }
 
         retire_seqs(&state, &[2], MutationState::Applied);
@@ -1814,7 +1834,10 @@ mod tests {
             "current terminal blob must be reclaimed before prune"
         );
         let queue = state.queue.lock().expect("lock");
-        assert!(queue.entries().is_empty(), "terminal entries should be pruned");
+        assert!(
+            queue.entries().is_empty(),
+            "terminal entries should be pruned"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1947,7 +1970,9 @@ mod tests {
                 )
                 .expect("enqueue");
             queue.set_state(&[1], MutationState::Applied);
-            queue.persist(&state.queue_path).expect("persist terminal entry");
+            queue
+                .persist(&state.queue_path)
+                .expect("persist terminal entry");
             assert!(queue.pending_partitions().is_empty(), "no queued work");
         }
 
@@ -1990,7 +2015,11 @@ mod tests {
             "blob must be retained when terminal state persistence is not confirmed"
         );
         let queue = state.queue.lock().expect("lock");
-        assert_eq!(queue.entries().len(), 1, "terminal entry must remain for retry");
+        assert_eq!(
+            queue.entries().len(),
+            1,
+            "terminal entry must remain for retry"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

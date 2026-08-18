@@ -113,6 +113,25 @@ export interface FailedUploadRetryResponse {
   detail?: string;
 }
 
+export interface ArchiveDeleteMutationResponse {
+  status: "accepted" | "replay" | "conflict" | "refused";
+  target: "archive" | string;
+  jobId: string;
+  requestId: string;
+  state: string;
+  detail?: string;
+  statusUrl?: string;
+}
+
+export interface ArchiveDeleteStatusResponse {
+  jobId: string;
+  requestId: string;
+  state: string;
+  responseStatus?: string | null;
+  responseCode?: number | null;
+  detail?: string | null;
+}
+
 /** `GET /api/fsck/status` read-only maintenance snapshot. */
 export interface FsckStatusResponse {
   running: boolean;
@@ -172,6 +191,7 @@ export interface IndexLifecycleResponse {
   front_parse_stale_count: number;
   front_parse_retry_pending_count: number;
   front_parse_missing_count: number;
+  front_parse_missing_keys: string[];
   last_derived_at: number | null;
   last_front_parse_attempt_at: number | null;
 }

@@ -39,11 +39,12 @@ identical Flask routes, templates, database layout, or implementation.
 - Decide and document product choices for armed retention, cloud durability
   requirements, provider support, and whether legacy configuration is imported
   automatically or only through an explicit migration command.
-- **Operator security decision (2026-08-10):** the operator prefers no login and
-  local-network-only access. B-1 will not enable dangerous mutations on that
-  basis alone; cloud commands, deletion, Wi-Fi changes, gadget operations, and
-  maintenance actions remain disabled until an authenticated session and
-  request-forgery protection are approved.
+- **Operator security decision (2026-08-13):** the product is permanently
+  anonymous and local-network-only; authentication will not be added. Mutations
+  must therefore rely on same-origin/request-forgery checks, explicit UI
+  confirmation, strict input validation, durable idempotent jobs, target and
+  fingerprint fencing, and fail-closed recovery. Anonymous access is not a
+  reason to bypass those safety controls.
 
 **Dependencies:** none.
 
@@ -60,12 +61,14 @@ identical Flask routes, templates, database layout, or implementation.
 
 **Progress:** The read-only uploader status channel is now exposed by
 `GET /api/cloud` and rendered by the Cloud Archive screen. Queue/history remain
-read-only. Cloud mutations are still intentionally blocked until operator
-authentication/CSRF protection and durable command/job semantics are defined.
+read-only. Cloud mutations are still intentionally blocked until the
+anonymous-local-network request-forgery boundary and durable command/job
+semantics are defined.
 
 **Implementation**
 
-1. Define authenticated/operator-protected webd contracts for:
+1. Define anonymous-local-network webd contracts with strict origin checks,
+   explicit confirmation, and durable job ownership for:
    - aggregate status and health;
    - Sync Now, wake, stop, and cancel;
    - queue page, item removal, and clear;
@@ -151,16 +154,27 @@ diagnostics are missing. Policy editing and deletion execution remain pending.
 **Dependencies:** Workstream 0; existing retention and indexd delete code;
 cloud semantics from Workstream 1 if cloud-gated deletion is approved.
 
-**Next safe slice:** keep cleanup control read-only while repairing the internal
-delete protocol. The claim response must carry the persisted OS-random
-`delete_gen` used for the trash filename, and indexd must state-guard
-`DELETE_CLAIMED -> DELETING -> DELETED` plus claim release transitions.
-Transitional recovery rows without a generation fail closed. Public archive and
-combined deletion remain disabled until durable job persistence, stale-plan
-fencing, restart recovery, reconciliation, and the approved same-origin/auth
-boundary are complete. The internal v11/v12 archive-delete request scaffold now
-stores idempotency identity and target fences, with restart projection that
-distinguishes owned in-flight work from stale plans and terminal outcomes.
+**Current status:** the internal owner handoff is in place: `indexd` persists the
+archive-delete request, claims the next queued item with an OS-random
+`delete_gen`, and retentiond executes the crash-safe rename/unlink protocol under
+that exact token. The durable request row is now terminalized on the success and
+failure paths (`archive_delete_complete` / `archive_delete_fail`) so a claimed
+job cannot silently remain in `running`. The public archive/both delete routes
+now also enforce same-origin/request-forgery checks before they even reach the
+`501` placeholder, returning `403 forbidden_origin` for cross-site requests while
+allowing the explicit same-origin request path to reach the not-yet-implemented
+retention contract. This closes the ownership gap for the internal delete
+protocol and adds the first hard safety gate to the public API without enabling
+full destructive execution.
+
+**Next safe slice:** keep cleanup control read-only while finishing the public
+contract. `DELETE /api/clips/:id?target=archive` and `?target=both` remain
+explicitly `501 Not Implemented` until we complete the full request idempotency
+and confirmation flow, durable job publication, restart recovery replay, and the
+final SPA/UAT coverage for archive and combined delete. The internal v11/v12
+archive-delete request scaffold stores idempotency identity and target fences,
+with restart projection that distinguishes owned in-flight work from stale plans
+and terminal outcomes.
 
 **Acceptance**
 
@@ -224,8 +238,8 @@ The `/api/jobs` + `/api/jobs/failed` path remains read-only, and B-1 now adds
 read-only durable failed-upload history at `GET /api/jobs/failed/uploads`
 (indexd-backed `cloud_sync_history` rows with `outcome='failed'`) so operators
 can triage upload failures without mutating queue state. Retry/delete commands
-remain intentionally disabled pending operator-approved auth/CSRF and daemon
-ownership wiring. The pending retry contract is now explicit: child-specific
+remain intentionally disabled pending the anonymous-local-network
+request-forgery boundary and daemon ownership wiring. The pending retry contract is now explicit: child-specific
 targeting (`archive_item_id` + `child_key`), `failed`-only eligibility, and
 deterministic reject for `done|queued|in_progress|parked`, with optional
 `upload_set_id` generation-fence semantics (sealed rows require match;
@@ -236,9 +250,13 @@ indexd now also persists failed-upload retry request identity (migration v9
 failed history (migration v10). The public retry route is enabled for local
 network users with strict same-origin checks; delete remains disabled.
 
-Next step: finish the full retry validation/UAT gate, then add typed delete
-commands only after their durable ownership and recovery contract is complete.
-Retry creates a new durable attempt rather than mutating history invisibly.
+The retry validation/UAT gate is complete: Linux-container indexd retry tests,
+webd failed-upload retry tests, retention delete/recovery tests, and the
+responsive failed-jobs UAT all pass. Retry creates a new durable attempt rather
+than mutating history invisibly. The next deletion slice is gated only on the
+complete durable ownership/recovery contract and anonymous local-network
+request-forgery protections; public archive deletion stays disabled until those
+controls are complete.
 
 ### Advanced settings
 
@@ -286,7 +304,7 @@ work must not bypass gadgetd or the single-writer rules.
 
 **Acceptance**
 
-- Each operation has typed request/response DTOs, authorization/origin checks,
+- Each operation has typed request/response DTOs, origin/request-forgery checks,
   timeout behavior, and durable terminal status.
 - UI controls cannot issue duplicate operations and remain correct after
   refresh/reconnect.

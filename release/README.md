@@ -12,7 +12,7 @@ A gzip tarball that extracts to `teslausb-<version>-<triple>/` containing:
 
 | Entry | Purpose | Trusted on Pi? |
 |---|---|---|
-| `bin/<svc>` | aarch64 service binaries (7) | yes — hashed in `SHA256SUMS` |
+| `bin/<svc>` | aarch64 service binaries (8) | yes — hashed in `SHA256SUMS` |
 | `spa/**` | built Vite/Preact SPA bundle | yes — hashed in `SHA256SUMS` |
 | `units/*.service` | systemd units installed by step 8 | yes — hashed |
 | `SHA256SUMS` | `sha256sum`-format line per shipped file | the integrity input |

@@ -237,9 +237,8 @@ fn operator_signal(
         .get("last_stop")
         .and_then(|value| value.as_str())
         .and_then(stop_indicates_no_progress);
-    let retention_non_progress = candidate.map(|summary| {
-        summary.count == 0 || stop_indicates_no_progress.unwrap_or(false)
-    });
+    let retention_non_progress =
+        candidate.map(|summary| summary.count == 0 || stop_indicates_no_progress.unwrap_or(false));
 
     let status = if pressure_below_target_exit == Some(true) && retention_non_progress == Some(true)
     {

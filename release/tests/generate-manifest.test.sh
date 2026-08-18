@@ -91,7 +91,7 @@ assert doc["release_version"] == env["RELEASE_VERSION"], "version mismatch"
 assert doc["git_commit"] == env["GIT_COMMIT"], "commit mismatch"
 assert doc["target_triple"] == env["TARGET_TRIPLE"], "triple mismatch"
 assert doc["spa_bundle_sha256"] == env["SPA_BUNDLE_SHA256"], "spa mismatch"
-assert len(doc["binaries"]) == 7, "expected 7 binaries, got %d" % len(doc["binaries"])
+assert len(doc["binaries"]) == 8, "expected 8 binaries, got %d" % len(doc["binaries"])
 sums = {}
 for raw in open(os.path.join(os.path.dirname(mjson), "SHA256SUMS"), encoding="utf-8"):
     m = re.match(r"^([0-9a-f]{64})  (.+)$", raw.rstrip("\n"))

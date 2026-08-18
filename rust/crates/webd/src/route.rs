@@ -12,7 +12,7 @@ use std::time::Duration;
 use axum::Json;
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::Redirect;
 use axum::response::Sse;
 use axum::response::sse::{Event, KeepAlive};
@@ -20,6 +20,10 @@ use axum::routing::{delete, get, post};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use teslausb_core::durable_mutation::{
+    validate_idempotency_key, validate_mutation_job_id, validate_request_hash, validate_request_id,
+};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::{Stream, StreamExt};
@@ -35,6 +39,7 @@ use crate::error::ApiError;
 use crate::gadget::{self, DeleteRefusal, MutationOutcome, TransportError};
 use crate::jobs;
 use crate::jobs::{JobEvent, JobState, JobStatus};
+use crate::mutation_origin::require_strict_same_origin;
 use crate::{AppState, Catalog, query};
 
 /// Default page size when `limit` is omitted.
@@ -74,6 +79,7 @@ pub(crate) fn router(state: AppState, static_dir: PathBuf) -> Router {
         .route("/clips/{id}/stream", get(crate::media::stream))
         .route("/clips/{id}/telemetry", get(crate::media::telemetry))
         .route("/clips/{id}/export", get(crate::media::export))
+        .route("/jobs/archive-delete/{job_id}", get(archive_delete_status))
         .route("/media/content", get(crate::media::content))
         .route(
             "/clips/{id}/angles/{camera}/download",
@@ -743,10 +749,197 @@ fn validate_setting(key: &str, value: &str) -> bool {
 /// Query parameters for `DELETE /api/clips/:id`.
 #[derive(Deserialize)]
 struct DeleteQuery {
-    /// Delete target: `car` (the Tesla USB volume, via `gadgetd`) is the only
-    /// implemented target. `archive`/`both` require `retentiond` (not built) →
-    /// `501`. Omitted → `400` (no destructive default; the caller must opt in).
+    /// Delete target: `car` is the direct gadgetd eject path. `archive` is the
+    /// durable retentiond-owned delete queue path. `both` stays disabled until
+    /// composite semantics are explicitly defined.
     target: Option<String>,
+    /// Durable request id for any mutation being requested.
+    #[serde(rename = "requestId")]
+    request_id: Option<String>,
+    /// Durable idempotency key used to guard replays.
+    #[serde(rename = "idempotencyKey")]
+    idempotency_key: Option<String>,
+    /// Canonical request hash used to detect same-key conflicts.
+    #[serde(rename = "requestHash")]
+    request_hash: Option<String>,
+}
+
+fn validate_archive_delete_metadata(
+    request_id: Option<&str>,
+    idempotency_key: Option<&str>,
+    request_hash: Option<&str>,
+) -> Result<(), ApiError> {
+    let request_id = request_id.ok_or_else(|| {
+        ApiError::bad_request(
+            "request_id_required",
+            "requestId is required for archive delete mutations",
+        )
+    })?;
+    let idempotency_key = idempotency_key.ok_or_else(|| {
+        ApiError::bad_request(
+            "idempotency_key_required",
+            "idempotencyKey is required for archive delete mutations",
+        )
+    })?;
+    let request_hash = request_hash.ok_or_else(|| {
+        ApiError::bad_request(
+            "request_hash_required",
+            "requestHash is required for archive delete mutations",
+        )
+    })?;
+
+    validate_request_id(request_id).map_err(|cause| {
+        ApiError::bad_request("invalid_request_id", format!("invalid requestId: {cause}"))
+    })?;
+    validate_idempotency_key(idempotency_key).map_err(|cause| {
+        ApiError::bad_request(
+            "invalid_idempotency_key",
+            format!("invalid idempotencyKey: {cause}"),
+        )
+    })?;
+    validate_request_hash(request_hash).map_err(|cause| {
+        ApiError::bad_request(
+            "invalid_request_hash",
+            format!("invalid requestHash: {cause}"),
+        )
+    })?;
+
+    Ok(())
+}
+
+const ARCHIVE_DELETE_HASH_DOMAIN_TAG: &[u8] = b"teslausb.clip_archive_delete.v1\0";
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum ArchiveDeleteWire {
+    ArchiveDeleteAccepted {
+        job_id: String,
+        request_id: String,
+        state: String,
+    },
+    ArchiveDeleteReplay {
+        job_id: String,
+        request_id: String,
+        outcome: String,
+        #[serde(default)]
+        response_status: Option<String>,
+        #[serde(default)]
+        response_code: Option<i64>,
+        detail: Option<String>,
+    },
+    ArchiveDeleteConflict {
+        job_id: String,
+        request_id: String,
+        message: String,
+    },
+    ArchiveDeleteRefused {
+        job_id: String,
+        request_id: String,
+        message: String,
+    },
+    Rejected {
+        message: String,
+    },
+    Error {
+        #[serde(rename = "message")]
+        _message: String,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum ArchiveDeleteInspectWire {
+    ArchiveDeleteInspect {
+        job_id: String,
+        request_id: String,
+        state: String,
+        #[serde(default)]
+        response_status: Option<String>,
+        #[serde(default)]
+        response_code: Option<i64>,
+        detail: Option<String>,
+    },
+    NotFound {},
+    Rejected {
+        message: String,
+    },
+    Error {
+        message: String,
+    },
+}
+
+fn archive_delete_replay_http_status(
+    response_status: Option<&str>,
+    response_code: Option<i64>,
+    outcome: &str,
+) -> StatusCode {
+    if let Some(code) = response_code {
+        if (100..=599).contains(&code) {
+            if let Ok(status) = StatusCode::from_u16(code as u16) {
+                return status;
+            }
+        }
+    }
+    match response_status {
+        Some("accepted") => StatusCode::ACCEPTED,
+        Some("rejected") => StatusCode::CONFLICT,
+        Some("conflict") => StatusCode::CONFLICT,
+        Some("error") => StatusCode::BAD_GATEWAY,
+        Some("replay") => StatusCode::OK,
+        _ => match outcome {
+            "accepted" => StatusCode::ACCEPTED,
+            "refused" => StatusCode::CONFLICT,
+            "conflict" => StatusCode::CONFLICT,
+            "error" => StatusCode::BAD_GATEWAY,
+            _ => StatusCode::OK,
+        },
+    }
+}
+
+fn archive_delete_replay_state(outcome: &str, detail: Option<&str>) -> String {
+    match outcome {
+        "accepted" => detail.unwrap_or("queued").to_owned(),
+        "refused" => "refused".to_owned(),
+        "conflict" => "conflict".to_owned(),
+        "error" => "failed".to_owned(),
+        _ => "queued".to_owned(),
+    }
+}
+
+fn new_archive_delete_job_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or(0);
+    format!("m-{now}")
+}
+
+fn append_archive_delete_hash_field(hasher: &mut Sha256, name: &[u8], value: &str) {
+    hasher.update(name);
+    hasher.update([0u8]);
+    let bytes = value.as_bytes();
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
+fn hex_encode_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        out.push(char::from(HEX[(byte >> 4) as usize]));
+        out.push(char::from(HEX[(byte & 0x0f) as usize]));
+    }
+    out
+}
+
+fn canonical_archive_delete_hash(request_id: &str, idempotency_key: &str, target: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(ARCHIVE_DELETE_HASH_DOMAIN_TAG);
+    append_archive_delete_hash_field(&mut hasher, b"target", target);
+    append_archive_delete_hash_field(&mut hasher, b"request_id", request_id);
+    append_archive_delete_hash_field(&mut hasher, b"idempotency_key", idempotency_key);
+    hex_encode_lower(&hasher.finalize())
 }
 
 /// `DELETE /api/clips/:id?target=car`: delete a clip's car-visible camera files
@@ -756,28 +949,197 @@ struct DeleteQuery {
 /// clip, or any catalog inconsistency refuses **before** the LUN is touched.
 async fn delete_clip(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<i64>,
     Query(q): Query<DeleteQuery>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     match q.target.as_deref() {
         Some("car") => {}
-        Some("archive" | "both") => {
+        Some("both") => {
             return Err(ApiError::status(
-                StatusCode::NOT_IMPLEMENTED,
-                "not_implemented",
-                "archive deletes are not implemented yet (retentiond delete protocol)",
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "both_target_refused",
+                "target=both is disabled until composite archive+car semantics are defined",
             ));
+        }
+        Some("archive") => {
+            require_strict_same_origin(&headers, "cross-origin archive delete mutation refused")?;
+            validate_archive_delete_metadata(
+                q.request_id.as_deref(),
+                q.idempotency_key.as_deref(),
+                q.request_hash.as_deref(),
+            )?;
+            let target = q.target.as_deref().unwrap_or("archive");
+            let request_id = q.request_id.clone().expect("request_id is validated above");
+            let idempotency_key = q
+                .idempotency_key
+                .clone()
+                .expect("idempotency_key is validated above");
+            let client_request_hash = q
+                .request_hash
+                .clone()
+                .expect("request_hash is validated above");
+            let canonical_request_hash =
+                canonical_archive_delete_hash(&request_id, &idempotency_key, target);
+            if client_request_hash != canonical_request_hash {
+                return Err(ApiError::bad_request(
+                    "request_hash_mismatch",
+                    "requestHash does not match the canonical archive delete hash",
+                ));
+            }
+            let archive_targets = read(state.catalog.clone(), move |conn| {
+                let clip_exists = query::get_clip(conn, id)?.is_some();
+                let targets = query::list_clip_archive_delete_targets(conn, id)?;
+                Ok((clip_exists, targets))
+            })
+            .await?;
+            let (clip_exists, targets) = archive_targets;
+            if !clip_exists {
+                return Err(ApiError::NotFound);
+            }
+            if targets.is_empty() {
+                return Err(ApiError::status(
+                    StatusCode::CONFLICT,
+                    "archive_delete_target_unavailable",
+                    "clip is not linked to a live archive item; refresh required",
+                ));
+            }
+            if targets.len() > 1 {
+                return Err(ApiError::status(
+                    StatusCode::CONFLICT,
+                    "archive_delete_target_ambiguous",
+                    "clip maps to multiple live archive items; refresh required",
+                ));
+            }
+            let target_fence = &targets[0];
+            let request = json!({
+                "cmd": "archive_delete_create_or_load",
+                "job_id": new_archive_delete_job_id(),
+                "request_id": request_id,
+                "idempotency_key": idempotency_key,
+                "request_hash": canonical_request_hash,
+                "target_archive_item_id": target_fence.archive_item_id,
+                "target_archive_path": target_fence.archive_path,
+                "target_archive_size_bytes": target_fence.archive_size_bytes,
+                "target_archive_file_count": target_fence.archive_file_count,
+                "target_clip_canonical_key": target_fence.clip_canonical_key,
+                "target_manifest_digest": target_fence.manifest_digest,
+            });
+            let client = state.indexd.clone();
+            let response = tokio::task::spawn_blocking(move || client.call(request))
+                .await
+                .map_err(|_| ApiError::Internal)?
+                .map_err(|err| match err {
+                    TransportError::Unavailable(_) => ApiError::status(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "unavailable",
+                        "archive delete service unavailable",
+                    ),
+                    TransportError::Protocol(_) => ApiError::status(
+                        StatusCode::BAD_GATEWAY,
+                        "indexd_protocol",
+                        "archive delete protocol error",
+                    ),
+                })?;
+            let wire: ArchiveDeleteWire = serde_json::from_value(response).map_err(|_| {
+                ApiError::status(
+                    StatusCode::BAD_GATEWAY,
+                    "indexd_protocol",
+                    "malformed archive-delete response",
+                )
+            })?;
+            return match wire {
+                ArchiveDeleteWire::ArchiveDeleteAccepted {
+                    job_id,
+                    request_id,
+                    state,
+                } => Ok((
+                    StatusCode::ACCEPTED,
+                    Json(json!({
+                        "status": "accepted",
+                        "target": target,
+                        "jobId": job_id,
+                        "requestId": request_id,
+                        "state": state,
+                        "statusUrl": format!("/api/jobs/archive-delete/{job_id}"),
+                    })),
+                )),
+                ArchiveDeleteWire::ArchiveDeleteReplay {
+                    job_id,
+                    request_id,
+                    outcome,
+                    response_status,
+                    response_code,
+                    detail,
+                } => Ok((
+                    archive_delete_replay_http_status(
+                        response_status.as_deref(),
+                        response_code,
+                        &outcome,
+                    ),
+                    Json(json!({
+                        "status": "replay",
+                        "target": target,
+                        "jobId": job_id,
+                        "requestId": request_id,
+                        "state": archive_delete_replay_state(&outcome, detail.as_deref()),
+                        "detail": detail,
+                        "statusUrl": format!("/api/jobs/archive-delete/{job_id}"),
+                    })),
+                )),
+                ArchiveDeleteWire::ArchiveDeleteConflict {
+                    job_id,
+                    request_id,
+                    message,
+                } => Ok((
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "status": "conflict",
+                        "target": target,
+                        "jobId": job_id,
+                        "requestId": request_id,
+                        "state": "conflict",
+                        "detail": message,
+                        "statusUrl": format!("/api/jobs/archive-delete/{job_id}"),
+                    })),
+                )),
+                ArchiveDeleteWire::ArchiveDeleteRefused {
+                    job_id,
+                    request_id,
+                    message,
+                } => Ok((
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "status": "refused",
+                        "target": target,
+                        "jobId": job_id,
+                        "requestId": request_id,
+                        "state": "refused",
+                        "detail": message,
+                        "statusUrl": format!("/api/jobs/archive-delete/{job_id}"),
+                    })),
+                )),
+                ArchiveDeleteWire::Rejected { message } => Err(ApiError::bad_request(
+                    "invalid_archive_delete_request",
+                    message,
+                )),
+                ArchiveDeleteWire::Error { _message: _ } => Err(ApiError::status(
+                    StatusCode::BAD_GATEWAY,
+                    "indexd_error",
+                    "archive delete request failed in indexd",
+                )),
+            };
         }
         Some(other) => {
             return Err(ApiError::bad_request(
                 "invalid_target",
-                format!("unknown delete target `{other}`; use ?target=car"),
+                format!("unknown delete target `{other}`; use ?target=car|archive|both"),
             ));
         }
         None => {
             return Err(ApiError::bad_request(
                 "target_required",
-                "specify an explicit ?target=car (no destructive default)",
+                "specify an explicit ?target=car|archive|both (no destructive default)",
             ));
         }
     }
@@ -1388,6 +1750,69 @@ async fn jobs_failed(State(state): State<AppState>) -> Json<Value> {
     Json(json!({ "jobs": state.jobs.failed_snapshot() }))
 }
 
+async fn archive_delete_status(
+    Path(job_id): Path<String>,
+    State(state): State<AppState>,
+) -> Result<Json<Value>, ApiError> {
+    validate_mutation_job_id(&job_id).map_err(|cause| {
+        ApiError::bad_request("invalid_job_id", format!("invalid job id: {cause}"))
+    })?;
+    let request = json!({
+        "cmd": "archive_delete_inspect",
+        "job_id": job_id,
+    });
+    let client = state.indexd.clone();
+    let response = tokio::task::spawn_blocking(move || client.call(request))
+        .await
+        .map_err(|_| ApiError::Internal)?
+        .map_err(|err| match err {
+            TransportError::Unavailable(_) => ApiError::status(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "unavailable",
+                "archive delete service unavailable",
+            ),
+            TransportError::Protocol(_) => ApiError::status(
+                StatusCode::BAD_GATEWAY,
+                "indexd_protocol",
+                "archive delete protocol error",
+            ),
+        })?;
+    let wire: ArchiveDeleteInspectWire = serde_json::from_value(response).map_err(|_| {
+        ApiError::status(
+            StatusCode::BAD_GATEWAY,
+            "indexd_protocol",
+            "malformed archive-delete inspect response",
+        )
+    })?;
+    match wire {
+        ArchiveDeleteInspectWire::ArchiveDeleteInspect {
+            job_id,
+            request_id,
+            state,
+            response_status,
+            response_code,
+            detail,
+        } => Ok(Json(json!({
+            "jobId": job_id,
+            "requestId": request_id,
+            "state": state,
+            "responseStatus": response_status,
+            "responseCode": response_code,
+            "detail": detail,
+        }))),
+        ArchiveDeleteInspectWire::NotFound {} => Err(ApiError::NotFound),
+        ArchiveDeleteInspectWire::Rejected { message } => Err(ApiError::bad_request(
+            "invalid_archive_delete_status_request",
+            message,
+        )),
+        ArchiveDeleteInspectWire::Error { message } => Err(ApiError::status(
+            StatusCode::BAD_GATEWAY,
+            "indexd_error",
+            format!("archive delete status request failed in indexd: {message}"),
+        )),
+    }
+}
+
 /// `GET /api/jobs/capabilities`: read-only contract/capability disclosure for the
 /// durable-mutation foundation. No mutation commands are exposed by this route.
 async fn jobs_capabilities() -> Json<Value> {
@@ -1452,10 +1877,22 @@ async fn jobs_capabilities() -> Json<Value> {
             "delete_enabled": false,
             "notes": "Route is enabled for local-network retry of failed child rows only. Delete and parked-collision resolution stay disabled."
         },
+        "archive_delete_contract": {
+            "route": "/api/clips/{id}?target=archive|both",
+            "owner": "retentiond",
+            "enabled": true,
+            "targets": ["archive"],
+            "disabled_targets": ["both"],
+            "requires_same_origin": true,
+            "required_fields": ["requestId", "idempotencyKey", "requestHash"],
+            "status_route": "/api/jobs/archive-delete/{jobId}",
+            "fallback_status": "refused_or_conflict",
+            "notes": "Archive deletion persists through indexd archive-delete create-or-load and executes through retentiond ownership handoff. target=both stays refused until composite semantics are defined."
+        },
         "csrf_hardening_non_get": {
             "checks": ["Host", "Origin", "Sec-Fetch-Site"],
             "is_authentication": false,
-            "currently_enforced_on": ["wifi_mutations_legacy", "cloud_failed_upload_retry"],
+            "currently_enforced_on": ["wifi_mutations_legacy", "cloud_failed_upload_retry", "clip_archive_delete"],
             "current_behavior": {
                 "host_required": true,
                 "sec_fetch_site_restricted": true,

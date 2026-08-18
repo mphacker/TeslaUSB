@@ -11,6 +11,8 @@
  * itself; in dev, Vite proxies `/api` to webd.
  */
 import type {
+  ArchiveDeleteMutationResponse,
+  ArchiveDeleteStatusResponse,
   AdvancedSettingsResponse,
   Analytics,
   ApMode,
@@ -101,6 +103,53 @@ function qs(params: Record<string, string | number | boolean | undefined>): stri
   const sp = new URLSearchParams();
   for (const [k, v] of entries) sp.set(k, String(v));
   return `?${sp.toString()}`;
+}
+
+const ARCHIVE_DELETE_HASH_DOMAIN_TAG = "teslausb.clip_archive_delete.v1\0";
+
+function appendArchiveDeleteHashField(bytes: number[], name: string, value: string): void {
+  const enc = new TextEncoder();
+  const nameBytes = enc.encode(name);
+  const valueBytes = enc.encode(value);
+  bytes.push(...nameBytes);
+  bytes.push(0);
+  const lenBuf = new ArrayBuffer(8);
+  new DataView(lenBuf).setBigUint64(0, BigInt(valueBytes.length), true);
+  bytes.push(...new Uint8Array(lenBuf));
+  bytes.push(...valueBytes);
+}
+
+function randomDurableToken(prefix: string): string {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return `${prefix}-${globalThis.crypto.randomUUID()}`;
+  }
+  if (typeof globalThis.crypto?.getRandomValues === "function") {
+    const bytes = new Uint8Array(16);
+    globalThis.crypto.getRandomValues(bytes);
+    const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+    return `${prefix}-${hex}`;
+  }
+  return `${prefix}-${Date.now().toString(16)}-${Math.floor(Math.random() * 1_000_000_000).toString(16)}`;
+}
+
+async function canonicalArchiveDeleteHash(
+  requestId: string,
+  idempotencyKey: string,
+  target: string,
+): Promise<string> {
+  if (!globalThis.crypto?.subtle) {
+    throw new ApiError(0, "crypto_unavailable", "WebCrypto unavailable for archive delete request hash");
+  }
+  const bytes: number[] = [];
+  bytes.push(...new TextEncoder().encode(ARCHIVE_DELETE_HASH_DOMAIN_TAG));
+  appendArchiveDeleteHashField(bytes, "target", target);
+  appendArchiveDeleteHashField(bytes, "request_id", requestId);
+  appendArchiveDeleteHashField(bytes, "idempotency_key", idempotencyKey);
+  const digest = await globalThis.crypto.subtle.digest(
+    "SHA-256",
+    Uint8Array.from(bytes),
+  );
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 async function request<T>(
@@ -577,6 +626,37 @@ export const api = {
     }
     return res;
   },
+
+  archiveDeleteClip: async (
+    id: number,
+    signal?: AbortSignal,
+  ): Promise<ArchiveDeleteMutationResponse> => {
+    const target = "archive";
+    const requestId = randomDurableToken("req");
+    const idempotencyKey = randomDurableToken("idem");
+    const requestHash = await canonicalArchiveDeleteHash(
+      requestId,
+      idempotencyKey,
+      target,
+    );
+    return requestJsonAllowStatuses<ArchiveDeleteMutationResponse>(
+      "DELETE",
+      `/api/clips/${id}${qs({
+        target,
+        requestId,
+        idempotencyKey,
+        requestHash,
+      })}`,
+      [200, 202, 409],
+      signal,
+    );
+  },
+
+  archiveDeleteStatus: (jobId: string, signal?: AbortSignal) =>
+    getJson<ArchiveDeleteStatusResponse>(
+      `/api/jobs/archive-delete/${encodeURIComponent(jobId)}`,
+      signal,
+    ),
 
   /**
    * Install (or replace) the lock chime on the p2 MEDIA partition by POSTing a

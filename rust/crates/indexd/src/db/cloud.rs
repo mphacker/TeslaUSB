@@ -3778,7 +3778,9 @@ mod tests {
         .unwrap();
 
         let target = CloudQueueRetryTarget::new(parent, "child-amb".to_owned(), None).unwrap();
-        let err = cloud_failed_upload_retry(&conn, &target).unwrap_err().to_string();
+        let err = cloud_failed_upload_retry(&conn, &target)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("ambiguous target queue rows"));
         let count_queued: i64 = conn
             .query_row(

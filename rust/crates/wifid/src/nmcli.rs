@@ -63,6 +63,24 @@ impl NmcliNetworkController {
             Err(_) => true,
         }
     }
+
+    /// Use the live active STA profile when present; otherwise fall back to the
+    /// configured profile name.
+    fn managed_sta_profile(&self) -> String {
+        let active = capture(
+            "nmcli",
+            &[
+                "-t",
+                "-f",
+                "TYPE,DEVICE,STATE,802-11-wireless.mode,NAME",
+                "connection",
+                "show",
+                "--active",
+            ],
+        )
+        .unwrap_or_default();
+        select_sta_profile(&active, &self.cfg.wifi_iface, &self.cfg.sta_profile)
+    }
 }
 
 impl NetworkController for NmcliNetworkController {
@@ -144,7 +162,8 @@ impl NetworkController for NmcliNetworkController {
     }
 
     fn start_sta(&self) -> Result<()> {
-        up_profile(&self.cfg.sta_profile)
+        let profile = self.managed_sta_profile();
+        up_profile(&profile)
     }
 
     fn stop_sta(&self) -> Result<()> {
@@ -155,7 +174,8 @@ impl NetworkController for NmcliNetworkController {
                 "refusing to stop STA: it is the active management path (SSH safety)".to_owned(),
             ));
         }
-        down_profile(&self.cfg.sta_profile)
+        let profile = self.managed_sta_profile();
+        down_profile(&profile)
     }
 
     fn apply_tx_cap(&self, bytes_per_s: u64) -> Result<()> {
@@ -302,6 +322,63 @@ fn any_active_wifi_sta(active_list: &str, iface: &str) -> bool {
     })
 }
 
+/// Parse the active Wi-Fi STA profile name for `iface` from terse `nmcli` rows.
+///
+/// Supports both:
+/// * `TYPE:DEVICE:STATE:NAME`
+/// * `TYPE:DEVICE:STATE:MODE:NAME` (preferred for mode-aware STA filtering)
+fn active_wifi_sta_profile(active_list: &str, iface: &str) -> Option<String> {
+    active_list.lines().find_map(|line| {
+        let mut fields = line.splitn(4, ':');
+        let ty = fields.next().unwrap_or_default();
+        let device = fields.next().unwrap_or_default();
+        let state = fields.next().unwrap_or_default();
+        let remainder = fields.next().unwrap_or_default();
+        if ty != "802-11-wireless"
+            || device != iface
+            || !matches!(state, "activated" | "activating")
+        {
+            return None;
+        }
+        let (mode, name) = match remainder.split_once(':') {
+            Some((candidate_mode, name)) if is_known_wifi_mode(candidate_mode) => {
+                (Some(candidate_mode), name)
+            }
+            _ => (None, remainder),
+        };
+        if !wifi_mode_is_sta(mode) {
+            return None;
+        }
+        let name = name.trim();
+        if name.is_empty() || name == "--" {
+            None
+        } else {
+            Some(name.to_owned())
+        }
+    })
+}
+
+fn is_known_wifi_mode(mode: &str) -> bool {
+    matches!(
+        mode.trim(),
+        "" | "--" | "infrastructure" | "ap" | "adhoc" | "mesh" | "p2p"
+    )
+}
+
+/// `true` when `nmcli` reports a STA mode (or mode is unavailable).
+fn wifi_mode_is_sta(mode: Option<&str>) -> bool {
+    matches!(
+        mode.map(str::trim),
+        None | Some("") | Some("--") | Some("infrastructure")
+    )
+}
+
+/// Pick the active STA profile when present; otherwise use the configured
+/// fallback profile.
+fn select_sta_profile(active_list: &str, iface: &str, fallback: &str) -> String {
+    active_wifi_sta_profile(active_list, iface).unwrap_or_else(|| fallback.to_owned())
+}
+
 /// Read the current monotonic uptime (seconds since boot) from `/proc/uptime`
 /// (its first whitespace token). Monotonic and immune to wall-clock/NTP steps:
 /// the Pi Zero 2 W has no RTC and steps its clock forward when NTP disciplines
@@ -408,8 +485,9 @@ pub(crate) fn count_stations(dump: &str) -> usize {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::{
-        any_active_wifi_sta, count_stations, has_ip, iw_connected, mutation_hold_fresh,
-        nmcli_field, parse_iw_signal_dbm, sta_associated, tc_cap_args,
+        active_wifi_sta_profile, any_active_wifi_sta, count_stations, has_ip, iw_connected,
+        mutation_hold_fresh, nmcli_field, parse_iw_signal_dbm, select_sta_profile, sta_associated,
+        tc_cap_args, wifi_mode_is_sta,
     };
 
     #[test]
@@ -447,6 +525,47 @@ mod tests {
             "802-11-wireless:wlan0:deactivating:netplan-wlan0-Trez\n",
             "wlan0"
         ));
+    }
+
+    #[test]
+    fn active_wifi_sta_profile_prefers_iface_and_sta_mode() {
+        let active = "\
+802-11-wireless:wlan0:activated:ap:teslausb-ap\n\
+802-11-wireless:wlan1:activated:infrastructure:other\n\
+802-11-wireless:wlan0:activating:infrastructure:netplan-wlan0-Home\n";
+        assert_eq!(
+            active_wifi_sta_profile(active, "wlan0").as_deref(),
+            Some("netplan-wlan0-Home")
+        );
+    }
+
+    #[test]
+    fn active_wifi_sta_profile_supports_legacy_layout_and_colons() {
+        // Legacy rows omit MODE and keep NAME as splitn(4) remainder.
+        let active = "802-11-wireless:wlan0:activated:netplan-wlan0-Guest\\:5G\n";
+        assert_eq!(
+            active_wifi_sta_profile(active, "wlan0").as_deref(),
+            Some("netplan-wlan0-Guest\\:5G")
+        );
+    }
+
+    #[test]
+    fn select_sta_profile_falls_back_when_no_active_sta_exists() {
+        let active = "802-3-ethernet:eth0:activated:infrastructure:wired\n";
+        assert_eq!(
+            select_sta_profile(active, "wlan0", "teslausb-sta"),
+            "teslausb-sta"
+        );
+    }
+
+    #[test]
+    fn wifi_mode_is_sta_only_for_sta_or_unknown_modes() {
+        assert!(wifi_mode_is_sta(None));
+        assert!(wifi_mode_is_sta(Some("")));
+        assert!(wifi_mode_is_sta(Some("--")));
+        assert!(wifi_mode_is_sta(Some("infrastructure")));
+        assert!(!wifi_mode_is_sta(Some("ap")));
+        assert!(!wifi_mode_is_sta(Some("adhoc")));
     }
 
     #[test]

@@ -7,8 +7,8 @@ use std::io::{self, Read, Write};
 
 use serde::{Deserialize, Serialize};
 
-/// Maximum accepted request frame for indexd control RPCs.
-pub const MAX_REQUEST_FRAME: u32 = 64 * 1024;
+/// Maximum accepted request/response frame for indexd control RPCs.
+pub const MAX_REQUEST_FRAME: u32 = 4 * 1024 * 1024;
 
 /// Inbound control requests.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +54,13 @@ pub enum Request {
     ReleaseArchiveDeleteClaim {
         /// Archive item id.
         id: i64,
+    },
+    /// Clear a terminal row's consumed delete generation token.
+    ClearArchiveDeleteGeneration {
+        /// Archive item id.
+        id: i64,
+        /// Expected delete generation token to consume.
+        delete_gen: String,
     },
     /// Quarantine an archive item.
     QuarantineArchiveItem {
@@ -181,6 +188,27 @@ pub enum Request {
     ArchiveDeleteInspect {
         /// Stable durable job id.
         job_id: String,
+    },
+    /// Internal archive-delete request owner handoff claim (oldest claimable queued row).
+    ArchiveDeleteClaimNext {},
+    /// Internal archive-delete request completion acknowledgement.
+    ArchiveDeleteComplete {
+        /// Stable durable job id.
+        job_id: String,
+        /// Expected owned delete generation token.
+        owned_delete_gen: String,
+    },
+    /// Internal archive-delete request failure/refusal acknowledgement.
+    ArchiveDeleteFail {
+        /// Stable durable job id.
+        job_id: String,
+        /// Expected owned delete generation token.
+        owned_delete_gen: String,
+        /// Human-readable failure detail (sanitized server-side).
+        detail: String,
+        /// Explicitly requeue instead of terminal-failing.
+        #[serde(default)]
+        requeue: bool,
     },
     /// Acquire upload lease token.
     UploadLeaseAcquire {
@@ -899,6 +927,21 @@ pub enum Response {
         /// Stored sanitized detail.
         detail: Option<String>,
     },
+    /// Archive-delete request claimed for retentiond execution.
+    ArchiveDeleteClaimed {
+        /// Stable durable job id.
+        job_id: String,
+        /// Logical request id.
+        request_id: String,
+        /// Target archive item id.
+        target_archive_item_id: i64,
+        /// Target archive relative path fence.
+        target_archive_path: String,
+        /// Target archive size fence.
+        target_archive_size_bytes: i64,
+        /// Persisted delete generation token from claim.
+        delete_gen: String,
+    },
     /// Upload lease acquire response.
     UploadLeaseAcquired {
         /// Lease granted.
@@ -1138,6 +1181,13 @@ mod tests {
     }
 
     #[test]
+    fn write_frame_rejects_payload_above_cap() {
+        let payload = vec![0_u8; MAX_REQUEST_FRAME as usize + 1];
+        let mut buf = Vec::new();
+        assert!(write_frame(&mut buf, &payload).is_err());
+    }
+
+    #[test]
     fn response_roundtrip_frame_codec() {
         let response = Response::Ok {
             clip_id: 7,
@@ -1221,9 +1271,16 @@ mod tests {
                 Request::ReleaseArchiveDeleteClaim { id: 4 },
             ),
             (
+                "clear_archive_delete_generation",
+                Request::ClearArchiveDeleteGeneration {
+                    id: 5,
+                    delete_gen: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                },
+            ),
+            (
                 "quarantine_archive_item",
                 Request::QuarantineArchiveItem {
-                    id: 5,
+                    id: 6,
                     reason: "bad state".to_owned(),
                 },
             ),
@@ -1356,6 +1413,26 @@ mod tests {
                 "archive_delete_inspect",
                 Request::ArchiveDeleteInspect {
                     job_id: "m-124".to_owned(),
+                },
+            ),
+            (
+                "archive_delete_claim_next",
+                Request::ArchiveDeleteClaimNext {},
+            ),
+            (
+                "archive_delete_complete",
+                Request::ArchiveDeleteComplete {
+                    job_id: "m-124".to_owned(),
+                    owned_delete_gen: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                },
+            ),
+            (
+                "archive_delete_fail",
+                Request::ArchiveDeleteFail {
+                    job_id: "m-124".to_owned(),
+                    owned_delete_gen: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                    detail: "delete failed".to_owned(),
+                    requeue: false,
                 },
             ),
             (
@@ -1742,6 +1819,17 @@ mod tests {
                     response_status: Some("rejected".to_owned()),
                     response_code: Some(409),
                     detail: Some("archive delete request stale; refresh required".to_owned()),
+                },
+            ),
+            (
+                "archive_delete_claimed",
+                Response::ArchiveDeleteClaimed {
+                    job_id: "m-604".to_owned(),
+                    request_id: "req-604".to_owned(),
+                    target_archive_item_id: 7,
+                    target_archive_path: "archive/recent/sample".to_owned(),
+                    target_archive_size_bytes: 4096,
+                    delete_gen: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
                 },
             ),
             (

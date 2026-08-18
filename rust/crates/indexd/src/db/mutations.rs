@@ -20,7 +20,7 @@
 
 use std::time::Instant;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::db::{DbError, PROVEN_DURABLE_PROOF_SQL, now_epoch_s};
 
@@ -603,8 +603,23 @@ pub fn claim_for_delete(
     archive_item_id: i64,
 ) -> Result<Option<String>, DbError> {
     let tx = conn.transaction()?;
-    if has_unexpired_lease(&tx, boot_id, mono_now_ms, archive_item_id)? {
-        drop(tx);
+    let claimed = claim_for_delete_tx(&tx, boot_id, mono_now_ms, archive_item_id)?;
+    tx.commit()?;
+    Ok(claimed)
+}
+
+/// Transaction-scoped claim helper used by internal owner-handoff flows.
+///
+/// # Errors
+///
+/// Returns [`DbError`] if a statement fails.
+pub fn claim_for_delete_tx(
+    tx: &Transaction<'_>,
+    boot_id: &str,
+    mono_now_ms: i64,
+    archive_item_id: i64,
+) -> Result<Option<String>, DbError> {
+    if has_unexpired_lease(tx, boot_id, mono_now_ms, archive_item_id)? {
         return Ok(None);
     }
     let is_live: bool = tx
@@ -616,7 +631,6 @@ pub fn claim_for_delete(
         .optional()?
         .unwrap_or(false);
     if !is_live {
-        drop(tx);
         return Ok(None);
     }
     let generation = token::delete_gen_128().map_err(delete_gen_entropy_error)?;
@@ -626,7 +640,6 @@ pub fn claim_for_delete(
           WHERE id = ?1",
         params![archive_item_id, generation, now_epoch_s()],
     )?;
-    tx.commit()?;
     Ok(Some(generation))
 }
 
@@ -828,6 +841,60 @@ pub fn release_delete_claim(conn: &Connection, archive_item_id: i64) -> Result<(
     transition_delete_state(conn, archive_item_id, "DELETE_CLAIMED", "LIVE", None)
 }
 
+/// Clear a terminal row's consumed `delete_gen` token when it matches exactly.
+///
+/// This is used by retention recovery to stop re-selecting healthy
+/// `LIVE`/`DELETED` terminal rows for anomaly checks forever.
+///
+/// # Errors
+/// Returns [`DbError`] when the row is missing, non-terminal, or the token
+/// mismatches.
+pub fn clear_delete_generation(
+    conn: &Connection,
+    archive_item_id: i64,
+    delete_gen: &str,
+) -> Result<(), DbError> {
+    let changed = conn.execute(
+        "UPDATE archive_items
+            SET delete_gen = NULL,
+                updated_at = ?3
+          WHERE id = ?1
+            AND delete_state IN ('LIVE','DELETED')
+            AND delete_gen = ?2",
+        params![archive_item_id, delete_gen, now_epoch_s()],
+    )?;
+    if changed == 1 {
+        return Ok(());
+    }
+    if changed != 0 {
+        return Err(reject_transition(format!(
+            "archive item {archive_item_id} clear_delete_generation touched {changed} rows"
+        )));
+    }
+    let current: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT delete_state, delete_gen
+               FROM archive_items
+              WHERE id = ?1",
+            params![archive_item_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    match current {
+        None => Err(reject_transition(format!(
+            "archive item {archive_item_id} not found"
+        ))),
+        Some((state, _)) if state != "LIVE" && state != "DELETED" => {
+            Err(reject_transition(format!(
+                "archive item {archive_item_id} clear_delete_generation rejected from state {state}"
+            )))
+        }
+        Some((state, current_gen)) => Err(reject_transition(format!(
+            "archive item {archive_item_id} clear_delete_generation rejected for token mismatch in state {state} (stored={current_gen:?})"
+        ))),
+    }
+}
+
 /// Mark a delete attempt failed (`DELETE_FAILED`).
 ///
 /// # Errors
@@ -923,9 +990,10 @@ mod tests {
 
     use super::{
         ClipLeaseGrant, LeaseGrant, LeaseKind, ReleaseResult, RenewResult,
-        claim_eviction_candidate, claim_for_delete, get_pref, has_unexpired_lease, lease_acquire,
-        lease_acquire_for_clip, lease_release, lease_renew, mark_deleted, mark_deleting,
-        reap_stale_leases, release_delete_claim, set_pref, wal_checkpoint_truncate,
+        claim_eviction_candidate, claim_for_delete, clear_delete_generation, get_pref,
+        has_unexpired_lease, lease_acquire, lease_acquire_for_clip, lease_release, lease_renew,
+        mark_deleted, mark_deleting, reap_stale_leases, release_delete_claim, set_pref,
+        wal_checkpoint_truncate,
     };
     use crate::db::open_in_memory;
 
@@ -1968,6 +2036,68 @@ mod tests {
         let err = release_delete_claim(&conn, live).unwrap_err().to_string();
         assert!(err.contains("DELETE_CLAIMED->LIVE rejected from state LIVE"));
         let err = release_delete_claim(&conn, 9_999).unwrap_err().to_string();
+        assert!(err.contains("not found"));
+    }
+
+    #[test]
+    fn clear_delete_generation_requires_terminal_state_and_matching_token() {
+        let conn = open_in_memory().unwrap();
+        let live = insert_archive_item(&conn, "/live");
+        conn.execute(
+            "UPDATE archive_items
+                SET delete_state = 'LIVE', delete_gen = 'live-gen'
+              WHERE id = ?1",
+            params![live],
+        )
+        .unwrap();
+        let deleted = insert_archive_item(&conn, "/deleted");
+        conn.execute(
+            "UPDATE archive_items
+                SET delete_state = 'DELETED', delete_gen = 'deleted-gen'
+              WHERE id = ?1",
+            params![deleted],
+        )
+        .unwrap();
+        let claimed = insert_archive_item(&conn, "/claimed");
+        conn.execute(
+            "UPDATE archive_items
+                SET delete_state = 'DELETE_CLAIMED', delete_gen = 'claimed-gen'
+              WHERE id = ?1",
+            params![claimed],
+        )
+        .unwrap();
+
+        clear_delete_generation(&conn, live, "live-gen").unwrap();
+        clear_delete_generation(&conn, deleted, "deleted-gen").unwrap();
+
+        let live_gen: Option<String> = conn
+            .query_row(
+                "SELECT delete_gen FROM archive_items WHERE id = ?1",
+                params![live],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(live_gen.is_none());
+        let deleted_gen: Option<String> = conn
+            .query_row(
+                "SELECT delete_gen FROM archive_items WHERE id = ?1",
+                params![deleted],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(deleted_gen.is_none());
+
+        let err = clear_delete_generation(&conn, claimed, "claimed-gen")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("rejected from state DELETE_CLAIMED"));
+        let err = clear_delete_generation(&conn, deleted, "wrong-token")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("token mismatch"));
+        let err = clear_delete_generation(&conn, 9_999, "missing")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("not found"));
     }
 

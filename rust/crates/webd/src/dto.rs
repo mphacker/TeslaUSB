@@ -64,7 +64,9 @@ pub(crate) struct IndexLifecycleDto {
     pub front_parse_retry_pending_count: i64,
     /// Count of present front-camera clips that still have no parse-attempt row.
     pub front_parse_missing_count: i64,
-    /// Latest derived row timestamp (`MAX(trips.created_at, events.created_at)`).
+    /// Bounded canonical keys for present front-camera clips missing provenance.
+    pub front_parse_missing_keys: Vec<String>,
+    /// Latest successful index freshness marker (falls back to derived-row timestamps).
     pub last_derived_at: Option<i64>,
     /// Latest durable front parse-attempt timestamp (`MAX(attempted_at)`).
     pub last_front_parse_attempt_at: Option<i64>,

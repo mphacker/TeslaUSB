@@ -125,6 +125,25 @@ pub struct NewArchiveDeleteRequestRow {
     pub request: ArchiveDeleteRequestRecord,
 }
 
+/// One queued archive-delete request claimed for retentiond execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimedArchiveDeleteRequest {
+    /// Stable durable job id.
+    pub job_id: String,
+    /// Logical request id.
+    pub request_id: String,
+    /// Target archive item id.
+    pub target_archive_item_id: i64,
+    /// Target archive relative path fence.
+    pub target_archive_path: String,
+    /// Target archive size fence.
+    pub target_archive_size_bytes: i64,
+    /// Target archive file-count fence.
+    pub target_archive_file_count: i64,
+    /// Persisted delete generation token from the claim handoff.
+    pub delete_gen: String,
+}
+
 /// Insert-or-load idempotency outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CreateOrLoadArchiveDeleteRequestResult {
@@ -957,6 +976,223 @@ pub fn archive_delete_request_load_by_job_id(
     Ok(row)
 }
 
+/// Claim the oldest claimable queued archive-delete request and mark it running.
+///
+/// Applies restart projection first. The provided `claim_archive_item` closure must
+/// atomically attempt `LIVE -> DELETE_CLAIMED` and return the persisted delete token.
+pub fn archive_delete_request_claim_next_tx<F>(
+    tx: &Transaction<'_>,
+    mut claim_archive_item: F,
+) -> Result<Option<ClaimedArchiveDeleteRequest>, DbError>
+where
+    F: FnMut(i64) -> Result<Option<String>, DbError>,
+{
+    archive_delete_request_project_restart_tx(tx)?;
+    let queued_rows: Vec<(String, String, i64, String, i64, i64)> = {
+        let mut stmt = tx.prepare(
+            "SELECT
+                 job_id,
+                 request_id,
+                 target_archive_item_id,
+                 target_archive_path,
+                 target_archive_size_bytes,
+                 target_archive_file_count
+               FROM archive_delete_requests
+              WHERE state = 'queued'
+              ORDER BY created_at ASC, job_id ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })?;
+        let mut queued_rows = Vec::new();
+        for row in rows {
+            queued_rows.push(row?);
+        }
+        queued_rows
+    };
+    for (
+        job_id,
+        request_id,
+        target_archive_item_id,
+        target_archive_path,
+        target_archive_size_bytes,
+        target_archive_file_count,
+    ) in queued_rows
+    {
+        let Some(delete_gen) = claim_archive_item(target_archive_item_id)? else {
+            continue;
+        };
+        validate_optional_delete_gen(Some(&delete_gen)).map_err(map_validation_err)?;
+        let changed = tx.execute(
+            "UPDATE archive_delete_requests
+                SET state = 'running',
+                    owned_delete_gen = ?1,
+                    response_status = 'accepted',
+                    response_code = 202,
+                    sanitized_error = 'running',
+                    updated_at = ?2,
+                    completed_at = NULL
+              WHERE job_id = ?3
+                AND state = 'queued'
+                AND owned_delete_gen IS NULL",
+            params![delete_gen, now_epoch_s(), job_id],
+        )?;
+        if changed == 1 {
+            return Ok(Some(ClaimedArchiveDeleteRequest {
+                job_id,
+                request_id,
+                target_archive_item_id,
+                target_archive_path,
+                target_archive_size_bytes,
+                target_archive_file_count,
+                delete_gen,
+            }));
+        }
+    }
+    Ok(None)
+}
+
+fn load_running_owned_row_tx(
+    tx: &Transaction<'_>,
+    job_id: &str,
+    owned_delete_gen: &str,
+) -> Result<ArchiveDeleteRequestRow, DbError> {
+    validate_mutation_job_id(job_id).map_err(map_validation_err)?;
+    validate_optional_delete_gen(Some(owned_delete_gen)).map_err(map_validation_err)?;
+    let row = row_by_job_id_tx(tx, job_id)?
+        .ok_or_else(|| invalid_input("archive delete job not found"))?;
+    if row.state != DurableMutationState::Running {
+        return Err(invalid_input("archive delete job is not running"));
+    }
+    if row.owned_delete_gen.as_deref() != Some(owned_delete_gen) {
+        return Err(invalid_input("archive delete job ownership mismatch"));
+    }
+    Ok(row)
+}
+
+/// Mark one owned running archive-delete request done.
+///
+/// Requires exact `job_id + owned_delete_gen`, verifies the target archive item
+/// reached `DELETED`, then transitions the durable row to terminal `done`.
+pub fn archive_delete_request_complete_tx(
+    tx: &Transaction<'_>,
+    job_id: &str,
+    owned_delete_gen: &str,
+) -> Result<(), DbError> {
+    let row = load_running_owned_row_tx(tx, job_id, owned_delete_gen)?;
+    let delete_state = tx
+        .query_row(
+            "SELECT delete_state
+               FROM archive_items
+              WHERE id = ?1",
+            params![row.request.target_archive_item_id],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(delete_state) = delete_state else {
+        return Err(invalid_input("archive delete target missing"));
+    };
+    if delete_state != "DELETED" {
+        return Err(invalid_input("archive delete target is not deleted"));
+    }
+    let completed_at = now_epoch_s().max(row.updated_at).max(row.created_at);
+    let changed = tx.execute(
+        "UPDATE archive_delete_requests
+            SET state = 'done',
+                response_status = 'accepted',
+                response_code = 200,
+                sanitized_error = 'done',
+                updated_at = ?1,
+                completed_at = ?1
+          WHERE job_id = ?2
+            AND state = 'running'
+            AND owned_delete_gen = ?3",
+        params![completed_at, job_id, owned_delete_gen],
+    )?;
+    if changed != 1 {
+        return Err(invalid_input("archive delete completion lost ownership"));
+    }
+    Ok(())
+}
+
+/// Mark one owned running archive-delete request failed or explicitly requeued.
+///
+/// Requires exact `job_id + owned_delete_gen`. Failure detail is sanitized and
+/// length-bounded before persistence.
+pub fn archive_delete_request_fail_tx(
+    tx: &Transaction<'_>,
+    job_id: &str,
+    owned_delete_gen: &str,
+    detail: &str,
+    requeue: bool,
+) -> Result<(), DbError> {
+    let row = load_running_owned_row_tx(tx, job_id, owned_delete_gen)?;
+    let now = now_epoch_s().max(row.updated_at).max(row.created_at);
+    if requeue {
+        let live_state = tx
+            .query_row(
+                "SELECT delete_state, delete_gen
+                   FROM archive_items
+                  WHERE id = ?1",
+                params![row.request.target_archive_item_id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?;
+        match live_state {
+            Some((delete_state, None)) if delete_state == "LIVE" => {}
+            _ => {
+                return Err(invalid_input(
+                    "archive delete requeue requires released pre-filesystem refusal ownership",
+                ));
+            }
+        }
+        let changed = tx.execute(
+            "UPDATE archive_delete_requests
+                SET state = 'queued',
+                    owned_delete_gen = NULL,
+                    response_status = 'accepted',
+                    response_code = 202,
+                    sanitized_error = 'queued',
+                    updated_at = ?1,
+                    completed_at = NULL
+              WHERE job_id = ?2
+                AND state = 'running'
+                AND owned_delete_gen = ?3",
+            params![now, job_id, owned_delete_gen],
+        )?;
+        if changed != 1 {
+            return Err(invalid_input("archive delete requeue lost ownership"));
+        }
+        return Ok(());
+    }
+
+    let sanitized = sanitize_public_error(detail);
+    let changed = tx.execute(
+        "UPDATE archive_delete_requests
+            SET state = 'failed',
+                response_status = 'error',
+                response_code = 500,
+                sanitized_error = ?1,
+                updated_at = ?2,
+                completed_at = ?2
+          WHERE job_id = ?3
+            AND state = 'running'
+            AND owned_delete_gen = ?4",
+        params![sanitized, now, job_id, owned_delete_gen],
+    )?;
+    if changed != 1 {
+        return Err(invalid_input("archive delete failure lost ownership"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
@@ -964,14 +1200,15 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use rusqlite::params;
-    use teslausb_core::durable_mutation::DurableMutationState;
+    use teslausb_core::durable_mutation::{DurableMutationState, MAX_PUBLIC_ERROR_LEN};
 
     use super::{
         ARCHIVE_DELETE_RECONCILIATION_REQUIRED_ERROR, ARCHIVE_DELETE_STALE_PLAN_ERROR,
         ArchiveDeleteRequestRecord, CreateOrLoadArchiveDeleteRequestResult,
-        NewArchiveDeleteRequestRow, archive_delete_request_create_or_load,
-        archive_delete_request_inspect_by_job_id, archive_delete_request_load_by_job_id,
-        archive_delete_request_project_restart,
+        NewArchiveDeleteRequestRow, archive_delete_request_claim_next_tx,
+        archive_delete_request_complete_tx, archive_delete_request_create_or_load,
+        archive_delete_request_fail_tx, archive_delete_request_inspect_by_job_id,
+        archive_delete_request_load_by_job_id, archive_delete_request_project_restart,
     };
     use crate::db::{open, open_in_memory};
 
@@ -1311,6 +1548,354 @@ mod tests {
             Some(ARCHIVE_DELETE_STALE_PLAN_ERROR)
         );
         assert!(row.completed_at.is_some());
+    }
+
+    #[test]
+    fn claim_next_marks_row_running_with_owned_delete_gen() {
+        let conn = open_in_memory().unwrap();
+        let (archive_item_id, clip_key) =
+            seed_archive_item(&conn, "archive/recent/claim-next", 500, 2, None);
+        archive_delete_request_create_or_load(
+            &conn,
+            &NewArchiveDeleteRequestRow {
+                job_id: "m-7351".to_owned(),
+                owner: "indexd".to_owned(),
+                kind: "archive_delete".to_owned(),
+                request: make_request(
+                    "req-7351",
+                    "idem-7351",
+                    "1212121212121212121212121212121212121212121212121212121212121212",
+                    archive_item_id,
+                    "archive/recent/claim-next",
+                    500,
+                    2,
+                    Some(clip_key.as_str()),
+                    None,
+                ),
+            },
+        )
+        .unwrap();
+
+        let tx = conn.unchecked_transaction().unwrap();
+        let claimed = archive_delete_request_claim_next_tx(&tx, |id| {
+            assert_eq!(id, archive_item_id);
+            Ok(Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned()))
+        })
+        .unwrap()
+        .expect("claimed");
+        tx.commit().unwrap();
+
+        assert_eq!(claimed.job_id, "m-7351");
+        assert_eq!(claimed.request_id, "req-7351");
+        assert_eq!(claimed.target_archive_item_id, archive_item_id);
+        assert_eq!(claimed.target_archive_path, "archive/recent/claim-next");
+        assert_eq!(claimed.target_archive_size_bytes, 500);
+        assert_eq!(claimed.target_archive_file_count, 2);
+        assert_eq!(claimed.delete_gen, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+
+        let row = archive_delete_request_load_by_job_id(&conn, "m-7351")
+            .unwrap()
+            .expect("row");
+        assert_eq!(row.state, DurableMutationState::Running);
+        assert_eq!(
+            row.owned_delete_gen.as_deref(),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+        assert_eq!(row.response_status.as_deref(), Some("accepted"));
+        assert_eq!(row.response_code, Some(202));
+        assert_eq!(row.sanitized_error.as_deref(), Some("running"));
+        assert_eq!(row.completed_at, None);
+    }
+
+    #[test]
+    fn claim_next_skips_unclaimable_and_claims_next_row() {
+        let conn = open_in_memory().unwrap();
+        let (first_id, first_clip) =
+            seed_archive_item(&conn, "archive/recent/claim-skip-a", 100, 2, None);
+        let (second_id, second_clip) =
+            seed_archive_item(&conn, "archive/recent/claim-skip-b", 200, 2, None);
+        archive_delete_request_create_or_load(
+            &conn,
+            &NewArchiveDeleteRequestRow {
+                job_id: "m-7361".to_owned(),
+                owner: "indexd".to_owned(),
+                kind: "archive_delete".to_owned(),
+                request: make_request(
+                    "req-7361",
+                    "idem-7361",
+                    "1313131313131313131313131313131313131313131313131313131313131313",
+                    first_id,
+                    "archive/recent/claim-skip-a",
+                    100,
+                    2,
+                    Some(first_clip.as_str()),
+                    None,
+                ),
+            },
+        )
+        .unwrap();
+        archive_delete_request_create_or_load(
+            &conn,
+            &NewArchiveDeleteRequestRow {
+                job_id: "m-7362".to_owned(),
+                owner: "indexd".to_owned(),
+                kind: "archive_delete".to_owned(),
+                request: make_request(
+                    "req-7362",
+                    "idem-7362",
+                    "1414141414141414141414141414141414141414141414141414141414141414",
+                    second_id,
+                    "archive/recent/claim-skip-b",
+                    200,
+                    2,
+                    Some(second_clip.as_str()),
+                    None,
+                ),
+            },
+        )
+        .unwrap();
+
+        let tx = conn.unchecked_transaction().unwrap();
+        let claimed = archive_delete_request_claim_next_tx(&tx, |id| {
+            if id == first_id {
+                Ok(None)
+            } else if id == second_id {
+                Ok(Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned()))
+            } else {
+                panic!("unexpected id {id}");
+            }
+        })
+        .unwrap()
+        .expect("claimed");
+        tx.commit().unwrap();
+
+        assert_eq!(claimed.job_id, "m-7362");
+        assert_eq!(claimed.target_archive_item_id, second_id);
+
+        let first = archive_delete_request_load_by_job_id(&conn, "m-7361")
+            .unwrap()
+            .expect("first row");
+        let second = archive_delete_request_load_by_job_id(&conn, "m-7362")
+            .unwrap()
+            .expect("second row");
+        assert_eq!(first.state, DurableMutationState::Queued);
+        assert_eq!(first.owned_delete_gen, None);
+        assert_eq!(second.state, DurableMutationState::Running);
+        assert_eq!(
+            second.owned_delete_gen.as_deref(),
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        );
+    }
+
+    #[test]
+    fn complete_requires_deleted_target_and_exact_owned_generation() {
+        let conn = open_in_memory().unwrap();
+        let (archive_item_id, clip_key) =
+            seed_archive_item(&conn, "archive/recent/complete", 520, 2, None);
+        archive_delete_request_create_or_load(
+            &conn,
+            &NewArchiveDeleteRequestRow {
+                job_id: "m-7371".to_owned(),
+                owner: "indexd".to_owned(),
+                kind: "archive_delete".to_owned(),
+                request: make_request(
+                    "req-7371",
+                    "idem-7371",
+                    "1515151515151515151515151515151515151515151515151515151515151515",
+                    archive_item_id,
+                    "archive/recent/complete",
+                    520,
+                    2,
+                    Some(clip_key.as_str()),
+                    None,
+                ),
+            },
+        )
+        .unwrap();
+        let tx = conn.unchecked_transaction().unwrap();
+        let claimed = archive_delete_request_claim_next_tx(&tx, |_| {
+            Ok(Some("cccccccccccccccccccccccccccccccc".to_owned()))
+        })
+        .unwrap()
+        .expect("claimed");
+        tx.commit().unwrap();
+
+        let tx = conn.unchecked_transaction().unwrap();
+        let err = archive_delete_request_complete_tx(&tx, &claimed.job_id, &claimed.delete_gen)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("target is not deleted"));
+        tx.commit().unwrap();
+
+        conn.execute(
+            "UPDATE archive_items
+                SET delete_state='DELETED',
+                    delete_gen=?2
+              WHERE id=?1",
+            params![archive_item_id, claimed.delete_gen],
+        )
+        .unwrap();
+
+        let tx = conn.unchecked_transaction().unwrap();
+        let ownership_err = archive_delete_request_complete_tx(
+            &tx,
+            &claimed.job_id,
+            "dddddddddddddddddddddddddddddddd",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(ownership_err.contains("ownership mismatch"));
+        tx.commit().unwrap();
+
+        let tx = conn.unchecked_transaction().unwrap();
+        archive_delete_request_complete_tx(&tx, &claimed.job_id, &claimed.delete_gen).unwrap();
+        tx.commit().unwrap();
+
+        let row = archive_delete_request_load_by_job_id(&conn, &claimed.job_id)
+            .unwrap()
+            .expect("row");
+        assert_eq!(row.state, DurableMutationState::Done);
+        assert_eq!(row.response_status.as_deref(), Some("accepted"));
+        assert_eq!(row.response_code, Some(200));
+        assert_eq!(row.sanitized_error.as_deref(), Some("done"));
+        assert!(row.completed_at.is_some());
+    }
+
+    #[test]
+    fn fail_terminalizes_running_row_with_sanitized_detail() {
+        let conn = open_in_memory().unwrap();
+        let (archive_item_id, clip_key) =
+            seed_archive_item(&conn, "archive/recent/fail", 530, 2, None);
+        archive_delete_request_create_or_load(
+            &conn,
+            &NewArchiveDeleteRequestRow {
+                job_id: "m-7372".to_owned(),
+                owner: "indexd".to_owned(),
+                kind: "archive_delete".to_owned(),
+                request: make_request(
+                    "req-7372",
+                    "idem-7372",
+                    "1616161616161616161616161616161616161616161616161616161616161616",
+                    archive_item_id,
+                    "archive/recent/fail",
+                    530,
+                    2,
+                    Some(clip_key.as_str()),
+                    None,
+                ),
+            },
+        )
+        .unwrap();
+        let tx = conn.unchecked_transaction().unwrap();
+        let claimed = archive_delete_request_claim_next_tx(&tx, |_| {
+            Ok(Some("edededededededededededededededed".to_owned()))
+        })
+        .unwrap()
+        .expect("claimed");
+        tx.commit().unwrap();
+
+        let detail = format!("  delete failed\r\n{}  ", "x".repeat(256));
+        let tx = conn.unchecked_transaction().unwrap();
+        archive_delete_request_fail_tx(&tx, &claimed.job_id, &claimed.delete_gen, &detail, false)
+            .unwrap();
+        tx.commit().unwrap();
+
+        let row = archive_delete_request_load_by_job_id(&conn, &claimed.job_id)
+            .unwrap()
+            .expect("row");
+        assert_eq!(row.state, DurableMutationState::Failed);
+        assert_eq!(row.response_status.as_deref(), Some("error"));
+        assert_eq!(row.response_code, Some(500));
+        let detail = row.sanitized_error.expect("sanitized detail");
+        assert!(!detail.contains('\n'));
+        assert!(detail.len() <= MAX_PUBLIC_ERROR_LEN);
+        assert!(row.completed_at.is_some());
+    }
+
+    #[test]
+    fn fail_requeue_requires_released_claim_and_clears_owned_generation() {
+        let conn = open_in_memory().unwrap();
+        let (archive_item_id, clip_key) =
+            seed_archive_item(&conn, "archive/recent/requeue", 540, 2, None);
+        archive_delete_request_create_or_load(
+            &conn,
+            &NewArchiveDeleteRequestRow {
+                job_id: "m-7373".to_owned(),
+                owner: "indexd".to_owned(),
+                kind: "archive_delete".to_owned(),
+                request: make_request(
+                    "req-7373",
+                    "idem-7373",
+                    "1717171717171717171717171717171717171717171717171717171717171717",
+                    archive_item_id,
+                    "archive/recent/requeue",
+                    540,
+                    2,
+                    Some(clip_key.as_str()),
+                    None,
+                ),
+            },
+        )
+        .unwrap();
+        let tx = conn.unchecked_transaction().unwrap();
+        let claimed = archive_delete_request_claim_next_tx(&tx, |_| {
+            Ok(Some("fefefefefefefefefefefefefefefefe".to_owned()))
+        })
+        .unwrap()
+        .expect("claimed");
+        tx.commit().unwrap();
+
+        conn.execute(
+            "UPDATE archive_items
+                SET delete_state='DELETE_CLAIMED',
+                    delete_gen=?2
+              WHERE id=?1",
+            params![archive_item_id, claimed.delete_gen],
+        )
+        .unwrap();
+
+        let tx = conn.unchecked_transaction().unwrap();
+        let err = archive_delete_request_fail_tx(
+            &tx,
+            &claimed.job_id,
+            &claimed.delete_gen,
+            "pre-fs refusal",
+            true,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("requeue requires released"));
+        tx.commit().unwrap();
+
+        conn.execute(
+            "UPDATE archive_items
+                SET delete_state='LIVE',
+                    delete_gen=NULL
+              WHERE id=?1",
+            params![archive_item_id],
+        )
+        .unwrap();
+
+        let tx = conn.unchecked_transaction().unwrap();
+        archive_delete_request_fail_tx(
+            &tx,
+            &claimed.job_id,
+            &claimed.delete_gen,
+            "pre-fs refusal",
+            true,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        let row = archive_delete_request_load_by_job_id(&conn, &claimed.job_id)
+            .unwrap()
+            .expect("row");
+        assert_eq!(row.state, DurableMutationState::Queued);
+        assert_eq!(row.owned_delete_gen, None);
+        assert_eq!(row.response_status.as_deref(), Some("accepted"));
+        assert_eq!(row.response_code, Some(202));
+        assert_eq!(row.sanitized_error.as_deref(), Some("queued"));
+        assert_eq!(row.completed_at, None);
     }
 
     #[test]

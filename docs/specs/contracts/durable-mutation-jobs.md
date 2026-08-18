@@ -9,11 +9,12 @@ Wi-Fi mutation, gadget mode mutation, or fsck start/cancel endpoints.
 
 ## 0. Security/product boundary (operator decision)
 
-- B-1 currently remains **local-network-only** and **no-login** by operator
-  decision (2026-08-10).
-- Do **not** infer that this authorizes destructive mutations.
-- Until an explicit operator-approved auth/CSRF design lands, dangerous
-  mutation routes stay disabled/read-only.
+- B-1 is permanently **local-network-only** and **no-login** by operator
+  decision (2026-08-13).
+- Anonymous access does not bypass the durable mutation safety contract:
+  destructive routes require strict same-origin/request-forgery checks,
+  explicit confirmation, target/fingerprint fencing, idempotency, and
+  fail-closed restart recovery.
 
 ## 1. Shared durable envelope fields
 
@@ -82,8 +83,8 @@ evidence:
 - `Origin` is required and must match `Host` authority.
 - `Sec-Fetch-Site`, when present, must be `same-origin`, `same-site`, or `none`.
 
-This hardening is **not** an auth substitute. It reduces cross-site trigger
-risk while the operator-approved auth/CSRF session model is still pending.
+This hardening is the deliberate request-forgery boundary for B-1's anonymous
+local-network model. It is not authentication and does not identify operators.
 
 Legacy pre-foundation mutation routes may still be on older per-route checks
 (for example, host-required with optional `Origin`). Those routes are not this

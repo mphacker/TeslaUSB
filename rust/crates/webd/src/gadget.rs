@@ -329,7 +329,10 @@ pub(crate) enum QueueOutcome {
     Unavailable(String),
     /// `gadgetd` could not confirm post-commit durability. Mutation may have
     /// been accepted; caller must not unlink staged blobs. → `503`.
-    Ambiguous { job_id: Option<String>, detail: String },
+    Ambiguous {
+        job_id: Option<String>,
+        detail: String,
+    },
     /// `gadgetd` returned a reply `webd` could not interpret. → `502`.
     BadResponse(String),
 }
@@ -343,20 +346,14 @@ pub(crate) fn map_queue_outcome(resp: &Value) -> QueueOutcome {
                 .and_then(Value::as_str)
                 .filter(|id| validate_mutation_job_id(id).is_ok())
                 .map(ToOwned::to_owned);
-            let detail = resp
-                .get("detail")
-                .and_then(Value::as_str)
-                .unwrap_or(err);
+            let detail = resp.get("detail").and_then(Value::as_str).unwrap_or(err);
             return QueueOutcome::Ambiguous {
                 job_id,
                 detail: sanitize_public_error(detail),
             };
         }
         if resp.get("error_code").and_then(Value::as_str) == Some("queue_unavailable") {
-            let detail = resp
-                .get("detail")
-                .and_then(Value::as_str)
-                .unwrap_or(err);
+            let detail = resp.get("detail").and_then(Value::as_str).unwrap_or(err);
             return QueueOutcome::Unavailable(sanitize_public_error(detail));
         }
         return QueueOutcome::Rejected(sanitize_public_error(err));
@@ -1016,7 +1013,10 @@ mod tests {
         });
         assert!(matches!(
             map_queue_outcome(&resp),
-            QueueOutcome::Ambiguous { job_id: Some(_), .. }
+            QueueOutcome::Ambiguous {
+                job_id: Some(_),
+                ..
+            }
         ));
     }
 

@@ -208,7 +208,7 @@ main() {
         fi
         install -m0755 "${bin_dir}/${svc}" "${stage}/bin/${svc}"
     done
-    br__log "staged 7 binaries$( [ "$skip_arch" -eq 0 ] && printf ' (all verified aarch64 ELF)' )"
+    br__log "staged 8 binaries$( [ "$skip_arch" -eq 0 ] && printf ' (all verified aarch64 ELF)' )"
 
     # --- 3a) SPA --------------------------------------------------------------
     if [ -n "$spa_project" ]; then

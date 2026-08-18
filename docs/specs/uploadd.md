@@ -349,8 +349,9 @@ committed), which the idempotent transaction absorbs.
 > for the per-child commit.
 
 ### 6.7 Enablement gate
-`serve` going live is gated on the **Phase 8 TX-cap spike** (§5) and the security
-prerequisites (webd auth — D8). On enablement, `uploadd.service` moves
+`serve` going live is gated on the **Phase 8 TX-cap spike** (§5) and the
+anonymous-local-network mutation boundary (strict request-forgery checks,
+bounded confirmation, and durable job semantics). On enablement, `uploadd.service` moves
 `TESLAUSB_STAGED_SERVICES` → `TESLAUSB_APP_SERVICES`, gains `LoadCredential=`
 (`cloud-provider-creds.md` §5), and the **resource bounds are mandatory (M3):**
 `Nice=19`, `IOSchedulingClass=idle`, one transfer/checker, bounded subprocess

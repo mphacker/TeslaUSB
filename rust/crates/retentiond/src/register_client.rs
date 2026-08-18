@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 pub const INDEXD_SOCKET_PATH: &str = "/run/teslausb/indexd.sock";
 
 /// Maximum accepted request/response frame length in bytes.
-pub const MAX_REQUEST_FRAME: u32 = 64 * 1024;
+pub const MAX_REQUEST_FRAME: u32 = 4 * 1024 * 1024;
 
 /// One archive registration payload sent by `retentiond`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -494,6 +494,15 @@ mod tests {
         frame.extend_from_slice(&(MAX_REQUEST_FRAME + 1).to_le_bytes());
 
         let err = decode_response_frame(&frame).expect_err("oversize frame should fail");
+        assert!(matches!(err, RegisterError::FrameTooLarge { .. }));
+    }
+
+    #[test]
+    fn write_frame_rejects_payload_above_cap() {
+        let payload = vec![0_u8; MAX_REQUEST_FRAME as usize + 1];
+        let mut framed = Vec::new();
+        let err = write_frame(&mut framed, &payload, MAX_REQUEST_FRAME)
+            .expect_err("oversize payload should fail");
         assert!(matches!(err, RegisterError::FrameTooLarge { .. }));
     }
 

@@ -405,6 +405,29 @@ async fn get_json(app: &Router, uri: &str) -> (StatusCode, Value) {
     (status, value)
 }
 
+/// Issue a GET with extra headers and return `(status, parsed-json)`.
+async fn get_json_with_headers(
+    app: &Router,
+    uri: &str,
+    headers: &[(&str, &str)],
+) -> (StatusCode, Value) {
+    let mut builder = Request::builder().uri(uri);
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    let resp = app
+        .clone()
+        .oneshot(builder.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, value)
+}
+
 /// Issue a GET and return `(status, content-type, body-as-string)`.
 async fn get_raw(app: &Router, uri: &str) -> (StatusCode, String, String) {
     let resp = app
@@ -572,7 +595,7 @@ async fn fsck_last_check_rejects_unknown_partition() {
     });
     let fx = fixture_with_probe(probe);
     let (status, body) = get_json(&fx.app, "/api/fsck/last-check/9").await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(body["error"]["code"], "invalid_partition");
 }
 
@@ -824,7 +847,7 @@ async fn events_filter_by_trip_and_reject_bad_params() {
     assert_eq!(body["items"].as_array().unwrap().len(), 2);
 
     let (status, body) = get_json(&fx.app, "/api/events?limit=0").await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(body["error"]["code"], "invalid_limit");
 
     let (status, body) = get_json(&fx.app, "/api/events?cursor=not-valid-base64!!").await;
@@ -1060,6 +1083,7 @@ async fn index_lifecycle_reports_parse_and_last_run_diagnostics() {
     assert_eq!(body["front_parse_error_count"], 1);
     assert_eq!(body["front_parse_retry_pending_count"], 1);
     assert_eq!(body["front_parse_missing_count"], 1);
+    assert_eq!(body["front_parse_missing_keys"], serde_json::json!(["clip-2"]));
     assert_eq!(body["last_front_parse_attempt_at"], 1700);
     assert_eq!(body["last_derived_at"], 0);
 }
@@ -4087,18 +4111,68 @@ impl GadgetClient for MockGadget {
     }
 }
 
+/// A mock [`IndexdClient`] for archive-delete route tests: records every request
+/// and replies from a FIFO queue.
+struct MockDeleteIndexd {
+    requests: Arc<Mutex<Vec<Value>>>,
+    replies: Arc<Mutex<VecDeque<Value>>>,
+}
+
+impl indexd_client::IndexdClient for MockDeleteIndexd {
+    fn call(&self, request: Value) -> Result<Value, TransportError> {
+        self.requests.lock().unwrap().push(request);
+        self.replies
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| TransportError::Protocol("missing indexd mock response".to_owned()))
+    }
+}
+
 /// A delete fixture: a catalog seeded with car-deletable clips plus a router
 /// wired to a mock gadgetd. `last` captures the request sent to gadgetd.
 struct DeleteFixture {
     _dir: TempDir,
     app: Router,
     last: Arc<Mutex<Option<Value>>>,
+    indexd_requests: Arc<Mutex<Vec<Value>>>,
 }
 
 const EVENT: &str = "2026-06-01_20-10-04";
 const EVENT2: &str = "2026-06-01_20-11-04";
+const EVENT3: &str = "2026-06-01_20-12-04";
+const MANIFEST_10: &str = "0123456789abcdef0123456789abcdef";
+const MANIFEST_14: &str = "fedcba9876543210fedcba9876543210";
+
+fn archive_delete_hash_for_test(request_id: &str, idempotency_key: &str, target: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"teslausb.clip_archive_delete.v1\0");
+    append_retry_hash_field(&mut hasher, b"target", target);
+    append_retry_hash_field(&mut hasher, b"request_id", request_id);
+    append_retry_hash_field(&mut hasher, b"idempotency_key", idempotency_key);
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(digest.len() * 2);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for &byte in &digest {
+        out.push(char::from(HEX[(byte >> 4) as usize]));
+        out.push(char::from(HEX[(byte & 0x0f) as usize]));
+    }
+    out
+}
 
 fn delete_fixture(reply: Reply) -> DeleteFixture {
+    delete_fixture_with_indexd(
+        reply,
+        vec![json!({
+            "status": "archive_delete_accepted",
+            "job_id": "m-9000",
+            "request_id": "req-default",
+            "state": "queued"
+        })],
+    )
+}
+
+fn delete_fixture_with_indexd(reply: Reply, indexd_responses: Vec<Value>) -> DeleteFixture {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("catalog.db");
     seed_car_clips(&db_path);
@@ -4108,17 +4182,41 @@ fn delete_fixture(reply: Reply) -> DeleteFixture {
     std::fs::write(static_dir.join("index.html"), "<!doctype html>shell").unwrap();
 
     let catalog = Catalog::open(&db_path).unwrap();
-    let media = MediaConfig::new(dir.path().join("archive"), dir.path().join("cache"));
+    let archive_dir = dir.path().join("archive");
+    let cache_dir = dir.path().join("cache");
+    std::fs::create_dir_all(&archive_dir).unwrap();
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    let media = MediaConfig::new(archive_dir, cache_dir);
     let last = Arc::new(Mutex::new(None));
     let gadget: Arc<dyn GadgetClient> = Arc::new(MockGadget {
         reply,
         last: Arc::clone(&last),
     });
-    let app = router_with_gadget(catalog, static_dir, media, gadget);
+    let scheduler = crate::scheduler::default_client(dir.path().join("schedulerd.sock"));
+    let indexd_requests = Arc::new(Mutex::new(Vec::new()));
+    let indexd: Arc<dyn indexd_client::IndexdClient> = Arc::new(MockDeleteIndexd {
+        requests: Arc::clone(&indexd_requests),
+        replies: Arc::new(Mutex::new(indexd_responses.into())),
+    });
+    let chime_dir = dir.path().join("chimes");
+    std::fs::create_dir_all(&chime_dir).unwrap();
+    let app = router_with_all_clients_and_read_client(
+        catalog,
+        static_dir,
+        media,
+        gadget,
+        scheduler,
+        indexd,
+        Arc::new(UnavailableReadFileClient),
+        Arc::new(UnavailableVolumeStatsClient),
+        wifid_client::default_client(dir.path().join("wifid.sock")),
+        chime_dir,
+    );
     DeleteFixture {
         _dir: dir,
         app,
         last,
+        indexd_requests,
     }
 }
 
@@ -4132,19 +4230,29 @@ fn seed_car_clips(path: &std::path::Path) {
     //   angles whose file_refs match the canonical_key-derived paths.
     // clip 11: same shape but on slot1 (media) → planner refuses (not car).
     // clip 12: ro_usb angle whose file_ref escapes the clip → planner refuses.
+    // clip 14: second archived clip used by archive-target conflict tests.
     let key = format!("0:TeslaCam/SavedClips/{EVENT}/{EVENT}");
     let key1 = format!("1:TeslaCam/SavedClips/{EVENT}/{EVENT}");
     let key12 = format!("0:TeslaCam/SavedClips/{EVENT2}/{EVENT2}");
+    let key14 = format!("0:TeslaCam/SavedClips/{EVENT3}/{EVENT3}");
     conn.execute_batch(&format!(
         "INSERT INTO clips (id, canonical_key, started_at, ended_at, partition, folder_class, is_sentry, duration_s, availability, created_at, updated_at) VALUES
             (10, '{key}', 1000, 1060, 'slot0', 'SavedClips', 0, 60.0, 'present', 0, 0),
             (11, '{key1}', 1000, 1060, 'slot1', 'SavedClips', 0, 60.0, 'present', 0, 0),
-            (12, '{key12}', 1000, 1060, 'slot0', 'SavedClips', 0, 60.0, 'present', 0, 0);
+            (12, '{key12}', 1000, 1060, 'slot0', 'SavedClips', 0, 60.0, 'present', 0, 0),
+            (14, '{key14}', 1000, 1060, 'slot0', 'SavedClips', 0, 60.0, 'present', 0, 0);
          INSERT INTO angles (id, clip_id, camera, file_ref, view_kind, offset_ms, duration_s, size_bytes) VALUES
             (1, 10, 'back',  'TeslaCam/SavedClips/{EVENT}/{EVENT}-back.mp4',  'ro_usb', 0, 60.0, 1),
             (2, 10, 'front', 'TeslaCam/SavedClips/{EVENT}/{EVENT}-front.mp4', 'ro_usb', 0, 60.0, 2),
             (3, 11, 'front', 'TeslaCam/SavedClips/{EVENT}/{EVENT}-front.mp4', 'ro_usb', 0, 60.0, 2),
-            (4, 12, 'front', 'TeslaCam/SavedClips/{EVENT2}/2026-06-01_20-09-04-front.mp4', 'ro_usb', 0, 60.0, 2);"
+            (4, 12, 'front', 'TeslaCam/SavedClips/{EVENT2}/2026-06-01_20-09-04-front.mp4', 'ro_usb', 0, 60.0, 2),
+            (5, 14, 'front', 'TeslaCam/SavedClips/{EVENT3}/{EVENT3}-front.mp4', 'ro_usb', 0, 60.0, 2);
+         INSERT INTO archive_items (id, folder_class, path, size_bytes, file_count, delete_state, archived_at, created_at, updated_at, manifest_digest) VALUES
+            (100, 'SavedClips', 'SavedClips/{EVENT}', 3, 2, 'LIVE', 1001, 1001, 1001, '{MANIFEST_10}'),
+            (101, 'SavedClips', 'SavedClips/{EVENT3}', 2, 1, 'LIVE', 1001, 1001, 1001, '{MANIFEST_14}');
+         INSERT INTO archive_item_clips (archive_item_id, clip_id) VALUES
+            (100, 10),
+            (101, 14);"
     ))
     .unwrap();
 }
@@ -4210,25 +4318,382 @@ async fn delete_requires_explicit_target() {
 }
 
 #[tokio::test]
-async fn delete_archive_target_is_not_implemented() {
-    let fx = delete_fixture(Reply::Json(
-        json!({ "handoff_id": "h-1", "result": "done" }),
-    ));
-    let (status, body) = delete_json(&fx.app, "/api/clips/10?target=archive").await;
-    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
-    assert_eq!(body["error"]["code"], "not_implemented");
+async fn delete_archive_target_first_enqueue_calls_indexd_create_or_load() {
+    let request_id = "req-archive-1";
+    let idempotency_key = "idem-archive-1";
+    let request_hash = archive_delete_hash_for_test(request_id, idempotency_key, "archive");
+    let fx = delete_fixture_with_indexd(
+        Reply::Json(json!({ "handoff_id": "h-1", "result": "done" })),
+        vec![json!({
+            "status": "archive_delete_accepted",
+            "job_id": "m-9100",
+            "request_id": request_id,
+            "state": "queued"
+        })],
+    );
+    let (status, body) = delete_json_with_headers(
+        &fx.app,
+        &format!(
+            "/api/clips/10?target=archive&requestId={request_id}&idempotencyKey={idempotency_key}&requestHash={request_hash}"
+        ),
+        &[
+            ("host", "cybertruckusb.local"),
+            ("origin", "http://cybertruckusb.local"),
+            ("sec-fetch-site", "same-origin"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(body["status"], "accepted");
+    assert_eq!(body["target"], "archive");
+    assert_eq!(body["jobId"], "m-9100");
+    assert_eq!(body["requestId"], request_id);
+    assert_eq!(body["state"], "queued");
+    assert_eq!(body["statusUrl"], "/api/jobs/archive-delete/m-9100");
     assert!(fx.last.lock().unwrap().is_none());
+    let requests = fx.indexd_requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["cmd"], "archive_delete_create_or_load");
+    assert_eq!(requests[0]["request_id"], request_id);
+    assert_eq!(requests[0]["idempotency_key"], idempotency_key);
+    assert_eq!(requests[0]["request_hash"], request_hash);
+    assert_eq!(requests[0]["target_archive_item_id"], 100);
+    assert_eq!(
+        requests[0]["target_archive_path"],
+        format!("SavedClips/{EVENT}")
+    );
+    assert_eq!(requests[0]["target_archive_size_bytes"], 3);
+    assert_eq!(requests[0]["target_archive_file_count"], 2);
+    assert_eq!(
+        requests[0]["target_clip_canonical_key"],
+        format!("0:TeslaCam/SavedClips/{EVENT}/{EVENT}")
+    );
+    assert_eq!(requests[0]["target_manifest_digest"], MANIFEST_10);
+    assert!(
+        requests[0]["job_id"]
+            .as_str()
+            .is_some_and(|job_id| job_id.starts_with("m-")),
+        "job_id must use durable m-<digits> format"
+    );
 }
 
 #[tokio::test]
-async fn delete_both_target_is_not_implemented() {
+async fn delete_archive_target_rejects_missing_durable_metadata_before_501() {
     let fx = delete_fixture(Reply::Json(
         json!({ "handoff_id": "h-1", "result": "done" }),
     ));
-    let (status, body) = delete_json(&fx.app, "/api/clips/10?target=both").await;
-    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
-    assert_eq!(body["error"]["code"], "not_implemented");
+    let (status, body) = delete_json_with_headers(
+        &fx.app,
+        "/api/clips/10?target=archive&requestId=req-archive-1&idempotencyKey=idem-archive-1",
+        &[
+            ("host", "cybertruckusb.local"),
+            ("origin", "http://cybertruckusb.local"),
+            ("sec-fetch-site", "same-origin"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "request_hash_required");
     assert!(fx.last.lock().unwrap().is_none());
+    assert!(fx.indexd_requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn delete_archive_target_rejects_cross_origin_without_forwarding() {
+    let fx = delete_fixture(Reply::Json(
+        json!({ "handoff_id": "h-1", "result": "done" }),
+    ));
+    let (status, body) = delete_json_with_headers(
+        &fx.app,
+        "/api/clips/10?target=archive",
+        &[
+            ("host", "cybertruckusb.local"),
+            ("origin", "https://evil.example"),
+            ("sec-fetch-site", "cross-site"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"]["code"], "forbidden_origin");
+    assert!(fx.last.lock().unwrap().is_none());
+    assert!(fx.indexd_requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn delete_archive_target_same_key_replay_returns_replay_response() {
+    let request_id = "req-archive-2";
+    let idempotency_key = "idem-archive-2";
+    let request_hash = archive_delete_hash_for_test(request_id, idempotency_key, "archive");
+    let fx = delete_fixture_with_indexd(
+        Reply::Json(json!({ "handoff_id": "h-1", "result": "done" })),
+        vec![
+            json!({
+                "status": "archive_delete_accepted",
+                "job_id": "m-9200",
+                "request_id": request_id,
+                "state": "queued"
+            }),
+            json!({
+                "status": "archive_delete_replay",
+                "job_id": "m-9200",
+                "request_id": request_id,
+                "outcome": "accepted",
+                "response_status": "accepted",
+                "response_code": 202,
+                "detail": "queued"
+            }),
+        ],
+    );
+    let uri = format!(
+        "/api/clips/10?target=archive&requestId={request_id}&idempotencyKey={idempotency_key}&requestHash={request_hash}"
+    );
+    let (first_status, first_body) = delete_json_with_headers(
+        &fx.app,
+        &uri,
+        &[
+            ("host", "cybertruckusb.local"),
+            ("origin", "http://cybertruckusb.local"),
+            ("sec-fetch-site", "same-origin"),
+        ],
+    )
+    .await;
+    assert_eq!(first_status, StatusCode::ACCEPTED);
+    assert_eq!(first_body["status"], "accepted");
+    let (replay_status, replay_body) = delete_json_with_headers(
+        &fx.app,
+        &uri,
+        &[
+            ("host", "cybertruckusb.local"),
+            ("origin", "http://cybertruckusb.local"),
+            ("sec-fetch-site", "same-origin"),
+        ],
+    )
+    .await;
+    assert_eq!(replay_status, StatusCode::ACCEPTED);
+    assert_eq!(replay_body["status"], "replay");
+    assert_eq!(replay_body["jobId"], "m-9200");
+    assert_eq!(replay_body["requestId"], "req-archive-2");
+    assert_eq!(replay_body["state"], "queued");
+    assert_eq!(replay_body["detail"], "queued");
+}
+
+#[tokio::test]
+async fn delete_both_target_is_refused_and_not_forwarded() {
+    let request_id = "req-both-1";
+    let idempotency_key = "idem-both-1";
+    let request_hash = archive_delete_hash_for_test(request_id, idempotency_key, "both");
+    let fx = delete_fixture_with_indexd(
+        Reply::Json(json!({ "handoff_id": "h-1", "result": "done" })),
+        vec![json!({
+            "status": "archive_delete_accepted",
+            "job_id": "m-9250",
+            "request_id": request_id,
+            "state": "queued"
+        })],
+    );
+    let (status, body) = delete_json_with_headers(
+        &fx.app,
+        &format!(
+            "/api/clips/10?target=both&requestId={request_id}&idempotencyKey={idempotency_key}&requestHash={request_hash}"
+        ),
+        &[
+            ("host", "cybertruckusb.local"),
+            ("origin", "http://cybertruckusb.local"),
+            ("sec-fetch-site", "same-origin"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["code"], "both_target_refused");
+    assert!(fx.indexd_requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn delete_archive_target_same_key_different_hash_is_conflict() {
+    let first_request_id = "req-archive-3a";
+    let second_request_id = "req-archive-3b";
+    let idempotency_key = "idem-archive-3";
+    let first_hash = archive_delete_hash_for_test(first_request_id, idempotency_key, "archive");
+    let second_hash = archive_delete_hash_for_test(second_request_id, idempotency_key, "archive");
+    let fx = delete_fixture_with_indexd(
+        Reply::Json(json!({ "handoff_id": "h-1", "result": "done" })),
+        vec![
+            json!({
+                "status": "archive_delete_accepted",
+                "job_id": "m-9300",
+                "request_id": first_request_id,
+                "state": "queued"
+            }),
+            json!({
+                "status": "archive_delete_conflict",
+                "job_id": "m-9300",
+                "request_id": first_request_id,
+                "message": "idempotency key already used with a different archive-delete request"
+            }),
+        ],
+    );
+    let (first_status, _) = delete_json_with_headers(
+        &fx.app,
+        &format!(
+            "/api/clips/10?target=archive&requestId={first_request_id}&idempotencyKey={idempotency_key}&requestHash={first_hash}"
+        ),
+        &[
+            ("host", "cybertruckusb.local"),
+            ("origin", "http://cybertruckusb.local"),
+            ("sec-fetch-site", "same-origin"),
+        ],
+    )
+    .await;
+    assert_eq!(first_status, StatusCode::ACCEPTED);
+    let (status, body) = delete_json_with_headers(
+        &fx.app,
+        &format!(
+            "/api/clips/10?target=archive&requestId={second_request_id}&idempotencyKey={idempotency_key}&requestHash={second_hash}"
+        ),
+        &[
+            ("host", "cybertruckusb.local"),
+            ("origin", "http://cybertruckusb.local"),
+            ("sec-fetch-site", "same-origin"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["status"], "conflict");
+    assert_eq!(body["state"], "conflict");
+    let requests = fx.indexd_requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["idempotency_key"], idempotency_key);
+    assert_eq!(requests[1]["idempotency_key"], idempotency_key);
+    assert_eq!(
+        requests[0]["target_archive_item_id"],
+        requests[1]["target_archive_item_id"]
+    );
+    assert_ne!(requests[0]["request_hash"], requests[1]["request_hash"]);
+}
+
+#[tokio::test]
+async fn delete_archive_target_same_key_different_target_is_conflict() {
+    let request_id = "req-archive-4";
+    let idempotency_key = "idem-archive-4";
+    let request_hash = archive_delete_hash_for_test(request_id, idempotency_key, "archive");
+    let fx = delete_fixture_with_indexd(
+        Reply::Json(json!({ "handoff_id": "h-1", "result": "done" })),
+        vec![
+            json!({
+                "status": "archive_delete_accepted",
+                "job_id": "m-9400",
+                "request_id": request_id,
+                "state": "queued"
+            }),
+            json!({
+                "status": "archive_delete_conflict",
+                "job_id": "m-9400",
+                "request_id": request_id,
+                "message": "idempotency key already used with a different archive-delete request"
+            }),
+        ],
+    );
+    let (first_status, _) = delete_json_with_headers(
+        &fx.app,
+        &format!(
+            "/api/clips/10?target=archive&requestId={request_id}&idempotencyKey={idempotency_key}&requestHash={request_hash}"
+        ),
+        &[
+            ("host", "cybertruckusb.local"),
+            ("origin", "http://cybertruckusb.local"),
+            ("sec-fetch-site", "same-origin"),
+        ],
+    )
+    .await;
+    assert_eq!(first_status, StatusCode::ACCEPTED);
+    let (status, body) = delete_json_with_headers(
+        &fx.app,
+        &format!(
+            "/api/clips/14?target=archive&requestId={request_id}&idempotencyKey={idempotency_key}&requestHash={request_hash}"
+        ),
+        &[
+            ("host", "cybertruckusb.local"),
+            ("origin", "http://cybertruckusb.local"),
+            ("sec-fetch-site", "same-origin"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["status"], "conflict");
+    assert_eq!(body["state"], "conflict");
+    let requests = fx.indexd_requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["idempotency_key"], idempotency_key);
+    assert_eq!(requests[1]["idempotency_key"], idempotency_key);
+    assert_eq!(requests[0]["request_hash"], requests[1]["request_hash"]);
+    assert_ne!(
+        requests[0]["target_archive_item_id"],
+        requests[1]["target_archive_item_id"]
+    );
+    assert_ne!(
+        requests[0]["target_archive_path"],
+        requests[1]["target_archive_path"]
+    );
+}
+
+#[tokio::test]
+async fn delete_archive_target_rejects_request_hash_tampering() {
+    let request_id = "req-archive-tamper";
+    let idempotency_key = "idem-archive-tamper";
+    let fx = delete_fixture_with_indexd(
+        Reply::Json(json!({ "handoff_id": "h-1", "result": "done" })),
+        vec![],
+    );
+    let (status, body) = delete_json_with_headers(
+        &fx.app,
+        &format!(
+            "/api/clips/10?target=archive&requestId={request_id}&idempotencyKey={idempotency_key}&requestHash={}",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ),
+        &[
+            ("host", "cybertruckusb.local"),
+            ("origin", "http://cybertruckusb.local"),
+            ("referer", "http://cybertruckusb.local/"),
+            ("x-csrf-token", "token"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "request_hash_mismatch");
+    assert!(fx.indexd_requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn archive_delete_status_proxies_indexd_inspect() {
+    let fx = delete_fixture_with_indexd(
+        Reply::Json(json!({ "handoff_id": "h-1", "result": "done" })),
+        vec![json!({
+            "status": "archive_delete_inspect",
+            "job_id": "m-9500",
+            "request_id": "req-archive-status",
+            "state": "queued",
+            "response_status": "accepted",
+            "response_code": 202,
+            "detail": "queued for execution"
+        })],
+    );
+    let (status, body) = get_json_with_headers(
+        &fx.app,
+        "/api/jobs/archive-delete/m-9500",
+        &[("host", "cybertruckusb.local")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["jobId"], "m-9500");
+    assert_eq!(body["requestId"], "req-archive-status");
+    assert_eq!(body["state"], "queued");
+    assert_eq!(body["responseStatus"], "accepted");
+    assert_eq!(body["responseCode"], 202);
+    assert_eq!(body["detail"], "queued for execution");
+    let requests = fx.indexd_requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["cmd"], "archive_delete_inspect");
+    assert_eq!(requests[0]["job_id"], "m-9500");
 }
 
 #[tokio::test]
@@ -4486,6 +4951,20 @@ async fn jobs_capabilities_reports_read_only_foundation() {
     assert_eq!(
         body["failed_upload_retry_contract"]["delete_enabled"],
         false
+    );
+    assert_eq!(body["archive_delete_contract"]["enabled"], true);
+    assert_eq!(
+        body["archive_delete_contract"]["requires_same_origin"],
+        true
+    );
+    assert_eq!(body["archive_delete_contract"]["targets"][0], "archive");
+    assert_eq!(
+        body["archive_delete_contract"]["required_fields"][2],
+        "requestHash"
+    );
+    assert_eq!(
+        body["csrf_hardening_non_get"]["currently_enforced_on"][2],
+        "clip_archive_delete"
     );
     assert_eq!(body["csrf_hardening_non_get"]["is_authentication"], false);
     assert_eq!(
@@ -5033,6 +5512,28 @@ fn append_retry_hash_field(hasher: &mut Sha256, name: &[u8], value: &str) {
     let bytes = value.as_bytes();
     hasher.update((bytes.len() as u64).to_le_bytes());
     hasher.update(bytes);
+}
+
+async fn delete_json_with_headers(
+    app: &Router,
+    uri: &str,
+    headers: &[(&str, &str)],
+) -> (StatusCode, Value) {
+    let mut builder = Request::builder().method(Method::DELETE).uri(uri);
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    let resp = app
+        .clone()
+        .oneshot(builder.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, value)
 }
 
 async fn post_json_with_headers(

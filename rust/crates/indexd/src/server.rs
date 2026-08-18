@@ -18,7 +18,9 @@ use teslausb_core::manifest_digest::{ManifestDigestEntry, manifest_digest_v1_hex
 
 use crate::db::archive_delete_requests::{
     ArchiveDeleteRequestRecord, CreateOrLoadArchiveDeleteRequestResult, NewArchiveDeleteRequestRow,
-    archive_delete_request_create_or_load_tx, archive_delete_request_inspect_by_job_id,
+    archive_delete_request_claim_next_tx, archive_delete_request_complete_tx,
+    archive_delete_request_create_or_load_tx, archive_delete_request_fail_tx,
+    archive_delete_request_inspect_by_job_id,
 };
 use crate::db::cloud::{
     CloudConfig, CloudQueuePk, CloudQueueRetryResolution, CloudQueueUpsertItem, cloud_candidates,
@@ -37,8 +39,8 @@ use crate::db::ingest::{
     register_archived_clip, register_quarantined_clip, upsert_angle_force_archive, upsert_clip,
 };
 use crate::db::mutations::{
-    BootContext, has_unexpired_lease, mark_deleted, mark_deleting, quarantine,
-    release_delete_claim, set_pref,
+    BootContext, claim_for_delete_tx, clear_delete_generation, has_unexpired_lease, mark_deleted,
+    mark_deleting, quarantine, release_delete_claim, set_pref,
 };
 use crate::db::reads::{eviction_exclusion_report, list_eviction_candidates, list_recovery_rows};
 use crate::db::{DbError, now_epoch_s};
@@ -165,6 +167,12 @@ fn handle_connection(
             }
             Request::ReleaseArchiveDeleteClaim { id } => {
                 match handle_release_archive_delete_claim(conn, id) {
+                    Ok(response) => response,
+                    Err(message) => Response::Error { message },
+                }
+            }
+            Request::ClearArchiveDeleteGeneration { id, delete_gen } => {
+                match handle_clear_archive_delete_generation(conn, id, &delete_gen) {
                     Ok(response) => response,
                     Err(message) => Response::Error { message },
                 }
@@ -326,6 +334,34 @@ fn handle_connection(
             },
             Request::ArchiveDeleteInspect { job_id } => {
                 match handle_archive_delete_inspect(conn, &job_id) {
+                    Ok(response) => response,
+                    Err(HandlerError::Rejected(message)) => Response::Rejected { message },
+                    Err(HandlerError::Internal(message)) => Response::Error { message },
+                }
+            }
+            Request::ArchiveDeleteClaimNext {} => {
+                match handle_archive_delete_claim_next(conn, boot) {
+                    Ok(response) => response,
+                    Err(HandlerError::Rejected(message)) => Response::Rejected { message },
+                    Err(HandlerError::Internal(message)) => Response::Error { message },
+                }
+            }
+            Request::ArchiveDeleteComplete {
+                job_id,
+                owned_delete_gen,
+            } => match handle_archive_delete_complete(conn, &job_id, &owned_delete_gen) {
+                Ok(response) => response,
+                Err(HandlerError::Rejected(message)) => Response::Rejected { message },
+                Err(HandlerError::Internal(message)) => Response::Error { message },
+            },
+            Request::ArchiveDeleteFail {
+                job_id,
+                owned_delete_gen,
+                detail,
+                requeue,
+            } => {
+                match handle_archive_delete_fail(conn, &job_id, &owned_delete_gen, &detail, requeue)
+                {
                     Ok(response) => response,
                     Err(HandlerError::Rejected(message)) => Response::Rejected { message },
                     Err(HandlerError::Internal(message)) => Response::Error { message },
@@ -594,6 +630,19 @@ fn handle_release_archive_delete_claim(
         .lock()
         .map_err(|_| "index database mutex is poisoned".to_owned())?;
     Ok(map_delete_write_result(release_delete_claim(&locked, id)))
+}
+
+fn handle_clear_archive_delete_generation(
+    conn: &Arc<Mutex<Connection>>,
+    id: i64,
+    delete_gen: &str,
+) -> Result<Response, String> {
+    let locked = conn
+        .lock()
+        .map_err(|_| "index database mutex is poisoned".to_owned())?;
+    Ok(map_delete_write_result(clear_delete_generation(
+        &locked, id, delete_gen,
+    )))
 }
 
 fn handle_quarantine_archive_item(
@@ -1169,6 +1218,74 @@ fn handle_archive_delete_inspect(
         response_code: row.response_code,
         detail: row.sanitized_error,
     })
+}
+
+fn handle_archive_delete_claim_next(
+    conn: &Arc<Mutex<Connection>>,
+    boot: &Arc<BootContext>,
+) -> Result<Response, HandlerError> {
+    let locked = conn
+        .lock()
+        .map_err(|_| HandlerError::Internal("index database mutex is poisoned".to_owned()))?;
+    let tx = locked
+        .unchecked_transaction()
+        .map_err(DbError::from)
+        .map_err(map_db_error)?;
+    let boot_id = boot.boot_id().to_owned();
+    let mono_now_ms = boot.mono_now_ms();
+    let claimed = archive_delete_request_claim_next_tx(&tx, |archive_item_id| {
+        claim_for_delete_tx(&tx, &boot_id, mono_now_ms, archive_item_id)
+    })
+    .map_err(map_db_error)?;
+    tx.commit().map_err(DbError::from).map_err(map_db_error)?;
+    let Some(claimed) = claimed else {
+        return Ok(Response::NotFound {});
+    };
+    Ok(Response::ArchiveDeleteClaimed {
+        job_id: claimed.job_id,
+        request_id: claimed.request_id,
+        target_archive_item_id: claimed.target_archive_item_id,
+        target_archive_path: claimed.target_archive_path,
+        target_archive_size_bytes: claimed.target_archive_size_bytes,
+        delete_gen: claimed.delete_gen,
+    })
+}
+
+fn handle_archive_delete_complete(
+    conn: &Arc<Mutex<Connection>>,
+    job_id: &str,
+    owned_delete_gen: &str,
+) -> Result<Response, HandlerError> {
+    let locked = conn
+        .lock()
+        .map_err(|_| HandlerError::Internal("index database mutex is poisoned".to_owned()))?;
+    let tx = locked
+        .unchecked_transaction()
+        .map_err(DbError::from)
+        .map_err(map_db_error)?;
+    archive_delete_request_complete_tx(&tx, job_id, owned_delete_gen).map_err(map_db_error)?;
+    tx.commit().map_err(DbError::from).map_err(map_db_error)?;
+    Ok(Response::Acked {})
+}
+
+fn handle_archive_delete_fail(
+    conn: &Arc<Mutex<Connection>>,
+    job_id: &str,
+    owned_delete_gen: &str,
+    detail: &str,
+    requeue: bool,
+) -> Result<Response, HandlerError> {
+    let locked = conn
+        .lock()
+        .map_err(|_| HandlerError::Internal("index database mutex is poisoned".to_owned()))?;
+    let tx = locked
+        .unchecked_transaction()
+        .map_err(DbError::from)
+        .map_err(map_db_error)?;
+    archive_delete_request_fail_tx(&tx, job_id, owned_delete_gen, detail, requeue)
+        .map_err(map_db_error)?;
+    tx.commit().map_err(DbError::from).map_err(map_db_error)?;
+    Ok(Response::Acked {})
 }
 
 fn handle_upload_lease_acquire(
@@ -5717,7 +5834,92 @@ mod tests {
             ),
             Response::Acked {}
         );
+        match send(
+            &socket_path,
+            &Request::ClearArchiveDeleteGeneration {
+                id: live_id,
+                delete_gen: "not-present".to_owned(),
+            },
+        ) {
+            Response::Rejected { message } => {
+                assert!(message.contains("token mismatch in state LIVE"))
+            }
+            other => panic!("expected rejected, got {other:?}"),
+        }
+        assert_eq!(
+            send(
+                &socket_path,
+                &Request::ClearArchiveDeleteGeneration {
+                    id: deleted_id,
+                    delete_gen: "wrong".to_owned(),
+                },
+            ),
+            Response::Rejected {
+                message: format!(
+                    "archive item {deleted_id} clear_delete_generation rejected for token mismatch in state DELETED (stored=None)"
+                )
+            }
+        );
+        assert_eq!(
+            send(
+                &socket_path,
+                &Request::ClearArchiveDeleteGeneration {
+                    id: 9_999,
+                    delete_gen: "missing".to_owned(),
+                },
+            ),
+            Response::NotFound {}
+        );
 
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn socket_clear_delete_generation_acks_for_matching_terminal_row() {
+        let conn = open_in_memory().expect("open db");
+        let live_id = insert_archive_item(
+            &conn,
+            "archive/recent/live-clear-gen",
+            "RecentClips",
+            100,
+            1,
+            0,
+        );
+        conn.execute(
+            "UPDATE archive_items
+                SET delete_state = 'LIVE', delete_gen = 'clear-me'
+              WHERE id = ?1",
+            params![live_id],
+        )
+        .expect("seed live row");
+        let conn = Arc::new(Mutex::new(conn));
+        let boot = Arc::new(BootContext::new());
+        let dir = new_temp_dir();
+        let socket_path = dir.join("indexd.sock");
+        let _server =
+            spawn(&conn, &boot, &socket_path, Duration::from_secs(2)).expect("spawn indexd server");
+
+        assert_eq!(
+            send(
+                &socket_path,
+                &Request::ClearArchiveDeleteGeneration {
+                    id: live_id,
+                    delete_gen: "clear-me".to_owned(),
+                },
+            ),
+            Response::Acked {}
+        );
+
+        let stored: Option<String> = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT delete_gen FROM archive_items WHERE id = ?1",
+                params![live_id],
+                |r| r.get(0),
+            )
+            .expect("read delete_gen");
+        assert!(stored.is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -6440,6 +6642,340 @@ mod tests {
             )
             .expect("load delete_state");
         assert_eq!(delete_state, "LIVE");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn socket_archive_delete_claim_next_handoff_claims_and_marks_running() {
+        let conn = open_in_memory().expect("open db");
+        let archive_item_id = insert_archive_item(
+            &conn,
+            "archive/manual-delete/item-claim",
+            "RecentClips",
+            100,
+            1,
+            0,
+        );
+        let conn = Arc::new(Mutex::new(conn));
+        let boot = Arc::new(BootContext::new());
+        let dir = new_temp_dir();
+        let socket_path = dir.join("indexd.sock");
+        let _server =
+            spawn(&conn, &boot, &socket_path, Duration::from_secs(2)).expect("spawn indexd server");
+
+        let accepted = send(
+            &socket_path,
+            &Request::ArchiveDeleteCreateOrLoad {
+                job_id: "m-8811".to_owned(),
+                request_id: "req-8811".to_owned(),
+                idempotency_key: "idem-8811".to_owned(),
+                request_hash: "9191919191919191919191919191919191919191919191919191919191919191"
+                    .to_owned(),
+                target_archive_item_id: archive_item_id,
+                target_archive_path: "archive/manual-delete/item-claim".to_owned(),
+                target_archive_size_bytes: 4096,
+                target_archive_file_count: 1,
+                target_clip_canonical_key: Some("archive/manual-delete/item-claim".to_owned()),
+                target_manifest_digest: None,
+            },
+        );
+        assert_eq!(
+            accepted,
+            Response::ArchiveDeleteAccepted {
+                job_id: "m-8811".to_owned(),
+                request_id: "req-8811".to_owned(),
+                state: "queued".to_owned(),
+            }
+        );
+
+        let claimed = send(&socket_path, &Request::ArchiveDeleteClaimNext {});
+        let delete_gen = match claimed {
+            Response::ArchiveDeleteClaimed {
+                job_id,
+                request_id,
+                target_archive_item_id,
+                target_archive_path,
+                target_archive_size_bytes,
+                delete_gen,
+            } => {
+                assert_eq!(job_id, "m-8811");
+                assert_eq!(request_id, "req-8811");
+                assert_eq!(target_archive_item_id, archive_item_id);
+                assert_eq!(target_archive_path, "archive/manual-delete/item-claim");
+                assert_eq!(target_archive_size_bytes, 4096);
+                assert_eq!(delete_gen.len(), 32);
+                assert!(delete_gen.bytes().all(|byte| byte.is_ascii_hexdigit()));
+                delete_gen
+            }
+            other => panic!("expected ArchiveDeleteClaimed, got {other:?}"),
+        };
+
+        let inspect = send(
+            &socket_path,
+            &Request::ArchiveDeleteInspect {
+                job_id: "m-8811".to_owned(),
+            },
+        );
+        assert_eq!(
+            inspect,
+            Response::ArchiveDeleteInspect {
+                job_id: "m-8811".to_owned(),
+                request_id: "req-8811".to_owned(),
+                state: "running".to_owned(),
+                response_status: Some("accepted".to_owned()),
+                response_code: Some(202),
+                detail: Some("running".to_owned()),
+            }
+        );
+
+        let item_state: (String, Option<String>) = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT delete_state, delete_gen FROM archive_items WHERE id = ?1",
+                params![archive_item_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("load delete state");
+        assert_eq!(item_state.0, "DELETE_CLAIMED");
+        assert_eq!(item_state.1.as_deref(), Some(delete_gen.as_str()));
+
+        let empty = send(&socket_path, &Request::ArchiveDeleteClaimNext {});
+        assert_eq!(empty, Response::NotFound {});
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn socket_archive_delete_complete_requires_deleted_and_marks_done() {
+        let conn = open_in_memory().expect("open db");
+        let archive_item_id = insert_archive_item(
+            &conn,
+            "archive/manual-delete/item-complete",
+            "RecentClips",
+            100,
+            1,
+            0,
+        );
+        let conn = Arc::new(Mutex::new(conn));
+        let boot = Arc::new(BootContext::new());
+        let dir = new_temp_dir();
+        let socket_path = dir.join("indexd.sock");
+        let _server =
+            spawn(&conn, &boot, &socket_path, Duration::from_secs(2)).expect("spawn indexd server");
+
+        let accepted = send(
+            &socket_path,
+            &Request::ArchiveDeleteCreateOrLoad {
+                job_id: "m-8812".to_owned(),
+                request_id: "req-8812".to_owned(),
+                idempotency_key: "idem-8812".to_owned(),
+                request_hash: "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+                    .to_owned(),
+                target_archive_item_id: archive_item_id,
+                target_archive_path: "archive/manual-delete/item-complete".to_owned(),
+                target_archive_size_bytes: 4096,
+                target_archive_file_count: 1,
+                target_clip_canonical_key: Some("archive/manual-delete/item-complete".to_owned()),
+                target_manifest_digest: None,
+            },
+        );
+        assert_eq!(
+            accepted,
+            Response::ArchiveDeleteAccepted {
+                job_id: "m-8812".to_owned(),
+                request_id: "req-8812".to_owned(),
+                state: "queued".to_owned(),
+            }
+        );
+
+        let claimed = send(&socket_path, &Request::ArchiveDeleteClaimNext {});
+        let claimed_delete_gen = match claimed {
+            Response::ArchiveDeleteClaimed {
+                job_id,
+                request_id,
+                delete_gen,
+                ..
+            } => {
+                assert_eq!(job_id, "m-8812");
+                assert_eq!(request_id, "req-8812");
+                delete_gen
+            }
+            other => panic!("expected ArchiveDeleteClaimed, got {other:?}"),
+        };
+
+        let not_deleted = send(
+            &socket_path,
+            &Request::ArchiveDeleteComplete {
+                job_id: "m-8812".to_owned(),
+                owned_delete_gen: claimed_delete_gen.clone(),
+            },
+        );
+        match not_deleted {
+            Response::Rejected { message } => assert!(message.contains("not deleted")),
+            other => panic!("expected rejected, got {other:?}"),
+        }
+
+        conn.lock()
+            .expect("lock db")
+            .execute(
+                "UPDATE archive_items
+                    SET delete_state='DELETED',
+                        delete_gen=?2
+                  WHERE id=?1",
+                params![archive_item_id, claimed_delete_gen],
+            )
+            .expect("mark deleted in db");
+
+        let wrong_gen = send(
+            &socket_path,
+            &Request::ArchiveDeleteComplete {
+                job_id: "m-8812".to_owned(),
+                owned_delete_gen: "ffffffffffffffffffffffffffffffff".to_owned(),
+            },
+        );
+        match wrong_gen {
+            Response::Rejected { message } => assert!(message.contains("ownership mismatch")),
+            other => panic!("expected rejected, got {other:?}"),
+        }
+
+        let done = send(
+            &socket_path,
+            &Request::ArchiveDeleteComplete {
+                job_id: "m-8812".to_owned(),
+                owned_delete_gen: "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1".to_owned(),
+            },
+        );
+        match done {
+            Response::Rejected { message } => assert!(message.contains("ownership mismatch")),
+            other => panic!("expected rejected, got {other:?}"),
+        }
+
+        let owned_delete_gen: String = conn
+            .lock()
+            .expect("lock db")
+            .query_row(
+                "SELECT owned_delete_gen FROM archive_delete_requests WHERE job_id='m-8812'",
+                [],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .expect("owned gen row")
+            .expect("owned gen");
+        let done = send(
+            &socket_path,
+            &Request::ArchiveDeleteComplete {
+                job_id: "m-8812".to_owned(),
+                owned_delete_gen,
+            },
+        );
+        assert_eq!(done, Response::Acked {});
+
+        let inspect = send(
+            &socket_path,
+            &Request::ArchiveDeleteInspect {
+                job_id: "m-8812".to_owned(),
+            },
+        );
+        assert_eq!(
+            inspect,
+            Response::ArchiveDeleteInspect {
+                job_id: "m-8812".to_owned(),
+                request_id: "req-8812".to_owned(),
+                state: "done".to_owned(),
+                response_status: Some("accepted".to_owned()),
+                response_code: Some(200),
+                detail: Some("done".to_owned()),
+            }
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn socket_archive_delete_fail_marks_failed_with_sanitized_detail() {
+        let conn = open_in_memory().expect("open db");
+        let archive_item_id = insert_archive_item(
+            &conn,
+            "archive/manual-delete/item-fail",
+            "RecentClips",
+            100,
+            1,
+            0,
+        );
+        let conn = Arc::new(Mutex::new(conn));
+        let boot = Arc::new(BootContext::new());
+        let dir = new_temp_dir();
+        let socket_path = dir.join("indexd.sock");
+        let _server =
+            spawn(&conn, &boot, &socket_path, Duration::from_secs(2)).expect("spawn indexd server");
+
+        let accepted = send(
+            &socket_path,
+            &Request::ArchiveDeleteCreateOrLoad {
+                job_id: "m-8813".to_owned(),
+                request_id: "req-8813".to_owned(),
+                idempotency_key: "idem-8813".to_owned(),
+                request_hash: "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                    .to_owned(),
+                target_archive_item_id: archive_item_id,
+                target_archive_path: "archive/manual-delete/item-fail".to_owned(),
+                target_archive_size_bytes: 4096,
+                target_archive_file_count: 1,
+                target_clip_canonical_key: Some("archive/manual-delete/item-fail".to_owned()),
+                target_manifest_digest: None,
+            },
+        );
+        assert_eq!(
+            accepted,
+            Response::ArchiveDeleteAccepted {
+                job_id: "m-8813".to_owned(),
+                request_id: "req-8813".to_owned(),
+                state: "queued".to_owned(),
+            }
+        );
+
+        let claimed = send(&socket_path, &Request::ArchiveDeleteClaimNext {});
+        let delete_gen = match claimed {
+            Response::ArchiveDeleteClaimed { delete_gen, .. } => delete_gen,
+            other => panic!("expected ArchiveDeleteClaimed, got {other:?}"),
+        };
+
+        let detail = format!("failed\t{}\n", "x".repeat(512));
+        let failed = send(
+            &socket_path,
+            &Request::ArchiveDeleteFail {
+                job_id: "m-8813".to_owned(),
+                owned_delete_gen: delete_gen,
+                detail,
+                requeue: false,
+            },
+        );
+        assert_eq!(failed, Response::Acked {});
+
+        let inspect = send(
+            &socket_path,
+            &Request::ArchiveDeleteInspect {
+                job_id: "m-8813".to_owned(),
+            },
+        );
+        match inspect {
+            Response::ArchiveDeleteInspect {
+                state,
+                response_status,
+                response_code,
+                detail,
+                ..
+            } => {
+                assert_eq!(state, "failed");
+                assert_eq!(response_status.as_deref(), Some("error"));
+                assert_eq!(response_code, Some(500));
+                let detail = detail.expect("detail");
+                assert!(!detail.contains('\n'));
+                assert!(detail.len() <= 160);
+            }
+            other => panic!("expected inspect response, got {other:?}"),
+        }
 
         let _ = std::fs::remove_dir_all(dir);
     }

@@ -65,6 +65,13 @@ pub const DEFAULT_SEI_SAMPLE_RATE: u32 = 30;
 /// corrupt `valid_data_length`. Tesla clips are tens of MiB; 256 MiB is a
 /// generous ceiling.
 const MAX_CLIP_BYTES: u64 = 256 * 1024 * 1024;
+/// Prefix probe budget used to classify encrypted Tesla clips before any
+/// full-file read. A stable encrypted front observed in the field had a
+/// deterministic 64 KiB prefix with no MP4 markers.
+const ENCRYPTED_PREFIX_PROBE_BYTES: u64 = 64 * 1024;
+/// Legacy-compatible header window: if the first 12 bytes contain no `ftyp`
+/// marker, treat the clip as encrypted/opaque.
+const FTYP_HEADER_WINDOW_BYTES: usize = 12;
 
 /// Maximum expensive front-clip SEI walks performed in a single produce
 /// pass. Front clips are the only records that read+parse clip bytes (tens
@@ -407,6 +414,7 @@ pub(crate) enum FrontParseState {
     NoWaypoints,
     ParseError,
     ReadError,
+    Encrypted,
 }
 
 impl FrontParseState {
@@ -416,8 +424,21 @@ impl FrontParseState {
             Self::NoWaypoints => "no_waypoints",
             Self::ParseError => "parse_error",
             Self::ReadError => "read_error",
+            Self::Encrypted => "encrypted",
         }
     }
+}
+
+fn missing_ftyp_header(prefix: &[u8]) -> bool {
+    let Some(window) = prefix.get(..FTYP_HEADER_WINDOW_BYTES) else {
+        return false;
+    };
+    !window.windows(4).any(|bytes| bytes == b"ftyp")
+}
+
+fn is_encrypted_clip_path(path: &str) -> bool {
+    path.split('/')
+        .any(|component| component.eq_ignore_ascii_case("EncryptedClips"))
 }
 
 fn front_record_with_parse_state(
@@ -459,34 +480,97 @@ fn shape_front<R: BlockReader + ?Sized>(
     sample_rate: u32,
 ) -> FrontShapeOutcome {
     let filename_started_at = epoch_from_tesla_timestamp(&ident.timestamp);
-    let Ok(bytes) = read_full_file(volume, record) else {
-        let Some(started_at) = filename_started_at else {
-            return FrontShapeOutcome::Unplaceable("read_error");
+    if is_encrypted_clip_path(&record.path) {
+        let prefix = match read_bounded_file(volume, record, ENCRYPTED_PREFIX_PROBE_BYTES) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                eprintln!(
+                    "scannerd produce: front_shape read_error canonical_key={} bucket={} path={} valid_data_length={} data_length={} error={err}",
+                    ident.key,
+                    ident.bucket.as_db_str(),
+                    record.path,
+                    record.valid_data_length,
+                    record.data_length
+                );
+                let Some(started_at) = filename_started_at else {
+                    return FrontShapeOutcome::Unplaceable("read_error");
+                };
+                return FrontShapeOutcome::Placed(Box::new(front_record_with_parse_state(
+                    record,
+                    ident,
+                    started_at,
+                    None,
+                    None,
+                    Vec::new(),
+                    FrontParseState::ReadError,
+                )));
+            }
         };
-        return FrontShapeOutcome::Placed(Box::new(front_record_with_parse_state(
-            record,
-            ident,
-            started_at,
-            None,
-            None,
-            Vec::new(),
-            FrontParseState::ReadError,
-        )));
+        if missing_ftyp_header(&prefix) {
+            let Some(started_at) = filename_started_at else {
+                return FrontShapeOutcome::Unplaceable("encrypted");
+            };
+            return FrontShapeOutcome::Placed(Box::new(front_record_with_parse_state(
+                record,
+                ident,
+                started_at,
+                None,
+                None,
+                Vec::new(),
+                FrontParseState::Encrypted,
+            )));
+        }
+    }
+    let bytes = match read_full_file(volume, record) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            eprintln!(
+                "scannerd produce: front_shape read_error canonical_key={} bucket={} path={} valid_data_length={} data_length={} error={err}",
+                ident.key,
+                ident.bucket.as_db_str(),
+                record.path,
+                record.valid_data_length,
+                record.data_length
+            );
+            let Some(started_at) = filename_started_at else {
+                return FrontShapeOutcome::Unplaceable("read_error");
+            };
+            return FrontShapeOutcome::Placed(Box::new(front_record_with_parse_state(
+                record,
+                ident,
+                started_at,
+                None,
+                None,
+                Vec::new(),
+                FrontParseState::ReadError,
+            )));
+        }
     };
 
-    let Ok(walk) = walk_clip_waypoints(&bytes, sample_rate) else {
-        let Some(started_at) = filename_started_at else {
-            return FrontShapeOutcome::Unplaceable("parse_error");
-        };
-        return FrontShapeOutcome::Placed(Box::new(front_record_with_parse_state(
-            record,
-            ident,
-            started_at,
-            None,
-            None,
-            Vec::new(),
-            FrontParseState::ParseError,
-        )));
+    let walk = match walk_clip_waypoints(&bytes, sample_rate) {
+        Ok(walk) => walk,
+        Err(err) => {
+            eprintln!(
+                "scannerd produce: front_shape parse_error canonical_key={} bucket={} path={} valid_data_length={} data_length={} error={err}",
+                ident.key,
+                ident.bucket.as_db_str(),
+                record.path,
+                record.valid_data_length,
+                record.data_length
+            );
+            let Some(started_at) = filename_started_at else {
+                return FrontShapeOutcome::Unplaceable("parse_error");
+            };
+            return FrontShapeOutcome::Placed(Box::new(front_record_with_parse_state(
+                record,
+                ident,
+                started_at,
+                None,
+                None,
+                Vec::new(),
+                FrontParseState::ParseError,
+            )));
+        }
     };
 
     let started_at = walk
@@ -1158,6 +1242,7 @@ mod tests {
         event_json: &[u8],
         front_cluster: u32,
         front_file_name: &str,
+        front_payload: &[u8],
     ) -> Vec<u8> {
         let mut img = vec![0_u8; 8192];
 
@@ -1217,8 +1302,16 @@ mod tests {
             true,
             &upcase,
         );
-        let front_entry =
-            encode_entry_set(front_file_name, false, front_cluster, 8, 8, true, &upcase);
+        let front_len = u64::try_from(front_payload.len()).unwrap_or(u64::MAX);
+        let front_entry = encode_entry_set(
+            front_file_name,
+            false,
+            front_cluster,
+            front_len,
+            front_len,
+            true,
+            &upcase,
+        );
         let event_entry = encode_entry_set(
             "event.json",
             false,
@@ -1254,7 +1347,7 @@ mod tests {
             &directory_cluster(&[front_entry, event_entry], CLUSTER_SIZE),
         );
         if front_cluster == FRONT_FILE_CLUSTER {
-            write_cluster(&mut img, START_LBA, FRONT_FILE_CLUSTER, b"not-anmp");
+            write_cluster(&mut img, START_LBA, FRONT_FILE_CLUSTER, front_payload);
         }
         write_cluster(&mut img, START_LBA, EVENT_JSON_CLUSTER, event_json);
         img
@@ -1265,11 +1358,31 @@ mod tests {
         event_json: &[u8],
         front_cluster: u32,
     ) -> Vec<u8> {
-        event_fixture_image_with_front_name(bucket_dir, event_json, front_cluster, FRONT_FILE_NAME)
+        event_fixture_image_with_front_name(
+            bucket_dir,
+            event_json,
+            front_cluster,
+            FRONT_FILE_NAME,
+            b"not-anmp",
+        )
     }
 
     fn event_fixture_image(bucket_dir: &str, event_json: &[u8]) -> Vec<u8> {
         event_fixture_image_with_front_cluster(bucket_dir, event_json, FRONT_FILE_CLUSTER)
+    }
+
+    fn event_fixture_image_with_front_payload(
+        bucket_dir: &str,
+        event_json: &[u8],
+        front_payload: &[u8],
+    ) -> Vec<u8> {
+        event_fixture_image_with_front_name(
+            bucket_dir,
+            event_json,
+            FRONT_FILE_CLUSTER,
+            FRONT_FILE_NAME,
+            front_payload,
+        )
     }
 
     fn produce_stable_batch(reader: &SliceReader) -> crate::record::ScanBatch {
@@ -1624,6 +1737,51 @@ mod tests {
     }
 
     #[test]
+    fn missing_ftyp_header_marks_front_as_encrypted_terminal_state() {
+        let event_json =
+            br#"{"timestamp":"2026-06-01T20:10:35-07:00","est_lat":"37.7749","est_lon":"-122.4194"}"#;
+        let mut encrypted_prefix = vec![0xA5_u8; 64];
+        encrypted_prefix[0..4].copy_from_slice(b"enc!");
+        encrypted_prefix[8..12].copy_from_slice(b"xxxx");
+        let reader = SliceReader::new(event_fixture_image_with_front_payload(
+            "EncryptedClips/RecentClips",
+            event_json,
+            &encrypted_prefix,
+        ));
+        let batch = produce_stable_batch(&reader);
+        assert_eq!(batch.records.len(), 1);
+        let front = &batch.records[0];
+        assert_eq!(front.parse_state.as_deref(), Some("encrypted"));
+        assert!(front.waypoints.is_empty());
+        assert_eq!(batch.stats.parse_errors, 0);
+        assert_eq!(batch.stats.read_walk_errors, 0);
+        assert_eq!(batch.stats.no_waypoints, 0);
+    }
+
+    #[test]
+    fn missing_ftyp_header_detects_64k_encrypted_prefix_fixture() {
+        let prefix = vec![0xA5_u8; 64 * 1024];
+        assert!(super::missing_ftyp_header(&prefix));
+    }
+
+    #[test]
+    fn missing_ftyp_header_accepts_mp4_signature_in_first_12_bytes() {
+        let mut prefix = vec![0_u8; 64];
+        prefix[4..8].copy_from_slice(b"ftyp");
+        assert!(!super::missing_ftyp_header(&prefix));
+    }
+
+    #[test]
+    fn missing_ftyp_header_does_not_classify_plain_recent_clip_as_encrypted() {
+        assert!(!super::is_encrypted_clip_path(
+            "TeslaCam/RecentClips/2026-06-01_20-10-35-front.mp4"
+        ));
+        assert!(super::is_encrypted_clip_path(
+            "TeslaCam/EncryptedClips/RecentClips/2026-06-01_20-10-35-front.mp4"
+        ));
+    }
+
+    #[test]
     fn requested_unplaceable_front_is_emitted_for_durable_backoff() {
         let event_json =
             br#"{"timestamp":"2026-06-01T20:10:35-07:00","est_lat":"37.7749","est_lon":"-122.4194"}"#;
@@ -1632,6 +1790,7 @@ mod tests {
             event_json,
             FRONT_FILE_CLUSTER,
             INVALID_FRONT_FILE_NAME,
+            b"not-anmp",
         ));
         let sources = [ImageSource::with_slot(&reader, 0)];
         let mut tracker = StabilityTracker::new(StabilityConfig::default());

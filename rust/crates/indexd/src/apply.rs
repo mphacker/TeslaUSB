@@ -97,10 +97,11 @@ enum FrontApplyState {
     NoWaypoints,
     ParseError,
     ReadError,
+    Encrypted,
 }
 
 impl FrontApplyState {
-    /// Map the wire `parse_state` to an apply outcome. The four known states
+    /// Map the wire `parse_state` to an apply outcome. The known states
     /// map directly. Everything else — `None` (a pre-`parse_state` producer,
     /// though the `PROTOCOL_VERSION` gate already rejects an older batch
     /// wholesale, so this is defensive only) and any unrecognized/`legacy_unknown`
@@ -113,6 +114,7 @@ impl FrontApplyState {
             Some("no_waypoints") => Self::NoWaypoints,
             Some("parse_error") => Self::ParseError,
             Some("read_error") => Self::ReadError,
+            Some("encrypted") => Self::Encrypted,
             _ => Self::ParsedWithWaypoints,
         }
     }
@@ -123,6 +125,7 @@ impl FrontApplyState {
             Self::NoWaypoints => "no_waypoints",
             Self::ParseError => "parse_error",
             Self::ReadError => "read_error",
+            Self::Encrypted => "encrypted",
         }
     }
 }
@@ -158,7 +161,9 @@ fn front_attempt_update(
     now: i64,
 ) -> (i64, Option<i64>) {
     match front_state {
-        FrontApplyState::ParsedWithWaypoints | FrontApplyState::NoWaypoints => (0, None),
+        FrontApplyState::ParsedWithWaypoints
+        | FrontApplyState::NoWaypoints
+        | FrontApplyState::Encrypted => (0, None),
         FrontApplyState::ParseError | FrontApplyState::ReadError => {
             let (prior_fingerprint, prior_count) = match prior {
                 Some((_, parse_fingerprint, _, attempt_count, _)) => {
@@ -255,6 +260,7 @@ fn apply_unplaceable_fronts(
     for unplaceable in front_unplaceable {
         let front_state = match unplaceable.reason.as_str() {
             "read_error" => FrontApplyState::ReadError,
+            "encrypted" => FrontApplyState::Encrypted,
             _ => FrontApplyState::ParseError,
         };
         let parse_fingerprint = format!("{:x}", unplaceable.front_fingerprint);
@@ -340,10 +346,12 @@ fn angle_facts(record: &ClipAngleRecord, folder_class: FolderClass) -> AngleFact
 
 /// Ingest one validated record. Front angles are parse-state driven:
 /// `parsed_with_waypoints` / `no_waypoints` upsert+replace waypoints,
-/// `parse_error` / `read_error` ensure-only (non-destructive, no waypoint
-/// replacement), and all front paths upsert the parse-attempt row and
-/// angle. Non-front angles only ensure the clip exists (never downgrading
-/// a front-resolved instant) and upsert the angle.
+/// `encrypted` preserves the existing waypoint cache and clip timing fields
+/// (`ensure_clip` path), `parse_error` / `read_error` are ensure-only
+/// (non-destructive, no waypoint replacement), and all front paths upsert
+/// the parse-attempt row and angle. Non-front angles only ensure the clip
+/// exists (never downgrading a front-resolved instant) and upsert the
+/// angle.
 ///
 /// Errors are surfaced to the caller; the caller owns per-clip savepoint
 /// semantics and decides whether to roll back the whole clip group.
@@ -359,7 +367,9 @@ fn apply_record(
         let front_state = FrontApplyState::from_wire(record.parse_state.as_deref());
         let derived: Vec<DeriveWaypoint> = record.waypoints.iter().map(map_waypoint).collect();
         let clip_id = match front_state {
-            FrontApplyState::ParseError | FrontApplyState::ReadError => ensure_clip(conn, &facts)?,
+            FrontApplyState::ParseError
+            | FrontApplyState::ReadError
+            | FrontApplyState::Encrypted => ensure_clip(conn, &facts)?,
             FrontApplyState::ParsedWithWaypoints | FrontApplyState::NoWaypoints => {
                 upsert_clip(conn, &facts)?
             }
@@ -384,6 +394,7 @@ fn apply_record(
                 waypoints_deleted = replace_clip_waypoints(conn, clip_id, &[])?;
                 0
             }
+            FrontApplyState::Encrypted => 0,
             FrontApplyState::ParseError | FrontApplyState::ReadError => 0,
         };
         let prior_attempt = load_front_parse_attempt(conn, &record.canonical_key)?;
@@ -605,6 +616,24 @@ pub fn apply(
         report.rebuild_ran = false;
     }
     report.derived_dirty = derived_dirty;
+
+    let has_lifecycle_material = count_materialized_rows(&tx, "clips")? > 0
+        || report.trips > 0
+        || report.events > 0
+        || count_materialized_rows(&tx, "front_parse_attempts")? > 0;
+    if has_lifecycle_material {
+        tx.execute(
+            "INSERT INTO index_lifecycle_meta (id, last_derived_at)
+                 VALUES (1, ?1)
+             ON CONFLICT(id) DO UPDATE
+                 SET last_derived_at = MAX(index_lifecycle_meta.last_derived_at, excluded.last_derived_at)",
+            [now_epoch_s()],
+        )
+        .map_err(DbError::from)?;
+    } else {
+        tx.execute("DELETE FROM index_lifecycle_meta WHERE id = 1", [])
+            .map_err(DbError::from)?;
+    }
     tx.commit().map_err(DbError::from)?;
 
     Ok(report)
@@ -1011,6 +1040,43 @@ mod tests {
     }
 
     #[test]
+    fn encrypted_state_is_terminal_and_not_counted_as_parse_or_read_error() {
+        let mut conn = open_in_memory().unwrap();
+        let dir = "TeslaCam/EncryptedClips/RecentClips/2026-06-01_20-10-04";
+        let key = "0:TeslaCam/EncryptedClips/RecentClips/2026-06-01_20-10-04/2026-06-01_20-10-04";
+        apply(
+            &mut conn,
+            &batch(vec![front_record(key, dir, 1_700_000_000)], true),
+            DeriveConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(waypoint_count_for_key(&conn, key), 2);
+
+        let encrypted =
+            front_record_with_state(key, dir, 1_700_000_000, "encrypted", Vec::new(), None, None);
+        let report = apply(
+            &mut conn,
+            &batch(vec![encrypted], true),
+            DeriveConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(report.front_walked, 1);
+        assert_eq!(report.front_parse_errors, 0);
+        assert_eq!(report.front_read_errors, 0);
+        assert_eq!(report.front_no_waypoints, 0);
+        assert_eq!(
+            waypoint_count_for_key(&conn, key),
+            2,
+            "encrypted state must not delete previously decoded waypoints"
+        );
+        assert_eq!(
+            front_attempt_state(&conn, key).as_deref(),
+            Some("encrypted")
+        );
+        assert_eq!(front_attempt_count(&conn, key), Some((0, None)));
+    }
+
+    #[test]
     fn unplaceable_parse_error_writes_attempt_without_dirtying_derive() {
         let mut conn = open_in_memory().unwrap();
         let key = "0:TeslaCam/SavedClips/unplaceable/2026-13-99_00-00-00";
@@ -1086,6 +1152,25 @@ mod tests {
         let row = front_attempt_row(&conn, key).expect("front attempt row");
         assert_eq!(row.1.as_deref(), Some("def"));
         assert_eq!(row.2, 1);
+    }
+
+    #[test]
+    fn unplaceable_encrypted_writes_terminal_attempt_without_retry() {
+        let mut conn = open_in_memory().unwrap();
+        let key = "0:TeslaCam/EncryptedClips/RecentClips/2026-06-01_20-10-35/2026-06-01_20-10-35";
+        let mut unplaceable_batch = batch(Vec::new(), true);
+        unplaceable_batch.present_keys = vec![key.to_owned()];
+        unplaceable_batch.front_unplaceable = vec![FrontUnplaceableRecord {
+            canonical_key: key.to_owned(),
+            front_fingerprint: 0xabc_u64,
+            reason: "encrypted".to_owned(),
+        }];
+        apply(&mut conn, &unplaceable_batch, DeriveConfig::default()).unwrap();
+        let row = front_attempt_row(&conn, key).expect("front attempt row");
+        assert_eq!(row.0, "encrypted");
+        assert_eq!(row.1.as_deref(), Some("abc"));
+        assert_eq!(row.2, 0);
+        assert_eq!(row.3, None);
     }
 
     #[test]
@@ -1524,6 +1609,61 @@ mod tests {
         assert_eq!(third.clip_events_written, 1);
         assert!(third.derived_dirty);
         assert!(third.rebuild_ran);
+    }
+
+    #[test]
+    fn no_change_pass_advances_lifecycle_freshness_marker() {
+        let mut conn = open_in_memory().unwrap();
+        let event_key = "slot0:TeslaCam/SavedClips/2026-06-01_20-10-04";
+        let base = clip_event_batch(
+            vec![clip_event_rec(event_key, Some(47.6), Some(-122.3))],
+            true,
+            true,
+        );
+        let first = apply(&mut conn, &base, DeriveConfig::default()).unwrap();
+        assert!(first.rebuild_ran);
+        conn.execute(
+            "INSERT OR REPLACE INTO index_lifecycle_meta (id, last_derived_at) VALUES (1, 0)",
+            [],
+        )
+        .unwrap();
+
+        let second = apply(&mut conn, &base, DeriveConfig::default()).unwrap();
+        assert!(!second.derived_dirty);
+        assert!(!second.rebuild_ran);
+        let marker: i64 = conn
+            .query_row(
+                "SELECT last_derived_at FROM index_lifecycle_meta WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(marker > 0);
+    }
+
+    #[test]
+    fn empty_complete_pass_clears_lifecycle_freshness_marker() {
+        let mut conn = open_in_memory().unwrap();
+        let dir = "TeslaCam/SavedClips/2026-06-01_20-10-04";
+        let key = "0:TeslaCam/SavedClips/2026-06-01_20-10-04/2026-06-01_20-10-04";
+        let seeded = batch(vec![front_record(key, dir, 1_700_000_000)], true);
+        apply(&mut conn, &seeded, DeriveConfig::default()).unwrap();
+
+        let marker_before: i64 = conn
+            .query_row("SELECT COUNT(*) FROM index_lifecycle_meta WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(marker_before, 1);
+
+        let empty = batch(Vec::new(), true);
+        apply(&mut conn, &empty, DeriveConfig::default()).unwrap();
+        let marker_after: i64 = conn
+            .query_row("SELECT COUNT(*) FROM index_lifecycle_meta WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(marker_after, 0);
     }
 
     #[test]

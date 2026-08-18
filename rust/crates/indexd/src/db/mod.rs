@@ -275,6 +275,7 @@ mod tests {
             "cloud_upload_attempts",
             "cloud_failed_upload_retry_requests",
             "archive_delete_requests",
+            "index_lifecycle_meta",
         ] {
             let found: i64 = conn
                 .query_row(

@@ -6,10 +6,9 @@ for **P4** (webd) + **P6** (SPA). A Tier-3 review (cycle 2,
 found the wire contract underspecified. Pinned in P4, not here.
 
 > **OPEN ITEMS (pin in P4):**
-> - **The full session + CSRF wire contract** — login/bootstrap flow, cookie
->   attributes, expiry, CSRF token issuance/rotation, origin policy, exact 401/403
->   envelopes — so webd and the SPA implement one interoperable scheme (webd has
->   **no auth today**; §0).
+> - **The anonymous mutation boundary** — exact Host/Origin/Sec-Fetch validation,
+>   explicit confirmation fields, idempotency, target fencing, and exact
+>   4xx envelopes. B-1 has no login/session layer by product decision.
 > - Manual retry maps to the indexd **`cloud_queue_retry`** verb, not a plain
 >   upsert. For the failed-upload parity lane, webd's future route is
 >   **child-specific** and only retries rows currently in `failed`, with an
@@ -24,16 +23,13 @@ indexd-backed observability). The remaining
 
 ---
 
-## 0. Security prerequisite — auth + CSRF (D8, blocks P4)
-webd currently has **no auth middleware**; every route is unauthenticated. The
-cloud surface **mutates credentials and triggers uploads**, so before any mutating
-`/api/cloud/*` route ships:
-- an **authenticated operator session** (the parity target is v1's privileged-
-  action gate) must guard all non-GET cloud routes, and
-- **CSRF protection** (same-site + token) on those mutations.
-
-This is a **P4 prerequisite**, tracked as its own gate in `plan.md`. GET status
-may be readable, but **no credential write or `sync-now` lands unauthenticated**.
+## 0. Security/product boundary — anonymous local network
+webd has no login/session layer by deliberate product design. The cloud surface
+mutates credentials and triggers uploads, so mutating `/api/cloud/*` routes
+must enforce strict Host/Origin/Sec-Fetch validation, bounded typed input,
+explicit confirmation, idempotency, and durable owner-job semantics. Credential
+writes additionally require provider-specific validation and redaction.
+Authentication is not a prerequisite or a planned feature.
 
 ## 1. Transport & error mapping
 JSON over the existing webd HTTP server. webd calls **indexd** for
@@ -68,7 +64,7 @@ state/config/history and an **uploadd control socket** for actions (D6, §4).
   `cloud_sync_history` rows where `outcome='failed'`; same cursor/limit rules
   and redaction as `/api/cloud/history`.
 
-### Mutations (all auth + CSRF gated — §0)
+### Mutations (all anonymous-local-network safety gated — §0)
 - `PUT /api/cloud/config` → validate (like `set_pref`) → `cloud_config_put`.
   Rejects unknown keys / out-of-range values with 400 + field error.
 - `POST /api/cloud/provider` → set credentials for one flow (OAuth token paste /
@@ -127,8 +123,8 @@ process**, not indexd. The first implemented control-socket slice is read-only:
 - **Error envelope:** `{"status":"error","message":"..."}`
 
 Mutation verbs (`sync_now`, `test_remote`, `reload_credentials`) remain pending
-and are explicitly deferred until webd auth/CSRF is in place and each mutation
-has durable accepted/job semantics.
+and are explicitly deferred until the anonymous-local-network request-forgery
+boundary is in place and each mutation has durable accepted/job semantics.
 Until uploadd is enabled (Phase 8 gate), webd returns **503 "uploader offline"**
 rather than a hang or a 500.
 
@@ -137,8 +133,9 @@ rather than a hang or a 500.
   not needed for parity MVP and adds bandwidth/enumeration cost.
 
 ## 6. Tests (P4 acceptance)
-Accept/reject/persist per endpoint; **auth + CSRF**: every mutating route rejects
-unauthenticated / bad-token with 401/403 and **does not** touch creds/indexd;
+Accept/reject/persist per endpoint; **request-forgery boundary**: every
+mutating route rejects missing or mismatched Host/Origin/Sec-Fetch metadata with
+400/403 and **does not** touch creds/indexd;
 provider paste rejection (multi-section, banned key, `type=wasabi` normalized to
 `s3`) → 400 sanitized; **no endpoint ever returns raw rclone stderr or a secret**
 (assert on redaction); indexd-down → 503 (incl. the m1 timeout/reset remap);

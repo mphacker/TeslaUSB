@@ -59,7 +59,7 @@
         "properties": {
           "name": {
             "type": "string",
-            "enum": ["gadgetd", "scannerd", "indexd", "webd", "uploadd", "retentiond", "wifid"]
+            "enum": ["gadgetd", "scannerd", "indexd", "webd", "uploadd", "retentiond", "wifid", "schedulerd"]
           },
           "path": {
             "type": "string",

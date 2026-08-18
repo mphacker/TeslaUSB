@@ -58,13 +58,15 @@ pub(crate) fn index_lifecycle(conn: &Connection) -> Result<IndexLifecycleDto, ru
         [],
         |row| row.get(0),
     )?;
+    let trip_count: i64 = conn.query_row("SELECT COUNT(*) FROM trips", [], |row| row.get(0))?;
+    let event_count: i64 = conn.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?;
     let clip_count: i64 = conn.query_row("SELECT COUNT(*) FROM clips", [], |row| row.get(0))?;
     let stale_clip_count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM clips WHERE availability <> 'present'",
         [],
         |row| row.get(0),
     )?;
-    let last_derived_at: Option<i64> = conn.query_row(
+    let derived_row_last_derived_at: Option<i64> = conn.query_row(
         "SELECT MAX(created_at) FROM (
             SELECT created_at FROM trips
             UNION ALL
@@ -73,6 +75,22 @@ pub(crate) fn index_lifecycle(conn: &Connection) -> Result<IndexLifecycleDto, ru
         [],
         |row| row.get(0),
     )?;
+    let marker_last_derived_at: Option<i64> = if table_present(conn, "index_lifecycle_meta")? {
+        conn.query_row(
+            "SELECT last_derived_at FROM index_lifecycle_meta WHERE id = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+    } else {
+        None
+    };
+    let mut last_derived_at = match (marker_last_derived_at, derived_row_last_derived_at) {
+        (Some(marker), Some(derived_row)) => Some(marker.max(derived_row)),
+        (Some(marker), None) => Some(marker),
+        (None, Some(derived_row)) => Some(derived_row),
+        (None, None) => None,
+    };
 
     let has_front_parse_attempts = table_present(conn, "front_parse_attempts")?;
     let (
@@ -81,6 +99,7 @@ pub(crate) fn index_lifecycle(conn: &Connection) -> Result<IndexLifecycleDto, ru
         front_parse_stale_count,
         front_parse_retry_pending_count,
         front_parse_missing_count,
+        front_parse_missing_keys,
         last_front_parse_attempt_at,
     ) = if has_front_parse_attempts {
         let front_parse_total: i64 =
@@ -106,15 +125,30 @@ pub(crate) fn index_lifecycle(conn: &Connection) -> Result<IndexLifecycleDto, ru
             |row| row.get(0),
         )?;
         let front_parse_missing_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM clips c \
+            "SELECT COUNT(DISTINCT c.canonical_key) FROM clips c \
              JOIN angles a ON a.clip_id = c.id \
              LEFT JOIN front_parse_attempts fpa ON fpa.canonical_key = c.canonical_key \
              WHERE lower(a.camera) = 'front' \
+               AND a.view_kind = 'ro_usb' \
                AND c.availability = 'present' \
                AND fpa.canonical_key IS NULL",
             [],
             |row| row.get(0),
         )?;
+        let mut missing_stmt = conn.prepare(
+            "SELECT DISTINCT c.canonical_key FROM clips c \
+             JOIN angles a ON a.clip_id = c.id \
+             LEFT JOIN front_parse_attempts fpa ON fpa.canonical_key = c.canonical_key \
+             WHERE lower(a.camera) = 'front' \
+               AND a.view_kind = 'ro_usb' \
+               AND c.availability = 'present' \
+               AND fpa.canonical_key IS NULL \
+             ORDER BY c.started_at DESC, c.canonical_key DESC
+             LIMIT 32",
+        )?;
+        let front_parse_missing_keys = missing_stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
         let last_front_parse_attempt_at: Option<i64> = conn.query_row(
             "SELECT MAX(attempted_at) FROM front_parse_attempts",
             [],
@@ -126,14 +160,16 @@ pub(crate) fn index_lifecycle(conn: &Connection) -> Result<IndexLifecycleDto, ru
             front_parse_stale_count,
             front_parse_retry_pending_count,
             front_parse_missing_count,
+            front_parse_missing_keys,
             last_front_parse_attempt_at,
         )
     } else {
-        (0, 0, 0, 0, 0, None)
+        (0, 0, 0, 0, 0, Vec::new(), None)
     };
 
-    let lifecycle_state = if clip_count == 0 && front_parse_total == 0 && last_derived_at.is_none()
-    {
+    let is_empty_lifecycle =
+        clip_count == 0 && trip_count == 0 && event_count == 0 && front_parse_total == 0;
+    let lifecycle_state = if is_empty_lifecycle {
         "empty"
     } else if front_parse_error_count > 0 {
         "error"
@@ -146,6 +182,9 @@ pub(crate) fn index_lifecycle(conn: &Connection) -> Result<IndexLifecycleDto, ru
     } else {
         "healthy"
     };
+    if is_empty_lifecycle {
+        last_derived_at = None;
+    }
 
     Ok(IndexLifecycleDto {
         schema_version,
@@ -156,6 +195,7 @@ pub(crate) fn index_lifecycle(conn: &Connection) -> Result<IndexLifecycleDto, ru
         front_parse_stale_count,
         front_parse_retry_pending_count,
         front_parse_missing_count,
+        front_parse_missing_keys,
         last_derived_at,
         last_front_parse_attempt_at,
     })
@@ -1125,6 +1165,53 @@ pub(crate) fn list_ro_usb_angles(
     Ok(out)
 }
 
+/// One LIVE archive-item target linked to a clip, for durable archive-delete
+/// request fencing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClipArchiveDeleteTarget {
+    pub archive_item_id: i64,
+    pub archive_path: String,
+    pub archive_size_bytes: i64,
+    pub archive_file_count: i64,
+    pub clip_canonical_key: String,
+    pub manifest_digest: Option<String>,
+}
+
+/// List LIVE archive-delete targets linked to `clip_id`, ordered by id.
+pub(crate) fn list_clip_archive_delete_targets(
+    conn: &Connection,
+    clip_id: i64,
+) -> Result<Vec<ClipArchiveDeleteTarget>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT
+             ai.id,
+             ai.path,
+             ai.size_bytes,
+             ai.file_count,
+             c.canonical_key,
+             ai.manifest_digest
+           FROM clips c
+           JOIN archive_item_clips aic ON aic.clip_id = c.id
+           JOIN archive_items ai ON ai.id = aic.archive_item_id
+          WHERE c.id = ?1
+            AND ai.delete_state = 'LIVE'
+          ORDER BY ai.id ASC",
+    )?;
+    let out = stmt
+        .query_map(params![clip_id], |row| {
+            Ok(ClipArchiveDeleteTarget {
+                archive_item_id: row.get(0)?,
+                archive_path: row.get(1)?,
+                archive_size_bytes: row.get(2)?,
+                archive_file_count: row.get(3)?,
+                clip_canonical_key: row.get(4)?,
+                manifest_digest: row.get(5)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(out)
+}
+
 /// Fetch all angles for a set of clip ids in one query, grouped by clip id and
 /// ordered by `camera` for deterministic output.
 fn angles_for_clips(
@@ -1477,7 +1564,10 @@ mod tests {
         );
 
         let status = index_status(&conn).unwrap();
-        assert_eq!(status.schema_version, indexd::db::migrations::LATEST_VERSION);
+        assert_eq!(
+            status.schema_version,
+            indexd::db::migrations::LATEST_VERSION
+        );
         assert_eq!(status.trip_count, 1);
         assert_eq!(status.event_count, 1);
         assert_eq!(status.clip_count, 1);
@@ -1554,11 +1644,13 @@ mod tests {
         insert_clip_with_key(&conn, 1, "clip-front-a", 100);
         insert_clip_with_key(&conn, 2, "clip-front-b", 200);
         insert_clip_with_key(&conn, 3, "clip-front-c", 300);
+        insert_clip_with_key(&conn, 4, "clip-archive-only", 400);
         conn.execute(
             "INSERT INTO angles (clip_id, camera, file_ref, view_kind, offset_ms, duration_s, size_bytes) VALUES
-                (1, 'front', 'slot0/a-front.mp4', 'archive', 0, 60.0, 1000),
-                (2, 'front', 'slot0/b-front.mp4', 'archive', 0, 60.0, 1000),
-                (3, 'front', 'slot0/c-front.mp4', 'archive', 0, 60.0, 1000)",
+                (1, 'front', 'slot0/a-front.mp4', 'ro_usb', 0, 60.0, 1000),
+                (2, 'front', 'slot0/b-front.mp4', 'ro_usb', 0, 60.0, 1000),
+                (3, 'front', 'slot0/c-front.mp4', 'ro_usb', 0, 60.0, 1000),
+                (4, 'front', 'slot0/archive-front.mp4', 'archive', 0, 60.0, 1000)",
             [],
         )
         .unwrap();
@@ -1601,8 +1693,80 @@ mod tests {
         assert_eq!(lifecycle.front_parse_stale_count, 1);
         assert_eq!(lifecycle.front_parse_retry_pending_count, 1);
         assert_eq!(lifecycle.front_parse_missing_count, 1);
+        assert_eq!(
+            lifecycle.front_parse_missing_keys,
+            vec!["clip-front-c".to_owned()]
+        );
         assert_eq!(lifecycle.last_derived_at, Some(950));
         assert_eq!(lifecycle.last_front_parse_attempt_at, Some(900));
+    }
+
+    #[test]
+    fn index_lifecycle_prefers_persisted_freshness_marker() {
+        let conn = test_conn();
+        insert_clip_with_key(&conn, 1, "clip-front-a", 100);
+        conn.execute(
+            "INSERT INTO angles (clip_id, camera, file_ref, view_kind, offset_ms, duration_s, size_bytes)
+             VALUES (1, 'front', 'slot0/a-front.mp4', 'ro_usb', 0, 60.0, 1000)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO events
+                (id, type, severity, t, lat, lon, clip_id, trip_id, front_frame_index, front_frame_offset, description, created_at)
+             VALUES (1, 'sentry', 1, 1200, NULL, NULL, 1, NULL, NULL, NULL, 'seed', 950)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO index_lifecycle_meta (id, last_derived_at) VALUES (1, 2000)",
+            [],
+        )
+        .unwrap();
+
+        let lifecycle = index_lifecycle(&conn).unwrap();
+        assert_eq!(lifecycle.last_derived_at, Some(2000));
+    }
+
+    #[test]
+    fn index_lifecycle_uses_newer_of_marker_and_derived_row_timestamp() {
+        let conn = test_conn();
+        insert_clip_with_key(&conn, 1, "clip-front-a", 100);
+        conn.execute(
+            "INSERT INTO angles (clip_id, camera, file_ref, view_kind, offset_ms, duration_s, size_bytes)
+             VALUES (1, 'front', 'slot0/a-front.mp4', 'ro_usb', 0, 60.0, 1000)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO events
+                (id, type, severity, t, lat, lon, clip_id, trip_id, front_frame_index, front_frame_offset, description, created_at)
+             VALUES (1, 'sentry', 1, 1200, NULL, NULL, 1, NULL, NULL, NULL, 'seed', 950)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO index_lifecycle_meta (id, last_derived_at) VALUES (1, 500)",
+            [],
+        )
+        .unwrap();
+
+        let lifecycle = index_lifecycle(&conn).unwrap();
+        assert_eq!(lifecycle.last_derived_at, Some(950));
+    }
+
+    #[test]
+    fn index_lifecycle_empty_state_stays_empty_even_with_marker() {
+        let conn = test_conn();
+        conn.execute(
+            "INSERT INTO index_lifecycle_meta (id, last_derived_at) VALUES (1, 2000)",
+            [],
+        )
+        .unwrap();
+
+        let lifecycle = index_lifecycle(&conn).unwrap();
+        assert_eq!(lifecycle.lifecycle_state, "empty");
+        assert_eq!(lifecycle.last_derived_at, None);
     }
 
     fn insert_clip(conn: &Connection, id: i64, started_at: i64) {

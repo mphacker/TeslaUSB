@@ -105,9 +105,15 @@ mod unix_app {
             .unwrap_or(0)
     }
 
+    fn is_terminal_state(parse_state: &str) -> bool {
+        matches!(
+            parse_state,
+            "parsed_with_waypoints" | "no_waypoints" | "encrypted"
+        )
+    }
+
     fn is_nonterminal_state(parse_state: &str) -> bool {
-        matches!(parse_state, "legacy_unknown" | "parse_error" | "read_error")
-            || !matches!(parse_state, "parsed_with_waypoints" | "no_waypoints")
+        !is_terminal_state(parse_state)
     }
 
     fn terminal_refresh_needed(
@@ -135,7 +141,7 @@ mod unix_app {
         };
         if matches!(
             parse_state.as_str(),
-            "parsed_with_waypoints" | "no_waypoints"
+            "parsed_with_waypoints" | "no_waypoints" | "encrypted"
         ) {
             if terminal_refresh_needed(
                 *parser_version,
@@ -598,6 +604,31 @@ mod tests {
         assert!(
             !select_shape_keys(&census, &attempts, 400).contains(&key.to_owned()),
             "retry backoff must suppress re-selection until next_retry_at"
+        );
+    }
+
+    #[test]
+    fn encrypted_front_state_is_terminal_and_not_retried() {
+        let key = "0:TeslaCam/EncryptedClips/RecentClips/2026-06-01_20-10-35/2026-06-01_20-10-35";
+        let census = vec![FrontCensusRecord {
+            canonical_key: key.to_owned(),
+            front_fingerprint: 0xabc,
+            front_stable: true,
+        }];
+        let mut attempts = HashMap::new();
+        attempts.insert(
+            key.to_owned(),
+            (
+                "encrypted".to_owned(),
+                Some("abc".to_owned()),
+                Some(PARSER_VERSION),
+                0,
+                None,
+            ),
+        );
+        assert!(
+            !select_shape_keys(&census, &attempts, 400).contains(&key.to_owned()),
+            "terminal encrypted state must not be selected for retry"
         );
     }
 

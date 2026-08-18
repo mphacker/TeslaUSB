@@ -89,6 +89,8 @@ pub struct RecoveryRow {
     pub source_path: String,
     /// Absolute path the item would have been renamed to in the trash.
     pub trash_path: String,
+    /// Expected delete generation token, when present in the index row.
+    pub delete_gen: Option<String>,
     /// Size in bytes (reported as `bytes_freed` when a delete is finished).
     pub size_bytes: u64,
 }
@@ -118,8 +120,7 @@ pub trait Catalog {
     /// Propagates the underlying index read failure.
     fn delete_request(&self, id: ArchiveItemId) -> io::Result<Option<DeleteRequest>>;
 
-    /// Rows the startup recovery sweep must reconcile (anything not cleanly
-    /// `LIVE`/`DELETED`).
+    /// Rows the startup recovery sweep must reconcile.
     ///
     /// # Errors
     /// Propagates the underlying index read failure.
@@ -517,11 +518,17 @@ impl<'a> RetentionLoop<'a> {
     /// Propagates the first catalog or recovery IPC failure so the sweep retries
     /// next boot.
     pub fn recover(&self) -> io::Result<RecoverReport> {
-        let rows = self.seams.catalog.recovery_rows()?;
+        let rows = self
+            .seams
+            .catalog
+            .recovery_rows()
+            .map_err(|e| io::Error::other(format!("list recovery rows: {e}")))?;
         let mut actions = Vec::with_capacity(rows.len());
         for row in rows {
             let presence = self.fs_presence(&row.source_path, &row.trash_path);
             let action = recovery_action(row.delete_state, presence);
+            let should_clear_consumed_generation = matches!(action, RecoveryAction::NoOp)
+                && matches!(row.delete_state, DeleteState::Live | DeleteState::Deleted);
             run_recovery(
                 row.id,
                 &row.source_path,
@@ -530,19 +537,34 @@ impl<'a> RetentionLoop<'a> {
                 row.size_bytes,
                 self.seams.fs,
                 self.seams.index,
-            )?;
+            )
+            .map_err(|e| io::Error::other(format!("recover archive item {}: {e}", row.id.0)))?;
+            if should_clear_consumed_generation {
+                if let Some(delete_gen) = row.delete_gen.as_deref() {
+                    self.seams
+                        .index
+                        .clear_archive_delete_generation(row.id, delete_gen)
+                        .map_err(|e| {
+                            io::Error::other(format!(
+                                "clear archive delete generation {}: {e}",
+                                row.id.0
+                            ))
+                        })?;
+                }
+            }
             actions.push((row.id, action));
         }
         Ok(RecoverReport { actions })
     }
 
     fn fs_presence(&self, source: &str, trash: &str) -> FsPresence {
-        if self.seams.fs.exists(source) {
-            FsPresence::OriginalPresent
-        } else if self.seams.fs.exists(trash) {
-            FsPresence::TrashPresent
-        } else {
-            FsPresence::Neither
+        let source_present = self.seams.fs.exists(source);
+        let trash_present = self.seams.fs.exists(trash);
+        match (source_present, trash_present) {
+            (true, true) => FsPresence::BothPresent,
+            (true, false) => FsPresence::OriginalPresent,
+            (false, true) => FsPresence::TrashPresent,
+            (false, false) => FsPresence::Neither,
         }
     }
 
@@ -687,12 +709,9 @@ impl<'a> RetentionLoop<'a> {
                     source_path: row.source_path.clone(),
                     size_bytes: row.seg.size,
                 };
-                if let DeleteOutcome::Deleted { bytes_freed } = run_delete(
-                    &req,
-                    &self.trash_dir,
-                    self.seams.fs,
-                    self.seams.index,
-                ) {
+                if let DeleteOutcome::Deleted { bytes_freed } =
+                    run_delete(&req, &self.trash_dir, self.seams.fs, self.seams.index)
+                {
                     evicted.push(EvictedItem {
                         id: row.id,
                         bytes_freed,
@@ -849,12 +868,7 @@ impl<'a> RetentionLoop<'a> {
                 continue;
             }
 
-            match run_delete(
-                &req,
-                &self.trash_dir,
-                self.seams.fs,
-                self.seams.index,
-            ) {
+            match run_delete(&req, &self.trash_dir, self.seams.fs, self.seams.index) {
                 DeleteOutcome::Deleted { bytes_freed } => {
                     records.push(DrainRecord {
                         id: req.id,
@@ -928,12 +942,7 @@ impl<'a> RetentionLoop<'a> {
         let Some(req) = self.seams.catalog.delete_request(top.id)? else {
             return Ok((Vec::new(), Some("delete_request: row vanished".to_string())));
         };
-        match run_delete(
-            &req,
-            &self.trash_dir,
-            self.seams.fs,
-            self.seams.index,
-        ) {
+        match run_delete(&req, &self.trash_dir, self.seams.fs, self.seams.index) {
             DeleteOutcome::Deleted { bytes_freed } => Ok((
                 vec![EvictedItem {
                     id: top.id,
@@ -1044,7 +1053,10 @@ mod tests {
         ArchiveStore, CarDeleteHandoff, CarDeleteRequest, HandoffOutcome, VerifiedArchivePass,
     };
     use crate::config::RetentionConfig;
-    use crate::delete::{ArchiveDeleteOps, ClaimResult, DeleteRequest, IndexClient, RandGen};
+    use crate::delete::{
+        ArchiveDeleteOps, ClaimResult, DeleteRequest, FsPresence, IndexClient, RandGen,
+        RecoveryAction,
+    };
     use crate::durability::{ArchiveVerification, Durability, VerifiedPassId};
     use crate::folder::FolderClass;
     use crate::governor::{DiskImgAccounting, FsRole, FsSample, Tier};
@@ -1305,6 +1317,16 @@ mod tests {
         }
         fn quarantine(&self, _id: ArchiveItemId, reason: &str) -> io::Result<()> {
             self.log.borrow_mut().push(format!("quarantine {reason}"));
+            Ok(())
+        }
+        fn clear_archive_delete_generation(
+            &self,
+            id: ArchiveItemId,
+            delete_gen: &str,
+        ) -> io::Result<()> {
+            self.log
+                .borrow_mut()
+                .push(format!("clear_delete_gen {} {delete_gen}", id.0));
             Ok(())
         }
     }
@@ -2284,6 +2306,7 @@ mod tests {
             delete_state: DeleteState::Deleting,
             source_path: "arch/ev7".to_string(),
             trash_path: "trash/7.deleting".to_string(),
+            delete_gen: Some("00000000000000000000000000000007".to_string()),
             size_bytes: 2048,
         }];
         let cfg = RetentionConfig::default();
@@ -2293,6 +2316,70 @@ mod tests {
         let log = h.index.log.borrow();
         assert!(!log.contains(&"mark_deleting".to_string()));
         assert!(log.contains(&"mark_deleted 2048".to_string()));
+    }
+
+    #[test]
+    fn fs_presence_distinguishes_both_original_and_trash() {
+        let mut h = harness();
+        h.fs = FakeFs::new(&["arch/ev7", "trash/7.deleting"]);
+        let cfg = RetentionConfig::default();
+        let rl = RetentionLoop::new(&cfg, h.seams(), "trash");
+        assert_eq!(
+            rl.fs_presence("arch/ev7", "trash/7.deleting"),
+            FsPresence::BothPresent
+        );
+    }
+
+    #[test]
+    fn recover_quarantines_when_original_and_trash_both_exist() {
+        let mut h = harness();
+        h.fs = FakeFs::new(&["arch/ev7", "trash/7.deleting"]);
+        h.catalog.recovery = vec![RecoveryRow {
+            id: ArchiveItemId(7),
+            delete_state: DeleteState::DeleteClaimed,
+            source_path: "arch/ev7".to_string(),
+            trash_path: "trash/7.deleting".to_string(),
+            delete_gen: Some("00000000000000000000000000000007".to_string()),
+            size_bytes: 2048,
+        }];
+        let cfg = RetentionConfig::default();
+        let rl = RetentionLoop::new(&cfg, h.seams(), "trash");
+        let report = rl.recover().unwrap();
+        assert_eq!(
+            report.actions,
+            vec![(ArchiveItemId(7), RecoveryAction::Quarantine)]
+        );
+        let log = h.index.log.borrow();
+        assert!(log.contains(&"quarantine recovery: inconsistent FS/DB state".to_string()));
+        assert!(!log.contains(&"release".to_string()));
+        assert!(
+            !log.iter()
+                .any(|entry| entry.starts_with("clear_delete_gen "))
+        );
+    }
+
+    #[test]
+    fn recover_clears_consumed_generation_for_healthy_live_row() {
+        let mut h = harness();
+        h.fs = FakeFs::new(&["arch/ev7"]);
+        h.catalog.recovery = vec![RecoveryRow {
+            id: ArchiveItemId(7),
+            delete_state: DeleteState::Live,
+            source_path: "arch/ev7".to_string(),
+            trash_path: "trash/7.deleting".to_string(),
+            delete_gen: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
+            size_bytes: 2048,
+        }];
+        let cfg = RetentionConfig::default();
+        let rl = RetentionLoop::new(&cfg, h.seams(), "trash");
+        let report = rl.recover().unwrap();
+        assert_eq!(
+            report.actions,
+            vec![(ArchiveItemId(7), RecoveryAction::NoOp)]
+        );
+        let log = h.index.log.borrow();
+        assert!(log.contains(&"clear_delete_gen 7 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()));
+        assert!(!log.contains(&"quarantine recovery: inconsistent FS/DB state".to_string()));
     }
 
     #[test]

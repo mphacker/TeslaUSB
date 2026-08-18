@@ -6,7 +6,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use scannerd::boot::{ExfatParams, parse_boot_sector};
 use scannerd::clip::parse_clip_name;
+use scannerd::error::ScannerError;
 use scannerd::mbr::parse_mbr;
+use scannerd::reader::ReaderError;
 use scannerd::stability::{StabilityConfig, StabilityTracker};
 use scannerd::timestamp::epoch_from_tesla_timestamp;
 use scannerd::volume::Volume;
@@ -172,7 +174,7 @@ fn chain_digests_for_records<R: scannerd::reader::BlockReader + ?Sized>(
 ) -> io::Result<HashMap<String, u64>> {
     let mut digests = HashMap::new();
     for record in records {
-        if record.no_fat_chain {
+        if record.no_fat_chain || !record_ready_for_chain_digest(record) {
             continue;
         }
         // A 0-byte / in-flux clip can report first_cluster=0 (no data cluster
@@ -182,8 +184,17 @@ fn chain_digests_for_records<R: scannerd::reader::BlockReader + ?Sized>(
         if !volume.params().is_valid_cluster(record.first_cluster) {
             continue;
         }
-        let digest = record_chain_digest(volume, record)?;
-        digests.insert(record_chain_key(record), digest);
+        match record_chain_digest(volume, record) {
+            Ok(digest) => {
+                digests.insert(record_chain_key(record), digest);
+            }
+            Err(err) if is_truncated_record_read_race(&err) => {
+                // Per-file short-read race while Tesla is still mutating this
+                // clip: skip this record and continue the cycle.
+                continue;
+            }
+            Err(err) => return Err(scanner_to_io(&err)),
+        }
     }
     Ok(digests)
 }
@@ -191,14 +202,16 @@ fn chain_digests_for_records<R: scannerd::reader::BlockReader + ?Sized>(
 fn record_chain_digest<R: scannerd::reader::BlockReader + ?Sized>(
     volume: &Volume<'_, R>,
     record: &FileRecord,
-) -> io::Result<u64> {
-    let span = record
-        .data_length
+) -> Result<u64, ScannerError> {
+    let validated_length = record.valid_data_length.min(record.data_length);
+    let cluster_span = validated_length
         .div_ceil(volume.params().bytes_per_cluster())
         .max(1);
-    let chain = volume
-        .follow_chain(record.first_cluster, false, span)
-        .map_err(|err| scanner_to_io(&err))?;
+    let max_clusters = usize::try_from(cluster_span).map_err(|_| ScannerError::ChainError {
+        first: record.first_cluster,
+        reason: "validated-length cluster span exceeds usize",
+    })?;
+    let chain = volume.follow_chain_bounded(record.first_cluster, max_clusters)?;
     Ok(fold_chain_digest(&chain))
 }
 
@@ -223,6 +236,21 @@ fn record_chain_key(record: &FileRecord) -> String {
         "{}:{}:{}:{}",
         record.path, record.first_cluster, record.data_length, record.name_hash
     )
+}
+
+fn record_ready_for_chain_digest(record: &FileRecord) -> bool {
+    record.valid_data_length == record.data_length && record.set_checksum_ok
+}
+
+fn is_truncated_record_read_race(err: &ScannerError) -> bool {
+    match err {
+        ScannerError::Reader(ReaderError::OutOfRange { .. }) => true,
+        ScannerError::Reader(ReaderError::Io { source_msg, .. }) => {
+            let msg = source_msg.to_ascii_lowercase();
+            msg.contains("failed to fill whole buffer") || msg.contains("unexpected eof")
+        }
+        _ => false,
+    }
 }
 
 fn find_subdir<R: scannerd::reader::BlockReader + ?Sized>(
@@ -382,6 +410,11 @@ fn group_recent_candidates(
 ) -> Vec<Candidate> {
     let mut grouped: BTreeMap<String, Vec<FileRecord>> = BTreeMap::new();
     for record in records {
+        if !record.no_fat_chain && !chain_digests.contains_key(&record_chain_key(&record)) {
+            // Fragmented records without a validated chain digest are unstable:
+            // skip so they cannot surface as archivable candidates.
+            continue;
+        }
         if !record.path.starts_with(RECENT_PREFIX) {
             continue;
         }
@@ -531,6 +564,42 @@ mod tests {
         }
     }
 
+    struct RaceIoReader {
+        size: u64,
+    }
+
+    impl BlockReader for RaceIoReader {
+        fn size_bytes(&self) -> u64 {
+            self.size
+        }
+
+        fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), ReaderError> {
+            Err(ReaderError::Io {
+                offset,
+                len: buf.len(),
+                source_msg: "failed to fill whole buffer".to_owned(),
+            })
+        }
+    }
+
+    struct NonRaceIoReader {
+        size: u64,
+    }
+
+    impl BlockReader for NonRaceIoReader {
+        fn size_bytes(&self) -> u64 {
+            self.size
+        }
+
+        fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), ReaderError> {
+            Err(ReaderError::Io {
+                offset,
+                len: buf.len(),
+                source_msg: "input/output error".to_owned(),
+            })
+        }
+    }
+
     fn test_params() -> ExfatParams {
         ExfatParams {
             partition_offset_sectors: 2048,
@@ -589,7 +658,11 @@ mod tests {
             ),
         ];
 
-        let grouped = group_recent_candidates(0, 0x1234_abcd, records, &HashMap::new());
+        let mut digests = HashMap::new();
+        for record in &records {
+            digests.insert(record_chain_key(record), 1);
+        }
+        let grouped = group_recent_candidates(0, 0x1234_abcd, records, &digests);
         assert_eq!(grouped.len(), 1);
         assert_eq!(
             grouped[0].canonical_key,
@@ -723,6 +796,72 @@ mod tests {
         zero.first_cluster = 0;
         let digests = chain_digests_for_records(&volume, &[zero]).expect("must not error");
         assert!(digests.is_empty());
+    }
+
+    #[test]
+    fn chain_digests_skip_unstable_records_before_digesting() {
+        let reader = NonRaceIoReader { size: 1 << 24 };
+        let volume = Volume::new(&reader, test_params());
+        let growing = rec(
+            "TeslaCam/RecentClips/2026-06-19_10-00-00-front.mp4",
+            "2026-06-19_10-00-00-front.mp4",
+            500,
+            1000,
+            true,
+        );
+        let bad_checksum = rec(
+            "TeslaCam/RecentClips/2026-06-19_10-00-00-back.mp4",
+            "2026-06-19_10-00-00-back.mp4",
+            1000,
+            1000,
+            false,
+        );
+        let digests =
+            chain_digests_for_records(&volume, &[growing, bad_checksum]).expect("must not error");
+        assert!(digests.is_empty());
+    }
+
+    #[test]
+    fn chain_digests_skip_per_file_short_read_race() {
+        let reader = RaceIoReader { size: 1 << 24 };
+        let volume = Volume::new(&reader, test_params());
+        let record = rec(
+            "TeslaCam/RecentClips/2026-06-19_10-00-00-front.mp4",
+            "2026-06-19_10-00-00-front.mp4",
+            1000,
+            1000,
+            true,
+        );
+        let digests = chain_digests_for_records(&volume, &[record]).expect("must not error");
+        assert!(digests.is_empty());
+    }
+
+    #[test]
+    fn chain_digests_propagate_non_race_reader_errors() {
+        let reader = NonRaceIoReader { size: 1 << 24 };
+        let volume = Volume::new(&reader, test_params());
+        let record = rec(
+            "TeslaCam/RecentClips/2026-06-19_10-00-00-front.mp4",
+            "2026-06-19_10-00-00-front.mp4",
+            1000,
+            1000,
+            true,
+        );
+        let err = chain_digests_for_records(&volume, &[record]).expect_err("must error");
+        assert!(err.to_string().contains("input/output error"));
+    }
+
+    #[test]
+    fn group_recent_candidates_skip_fragmented_record_without_chain_digest() {
+        let record = rec(
+            "TeslaCam/RecentClips/2026-06-19_10-00-00-front.mp4",
+            "2026-06-19_10-00-00-front.mp4",
+            1000,
+            1000,
+            true,
+        );
+        let grouped = group_recent_candidates(0, 0x1234_abcd, vec![record], &HashMap::new());
+        assert!(grouped.is_empty());
     }
 
     #[test]

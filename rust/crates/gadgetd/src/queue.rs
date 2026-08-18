@@ -250,9 +250,11 @@ impl MutationQueue {
     ///
     /// Returns true when an entry was removed.
     pub(crate) fn rollback_enqueue(&mut self, job_id: &str) -> bool {
-        if let Some(pos) = self.entries.iter().position(|entry| {
-            entry.id == job_id && entry.state == MutationState::Queued
-        }) {
+        if let Some(pos) = self
+            .entries
+            .iter()
+            .position(|entry| entry.id == job_id && entry.state == MutationState::Queued)
+        {
             self.entries.remove(pos);
             return true;
         }
@@ -405,6 +407,7 @@ impl MutationQueue {
 
     /// Blob paths whose entries just reached a terminal state and can be
     /// unlinked. Call after `set_state(.., Applied|Coalesced|FailedFatal)`.
+    #[allow(dead_code)]
     pub(crate) fn reclaimable_blobs(&self, seqs: &[u64]) -> Vec<String> {
         self.entries
             .iter()
@@ -427,6 +430,7 @@ impl MutationQueue {
 
     /// Drop terminal entries from the in-memory journal (after their blobs are
     /// reclaimed) so it does not grow unbounded.
+    #[allow(dead_code)]
     pub(crate) fn prune_terminal(&mut self) {
         self.entries.retain(|e| !e.state.is_terminal());
     }
@@ -872,9 +876,7 @@ mod tests {
         q.enqueue(2, delete("Music/z.mp3"), None, None).unwrap();
 
         let err = q
-            .persist_with_parent_sync(&path, |_parent| {
-                Err(std::io::Error::other("sync failed"))
-            })
+            .persist_with_parent_sync(&path, |_parent| Err(std::io::Error::other("sync failed")))
             .expect_err("parent sync failure should be post-commit");
         assert_eq!(err.stage(), PersistErrorStage::PostCommit);
         assert!(path.exists(), "journal rename should already have happened");

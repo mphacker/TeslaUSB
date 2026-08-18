@@ -369,6 +369,21 @@ impl IndexClient for LiveIndexClient {
             "quarantine_archive_item",
         )
     }
+
+    fn clear_archive_delete_generation(
+        &self,
+        id: ArchiveItemId,
+        delete_gen: &str,
+    ) -> io::Result<()> {
+        expect_acked(
+            self.client
+                .send_delete_request(&DeleteWireRequest::ClearArchiveDeleteGeneration {
+                    id: id.0,
+                    delete_gen: delete_gen.to_owned(),
+                })?,
+            "clear_archive_delete_generation",
+        )
+    }
 }
 
 fn expect_acked(response: DeleteWireResponse, op: &str) -> io::Result<()> {
@@ -486,7 +501,8 @@ impl Catalog for LiveCatalog {
                 .to_string_lossy()
                 .into_owned();
             let delete_state = parse_delete_state(&row.delete_state)?;
-            let trash_path = if let Some(delete_gen) = row.delete_gen {
+            let delete_gen = row.delete_gen;
+            let trash_path = if let Some(ref delete_gen) = delete_gen {
                 if delete_gen.len() != 32
                     || !delete_gen.bytes().all(|byte| byte.is_ascii_hexdigit())
                 {
@@ -496,7 +512,10 @@ impl Catalog for LiveCatalog {
                     ));
                 }
                 retentiond::delete::trash_path(&self.trash_dir, ArchiveItemId(row.id), &delete_gen)
-            } else if matches!(delete_state, DeleteState::DeleteClaimed | DeleteState::Deleting) {
+            } else if matches!(
+                delete_state,
+                DeleteState::DeleteClaimed | DeleteState::Deleting
+            ) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("missing delete_gen for transitional row id {}", row.id),
@@ -510,6 +529,7 @@ impl Catalog for LiveCatalog {
                 delete_state,
                 source_path,
                 trash_path,
+                delete_gen,
                 size_bytes,
             });
         }
@@ -1000,7 +1020,7 @@ mod tests {
         }
 
         #[test]
-        fn mark_deleting_deleted_release_quarantine_ack_ok_else_err() {
+        fn mark_deleting_deleted_release_clear_quarantine_ack_ok_else_err() {
             let temp_dir = new_temp_dir();
             let socket_path = temp_dir.join("indexd.sock");
             let listener = UnixListener::bind(&socket_path).expect("bind listener");
@@ -1039,15 +1059,31 @@ mod tests {
                 let p4 = read_frame(&mut stream, MAX_REQUEST_FRAME).expect("read 4");
                 assert_eq!(
                     String::from_utf8(p4).expect("utf8"),
+                    "{\"cmd\":\"clear_archive_delete_generation\",\"id\":7,\"delete_gen\":\"feedfeedfeedfeedfeedfeedfeedfeed\"}"
+                );
+                write_frame(&mut stream, &ack, MAX_REQUEST_FRAME).expect("write 4");
+
+                let (mut stream, _) = listener.accept().expect("accept 5");
+                let p5 = read_frame(&mut stream, MAX_REQUEST_FRAME).expect("read 5");
+                assert_eq!(
+                    String::from_utf8(p5).expect("utf8"),
                     "{\"cmd\":\"quarantine_archive_item\",\"id\":7,\"reason\":\"boom\"}"
                 );
-                write_frame(&mut stream, &err, MAX_REQUEST_FRAME).expect("write 4");
+                write_frame(&mut stream, &err, MAX_REQUEST_FRAME).expect("write 5");
             });
             let shared = Rc::new(IndexDeleteClient::new(socket_path));
             let client = LiveIndexClient::new(shared);
             assert!(client.mark_deleting(ArchiveItemId(7)).is_ok());
             assert!(client.mark_deleted(ArchiveItemId(7), 99).is_ok());
             assert!(client.release_delete_claim(ArchiveItemId(7)).is_ok());
+            assert!(
+                client
+                    .clear_archive_delete_generation(
+                        ArchiveItemId(7),
+                        "feedfeedfeedfeedfeedfeedfeedfeed",
+                    )
+                    .is_ok()
+            );
             assert!(client.quarantine(ArchiveItemId(7), "boom").is_err());
             server.join().expect("join");
             let _ = fs::remove_dir_all(temp_dir);
@@ -1233,6 +1269,10 @@ mod tests {
                 rows[0].trash_path,
                 "/archive/.retention-trash/5.0000000000000000000000000000000f.deleting"
             );
+            assert_eq!(
+                rows[0].delete_gen.as_deref(),
+                Some("0000000000000000000000000000000f")
+            );
             server.join().expect("join");
             let _ = fs::remove_dir_all(temp_dir);
 
@@ -1288,9 +1328,10 @@ mod tests {
                 .recovery_rows()
                 .expect_err("missing delete_gen must fail closed");
             assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-            assert!(err
-                .to_string()
-                .contains("missing delete_gen for transitional row id 9"));
+            assert!(
+                err.to_string()
+                    .contains("missing delete_gen for transitional row id 9")
+            );
             server.join().expect("join");
             let _ = fs::remove_dir_all(temp_dir);
         }

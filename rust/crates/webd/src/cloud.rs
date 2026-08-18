@@ -547,8 +547,9 @@ async fn post_cloud_failed_upload_retry(
             detail,
         } => {
             let detail = detail.map(|value| sanitize_public_error(&value));
-            let http_status = replay_http_status(response_status.as_deref(), response_code, &outcome)
-                .unwrap_or(StatusCode::OK);
+            let http_status =
+                replay_http_status(response_status.as_deref(), response_code, &outcome)
+                    .unwrap_or(StatusCode::OK);
             Ok((
                 http_status,
                 Json(FailedUploadRetryResp {
@@ -612,7 +613,11 @@ fn canonical_failed_upload_retry_hash(
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(RETRY_HASH_DOMAIN_TAG);
-    append_canonical_field(&mut hasher, b"archive_item_id", &archive_item_id.to_string());
+    append_canonical_field(
+        &mut hasher,
+        b"archive_item_id",
+        &archive_item_id.to_string(),
+    );
     append_canonical_field(&mut hasher, b"child_key", child_key);
     append_canonical_field(
         &mut hasher,

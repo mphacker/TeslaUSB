@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { Icon } from "../components/Icon";
 import { api, ApiError } from "../api/client";
-import type { Clip, EventItem } from "../api/types";
+import type {
+  ArchiveDeleteMutationResponse,
+  ArchiveDeleteStatusResponse,
+  Clip,
+  EventItem,
+} from "../api/types";
 import { HudController, type HudElements } from "../player/hud-controller";
 import { isDownloadableAngle, isStreamableAngle } from "../player/angles";
 import { classifyDeleteFailure, type DeleteFailure } from "../player/deleteClip";
@@ -28,9 +33,9 @@ import "../styles/player.css";
  *
  * DEFERRED (webd 5.1c): the archive-to-cloud mutation renders inert/disabled
  * here, exactly as the media-hub did for its deferred mutation forms. The
- * delete-clip mutation IS wired (webd `DELETE /api/clips/:id?target=car`, the
- * `gadgetd` eject-handoff): an operator-gated confirm dialog issues a single
- * synchronous, terminal delete and reflects success/busy-retry/error inline.
+ * archive-delete mutation is wired (`DELETE /api/clips/:id?target=archive`):
+ * an operator-gated confirm dialog receives durable accepted/queued semantics
+ * and polls the archive-delete job status route until terminal.
  *
  * FLAG (nav placement): there is no "events" NavKey, so this screen highlights
  * "map" — the existing reversible router default. webd also exposes no city for
@@ -99,6 +104,8 @@ function clipSize(clip: Clip | null): string {
 
 const DL_DOWNLOADING_MS = 1000;
 const DL_RESET_MS = 8000;
+const ARCHIVE_DELETE_POLL_INTERVAL_MS = 600;
+const ARCHIVE_DELETE_POLL_MAX_ATTEMPTS = 30;
 type DlPhase = "idle" | "preparing" | "downloading";
 
 function errMessage(err: unknown): string {
@@ -107,7 +114,89 @@ function errMessage(err: unknown): string {
     : (err as Error).message;
 }
 
-/** How the delete UI should react to a failed `deleteClip` call. */
+function archiveDeleteProgressText(state: string): string {
+  if (state === "running") return "Archive delete accepted. Deleting\u2026";
+  if (state === "queued") return "Archive delete accepted and queued.";
+  return "Archive delete accepted. Waiting for completion\u2026";
+}
+
+function archiveDeleteImmediateFailure(
+  response: ArchiveDeleteMutationResponse,
+): DeleteFailure | null {
+  if (response.status === "conflict") {
+    return {
+      message: response.detail ?? "Archive delete request conflicted with existing durable metadata.",
+      retryable: false,
+      softGone: false,
+    };
+  }
+  if (response.status === "refused") {
+    return {
+      message: response.detail ?? "Archive delete was refused.",
+      retryable: false,
+      softGone: false,
+    };
+  }
+  if (response.state === "done") return null;
+  if (response.state === "refused") {
+    return {
+      message: response.detail ?? "Archive delete was refused.",
+      retryable: false,
+      softGone: false,
+    };
+  }
+  if (response.state === "failed") {
+    return {
+      message: response.detail
+        ? `Archive delete failed: ${response.detail}`
+        : "Archive delete failed before completion.",
+      retryable: true,
+      softGone: false,
+    };
+  }
+  return null;
+}
+
+function archiveDeleteTerminalFailure(
+  status: ArchiveDeleteStatusResponse,
+): DeleteFailure | null {
+  if (status.state === "done") return null;
+  if (status.state === "refused") {
+    return {
+      message: status.detail ?? "Archive delete was refused.",
+      retryable: false,
+      softGone: false,
+    };
+  }
+  if (status.state === "failed") {
+    return {
+      message: status.detail
+        ? `Archive delete failed: ${status.detail}`
+        : "Archive delete failed before completion.",
+      retryable: true,
+      softGone: false,
+    };
+  }
+  return null;
+}
+
+async function waitForArchiveDeletePoll(signal: AbortSignal): Promise<void> {
+  await new Promise<void>((resolve) => {
+    const id = window.setTimeout(resolve, ARCHIVE_DELETE_POLL_INTERVAL_MS);
+    signal.addEventListener(
+      "abort",
+      () => {
+        window.clearTimeout(id);
+        resolve();
+      },
+      { once: true },
+    );
+  });
+  if (signal.aborted) {
+    throw new Error("archive-delete-aborted");
+  }
+}
+
 /** Seconds into the *currently selected camera's* video where the event moment
  *  falls. The event's `front_frame_offset_ms` is relative to the FRONT cam's
  *  own start; each angle starts at its `offset_ms` within the clip, so the
@@ -215,6 +304,7 @@ export function EventPlayer() {
   );
   const [deleting, setDeleting] = useState(false);
   const [deleteFail, setDeleteFail] = useState<DeleteFailure | null>(null);
+  const [deleteProgress, setDeleteProgress] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [streamNotice, setStreamNotice] = useState<string | null>(null);
   // Only the ro_usb (HEAD-probed) path needs async gating; the archive common
@@ -668,6 +758,7 @@ export function EventPlayer() {
     if (deleting) return;
     setPending(null);
     setDeleteFail(null);
+    setDeleteProgress(null);
   }, [selectedClipId]);
 
   const openDeleteDialog = () => {
@@ -677,6 +768,7 @@ export function EventPlayer() {
       : `${clip.folder_class} \u2014 ${fmtDateTime(clip.started_at)}`;
     setPending({ clipId: clip.id, label });
     setDeleteFail(null);
+    setDeleteProgress(null);
     setNotice(null);
   };
 
@@ -684,6 +776,7 @@ export function EventPlayer() {
     if (deleting) return; // can't dismiss mid-flight
     setPending(null);
     setDeleteFail(null);
+    setDeleteProgress(null);
   };
 
   /** Remove the deleted clip by stable id (never by the current `index`, which
@@ -693,6 +786,7 @@ export function EventPlayer() {
   const finishDeletion = (clipId: number, msg: string) => {
     setPending(null);
     setDeleteFail(null);
+    setDeleteProgress(null);
     setNotice(msg);
     setClip((prev) => (prev && prev.id === clipId ? null : prev));
     setEvents((prev) => (prev ? prev.filter((e) => e.clip_id !== clipId) : prev));
@@ -703,11 +797,36 @@ export function EventPlayer() {
     const clipId = pending.clipId;
     setDeleting(true);
     setDeleteFail(null);
+    setDeleteProgress(null);
     const ac = new AbortController();
     deleteAbortRef.current = ac;
     try {
-      await api.deleteClip(clipId, ac.signal);
-      finishDeletion(clipId, "Clip deleted from the car.");
+      const accepted = await api.archiveDeleteClip(clipId, ac.signal);
+      const immediateFailure = archiveDeleteImmediateFailure(accepted);
+      if (immediateFailure) {
+        setDeleteFail(immediateFailure);
+        return;
+      }
+      setDeleteProgress(archiveDeleteProgressText(accepted.state));
+      for (let i = 0; i < ARCHIVE_DELETE_POLL_MAX_ATTEMPTS; i += 1) {
+        const status = await api.archiveDeleteStatus(accepted.jobId, ac.signal);
+        const terminalFailure = archiveDeleteTerminalFailure(status);
+        if (!terminalFailure && status.state === "done") {
+          finishDeletion(clipId, "Clip deleted from archive storage.");
+          return;
+        }
+        if (terminalFailure) {
+          setDeleteFail(terminalFailure);
+          return;
+        }
+        setDeleteProgress(archiveDeleteProgressText(status.state));
+        await waitForArchiveDeletePoll(ac.signal);
+      }
+      setDeleteFail({
+        message: "Archive delete is still queued. Retry in a moment to refresh status.",
+        retryable: true,
+        softGone: false,
+      });
     } catch (err) {
       if (ac.signal.aborted) return; // silent: the user/unmount cancelled
       const fail = classifyDeleteFailure(err);
@@ -975,7 +1094,7 @@ export function EventPlayer() {
           <div class="camera-label">Archive</div>
         </div>
 
-        {/* Delete clip — operator-gated destructive action (webd car-handoff). */}
+        {/* Delete clip — operator-gated destructive action (webd archive-delete protocol). */}
         <button
           type="button"
           class={`camera-option delete-option${clipReady ? "" : " disabled"}`}
@@ -984,7 +1103,7 @@ export function EventPlayer() {
           disabled={!clipReady || deleting}
           aria-disabled={clipReady ? "false" : "true"}
           aria-haspopup="dialog"
-          title={clipReady ? "Delete this clip from the car" : "No clip to delete"}
+          title={clipReady ? "Delete this clip from archive storage" : "No clip to delete"}
         >
           <Icon name="trash-2" class="camera-icon" />
           <div class="camera-label">Delete</div>
@@ -1012,9 +1131,19 @@ export function EventPlayer() {
             </h3>
             <p id="deleteModalDesc" class="delete-modal-desc">
               This permanently removes{" "}
-              <strong class="delete-modal-clip">{pending.label}</strong> from the
-              car's USB drive. This can't be undone.
+              <strong class="delete-modal-clip">{pending.label}</strong> from archive
+              storage. This can't be undone.
             </p>
+
+            {deleteProgress && !deleteFail && (
+              <div
+                class="delete-modal-status retryable"
+                role="status"
+                data-testid="delete-progress"
+              >
+                {deleteProgress}
+              </div>
+            )}
 
             {deleteFail && (
               <div

@@ -94,6 +94,17 @@ pub trait IndexClient {
     /// # Errors
     /// Propagates an IPC/transaction failure.
     fn quarantine(&self, id: ArchiveItemId, reason: &str) -> io::Result<()>;
+
+    /// Clear a consumed terminal (`LIVE`/`DELETED`) delete generation token
+    /// when it still matches the expected value.
+    ///
+    /// # Errors
+    /// Propagates an IPC/transaction failure.
+    fn clear_archive_delete_generation(
+        &self,
+        id: ArchiveItemId,
+        delete_gen: &str,
+    ) -> io::Result<()>;
 }
 
 /// Result of an atomic delete claim (the contract §3 lease-honoring gate).
@@ -199,6 +210,21 @@ pub fn run_delete(
             };
         }
     };
+    run_delete_claimed(req, trash_dir, &delete_gen, fs, index)
+}
+
+/// Continue the crash-safe protocol after a claim token is already owned.
+///
+/// This is used by the internal archive-delete owner handoff: indexd performs
+/// the atomic claim + ownership persistence, then retentiond executes the
+/// existing rename/unlink state machine from that claimed token.
+pub fn run_delete_claimed(
+    req: &DeleteRequest,
+    trash_dir: &str,
+    delete_gen: &str,
+    fs: &dyn ArchiveDeleteOps,
+    index: &dyn IndexClient,
+) -> DeleteOutcome {
     if let Err(message) = validate_delete_gen(&delete_gen) {
         return DeleteOutcome::Failed {
             reason: format!("claim delete_gen: {message}"),
@@ -267,6 +293,8 @@ use crate::lease::DeleteState;
 /// What the recovery sweep finds on disk for a given row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FsPresence {
+    /// Both the original and a `.retention-trash` entry exist.
+    BothPresent,
     /// The original (pre-rename) path still exists.
     OriginalPresent,
     /// A `.retention-trash` entry exists.
@@ -307,6 +335,10 @@ pub fn recovery_action(db: DeleteState, fs: FsPresence) -> RecoveryAction {
     use DeleteState as D;
     use FsPresence as F;
     match (db, fs) {
+        // If both original+trash exist simultaneously, fail closed for operator
+        // investigation instead of guessing a destructive action.
+        (_, F::BothPresent) => RecoveryAction::Quarantine,
+
         // Claimed but never renamed → release back to LIVE.
         (D::DeleteClaimed, F::OriginalPresent) => RecoveryAction::ReleaseToLive,
         // Claimed and renamed → continue the delete.
@@ -405,7 +437,7 @@ mod tests {
 
     use super::{
         ArchiveDeleteOps, ClaimResult, DeleteOutcome, DeleteRequest, FsPresence, IndexClient,
-        RecoveryAction, recovery_action, run_delete, trash_path,
+        RecoveryAction, recovery_action, run_delete, run_delete_claimed, trash_path,
     };
     use crate::io::ArchiveItemId;
     use crate::lease::DeleteState;
@@ -506,6 +538,16 @@ mod tests {
                 .push("QUARANTINED".to_string());
             Ok(())
         }
+        fn clear_archive_delete_generation(
+            &self,
+            _id: ArchiveItemId,
+            delete_gen: &str,
+        ) -> io::Result<()> {
+            self.transitions
+                .borrow_mut()
+                .push(format!("CLEAR_DELETE_GEN({delete_gen})"));
+            self.boom("clear_delete_gen")
+        }
     }
 
     fn req() -> DeleteRequest {
@@ -533,6 +575,25 @@ mod tests {
         assert!(ops[3].ends_with(".deleting"));
 
         // DB advanced DELETING only AFTER the durable rename, DELETED last.
+        let tr = index.transitions.borrow().clone();
+        assert_eq!(
+            tr,
+            vec!["DELETING".to_string(), "DELETED(1234)".to_string()]
+        );
+    }
+
+    #[test]
+    fn run_delete_claimed_reuses_existing_safe_order() {
+        let fs = Recorder::default();
+        let index = FakeIndex::default();
+        let out = run_delete_claimed(
+            &req(),
+            "/archive/.retention-trash",
+            "00000000000000000000000000000007",
+            &fs,
+            &index,
+        );
+        assert_eq!(out, DeleteOutcome::Deleted { bytes_freed: 1234 });
         let tr = index.transitions.borrow().clone();
         assert_eq!(
             tr,
@@ -634,6 +695,16 @@ mod tests {
         use DeleteState as D;
         use FsPresence as F;
         use RecoveryAction as R;
+        for db in [
+            D::Live,
+            D::DeleteClaimed,
+            D::Deleting,
+            D::Deleted,
+            D::DeleteFailed,
+            D::Quarantined,
+        ] {
+            assert_eq!(recovery_action(db, F::BothPresent), R::Quarantine);
+        }
         // Verbatim against contract §4.1.
         assert_eq!(
             recovery_action(D::DeleteClaimed, F::OriginalPresent),

@@ -35,9 +35,13 @@ use retentiond::archive_driver::{DriverState, archive_recent_capped};
 #[cfg(unix)]
 use retentiond::config::RetentionConfig;
 #[cfg(unix)]
+use retentiond::delete::{DeleteOutcome, DeleteRequest, IndexClient, run_delete_claimed};
+#[cfg(unix)]
 use retentiond::governor::{self, DiskImgAccounting, FsRole, FsSample, Statfs, Tier};
 #[cfg(unix)]
 use retentiond::index_delete_client::IndexDeleteClient;
+#[cfg(unix)]
+use retentiond::io::ArchiveItemId;
 #[cfg(unix)]
 use retentiond::read_client::VolumeReadFileClient;
 #[cfg(unix)]
@@ -253,6 +257,138 @@ impl CarDeleteHandoff for NoCarHandoff {
         HandoffOutcome::Refused(
             "governor archive-delete path does not use the car handoff".to_owned(),
         )
+    }
+}
+
+#[cfg(unix)]
+fn join_archive_rel_path(archive_root: &Path, rel: &str) -> Result<String, String> {
+    if rel.is_empty() || rel.as_bytes().contains(&0) || rel.contains('\\') {
+        return Err(format!("invalid archive relative path: {rel}"));
+    }
+    let mut out = archive_root.to_path_buf();
+    for component in Path::new(rel).components() {
+        match component {
+            std::path::Component::Normal(name) => out.push(name),
+            _ => {
+                return Err(format!("archive relative path escapes root: {rel}"));
+            }
+        }
+    }
+    Ok(out.to_string_lossy().into_owned())
+}
+
+#[cfg(unix)]
+fn process_archive_delete_queue_once(
+    shared: &IndexDeleteClient,
+    archive_root: &Path,
+    trash_dir: &str,
+    fs: &dyn retentiond::delete::ArchiveDeleteOps,
+    index: &dyn IndexClient,
+) {
+    let claimed = match shared.claim_next_archive_delete() {
+        Ok(claimed) => claimed,
+        Err(err) => {
+            eprintln!("retentiond archive_delete: claim_next error: {err}");
+            return;
+        }
+    };
+    let Some(work) = claimed else {
+        return;
+    };
+    let id = ArchiveItemId(work.target_archive_item_id);
+    let source_path = match join_archive_rel_path(archive_root, &work.target_archive_path) {
+        Ok(path) => path,
+        Err(reason) => {
+            eprintln!(
+                "retentiond archive_delete: refusing claimed job {} ({}): {}",
+                work.job_id, work.request_id, reason
+            );
+            let _ = index.release_delete_claim(id);
+            if let Err(err) = shared.fail_archive_delete(
+                &work.job_id,
+                &work.delete_gen,
+                &format!("refused before filesystem delete: {reason}"),
+                false,
+            ) {
+                eprintln!(
+                    "retentiond archive_delete: failed to terminalize refused job {} ({}): {err}",
+                    work.job_id, work.request_id
+                );
+            }
+            return;
+        }
+    };
+    let size_bytes = match u64::try_from(work.target_archive_size_bytes) {
+        Ok(size_bytes) => size_bytes,
+        Err(_) => {
+            eprintln!(
+                "retentiond archive_delete: refusing claimed job {} ({}): invalid size {}",
+                work.job_id, work.request_id, work.target_archive_size_bytes
+            );
+            let _ = index.release_delete_claim(id);
+            if let Err(err) = shared.fail_archive_delete(
+                &work.job_id,
+                &work.delete_gen,
+                &format!(
+                    "refused before filesystem delete: invalid size {}",
+                    work.target_archive_size_bytes
+                ),
+                false,
+            ) {
+                eprintln!(
+                    "retentiond archive_delete: failed to terminalize refused job {} ({}): {err}",
+                    work.job_id, work.request_id
+                );
+            }
+            return;
+        }
+    };
+    let req = DeleteRequest {
+        id,
+        source_path,
+        size_bytes,
+    };
+    match run_delete_claimed(&req, trash_dir, &work.delete_gen, fs, index) {
+        DeleteOutcome::Deleted { bytes_freed } => {
+            println!(
+                "retentiond archive_delete: completed job {} ({}), bytes_freed={bytes_freed}",
+                work.job_id, work.request_id
+            );
+            if let Err(err) = shared.complete_archive_delete(&work.job_id, &work.delete_gen) {
+                eprintln!(
+                    "retentiond archive_delete: completion rpc failed for already-deleted job {} ({}): {err}",
+                    work.job_id, work.request_id
+                );
+            }
+        }
+        DeleteOutcome::Skipped { reason } => {
+            eprintln!(
+                "retentiond archive_delete: skipped claimed job {} ({}): {reason}",
+                work.job_id, work.request_id
+            );
+            if let Err(err) =
+                shared.fail_archive_delete(&work.job_id, &work.delete_gen, &reason, false)
+            {
+                eprintln!(
+                    "retentiond archive_delete: failed to persist skipped outcome for job {} ({}): {err}",
+                    work.job_id, work.request_id
+                );
+            }
+        }
+        DeleteOutcome::Failed { reason } => {
+            eprintln!(
+                "retentiond archive_delete: failed claimed job {} ({}): {reason}",
+                work.job_id, work.request_id
+            );
+            if let Err(err) =
+                shared.fail_archive_delete(&work.job_id, &work.delete_gen, &reason, false)
+            {
+                eprintln!(
+                    "retentiond archive_delete: failed to persist failed outcome for job {} ({}): {err}",
+                    work.job_id, work.request_id
+                );
+            }
+        }
     }
 }
 
@@ -551,6 +687,7 @@ fn run_serve(args: &[String]) -> ExitCode {
     let mut archive_paused_prev = false;
     let publisher_instance = publisher_instance_hex_128();
     let mut governor_seq: u64 = 0;
+    let mut recovery_blocked = false;
 
     let mut recovered = false;
     maybe_retry_recover(
@@ -566,6 +703,28 @@ fn run_serve(args: &[String]) -> ExitCode {
             &mut recovered,
             true,
         );
+        let gate = recovery_gate_state(recovered, recovery_blocked);
+        if gate.log_blocked {
+            eprintln!(
+                "retentiond governor: recovery pending; deferring archive/delete/eviction work"
+            );
+        }
+        if gate.log_resumed {
+            println!(
+                "retentiond governor: recovery succeeded; resuming archive/delete/eviction work"
+            );
+        }
+        recovery_blocked = gate.blocked_now;
+        if gate.defer_work {
+            retentiond::watchdog::pet();
+            sleep_interruptible(parsed.interval_secs);
+            continue;
+        }
+        // Public archive-delete ownership is independent of eviction mode: keep
+        // draining durable archive-delete claims even when the eviction governor
+        // is inert or paused.
+        process_archive_delete_queue_once(&shared, &archive_root, &trash_dir, &fs, &index);
+        retentiond::watchdog::pet();
         let cycle_prev_tier = prev_space_tier;
         let mut pre_uploads_unsafe = true;
         let mut pre_status_bytes: Option<(u64, u64)> = None;
@@ -976,7 +1135,7 @@ fn write_governor_status_best_effort(
         target_exit_frac: cfg.target_drain.target_exit_frac,
         recency_floor_secs: cfg.target_drain.recency_floor_secs,
         per_cycle_evict_bytes: cfg.target_drain.per_cycle_evict_bytes,
-        per_cycle_evict_count: cfg.target_drain.per_cycle_evict_count,
+        per_cycle_evict_count: u64::from(cfg.target_drain.per_cycle_evict_count),
         per_cycle_wall_ms: cfg.target_drain.per_cycle_wall_ms,
         last_stop,
         last_bytes_freed,
@@ -1045,6 +1204,34 @@ impl Default for ServeArgs {
             indexd_socket: PathBuf::from(INDEXD_SOCKET_PATH),
             slot: DEFAULT_SLOT,
             interval_secs: DEFAULT_INTERVAL_SECS,
+        }
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RecoveryGateState {
+    defer_work: bool,
+    log_blocked: bool,
+    log_resumed: bool,
+    blocked_now: bool,
+}
+
+#[cfg(unix)]
+fn recovery_gate_state(recovered: bool, was_blocked: bool) -> RecoveryGateState {
+    if recovered {
+        RecoveryGateState {
+            defer_work: false,
+            log_blocked: false,
+            log_resumed: was_blocked,
+            blocked_now: false,
+        }
+    } else {
+        RecoveryGateState {
+            defer_work: true,
+            log_blocked: !was_blocked,
+            log_resumed: false,
+            blocked_now: true,
         }
     }
 }
@@ -1177,19 +1364,28 @@ fn install_shutdown_handlers() {
 #[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
+    use std::cell::RefCell;
+    use std::fs;
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixListener;
     use std::rc::Rc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::thread;
 
     use retentiond::config::RetentionConfig;
+    use retentiond::delete::{ArchiveDeleteOps, ClaimResult, IndexClient};
     use retentiond::governor::{GovernorAssessment, Tier};
     use retentiond::index_delete_client::IndexDeleteClient;
+    use retentiond::io::ArchiveItemId;
     use retentiond::read_client::VolumeReadFileClient;
 
     use super::{
         DrainStop, EvictBudget, EvictionMode, GovernorStatus, LiveArchiveDeleteOps,
         LiveArchiveStore, LiveCatalog, LiveClock, LiveIndexClient, LiveRand, LiveStatfs,
         NoCarHandoff, RetentionLoop, Seams, ServeArgs, cumulative_evict_budget, drain_stop_tag,
-        maybe_retry_recover, parse_serve_args, publisher_instance_hex_128, render_health,
-        resolve_eviction_mode, validate_phase1_mode,
+        maybe_retry_recover, parse_serve_args, process_archive_delete_queue_once,
+        publisher_instance_hex_128, recovery_gate_state, render_health, resolve_eviction_mode,
+        validate_phase1_mode,
     };
 
     #[test]
@@ -1572,6 +1768,9 @@ mod tests {
             target_free_frac: 0.08,
             target_exit_frac: 0.10,
             recency_floor_secs: 3_600,
+            per_cycle_evict_bytes: 8 << 30,
+            per_cycle_evict_count: 256,
+            per_cycle_wall_ms: 5_000,
             last_stop: "already_healthy",
             last_bytes_freed: 0,
             last_items: 0,
@@ -1597,9 +1796,9 @@ mod tests {
         assert_eq!(value["target_free_frac"], 0.08);
         assert_eq!(value["target_exit_frac"], 0.10);
         assert_eq!(value["recency_floor_secs"], 3_600);
-        assert_eq!(value["per_cycle_evict_bytes"], 8 << 30);
-        assert_eq!(value["per_cycle_evict_count"], 256);
-        assert_eq!(value["per_cycle_wall_ms"], 5_000);
+        assert_eq!(value["per_cycle_evict_bytes"], 8_u64 << 30);
+        assert_eq!(value["per_cycle_evict_count"], 256_u64);
+        assert_eq!(value["per_cycle_wall_ms"], 5_000_u64);
         assert_eq!(value["last_stop"], "already_healthy");
         assert_eq!(value["last_bytes_freed"], 0);
         assert_eq!(value["last_items"], 0);
@@ -1617,6 +1816,263 @@ mod tests {
             data_free_inodes: 0,
             usable_for_archive_bytes: 0,
         }
+    }
+
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn new_temp_dir() -> std::path::PathBuf {
+        let unique = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let name = format!("retentiond-main-{}-{unique}", std::process::id());
+        let dir = std::env::temp_dir().join(name);
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    fn read_json_frame(stream: &mut impl Read) -> serde_json::Value {
+        let mut len_buf = [0_u8; 4];
+        stream.read_exact(&mut len_buf).expect("read frame len");
+        let len = u32::from_le_bytes(len_buf);
+        let mut payload = vec![0_u8; usize::try_from(len).expect("len fits")];
+        stream.read_exact(&mut payload).expect("read frame payload");
+        serde_json::from_slice(&payload).expect("decode frame json")
+    }
+
+    fn write_json_frame(stream: &mut impl Write, value: serde_json::Value) {
+        let payload = serde_json::to_vec(&value).expect("encode frame");
+        let len = u32::try_from(payload.len()).expect("payload len fits");
+        stream
+            .write_all(&len.to_le_bytes())
+            .expect("write frame len");
+        stream.write_all(&payload).expect("write frame payload");
+    }
+
+    struct StubArchiveDeleteOps;
+
+    impl ArchiveDeleteOps for StubArchiveDeleteOps {
+        fn exists(&self, _path: &str) -> bool {
+            false
+        }
+
+        fn rename_into_trash(&self, _src: &str, _dst: &str) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn fsync_parent(&self, _path: &str) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn recursive_delete(&self, _path: &str) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct StubIndexClient {
+        released: RefCell<Vec<ArchiveItemId>>,
+        marked_deleting: RefCell<Vec<ArchiveItemId>>,
+        marked_deleted: RefCell<Vec<(ArchiveItemId, u64)>>,
+    }
+
+    impl IndexClient for StubIndexClient {
+        fn claim_archive_delete(&self, _id: ArchiveItemId) -> ClaimResult {
+            ClaimResult::Denied {
+                reason: "unexpected claim in stub".to_owned(),
+            }
+        }
+
+        fn mark_deleting(&self, id: ArchiveItemId) -> std::io::Result<()> {
+            self.marked_deleting.borrow_mut().push(id);
+            Ok(())
+        }
+
+        fn mark_deleted(&self, id: ArchiveItemId, bytes_freed: u64) -> std::io::Result<()> {
+            self.marked_deleted.borrow_mut().push((id, bytes_freed));
+            Ok(())
+        }
+
+        fn release_delete_claim(&self, id: ArchiveItemId) -> std::io::Result<()> {
+            self.released.borrow_mut().push(id);
+            Ok(())
+        }
+
+        fn quarantine(&self, _id: ArchiveItemId, _reason: &str) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn clear_archive_delete_generation(
+            &self,
+            _id: ArchiveItemId,
+            _delete_gen: &str,
+        ) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn process_archive_delete_queue_once_completes_claimed_job() {
+        let temp_dir = new_temp_dir();
+        let socket_path = temp_dir.join("indexd.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind listener");
+        let claim_gen = "abcdefabcdefabcdefabcdefabcdefab".to_owned();
+
+        let server = thread::spawn(move || {
+            let (mut first, _) = listener.accept().expect("accept claim");
+            let first_request = read_json_frame(&mut first);
+            assert_eq!(first_request["cmd"], "archive_delete_claim_next");
+            write_json_frame(
+                &mut first,
+                serde_json::json!({
+                    "status":"archive_delete_claimed",
+                    "job_id":"m-9901",
+                    "request_id":"req-9901",
+                    "target_archive_item_id":42,
+                    "target_archive_path":"archive/recent/item-a",
+                    "target_archive_size_bytes":2048,
+                    "delete_gen":claim_gen
+                }),
+            );
+
+            let (mut second, _) = listener.accept().expect("accept complete");
+            let second_request = read_json_frame(&mut second);
+            assert_eq!(second_request["cmd"], "archive_delete_complete");
+            assert_eq!(second_request["job_id"], "m-9901");
+            assert_eq!(
+                second_request["owned_delete_gen"],
+                "abcdefabcdefabcdefabcdefabcdefab"
+            );
+            write_json_frame(&mut second, serde_json::json!({"status":"acked"}));
+        });
+
+        let shared = IndexDeleteClient::new(socket_path);
+        let index = StubIndexClient::default();
+        let fs = StubArchiveDeleteOps;
+        let archive_root = temp_dir.join("archive-root");
+        fs::create_dir_all(&archive_root).expect("create archive root");
+        process_archive_delete_queue_once(&shared, &archive_root, "trash", &fs, &index);
+
+        server.join().expect("join server");
+        assert!(index.released.borrow().is_empty());
+        assert_eq!(
+            index.marked_deleting.borrow().as_slice(),
+            &[ArchiveItemId(42)]
+        );
+        assert_eq!(
+            index.marked_deleted.borrow().as_slice(),
+            &[(ArchiveItemId(42), 2048)]
+        );
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn process_archive_delete_queue_once_does_not_fail_after_completion_rpc_error() {
+        let temp_dir = new_temp_dir();
+        let socket_path = temp_dir.join("indexd.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind listener");
+        let claim_gen = "cccccccccccccccccccccccccccccccc".to_owned();
+
+        let server = thread::spawn(move || {
+            let (mut first, _) = listener.accept().expect("accept claim");
+            let first_request = read_json_frame(&mut first);
+            assert_eq!(first_request["cmd"], "archive_delete_claim_next");
+            write_json_frame(
+                &mut first,
+                serde_json::json!({
+                    "status":"archive_delete_claimed",
+                    "job_id":"m-9905",
+                    "request_id":"req-9905",
+                    "target_archive_item_id":45,
+                    "target_archive_path":"archive/recent/item-b",
+                    "target_archive_size_bytes":1024,
+                    "delete_gen":claim_gen
+                }),
+            );
+
+            let (mut second, _) = listener.accept().expect("accept complete");
+            let second_request = read_json_frame(&mut second);
+            assert_eq!(second_request["cmd"], "archive_delete_complete");
+            assert_eq!(second_request["job_id"], "m-9905");
+            drop(second);
+
+            listener.set_nonblocking(true).expect("set nonblocking");
+            thread::sleep(std::time::Duration::from_millis(50));
+            match listener.accept() {
+                Ok((_, _)) => panic!("unexpected follow-up archive_delete_fail rpc"),
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(err) => panic!("unexpected accept error: {err}"),
+            }
+        });
+
+        let shared = IndexDeleteClient::new(socket_path);
+        let index = StubIndexClient::default();
+        let fs = StubArchiveDeleteOps;
+        let archive_root = temp_dir.join("archive-root");
+        fs::create_dir_all(&archive_root).expect("create archive root");
+        process_archive_delete_queue_once(&shared, &archive_root, "trash", &fs, &index);
+
+        server.join().expect("join server");
+        assert!(index.released.borrow().is_empty());
+        assert_eq!(
+            index.marked_deleting.borrow().as_slice(),
+            &[ArchiveItemId(45)]
+        );
+        assert_eq!(
+            index.marked_deleted.borrow().as_slice(),
+            &[(ArchiveItemId(45), 1024)]
+        );
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn process_archive_delete_queue_once_terminalizes_invalid_path_refusal() {
+        let temp_dir = new_temp_dir();
+        let socket_path = temp_dir.join("indexd.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind listener");
+
+        let server = thread::spawn(move || {
+            let (mut first, _) = listener.accept().expect("accept claim");
+            let first_request = read_json_frame(&mut first);
+            assert_eq!(first_request["cmd"], "archive_delete_claim_next");
+            write_json_frame(
+                &mut first,
+                serde_json::json!({
+                    "status":"archive_delete_claimed",
+                    "job_id":"m-9902",
+                    "request_id":"req-9902",
+                    "target_archive_item_id":43,
+                    "target_archive_path":"../escape",
+                    "target_archive_size_bytes":4096,
+                    "delete_gen":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                }),
+            );
+
+            let (mut second, _) = listener.accept().expect("accept fail");
+            let second_request = read_json_frame(&mut second);
+            assert_eq!(second_request["cmd"], "archive_delete_fail");
+            assert_eq!(second_request["job_id"], "m-9902");
+            assert_eq!(
+                second_request["owned_delete_gen"],
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            );
+            assert_eq!(second_request["requeue"], false);
+            write_json_frame(&mut second, serde_json::json!({"status":"acked"}));
+        });
+
+        let shared = IndexDeleteClient::new(socket_path);
+        let index = StubIndexClient::default();
+        let fs = StubArchiveDeleteOps;
+        process_archive_delete_queue_once(
+            &shared,
+            &temp_dir.join("archive-root"),
+            "trash",
+            &fs,
+            &index,
+        );
+
+        server.join().expect("join server");
+        assert_eq!(index.released.borrow().as_slice(), &[ArchiveItemId(43)]);
+        assert!(index.marked_deleting.borrow().is_empty());
+        assert!(index.marked_deleted.borrow().is_empty());
+        let _ = fs::remove_dir_all(temp_dir);
     }
 
     #[test]
@@ -1683,6 +2139,9 @@ mod tests {
             target_free_frac: 0.08,
             target_exit_frac: 0.10,
             recency_floor_secs: 3_600,
+            per_cycle_evict_bytes: 8 << 30,
+            per_cycle_evict_count: 256,
+            per_cycle_wall_ms: 5_000,
             last_stop: "target_reached",
             last_bytes_freed: 50,
             last_items: 1,
@@ -1701,6 +2160,9 @@ mod tests {
             target_free_frac: first.target_free_frac,
             target_exit_frac: first.target_exit_frac,
             recency_floor_secs: first.recency_floor_secs,
+            per_cycle_evict_bytes: first.per_cycle_evict_bytes,
+            per_cycle_evict_count: first.per_cycle_evict_count,
+            per_cycle_wall_ms: first.per_cycle_wall_ms,
             last_stop: first.last_stop,
             last_bytes_freed: first.last_bytes_freed,
             last_items: first.last_items,
@@ -1794,5 +2256,32 @@ mod tests {
         );
         assert!(recovered);
         assert_eq!(calls.get(), 3);
+    }
+
+    #[test]
+    fn recovery_gate_state_defers_until_recovered_and_logs_transitions() {
+        let first_block = recovery_gate_state(false, false);
+        assert!(first_block.defer_work);
+        assert!(first_block.log_blocked);
+        assert!(!first_block.log_resumed);
+        assert!(first_block.blocked_now);
+
+        let continued_block = recovery_gate_state(false, first_block.blocked_now);
+        assert!(continued_block.defer_work);
+        assert!(!continued_block.log_blocked);
+        assert!(!continued_block.log_resumed);
+        assert!(continued_block.blocked_now);
+
+        let first_resume = recovery_gate_state(true, continued_block.blocked_now);
+        assert!(!first_resume.defer_work);
+        assert!(!first_resume.log_blocked);
+        assert!(first_resume.log_resumed);
+        assert!(!first_resume.blocked_now);
+
+        let continued_run = recovery_gate_state(true, first_resume.blocked_now);
+        assert!(!continued_run.defer_work);
+        assert!(!continued_run.log_blocked);
+        assert!(!continued_run.log_resumed);
+        assert!(!continued_run.blocked_now);
     }
 }

@@ -10,11 +10,9 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::register_client::{
-    MAX_REQUEST_FRAME, RegisterError, read_frame, write_frame,
-};
 #[cfg(unix)]
 use crate::register_client::IO_TIMEOUT_SECS;
+use crate::register_client::{MAX_REQUEST_FRAME, RegisterError, read_frame, write_frame};
 
 /// Delete-path request wire mirror for `indexd::proto::Request`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,6 +45,13 @@ pub enum DeleteWireRequest {
         /// Archive item id.
         id: i64,
     },
+    /// Clear a consumed terminal delete generation token.
+    ClearArchiveDeleteGeneration {
+        /// Archive item id.
+        id: i64,
+        /// Expected token to consume.
+        delete_gen: String,
+    },
     /// Quarantine an item.
     QuarantineArchiveItem {
         /// Archive item id.
@@ -66,6 +71,27 @@ pub enum DeleteWireRequest {
     },
     /// List rows needing crash recovery.
     ListRecoveryRows {},
+    /// Claim the oldest claimable queued internal archive-delete request.
+    ArchiveDeleteClaimNext {},
+    /// Mark one claimed internal archive-delete request done.
+    ArchiveDeleteComplete {
+        /// Stable durable job id.
+        job_id: String,
+        /// Expected owned delete generation token.
+        owned_delete_gen: String,
+    },
+    /// Mark one claimed internal archive-delete request failed or requeued.
+    ArchiveDeleteFail {
+        /// Stable durable job id.
+        job_id: String,
+        /// Expected owned delete generation token.
+        owned_delete_gen: String,
+        /// Human-readable failure detail.
+        detail: String,
+        /// Explicitly requeue instead of terminal-failing.
+        #[serde(default)]
+        requeue: bool,
+    },
 }
 
 /// Delete-path response wire mirror for `indexd::proto::Response`.
@@ -95,6 +121,21 @@ pub enum DeleteWireResponse {
     RecoveryRows {
         /// Recovery rows.
         rows: Vec<RecoveryRowWire>,
+    },
+    /// Claimed internal archive-delete work item.
+    ArchiveDeleteClaimed {
+        /// Stable durable job id.
+        job_id: String,
+        /// Logical request id.
+        request_id: String,
+        /// Target archive item id.
+        target_archive_item_id: i64,
+        /// Target archive relative path fence.
+        target_archive_path: String,
+        /// Target archive size fence.
+        target_archive_size_bytes: i64,
+        /// Persisted delete generation token from claim.
+        delete_gen: String,
     },
     /// Operational/transient error.
     Error {
@@ -136,6 +177,23 @@ pub struct RecoveryRowWire {
     pub size_bytes: i64,
     /// Delete generation token (hex) when present.
     pub delete_gen: Option<String>,
+}
+
+/// One claimed internal archive-delete work item over the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchiveDeleteClaimedWire {
+    /// Stable durable job id.
+    pub job_id: String,
+    /// Logical request id.
+    pub request_id: String,
+    /// Target archive item id.
+    pub target_archive_item_id: i64,
+    /// Target archive relative path fence.
+    pub target_archive_path: String,
+    /// Target archive size fence.
+    pub target_archive_size_bytes: i64,
+    /// Persisted delete generation token from claim.
+    pub delete_gen: String,
 }
 
 /// Unix-socket transport for retentiond delete-path RPC verbs.
@@ -225,6 +283,95 @@ impl IndexDeleteClient {
             ))),
             other => Err(io::Error::other(format!(
                 "unexpected list_recovery_rows response: {other:?}"
+            ))),
+        }
+    }
+
+    /// Claim the oldest claimable queued internal archive-delete request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on transport, decode, or unexpected response status.
+    pub fn claim_next_archive_delete(&self) -> io::Result<Option<ArchiveDeleteClaimedWire>> {
+        match self.send(&DeleteWireRequest::ArchiveDeleteClaimNext {})? {
+            DeleteWireResponse::ArchiveDeleteClaimed {
+                job_id,
+                request_id,
+                target_archive_item_id,
+                target_archive_path,
+                target_archive_size_bytes,
+                delete_gen,
+            } => Ok(Some(ArchiveDeleteClaimedWire {
+                job_id,
+                request_id,
+                target_archive_item_id,
+                target_archive_path,
+                target_archive_size_bytes,
+                delete_gen,
+            })),
+            DeleteWireResponse::NotFound {} => Ok(None),
+            DeleteWireResponse::Error { message } => Err(io::Error::other(format!(
+                "indexd archive_delete_claim_next error: {message}"
+            ))),
+            DeleteWireResponse::Rejected { message } => Err(io::Error::other(format!(
+                "indexd archive_delete_claim_next rejected: {message}"
+            ))),
+            other => Err(io::Error::other(format!(
+                "unexpected archive_delete_claim_next response: {other:?}"
+            ))),
+        }
+    }
+
+    /// Mark one claimed internal archive-delete request done.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on transport, decode, or non-ack response.
+    pub fn complete_archive_delete(&self, job_id: &str, owned_delete_gen: &str) -> io::Result<()> {
+        match self.send(&DeleteWireRequest::ArchiveDeleteComplete {
+            job_id: job_id.to_owned(),
+            owned_delete_gen: owned_delete_gen.to_owned(),
+        })? {
+            DeleteWireResponse::Acked {} => Ok(()),
+            DeleteWireResponse::Error { message } => Err(io::Error::other(format!(
+                "indexd archive_delete_complete error: {message}"
+            ))),
+            DeleteWireResponse::Rejected { message } => Err(io::Error::other(format!(
+                "indexd archive_delete_complete rejected: {message}"
+            ))),
+            other => Err(io::Error::other(format!(
+                "unexpected archive_delete_complete response: {other:?}"
+            ))),
+        }
+    }
+
+    /// Mark one claimed internal archive-delete request failed/requeued.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on transport, decode, or non-ack response.
+    pub fn fail_archive_delete(
+        &self,
+        job_id: &str,
+        owned_delete_gen: &str,
+        detail: &str,
+        requeue: bool,
+    ) -> io::Result<()> {
+        match self.send(&DeleteWireRequest::ArchiveDeleteFail {
+            job_id: job_id.to_owned(),
+            owned_delete_gen: owned_delete_gen.to_owned(),
+            detail: detail.to_owned(),
+            requeue,
+        })? {
+            DeleteWireResponse::Acked {} => Ok(()),
+            DeleteWireResponse::Error { message } => Err(io::Error::other(format!(
+                "indexd archive_delete_fail error: {message}"
+            ))),
+            DeleteWireResponse::Rejected { message } => Err(io::Error::other(format!(
+                "indexd archive_delete_fail rejected: {message}"
+            ))),
+            other => Err(io::Error::other(format!(
+                "unexpected archive_delete_fail response: {other:?}"
             ))),
         }
     }
@@ -358,6 +505,124 @@ mod tests {
         let rows = client.list_recovery_rows().expect("list recovery rows");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows.first().expect("row exists").id, 9);
+        server.join().expect("server join");
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn claim_next_archive_delete_sends_golden_json_and_maps_payload() {
+        let temp_dir = new_temp_dir();
+        let socket_path = temp_dir.join("indexd.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind listener");
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            let payload = read_frame(&mut stream, MAX_REQUEST_FRAME).expect("read request");
+            let request_json = String::from_utf8(payload).expect("utf8 request");
+            assert_eq!(request_json, "{\"cmd\":\"archive_delete_claim_next\"}");
+
+            let payload = serde_json::to_vec(&DeleteWireResponse::ArchiveDeleteClaimed {
+                job_id: "m-9001".to_owned(),
+                request_id: "req-9001".to_owned(),
+                target_archive_item_id: 9,
+                target_archive_path: "archive/manual-delete/item-a".to_owned(),
+                target_archive_size_bytes: 123,
+                delete_gen: "abcdefabcdefabcdefabcdefabcdefab".to_owned(),
+            })
+            .expect("encode response");
+            write_frame(&mut stream, &payload, MAX_REQUEST_FRAME).expect("write response");
+        });
+
+        let client = IndexDeleteClient::new(socket_path);
+        let claimed = client
+            .claim_next_archive_delete()
+            .expect("claim next")
+            .expect("work item");
+        assert_eq!(claimed.job_id, "m-9001");
+        assert_eq!(claimed.request_id, "req-9001");
+        assert_eq!(claimed.target_archive_item_id, 9);
+        assert_eq!(claimed.target_archive_path, "archive/manual-delete/item-a");
+        assert_eq!(claimed.target_archive_size_bytes, 123);
+        assert_eq!(claimed.delete_gen, "abcdefabcdefabcdefabcdefabcdefab");
+        server.join().expect("server join");
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn claim_next_archive_delete_maps_not_found_to_none() {
+        let temp_dir = new_temp_dir();
+        let socket_path = temp_dir.join("indexd.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind listener");
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            let _payload = read_frame(&mut stream, MAX_REQUEST_FRAME).expect("read request");
+            let payload = serde_json::to_vec(&DeleteWireResponse::NotFound {}).expect("encode");
+            write_frame(&mut stream, &payload, MAX_REQUEST_FRAME).expect("write response");
+        });
+
+        let client = IndexDeleteClient::new(socket_path);
+        let claimed = client.claim_next_archive_delete().expect("claim next");
+        assert!(claimed.is_none());
+        server.join().expect("server join");
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn complete_archive_delete_sends_golden_json() {
+        let temp_dir = new_temp_dir();
+        let socket_path = temp_dir.join("indexd.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind listener");
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            let payload = read_frame(&mut stream, MAX_REQUEST_FRAME).expect("read request");
+            let request_json = String::from_utf8(payload).expect("utf8 request");
+            assert_eq!(
+                request_json,
+                "{\"cmd\":\"archive_delete_complete\",\"job_id\":\"m-9002\",\"owned_delete_gen\":\"abcdefabcdefabcdefabcdefabcdefab\"}"
+            );
+
+            let payload = serde_json::to_vec(&DeleteWireResponse::Acked {}).expect("encode");
+            write_frame(&mut stream, &payload, MAX_REQUEST_FRAME).expect("write response");
+        });
+
+        let client = IndexDeleteClient::new(socket_path);
+        client
+            .complete_archive_delete("m-9002", "abcdefabcdefabcdefabcdefabcdefab")
+            .expect("complete archive delete");
+        server.join().expect("server join");
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn fail_archive_delete_sends_golden_json() {
+        let temp_dir = new_temp_dir();
+        let socket_path = temp_dir.join("indexd.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind listener");
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            let payload = read_frame(&mut stream, MAX_REQUEST_FRAME).expect("read request");
+            let request_json = String::from_utf8(payload).expect("utf8 request");
+            assert_eq!(
+                request_json,
+                "{\"cmd\":\"archive_delete_fail\",\"job_id\":\"m-9003\",\"owned_delete_gen\":\"abcdefabcdefabcdefabcdefabcdefab\",\"detail\":\"fsync source parent failed\",\"requeue\":false}"
+            );
+
+            let payload = serde_json::to_vec(&DeleteWireResponse::Acked {}).expect("encode");
+            write_frame(&mut stream, &payload, MAX_REQUEST_FRAME).expect("write response");
+        });
+
+        let client = IndexDeleteClient::new(socket_path);
+        client
+            .fail_archive_delete(
+                "m-9003",
+                "abcdefabcdefabcdefabcdefabcdefab",
+                "fsync source parent failed",
+                false,
+            )
+            .expect("fail archive delete");
         server.join().expect("server join");
         let _ = fs::remove_dir_all(temp_dir);
     }

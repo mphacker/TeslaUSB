@@ -133,7 +133,12 @@ pub fn list_eviction_candidates(
     Ok(out)
 }
 
-/// List rows that are in transitional delete states and require recovery.
+/// List rows that require startup recovery reconciliation.
+///
+/// Transitional delete states are always included. Additionally, `LIVE`/`DELETED`
+/// rows with a non-NULL `delete_gen` are included for filesystem anomaly checks.
+/// Ordering prioritizes active recovery work (`DELETE_CLAIMED`/`DELETING`) before
+/// passive anomalies and keeps `QUARANTINED` rows last.
 ///
 /// # Errors
 ///
@@ -143,7 +148,16 @@ pub fn list_recovery_rows(conn: &Connection) -> Result<Vec<RecoveryRow>, DbError
         "SELECT id, delete_state, path, size_bytes, delete_gen
            FROM archive_items
           WHERE delete_state NOT IN ('LIVE','DELETED')
-          ORDER BY id ASC
+             OR (delete_state IN ('LIVE','DELETED') AND delete_gen IS NOT NULL)
+          ORDER BY
+            CASE
+              WHEN delete_state IN ('DELETE_CLAIMED','DELETING') THEN 0
+              WHEN delete_state = 'DELETE_FAILED' THEN 1
+              WHEN delete_state IN ('LIVE','DELETED') AND delete_gen IS NOT NULL THEN 2
+              WHEN delete_state = 'QUARANTINED' THEN 3
+              ELSE 4
+            END ASC,
+            id ASC
           LIMIT 512",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -1973,13 +1987,13 @@ mod tests {
     }
 
     #[test]
-    fn list_recovery_rows_excludes_live_and_deleted() {
+    fn list_recovery_rows_includes_delete_gen_anomalies_only() {
         let conn = open_in_memory().expect("open db");
         insert_archive_item(
             &conn,
             &ArchiveSeed {
                 folder_class: "RecentClips",
-                path: "archive/live",
+                path: "archive/live-no-gen",
                 size_bytes: 1,
                 archived_at: 1,
                 delete_state: "LIVE",
@@ -1989,18 +2003,46 @@ mod tests {
                 delete_gen: None,
             },
         );
+        let live_with_gen = insert_archive_item(
+            &conn,
+            &ArchiveSeed {
+                folder_class: "RecentClips",
+                path: "archive/live-with-gen",
+                size_bytes: 2,
+                archived_at: 2,
+                delete_state: "LIVE",
+                durable: 1,
+                pinned: 0,
+                suppress_until: None,
+                delete_gen: Some("live-gen"),
+            },
+        );
         insert_archive_item(
             &conn,
             &ArchiveSeed {
                 folder_class: "RecentClips",
-                path: "archive/deleted",
-                size_bytes: 2,
-                archived_at: 2,
+                path: "archive/deleted-no-gen",
+                size_bytes: 3,
+                archived_at: 3,
                 delete_state: "DELETED",
                 durable: 1,
                 pinned: 0,
                 suppress_until: None,
-                delete_gen: Some("done"),
+                delete_gen: None,
+            },
+        );
+        let deleted_with_gen = insert_archive_item(
+            &conn,
+            &ArchiveSeed {
+                folder_class: "RecentClips",
+                path: "archive/deleted-with-gen",
+                size_bytes: 4,
+                archived_at: 4,
+                delete_state: "DELETED",
+                durable: 1,
+                pinned: 0,
+                suppress_until: None,
+                delete_gen: Some("deleted-gen"),
             },
         );
         let claimed = insert_archive_item(
@@ -2008,8 +2050,8 @@ mod tests {
             &ArchiveSeed {
                 folder_class: "RecentClips",
                 path: "archive/claimed",
-                size_bytes: 3,
-                archived_at: 3,
+                size_bytes: 5,
+                archived_at: 5,
                 delete_state: "DELETE_CLAIMED",
                 durable: 1,
                 pinned: 0,
@@ -2022,8 +2064,8 @@ mod tests {
             &ArchiveSeed {
                 folder_class: "RecentClips",
                 path: "archive/deleting",
-                size_bytes: 4,
-                archived_at: 4,
+                size_bytes: 6,
+                archived_at: 6,
                 delete_state: "DELETING",
                 durable: 1,
                 pinned: 0,
@@ -2036,8 +2078,8 @@ mod tests {
             &ArchiveSeed {
                 folder_class: "RecentClips",
                 path: "archive/failed",
-                size_bytes: 5,
-                archived_at: 5,
+                size_bytes: 7,
+                archived_at: 7,
                 delete_state: "DELETE_FAILED",
                 durable: 1,
                 pinned: 0,
@@ -2050,8 +2092,8 @@ mod tests {
             &ArchiveSeed {
                 folder_class: "RecentClips",
                 path: "archive/quarantined",
-                size_bytes: 6,
-                archived_at: 6,
+                size_bytes: 8,
+                archived_at: 8,
                 delete_state: "QUARANTINED",
                 durable: 1,
                 pinned: 0,
@@ -2062,14 +2104,123 @@ mod tests {
 
         let rows = list_recovery_rows(&conn).expect("query recovery rows");
         let ids: Vec<i64> = rows.iter().map(|row| row.id).collect();
-        assert_eq!(ids, vec![claimed, deleting, failed, quarantined]);
+        assert_eq!(
+            ids,
+            vec![
+                claimed,
+                deleting,
+                failed,
+                live_with_gen,
+                deleted_with_gen,
+                quarantined
+            ]
+        );
         assert_eq!(
             rows.first().map(|row| row.delete_state.as_str()),
             Some("DELETE_CLAIMED")
         );
-        assert_eq!(
-            rows.first().and_then(|row| row.delete_gen.as_deref()),
-            Some("g1")
+        assert!(rows.iter().any(|row| {
+            row.id == live_with_gen
+                && row.delete_state == "LIVE"
+                && row.delete_gen.as_deref() == Some("live-gen")
+        }));
+        assert!(rows.iter().any(|row| {
+            row.id == deleted_with_gen
+                && row.delete_state == "DELETED"
+                && row.delete_gen.as_deref() == Some("deleted-gen")
+        }));
+        assert!(
+            rows.iter().all(
+                |row| row.path != "archive/live-no-gen" && row.path != "archive/deleted-no-gen"
+            )
+        );
+    }
+
+    #[test]
+    fn list_recovery_rows_prioritizes_transitional_states_under_limit() {
+        let conn = open_in_memory().expect("open db");
+        for i in 0..600 {
+            let path = format!("archive/deleted-anomaly-{i}");
+            insert_archive_item_unlinked(
+                &conn,
+                &ArchiveSeed {
+                    folder_class: "RecentClips",
+                    path: &path,
+                    size_bytes: 1,
+                    archived_at: i64::from(i),
+                    delete_state: "DELETED",
+                    durable: 1,
+                    pinned: 0,
+                    suppress_until: None,
+                    delete_gen: Some("stale-gen"),
+                },
+            );
+        }
+        let deleting = insert_archive_item_unlinked(
+            &conn,
+            &ArchiveSeed {
+                folder_class: "RecentClips",
+                path: "archive/deleting-late",
+                size_bytes: 2,
+                archived_at: 700,
+                delete_state: "DELETING",
+                durable: 1,
+                pinned: 0,
+                suppress_until: None,
+                delete_gen: Some("active-gen"),
+            },
+        );
+
+        let rows = list_recovery_rows(&conn).expect("query recovery rows");
+        assert_eq!(rows.len(), 512);
+        assert_eq!(rows.first().map(|row| row.id), Some(deleting));
+        assert!(
+            rows.iter()
+                .any(|row| row.id == deleting && row.delete_state == "DELETING")
+        );
+    }
+
+    #[test]
+    fn list_recovery_rows_prioritizes_active_states_over_quarantined_under_limit() {
+        let conn = open_in_memory().expect("open db");
+        for i in 0..600 {
+            let path = format!("archive/quarantined-{i}");
+            insert_archive_item_unlinked(
+                &conn,
+                &ArchiveSeed {
+                    folder_class: "RecentClips",
+                    path: &path,
+                    size_bytes: 1,
+                    archived_at: i64::from(i),
+                    delete_state: "QUARANTINED",
+                    durable: 1,
+                    pinned: 0,
+                    suppress_until: None,
+                    delete_gen: None,
+                },
+            );
+        }
+        let deleting = insert_archive_item_unlinked(
+            &conn,
+            &ArchiveSeed {
+                folder_class: "RecentClips",
+                path: "archive/deleting-after-quarantine",
+                size_bytes: 2,
+                archived_at: 700,
+                delete_state: "DELETING",
+                durable: 1,
+                pinned: 0,
+                suppress_until: None,
+                delete_gen: Some("active-gen"),
+            },
+        );
+
+        let rows = list_recovery_rows(&conn).expect("query recovery rows");
+        assert_eq!(rows.len(), 512);
+        assert_eq!(rows.first().map(|row| row.id), Some(deleting));
+        assert!(
+            rows.iter()
+                .any(|row| row.id == deleting && row.delete_state == "DELETING")
         );
     }
 }

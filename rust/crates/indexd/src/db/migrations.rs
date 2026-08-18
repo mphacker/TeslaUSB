@@ -29,7 +29,7 @@ pub const SCHEMA_VERSION_NOTE: &str = "v1 (PROVISIONAL — pre-OP-3 freeze)";
 /// The highest schema version this binary knows how to produce. A DB
 /// reporting a higher version was written by a newer `indexd` and must
 /// not be opened read-write.
-pub const LATEST_VERSION: i64 = 12;
+pub const LATEST_VERSION: i64 = 13;
 
 /// The ordered migration ladder. Index order MUST match ascending
 /// `version`; [`MIGRATIONS`] is validated by a test.
@@ -93,6 +93,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 12,
         note: "v12 — archive-delete request owned delete-gen marker",
         sql: V12_SQL,
+    },
+    Migration {
+        version: 13,
+        note: "v13 — persisted index lifecycle freshness marker",
+        sql: V13_SQL,
     },
 ];
 
@@ -687,6 +692,14 @@ ALTER TABLE archive_delete_requests
                   AND owned_delete_gen NOT GLOB '*[^0-9a-f]*'));
 ";
 
+/// v13 DDL: persisted freshness marker for successful index/derive passes.
+const V13_SQL: &str = "
+CREATE TABLE index_lifecycle_meta (
+    id              INTEGER PRIMARY KEY CHECK(id = 1),
+    last_derived_at INTEGER NOT NULL CHECK(last_derived_at >= 0)
+);
+";
+
 /// v1 DDL: contract D1's proposed schema, plus two internal additions
 /// flagged in the build notes:
 ///   * `trips.polyline` BLOB — the RDP-simplified cached polyline (OQ-2
@@ -891,7 +904,7 @@ mod tests {
 
     use super::{
         LATEST_VERSION, MIGRATIONS, V1_SQL, V2_SQL, V3_SQL, V4_SQL, V5_SQL, V6_SQL, V7_SQL, V8_SQL,
-        V9_SQL, V10_SQL, V11_SQL, V12_SQL,
+        V9_SQL, V10_SQL, V11_SQL, V12_SQL, V13_SQL,
     };
     use crate::db::{DbError, apply_migrations};
 
@@ -1430,6 +1443,46 @@ mod tests {
             [],
         );
         assert!(bad_owned_delete_gen.is_err());
+    }
+
+    #[test]
+    fn v13_adds_index_lifecycle_meta_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(V1_SQL).unwrap();
+        conn.execute_batch(V2_SQL).unwrap();
+        conn.execute_batch(V3_SQL).unwrap();
+        conn.execute_batch(V4_SQL).unwrap();
+        conn.execute_batch(V5_SQL).unwrap();
+        conn.execute_batch(V6_SQL).unwrap();
+        conn.execute_batch(V7_SQL).unwrap();
+        conn.execute_batch(V8_SQL).unwrap();
+        conn.execute_batch(V9_SQL).unwrap();
+        conn.execute_batch(V10_SQL).unwrap();
+        conn.execute_batch(V11_SQL).unwrap();
+        conn.execute_batch(V12_SQL).unwrap();
+        conn.execute_batch(V13_SQL).unwrap();
+
+        let table_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                      WHERE type='table'
+                        AND name='index_lifecycle_meta'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_exists, 1);
+
+        conn.execute(
+            "INSERT INTO index_lifecycle_meta (id, last_derived_at) VALUES (1, 1234)",
+            [],
+        )
+        .unwrap();
+        let bad_negative = conn.execute(
+            "UPDATE index_lifecycle_meta SET last_derived_at = -1 WHERE id = 1",
+            [],
+        );
+        assert!(bad_negative.is_err());
     }
 
     #[test]

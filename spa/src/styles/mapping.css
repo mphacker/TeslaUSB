@@ -739,6 +739,9 @@ body.mapping-active .main-content {
     justify-content: center;
     cursor: pointer;
     font-size: 13px;
+    text-decoration: none;
+    box-sizing: border-box;
+    flex-shrink: 0;
     transition: all 150ms ease;
     padding: 0;
 }

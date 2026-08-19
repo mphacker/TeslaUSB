@@ -520,9 +520,11 @@ test.describe("trip map UAT", () => {
     // Events tab (global /api/events) → all 3 events incl. the trip-less sentry.
     const vpEvents = page.locator("[data-testid=vp-events]");
     await expect(vpEvents.locator(".st-event")).toHaveCount(3);
-    await expect(vpEvents).toContainText("harsh braking");
-    await expect(vpEvents).toContainText("hard acceleration");
-    await expect(vpEvents).toContainText("sentry");
+    // Event types render with V1's friendly labels + status glyph, not the raw
+    // indexd type string.
+    await expect(vpEvents).toContainText("🔴 Hard Brake");
+    await expect(vpEvents).toContainText("🟠 Hard Acceleration");
+    await expect(vpEvents).toContainText("🟣 Sentry Mode");
     // Severity is an indexd ordinal (1=info, 2=warning, 3=critical) rendered as
     // its LABEL — never as a fabricated speed. Regression guard: harsh_braking
     // reads "critical", hard_acceleration reads "warning", sentry reads "info",
@@ -531,6 +533,11 @@ test.describe("trip map UAT", () => {
     await expect(vpEvents).toContainText("warning");
     await expect(vpEvents).toContainText("info");
     await expect(vpEvents).not.toContainText(/\b\d+\s*(mph|kph)\b/);
+    // V1 row actions: clip-backed events get play + download ZIP; events with
+    // coordinates also get show-on-map. The detail button is a B-1 addition.
+    await expect(vpEvents.locator("[data-testid^=vp-event-play-]")).toHaveCount(3);
+    await expect(vpEvents.locator("[data-testid^=vp-event-dl-]")).toHaveCount(3);
+    await expect(vpEvents.locator("[data-testid^=vp-event-map-]")).toHaveCount(2);
     // Trips tab → the 3 seeded trips from the global paged catalog.
     await page.locator("#vpTabTrips").click();
     const vpTrips = page.locator("[data-testid=vp-trips]");

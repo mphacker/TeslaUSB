@@ -78,27 +78,31 @@ function appendUniqueById<T extends { id: number }>(existing: T[], incoming: T[]
   return merged;
 }
 
+/** v1's event-type presentation map: a friendly label (with its status glyph)
+ *  plus the timeline dot class. b1's indexd taxonomy uses different type
+ *  strings than v1, so the keys are b1's and the labels/dots are v1's. */
+const EVENT_TYPE_INFO: Record<string, { label: string; dot: string }> = {
+  sentry: { label: "🟣 Sentry Mode", dot: "sentry" },
+  saved: { label: "🔵 Saved Clip", dot: "saved" },
+  harsh_braking: { label: "🔴 Hard Brake", dot: "driving" },
+  emergency_braking: { label: "🔴 Emergency Brake", dot: "driving-critical" },
+  hard_acceleration: { label: "🟠 Hard Acceleration", dot: "driving" },
+  sharp_turn: { label: "🟡 Sharp Turn", dot: "driving" },
+  speed_limit_exceeded: { label: "🔴 Speed Alert", dot: "driving-critical" },
+  honk: { label: "🟡 Horn", dot: "driving" },
+  autopilot_engaged: { label: "🟢 FSD Engage", dot: "fsd" },
+  autopilot_disengaged: { label: "🟢 FSD Disengage", dot: "fsd" },
+};
+
+function eventTypeInfo(type: string): { label: string; dot: string } {
+  return (
+    EVENT_TYPE_INFO[type] ?? { label: type.replace(/_/g, " "), dot: "driving" }
+  );
+}
+
 /** Map a webd event type onto the legacy sentry-timeline dot class. */
 function eventDotClass(type: string): string {
-  switch (type) {
-    case "sentry":
-      return "sentry";
-    case "saved":
-      return "saved";
-    case "harsh_braking":
-    case "emergency_braking":
-      return "driving-critical";
-    case "hard_acceleration":
-    case "sharp_turn":
-    case "speed_limit_exceeded":
-    case "honk":
-      return "driving";
-    case "autopilot_engaged":
-    case "autopilot_disengaged":
-      return "fsd";
-    default:
-      return "trip";
-  }
+  return eventTypeInfo(type).dot;
 }
 
 /** Map the indexd-derived severity ordinal (1=info, 2=warning, 3=critical) to
@@ -116,20 +120,21 @@ function severityLabel(severity: number | null): string | null {
   }
 }
 
-/** v1's timeline header range, e.g. "2:14 PM – 6:02 PM". */
+/** v1's timeline header range, e.g. "Aug 12, 2026 – Aug 19, 2026". */
 function eventRangeLabel(events: EventItem[], tz: string): string {
   const times = events.map((ev) => ev.t).filter((t) => Number.isFinite(t));
   if (times.length === 0) return "";
-  const lo = fmtTimeOnly(Math.min(...times), tz);
-  const hi = fmtTimeOnly(Math.max(...times), tz);
-  return lo === hi ? lo : `${lo} \u2013 ${hi}`;
+  const lo = fmtDateOnly(Math.min(...times), tz);
+  const hi = fmtDateOnly(Math.max(...times), tz);
+  return lo === hi ? hi : `${lo} \u2013 ${hi}`;
 }
 
-function fmtTimeOnly(epochSec: number, tz: string): string {
+function fmtDateOnly(epochSec: number, tz: string): string {
   try {
     return new Intl.DateTimeFormat(undefined, {
-      hour: "numeric",
-      minute: "2-digit",
+      month: "short",
+      day: "numeric",
+      year: "numeric",
       timeZone: tz,
     }).format(new Date(epochSec * 1000));
   } catch {
@@ -1074,7 +1079,7 @@ export function TripMap() {
     setPanelOpen(false);
   }, []);
 
-  const onTripShowOnMap = useCallback((lat: number, lon: number) => {
+  const onFlashOnMap = useCallback((lat: number, lon: number) => {
     setClipActionNotice(null);
     ctrlRef.current?.flashLocation(lat, lon);
     setPanelOpen(false);
@@ -1549,6 +1554,7 @@ export function TripMap() {
               sentinelRef={setActiveSentinel}
               onRetry={() => retryPanelTab("events")}
               onShowDetail={openEventDetail}
+              onShowOnMap={onFlashOnMap}
             />
           )}
           {panelTab === "trips" && (
@@ -1560,7 +1566,7 @@ export function TripMap() {
               error={panelState.trips.error}
               sentinelRef={setActiveSentinel}
               onRetry={() => retryPanelTab("trips")}
-              onShowOnMap={onTripShowOnMap}
+              onShowOnMap={onFlashOnMap}
             />
           )}
           {panelTab === "clips" && (
@@ -1625,6 +1631,7 @@ function EventsTab({
   sentinelRef,
   onRetry,
   onShowDetail,
+  onShowOnMap,
 }: {
   events: EventItem[] | null;
   tz: string;
@@ -1634,6 +1641,7 @@ function EventsTab({
   sentinelRef: (node: HTMLDivElement | null) => void;
   onRetry: () => void;
   onShowDetail: (eventId: number) => void;
+  onShowOnMap: (lat: number, lon: number) => void;
 }) {
   if (events === null) {
     if (error && !loading)
@@ -1665,15 +1673,17 @@ function EventsTab({
         <span> · {eventRangeLabel(events, tz)}</span>
       </div>
       {events.map((ev) => {
+        const info = eventTypeInfo(ev.type);
+        const hasCoords = ev.lat != null && ev.lon != null;
         const inner = (
           <>
-            <div class="st-type">{ev.type.replace(/_/g, " ")}</div>
+            <div class="st-type">{info.label}</div>
             <div class="st-date">{fmtClock(ev.t, tz)}</div>
             <div class="st-meta">
               {ev.description ||
                 (ev.trip_id != null ? `Trip #${ev.trip_id}` : "Standalone")}
-              {ev.lat != null && ev.lon != null
-                ? ` \u00B7 ${ev.lat.toFixed(4)}, ${ev.lon.toFixed(4)}`
+              {hasCoords
+                ? ` \u00B7 ${ev.lat!.toFixed(4)}, ${ev.lon!.toFixed(4)}`
                 : ""}
               {severityLabel(ev.severity)
                 ? ` \u00B7 ${severityLabel(ev.severity)}`
@@ -1683,14 +1693,14 @@ function EventsTab({
         );
         return (
           <div class="st-event" key={ev.id}>
-            <span class={`st-dot ${eventDotClass(ev.type)}`} />
+            <span class={`st-dot ${info.dot}`} />
             <div class="st-card">
               {ev.clip_id != null ? (
                 <a
                   class="st-card-link"
                   href={`/events?event=${ev.id}`}
                   data-testid={`vp-event-link-${ev.id}`}
-                  aria-label={`Watch ${ev.type.replace(/_/g, " ")} event`}
+                  aria-label={`Watch ${info.label} event`}
                 >
                   {inner}
                 </a>
@@ -1698,11 +1708,46 @@ function EventsTab({
                 inner
               )}
               <div class="st-actions">
+                {ev.clip_id != null && (
+                  <>
+                    <a
+                      class="vp-btn st-btn-play"
+                      href={`/events?event=${ev.id}`}
+                      title="Play"
+                      aria-label={`Play ${info.label} event`}
+                      data-testid={`vp-event-play-${ev.id}`}
+                    >
+                      ▶
+                    </a>
+                    <a
+                      class="vp-btn st-btn-dl"
+                      href={api.exportUrl(ev.clip_id)}
+                      download
+                      title="Download ZIP"
+                      aria-label={`Download ${info.label} event`}
+                      data-testid={`vp-event-dl-${ev.id}`}
+                    >
+                      ⏬
+                    </a>
+                  </>
+                )}
+                {hasCoords && (
+                  <button
+                    type="button"
+                    class="vp-btn st-btn-map"
+                    title="Show on Map"
+                    aria-label={`Show ${info.label} event on map`}
+                    data-testid={`vp-event-map-${ev.id}`}
+                    onClick={() => onShowOnMap(ev.lat!, ev.lon!)}
+                  >
+                    📍
+                  </button>
+                )}
                 <button
                   type="button"
                   class="vp-btn"
                   data-testid={`vp-event-detail-${ev.id}`}
-                  aria-label={`Show details for ${ev.type.replace(/_/g, " ")}`}
+                  aria-label={`Show details for ${info.label}`}
                   onClick={() => onShowDetail(ev.id)}
                 >
                   ℹ

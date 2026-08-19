@@ -34,7 +34,6 @@ const SECTION_ORDER = [
   "Access Point",
   "Storage & Auto-Cleanup",
   "Mapping & Indexing",
-  "Advanced Settings",
   "Storage Health",
   "Filesystem Health Check",
   "System",
@@ -655,15 +654,6 @@ test.describe("settings dashboard UAT", () => {
     await expect(page.locator("#mapping-display-timezone")).toHaveValue(
       "America/Los_Angeles",
     );
-    await expect(page.locator("[data-testid=advanced-setting-speed_unit]")).toContainText(
-      "Configured",
-    );
-    await expect(page.locator("[data-testid=advanced-setting-clock]")).toContainText(
-      "Defaulted (missing)",
-    );
-    await expect(page.locator("[data-testid=advanced-setting-display_timezone]")).toContainText(
-      "Allowed: IANA timezone or Auto",
-    );
     // The Save button lives inside the collapsed Mapping <details>, so it is hidden
     // from the accessibility tree; assert enabled via a locator (works on attached,
     // non-visible elements) rather than getByRole (which excludes hidden nodes).
@@ -1092,10 +1082,6 @@ test.describe("settings dashboard UAT", () => {
     // The config bindings + the Video Indexer enrichment + the device-status
     // probes prove the catalog API is actually wired in.
     expect(apiSeen.has("/api/settings"), "/api/settings was never requested").toBe(true);
-    expect(
-      apiSeen.has("/api/settings/advanced"),
-      "/api/settings/advanced was never requested",
-    ).toBe(true);
     expect(apiSeen.has("/api/clips"), "/api/clips was never requested").toBe(true);
     expect(
       apiSeen.has("/api/system/health"),

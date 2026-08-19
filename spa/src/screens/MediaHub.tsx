@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import { Fragment } from "preact";
 import { ApiError, api } from "../api/client";
 import type {
-  AdvancedSetting,
   ApInfo,
   ApMode,
   FsckHistoryEntry,
@@ -184,26 +183,6 @@ function isAbortError(err: unknown): boolean {
   return err instanceof DOMException && err.name === "AbortError";
 }
 
-function advancedValueLabel(
-  value: string,
-  validation: AdvancedSetting["validation"],
-): string {
-  if (validation.kind === "timezone_or_auto" && value === "") return "Auto";
-  return value;
-}
-
-function advancedSourceLabel(status: AdvancedSetting["source_status"]): string {
-  if (status === "stored") return "Configured";
-  if (status === "default_invalid") return "Defaulted (invalid saved value)";
-  return "Defaulted (missing)";
-}
-
-function advancedValidationLabel(validation: AdvancedSetting["validation"]): string {
-  if (validation.kind === "enum") return validation.allowed.join(" | ");
-  if (validation.kind === "integer_range") return `${validation.min}–${validation.max}`;
-  return "IANA timezone or Auto";
-}
-
 function partitionLabel(partition: "part1" | "part2" | "part3"): string {
   if (partition === "part1") return "TeslaCam";
   if (partition === "part2") return "Light Show";
@@ -343,8 +322,6 @@ export function MediaHub() {
   const [mappingMsg, setMappingMsg] = useState<
     { kind: "info" | "success" | "error"; text: string } | null
   >(null);
-  const [advancedSettings, setAdvancedSettings] = useState<AdvancedSetting[]>([]);
-  const [advancedLoaded, setAdvancedLoaded] = useState(false);
   const [indexer, setIndexer] = useState<HealthBlock | null>(null);
   const [health, setHealth] = useState<SystemHealth | null>(null);
   const [metrics, setMetrics] = useState<SystemMetrics | null>(null);
@@ -414,18 +391,6 @@ export function MediaHub() {
       .catch(() => {
         // Read-only degrade: fall back to template defaults without logging,
         // so an absent/empty prefs store never trips the zero-console gate.
-      });
-    api
-      .advancedSettings(ctrl.signal)
-      .then((response) => {
-        if (ctrl.signal.aborted) return;
-        setAdvancedSettings(response.items);
-      })
-      .catch(() => {
-        // Read-only degrade: keep the section in its loading/default state.
-      })
-      .finally(() => {
-        if (!ctrl.signal.aborted) setAdvancedLoaded(true);
       });
     // Device-status reads (5.1d). Each handler never 5xx and self-degrades to
     // unknown/null, so on the rare transport error we simply leave the section
@@ -998,7 +963,9 @@ export function MediaHub() {
                   } else {
                     const block = health?.subsystems?.[sub.key] ?? null;
                     sev = block?.severity ?? "unknown";
-                    msg = block?.message ?? "—";
+                    const details = (sub.key === "journal" ? block?.details : undefined) ?? [];
+                    const detailText = details.length > 0 ? details.join(" | ") : null;
+                    msg = detailText ? `${block?.message ?? "—"} — ${detailText}` : (block?.message ?? "—");
                   }
                   return (
                     <Fragment key={sub.key}>
@@ -1770,58 +1737,6 @@ export function MediaHub() {
                 {mappingSaving ? "Saving Mapping Settings…" : "Save Mapping Settings"}
               </button>
             </form>
-          </div>
-        </details>
-
-        {/* Advanced Settings — read-only bounded visibility into supported,
-            validated pref keys only (no writes on this surface). */}
-        <details class="settings-section" id="advanced-settings-section">
-          <summary>Advanced Settings</summary>
-          <div class="section-content" id="advanced-settings-card">
-            <p style="font-size:0.85rem; color:var(--text-secondary); margin:0 0 12px;">
-              Read-only visibility into supported advanced preferences. Values are
-              bounded to validated keys; missing or invalid saved values fall back
-              to defaults.
-            </p>
-            {!advancedLoaded ? (
-              <p style="margin:0; color:var(--text-secondary); font-size:0.85rem;">
-                Loading advanced settings…
-              </p>
-            ) : advancedSettings.length === 0 ? (
-              <p style="margin:0; color:var(--text-secondary); font-size:0.85rem;">
-                No supported advanced settings available.
-              </p>
-            ) : (
-              <div class="advanced-settings-list">
-                {advancedSettings.map((setting) => (
-                  <article
-                    class="advanced-setting-row"
-                    key={setting.key}
-                    data-testid={`advanced-setting-${setting.key}`}
-                  >
-                    <div>
-                      <strong>{setting.label}</strong>
-                      <p class="advanced-setting-description">{setting.description}</p>
-                    </div>
-                    <div class="advanced-setting-meta">
-                      <code class="advanced-setting-value">
-                        {advancedValueLabel(setting.value, setting.validation)}
-                      </code>
-                      <span class="advanced-setting-status">
-                        {advancedSourceLabel(setting.source_status)}
-                      </span>
-                    </div>
-                    <div class="advanced-setting-foot">
-                      <span>Allowed: {advancedValidationLabel(setting.validation)}</span>
-                      <span>
-                        Default:{" "}
-                        {advancedValueLabel(setting.default_value, setting.validation)}
-                      </span>
-                    </div>
-                  </article>
-                ))}
-              </div>
-            )}
           </div>
         </details>
 

@@ -13,7 +13,6 @@
 import type {
   ArchiveDeleteMutationResponse,
   ArchiveDeleteStatusResponse,
-  AdvancedSettingsResponse,
   Analytics,
   ApMode,
   ApiErrorBody,
@@ -369,8 +368,6 @@ export const api = {
     getJson<Analytics>("/api/analytics", signal),
 
   settings: (signal?: AbortSignal) => getJson<Pref[]>("/api/settings", signal),
-  advancedSettings: (signal?: AbortSignal) =>
-    getJson<AdvancedSettingsResponse>("/api/settings/advanced", signal),
   putSetting: (key: string, value: string, signal?: AbortSignal): Promise<Pref> =>
     request<Pref>(
       "PUT",

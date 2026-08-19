@@ -546,6 +546,7 @@ export interface HealthBlock {
   /** `ok | warn | error | unknown`. */
   severity: string;
   message: string;
+  details?: string[];
 }
 
 /** `GET /api/system/health`. Subsystems webd cannot probe are omitted. */

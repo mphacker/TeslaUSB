@@ -181,6 +181,12 @@ pub trait SystemProbe: Send + Sync {
     fn recent_error_count(&self) -> Option<u64> {
         None
     }
+
+    /// Up to 5 recent error-priority journal lines in the last 10 minutes.
+    /// `None` when the journal cannot be read; empty when there are no errors.
+    fn recent_error_lines(&self) -> Option<Vec<String>> {
+        None
+    }
 }
 
 /// Paths `webd` probes: the Pi-side data/archive root whose ext4 filesystem
@@ -210,6 +216,9 @@ pub struct HealthBlock {
     pub severity: &'static str,
     /// Human-readable one-line status.
     pub message: String,
+    /// Optional recent error lines relevant to this subsystem.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub details: Vec<String>,
 }
 
 impl HealthBlock {
@@ -217,6 +226,7 @@ impl HealthBlock {
         Self {
             severity: sev.as_str(),
             message: message.into(),
+            details: Vec::new(),
         }
     }
 }
@@ -626,10 +636,11 @@ fn journal_block(probe: &dyn SystemProbe) -> (Severity, HealthBlock) {
             Severity::Ok,
             HealthBlock::new(Severity::Ok, "No errors in last 10 min"),
         ),
-        Some(n) => (
-            Severity::Warn,
-            HealthBlock::new(Severity::Warn, format!("{n} error(s) in last 10 min")),
-        ),
+        Some(n) => {
+            let mut block = HealthBlock::new(Severity::Warn, format!("{n} error(s) in last 10 min"));
+            block.details = probe.recent_error_lines().unwrap_or_default();
+            (Severity::Warn, block)
+        }
         None => (
             Severity::Unknown,
             HealthBlock::new(Severity::Unknown, "Journal unavailable"),
@@ -1318,6 +1329,35 @@ impl SystemProbe for LinuxProbe {
             .count();
         u64::try_from(count).ok()
     }
+
+    fn recent_error_lines(&self) -> Option<Vec<String>> {
+        let out = std::process::Command::new("timeout")
+            .args([
+                "-k",
+                "2",
+                "5",
+                "journalctl",
+                "--since=-10min",
+                "--priority=err",
+                "--no-pager",
+                "--quiet",
+                "--output=cat",
+                "--reverse",
+            ])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let mut lines: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
+        lines.truncate(5);
+        Some(lines)
+    }
 }
 
 #[cfg(unix)]
@@ -1377,6 +1417,7 @@ mod tests {
         ipv4: Option<String>,
         wifi_link: Option<WifiLink>,
         recent_error_count: Option<u64>,
+        recent_error_lines: Option<Vec<String>>,
     }
 
     impl SystemProbe for FakeProbe {
@@ -1424,6 +1465,10 @@ mod tests {
         }
         fn recent_error_count(&self) -> Option<u64> {
             self.recent_error_count
+        }
+
+        fn recent_error_lines(&self) -> Option<Vec<String>> {
+            self.recent_error_lines.clone()
         }
     }
 

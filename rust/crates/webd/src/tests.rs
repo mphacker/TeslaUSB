@@ -6904,6 +6904,20 @@ fn wifi_ap_fixture(reply: WifidReply) -> WifiApFixture {
     }
 }
 
+async fn post_wifi_ap_json(app: &Router, uri: &str, body: Value) -> (StatusCode, Value) {
+    post_json_with_headers(
+        app,
+        uri,
+        body,
+        &[
+            ("host", "cybertruckusb.local"),
+            ("origin", "http://cybertruckusb.local"),
+            ("sec-fetch-site", "same-origin"),
+        ],
+    )
+    .await
+}
+
 #[tokio::test]
 async fn wifi_ap_get_status_forwards_cmd_and_relays_body() {
     let reply = json!({ "ap": { "mode": "auto", "active": false, "ssid": "tesla", "client_count": 0, "ip": null } });
@@ -6918,8 +6932,7 @@ async fn wifi_ap_get_status_forwards_cmd_and_relays_body() {
 #[tokio::test]
 async fn wifi_ap_set_mode_force_on_forwards_cmd() {
     let fx = wifi_ap_fixture(WifidReply::Json(json!({ "ok": true })));
-    let (status, body) =
-        post_json(&fx.app, "/api/wifi/ap/mode", json!({ "mode": "force_on" })).await;
+    let (status, body) = post_wifi_ap_json(&fx.app, "/api/wifi/ap/mode", json!({ "mode": "force_on" })).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, json!({ "ok": true }));
     let req = fx.last.lock().unwrap().clone().unwrap();
@@ -6929,16 +6942,35 @@ async fn wifi_ap_set_mode_force_on_forwards_cmd() {
 #[tokio::test]
 async fn wifi_ap_set_mode_invalid_is_422_before_forward() {
     let fx = wifi_ap_fixture(WifidReply::Json(json!({ "ok": true })));
-    let (status, body) = post_json(&fx.app, "/api/wifi/ap/mode", json!({ "mode": "bogus" })).await;
+    let (status, body) = post_wifi_ap_json(&fx.app, "/api/wifi/ap/mode", json!({ "mode": "bogus" })).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(body["error"]["code"], "invalid_mode");
     assert!(fx.last.lock().unwrap().is_none(), "wifid not contacted");
 }
 
 #[tokio::test]
+async fn wifi_ap_set_mode_rejects_cross_origin_without_forwarding() {
+    let fx = wifi_ap_fixture(WifidReply::Json(json!({ "ok": true })));
+    let (status, body) = post_json_with_headers(
+        &fx.app,
+        "/api/wifi/ap/mode",
+        json!({ "mode": "force_on" }),
+        &[
+            ("host", "cybertruckusb.local"),
+            ("origin", "https://evil.example"),
+            ("sec-fetch-site", "cross-site"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"]["code"], "forbidden_origin");
+    assert!(fx.last.lock().unwrap().is_none(), "wifid not contacted");
+}
+
+#[tokio::test]
 async fn wifi_ap_set_config_forwards_cmd_and_never_echoes_secret() {
     let fx = wifi_ap_fixture(WifidReply::Json(json!({ "ok": true })));
-    let (status, body) = post_json(
+    let (status, body) = post_wifi_ap_json(
         &fx.app,
         "/api/wifi/ap/config",
         json!({ "ssid": "MyAP", "passphrase": "supersecret1" }),
@@ -6956,6 +6988,25 @@ async fn wifi_ap_set_config_forwards_cmd_and_never_echoes_secret() {
 }
 
 #[tokio::test]
+async fn wifi_ap_set_config_rejects_cross_origin_without_forwarding() {
+    let fx = wifi_ap_fixture(WifidReply::Json(json!({ "ok": true })));
+    let (status, body) = post_json_with_headers(
+        &fx.app,
+        "/api/wifi/ap/config",
+        json!({ "ssid": "MyAP", "passphrase": "supersecret1" }),
+        &[
+            ("host", "cybertruckusb.local"),
+            ("origin", "https://evil.example"),
+            ("sec-fetch-site", "cross-site"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"]["code"], "forbidden_origin");
+    assert!(fx.last.lock().unwrap().is_none(), "wifid not contacted");
+}
+
+#[tokio::test]
 async fn wifi_ap_unavailable_maps_to_503() {
     let fx = wifi_ap_fixture(WifidReply::Unavailable);
     let (status, body) = get_json(&fx.app, "/api/wifi/ap").await;
@@ -6968,7 +7019,7 @@ async fn wifi_ap_invalid_argument_maps_to_422() {
     let fx = wifi_ap_fixture(WifidReply::Json(json!({
         "error": { "code": "invalid_argument", "message": "passphrase too short" }
     })));
-    let (status, body) = post_json(
+    let (status, body) = post_wifi_ap_json(
         &fx.app,
         "/api/wifi/ap/config",
         json!({ "ssid": "x", "passphrase": "y" }),

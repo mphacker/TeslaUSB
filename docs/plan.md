@@ -19,10 +19,11 @@
 - Noninteractive sudo was restored on the test device with a validated `/etc/sudoers.d/teslausb-b1` rule and a timestamped rollback backup, allowing guarded deployment to proceed.
 - Schema v13 freshness tracking was rebuilt, manifest-verified, and deployed as a matched AArch64 set. The device migrated successfully; `/api/index/lifecycle` now reports `schema_version: 13`, `lifecycle_state: "healthy"`, `front_parse_missing_count: 0`, and a current `last_derived_at` that advances across no-change scan passes.
 - Post-deployment SSH, Wi-Fi, systemd, all six app services, deployed hashes, and retention recovery were healthy. One known transient retention SQLite contention message recurred during restart, then subsequent governor cycles completed as `AlreadyHealthy`; the dead-man timer was cancelled only after the settle checks passed.
+- The captive-portal parity slice is now wired to the existing typed Wi-Fi APIs for scan, manual/saved-network connection, forget, priority, and safe AP controls. Mutations require explicit operator confirmation; AP mutations now enforce the same-origin contract; `force_off` is intentionally unavailable. Focused desktop UAT (18 tests including failed-job coverage) and webd AP-origin tests pass.
 
 ## Next step
 
-Continue parity work now that Wi-Fi and lifecycle diagnostics are clean; retain the archive-vs-live provenance distinction and persisted freshness semantics in future index health checks.
+Continue parity work now that Wi-Fi onboarding source parity and lifecycle diagnostics are clean; live onboarding mutation UAT remains the gate before hardware use.
 
 Why this is next:
 

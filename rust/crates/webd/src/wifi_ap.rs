@@ -4,7 +4,7 @@
 //! [`crate::wifid_client`]) and relays the answer.
 
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use crate::AppState;
 use crate::error::ApiError;
 use crate::gadget::TransportError;
+use crate::wifi_mutate::same_origin_ok;
 
 /// The Wi-Fi AP sub-routes, mounted under `/api` by [`crate::route`].
 pub(crate) fn routes() -> Router<AppState> {
@@ -35,9 +36,17 @@ struct ModeBody {
 
 /// `POST /api/wifi/ap/mode`: set AP mode (`auto|force_on|force_off`).
 async fn set_ap_mode(
+    headers: HeaderMap,
     State(state): State<AppState>,
     Json(body): Json<ModeBody>,
 ) -> Result<Json<Value>, ApiError> {
+    if !same_origin_ok(&headers) {
+        return Err(ApiError::status(
+            StatusCode::FORBIDDEN,
+            "forbidden_origin",
+            "cross-origin Wi-Fi mutation refused",
+        ));
+    }
     if !matches!(body.mode.as_str(), "auto" | "force_on" | "force_off") {
         return Err(ApiError::status(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -57,9 +66,17 @@ struct ConfigBody {
 
 /// `POST /api/wifi/ap/config`: set AP SSID + passphrase.
 async fn set_ap_config(
+    headers: HeaderMap,
     State(state): State<AppState>,
     Json(body): Json<ConfigBody>,
 ) -> Result<Json<Value>, ApiError> {
+    if !same_origin_ok(&headers) {
+        return Err(ApiError::status(
+            StatusCode::FORBIDDEN,
+            "forbidden_origin",
+            "cross-origin Wi-Fi mutation refused",
+        ));
+    }
     let resp = call(
         &state,
         json!({

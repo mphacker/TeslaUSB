@@ -68,13 +68,12 @@ archive/event deletion workflows.
 
 #### Wi-Fi onboarding mismatch
 
-The B-1 `/captive-portal` screen is a static, read-only page that makes no API
-calls (`spa/src/screens/CaptivePortal.tsx`). This is now inconsistent with the
-live Wi-Fi APIs and controls already present in `MediaHub.tsx`,
-`wifi.rs`, `wifi_ap.rs`, and `wifi_mutate.rs`.
-
-The missing behavior includes live status, network scan, manual connection,
-saved-network actions, AP controls, and captive-portal onboarding behavior.
+Resolved in the current tree. `/captive-portal` now consumes the live Wi-Fi
+status, scan, saved-profile, STA mutation, priority, and safe AP control APIs.
+Every mutation is explicitly operator-confirmed; webd enforces same-origin
+checks on AP mutations as well as STA mutations; and the portal does not expose
+the unsafe `force_off` AP mode. Remaining work is live-device onboarding UAT,
+not missing source wiring.
 
 #### Advanced settings
 
@@ -157,4 +156,3 @@ control plane lands, the UI should make the unavailable status unmistakable.
    mapping administration.
 6. Add main-to-B-1 migration.
 7. Run the full parity, reliability, migration, and release gates.
-

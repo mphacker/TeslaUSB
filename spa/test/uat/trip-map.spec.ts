@@ -534,7 +534,7 @@ test.describe("trip map UAT", () => {
     // Trips tab → the 3 seeded trips from the global paged catalog.
     await page.locator("#vpTabTrips").click();
     const vpTrips = page.locator("[data-testid=vp-trips]");
-    await expect(vpTrips.locator(".vp-clip")).toHaveCount(3);
+    await expect(vpTrips.locator(".st-event")).toHaveCount(3);
     await expect(vpTrips).toContainText("Trip #1");
     await expect(vpTrips).toContainText("Trip #2");
     await expect(vpTrips).toContainText("Trip #3");

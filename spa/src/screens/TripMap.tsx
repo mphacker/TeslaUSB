@@ -116,6 +116,42 @@ function severityLabel(severity: number | null): string | null {
   }
 }
 
+/** v1's timeline header range, e.g. "2:14 PM – 6:02 PM". */
+function eventRangeLabel(events: EventItem[], tz: string): string {
+  const times = events.map((ev) => ev.t).filter((t) => Number.isFinite(t));
+  if (times.length === 0) return "";
+  const lo = fmtTimeOnly(Math.min(...times), tz);
+  const hi = fmtTimeOnly(Math.max(...times), tz);
+  return lo === hi ? lo : `${lo} \u2013 ${hi}`;
+}
+
+function fmtTimeOnly(epochSec: number, tz: string): string {
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      hour: "numeric",
+      minute: "2-digit",
+      timeZone: tz,
+    }).format(new Date(epochSec * 1000));
+  } catch {
+    return "";
+  }
+}
+
+/** First vertex of a trip's decoded geometry, as `[lat, lon]`. */
+function tripStartCoord(trip: Trip): [number, number] | null {
+  const first = trip.polyline[0];
+  if (!first || first.length === 0) return null;
+  const [lat, lon] = first[0];
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  return [lat, lon];
+}
+
+/** v1 shows trip duration in whole minutes; empty when it rounds to zero. */
+function tripDurationLabel(trip: Trip): string {
+  const minutes = Math.round((trip.ended_at - trip.started_at) / 60);
+  return minutes > 0 ? `${minutes} min` : "";
+}
+
 function fmtClock(epochSec: number, tz: string): string {
   try {
     const options: Intl.DateTimeFormatOptions = {
@@ -1038,6 +1074,12 @@ export function TripMap() {
     setPanelOpen(false);
   }, []);
 
+  const onTripShowOnMap = useCallback((lat: number, lon: number) => {
+    setClipActionNotice(null);
+    ctrlRef.current?.flashLocation(lat, lon);
+    setPanelOpen(false);
+  }, []);
+
   const onClipDownload = useCallback((clip: Clip) => {
     setClipActionNotice(null);
     const anchor = document.createElement("a");
@@ -1518,6 +1560,7 @@ export function TripMap() {
               error={panelState.trips.error}
               sentinelRef={setActiveSentinel}
               onRetry={() => retryPanelTab("trips")}
+              onShowOnMap={onTripShowOnMap}
             />
           )}
           {panelTab === "clips" && (
@@ -1619,6 +1662,7 @@ function EventsTab({
         <strong>
           {events.length} Event{events.length !== 1 ? "s" : ""}
         </strong>
+        <span> · {eventRangeLabel(events, tz)}</span>
       </div>
       {events.map((ev) => {
         const inner = (
@@ -1702,6 +1746,7 @@ function TripsTab({
   error,
   sentinelRef,
   onRetry,
+  onShowOnMap,
 }: {
   trips: Trip[] | null;
   tz: string;
@@ -1710,6 +1755,7 @@ function TripsTab({
   error: boolean;
   sentinelRef: (node: HTMLDivElement | null) => void;
   onRetry: () => void;
+  onShowOnMap: (lat: number, lon: number) => void;
 }) {
   if (trips === null) {
     if (error && !loading)
@@ -1732,21 +1778,47 @@ function TripsTab({
     if (loading) return <div class="vp-loading">Loading trips…</div>;
     return <div class="vp-empty">No trips this day</div>;
   }
+  const totalPoints = trips.reduce((sum, t) => sum + t.point_count, 0);
   return (
-    <div data-testid="vp-trips">
-      {trips.map((t) => (
-        <div class="vp-clip" key={t.id}>
-          <div class="vp-clip-info">
-            <div class="vp-clip-date">Trip #{t.id}</div>
-            <div class="vp-clip-meta">
-              {fmtClock(t.started_at, tz)} · {t.point_count} pts
-            </div>
-            <div class="vp-clip-reason">
-              {((t.distance_m ?? 0) / METERS_PER_MILE).toFixed(1)} mi
+    <div class="sentry-timeline" data-testid="vp-trips">
+      <div class="st-summary">
+        <strong>
+          {trips.length} Trip{trips.length !== 1 ? "s" : ""}
+        </strong>
+        {totalPoints > 0 && <span> · {totalPoints} points</span>}
+      </div>
+      {trips.map((t) => {
+        const start = tripStartCoord(t);
+        const meta = [
+          `${((t.distance_m ?? 0) / METERS_PER_MILE).toFixed(1)} mi`,
+          tripDurationLabel(t),
+          `${t.point_count} pts`,
+        ].filter(Boolean);
+        return (
+          <div class="st-event" key={t.id}>
+            <span class="st-dot trip" />
+            <div class="st-card">
+              <div class="st-type">Trip #{t.id}</div>
+              <div class="st-date">{fmtClock(t.started_at, tz)}</div>
+              <div class="st-meta">{meta.join(" \u00B7 ")}</div>
+              {start && (
+                <div class="st-actions">
+                  <button
+                    type="button"
+                    class="vp-btn vp-btn-map"
+                    title="Show on Map"
+                    aria-label={`Show trip ${t.id} on map`}
+                    data-testid={`vp-trip-map-${t.id}`}
+                    onClick={() => onShowOnMap(start[0], start[1])}
+                  >
+                    📍
+                  </button>
+                </div>
+              )}
             </div>
           </div>
-        </div>
-      ))}
+        );
+      })}
       {loading && <div class="vp-loading">Loading…</div>}
       {error && !loading && (
         <div class="vp-error" data-testid="vp-error-trips">

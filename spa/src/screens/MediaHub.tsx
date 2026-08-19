@@ -91,15 +91,31 @@ const METRIC_TILES = [
   { id: "metric-sd", label: "SD Card I/O" },
 ];
 
-const TIMEZONES = [
-  "UTC",
-  "America/Los_Angeles",
-  "America/Denver",
-  "America/Chicago",
-  "America/New_York",
-  "Europe/London",
-  "Europe/Berlin",
-];
+const TIMEZONE_FMT = new Intl.DateTimeFormat("en-US", {
+  timeZoneName: "shortOffset",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
+function timezoneOffsetLabel(_tz: string): string {
+  try {
+    TIMEZONE_FMT.resolvedOptions();
+    const parts = TIMEZONE_FMT.formatToParts(new Date());
+    const part = parts.find((p) => p.type === "timeZoneName")?.value ?? "";
+    return part.startsWith("GMT") ? ` (${part})` : "";
+  } catch {
+    return "";
+  }
+}
+
+function browserTimezones(): string[] {
+  const values = Intl.supportedValuesOf?.("timeZone");
+  if (Array.isArray(values) && values.length > 0) return values;
+  return ["UTC"];
+}
+
+const TIMEZONES = browserTimezones();
 
 // System Health subsystems + severity colors — transcribed verbatim from the
 // legacy index.html card (Phase 4.2). The system-probe rows
@@ -1722,7 +1738,7 @@ export function MediaHub() {
                     <option value="">Auto (use this device's timezone)</option>
                     {TIMEZONES.map((tz) => (
                       <option value={tz} key={tz}>
-                        {tz}
+                        {tz}{timezoneOffsetLabel(tz)}
                       </option>
                     ))}
                   </select>

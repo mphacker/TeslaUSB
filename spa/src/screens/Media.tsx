@@ -46,10 +46,26 @@ import "../styles/media.css";
 
 const DASH = "\u2014";
 const ACT_POLL_INTERVAL_MS = 2000;
-const ACT_POLL_MAX_MS = 60000;
+// How long the activation blocks the page with the busy overlay before it drops
+// to the non-blocking "still applying" state. Polling continues past this.
+const ACT_SYNCING_MAX_MS = 30000;
+// Total activation poll window. This MUST exceed the media-catalog refresh
+// latency, not the handoff latency: `GET /api/chimes` reports the `media_entries`
+// catalog produced by a scannerd pass and ingested by an indexd pass, so a
+// perfectly successful handoff is invisible here until both have cycled —
+// measured at ~2-4 minutes on the Pi. The previous 60s window expired before a
+// SUCCESSFUL activation could ever converge, so every activation degraded to
+// "still applying" and the operator was never told it had worked.
+const ACT_POLL_MAX_MS = 360000;
 const REENUM_POLL_INTERVAL_MS = 2000;
 const REENUM_SYNCING_MAX_MS = 30000;
 const REENUM_POLL_MAX_MS = 120000;
+
+// `/api/jobs/mutation/{id}` reads gadgetd's durable mutation queue, whose ids are
+// always `m-<seq>`; webd rejects anything else with a 400. Other endpoints hand
+// back opaque handles for their own in-process jobs, so guard here rather than
+// firing a request every 2s that we know the server will refuse.
+const GADGET_QUEUE_JOB_ID = /^m-\d+$/;
 
 function activationSuccessMessage(filename: string): string {
   return `“${filename}” is now your active lock chime.`;
@@ -387,7 +403,11 @@ export function Media() {
     token: number;
     preModified: string | null;
     preSize: number | null;
-    phase: "syncing" | "waiting";
+    /** Durable gadgetd queue id from the `202 {state:"queued"}` path, when queued. */
+    jobId: string | null;
+    phase: "syncing" | "waiting" | "failed";
+    /** gadgetd's reason, populated only in the `"failed"` phase. */
+    failDetail?: string | null;
   } | null>(null);
   const [activationNotice, setActivationNotice] = useState<string | null>(null);
   const [reenumOverlay, setReenumOverlay] = useState<{
@@ -422,7 +442,7 @@ export function Media() {
   const pageBusy =
     uploading ||
     childBusy ||
-    (!!pendingActivation && pendingActivation.phase !== "waiting");
+    (!!pendingActivation && pendingActivation.phase === "syncing");
   const showBusy = useDelayedFlag(pageBusy, 1000);
   // Lock document scroll (and reserve the scrollbar gutter so the page doesn't
   // jump) whenever a full-screen overlay is up — either the busy blocker or the
@@ -735,7 +755,7 @@ export function Media() {
       : activationSuccessMessage(filename);
   }
 
-  function onChimeActivated(filename: string, bytes: number) {
+  function onChimeActivated(filename: string, bytes: number, jobId: string | null) {
     setActivationNotice(null);
     const token = (activationSeqRef.current += 1);
     latestActivationTokenRef.current = token;
@@ -745,6 +765,7 @@ export function Media() {
       token,
       preModified: installed?.modified ?? null,
       preSize: installed?.size_bytes ?? null,
+      jobId,
       phase: "syncing",
     });
   }
@@ -773,13 +794,20 @@ export function Media() {
     const ctrl = new AbortController();
     activationAbortRef.current = ctrl;
     let pollId: ReturnType<typeof setTimeout> | null = null;
+    let syncingId: ReturnType<typeof setTimeout> | null = null;
     let timeoutId: ReturnType<typeof setTimeout> | null = null;
     const startedAt = Date.now();
+    const jobId =
+      pendingActivation.jobId && GADGET_QUEUE_JOB_ID.test(pendingActivation.jobId)
+        ? pendingActivation.jobId
+        : null;
 
     const stopPolling = () => {
       if (pollId) clearTimeout(pollId);
+      if (syncingId) clearTimeout(syncingId);
       if (timeoutId) clearTimeout(timeoutId);
       pollId = null;
+      syncingId = null;
       timeoutId = null;
     };
 
@@ -803,6 +831,39 @@ export function Media() {
         // through to re-arm so a momentary blip can't silently stop the poll.
         if (cancelled) return;
       }
+      // The catalog hasn't caught up yet — but the durable job may already have
+      // given up. Only `failed_fatal` is a definite failure: `unknown` just means
+      // the id is no longer in the queue (it may have applied and been pruned),
+      // so treating it as a failure would invent errors on the happy path.
+      if (jobId) {
+        try {
+          const job = await api.mutationStatus(jobId, ctrl.signal);
+          if (cancelled) return;
+          if (job.state === "failed_fatal") {
+            stopPolling();
+            // The activation is dead. Stop the re-enumeration watcher too: it is
+            // driven by a GLOBAL device flag, so leaving it armed lets an
+            // unrelated re-enumeration clear it later and post a false
+            // "is now your active lock chime" notice for a chime that never landed.
+            if (latestActivationTokenRef.current === pendingActivation.token) {
+              reenumAbortRef.current?.abort();
+              reenumStopRef.current?.();
+              setReenumPoll(null);
+              setReenumOverlay(null);
+            }
+            setPendingActivation((current) =>
+              current && current.token === pendingActivation.token
+                ? { ...current, phase: "failed", failDetail: job.detail }
+                : current,
+            );
+            return;
+          }
+        } catch {
+          // Job status is best-effort: an older webd without the route, or a
+          // blip, must not stop the catalog poll.
+          if (cancelled) return;
+        }
+      }
       if (Date.now() - startedAt < ACT_POLL_MAX_MS) {
         pollId = setTimeout(() => {
           void runPoll();
@@ -817,12 +878,23 @@ export function Media() {
     );
 
     void runPoll();
+    // Drop the blocking overlay well before the poll window closes: the handoff
+    // itself takes seconds, but the catalog that proves it can take minutes.
+    // Holding the page hostage for the whole poll window would be unusable.
+    syncingId = setTimeout(() => {
+      if (cancelled) return;
+      setPendingActivation((current) =>
+        current && current.token === pendingActivation.token && current.phase === "syncing"
+          ? { ...current, phase: "waiting" }
+          : current,
+      );
+    }, ACT_SYNCING_MAX_MS);
     timeoutId = setTimeout(() => {
       if (cancelled) return;
       ctrl.abort();
       stopPolling();
       setPendingActivation((current) =>
-        current && current.token === pendingActivation.token
+        current && current.token === pendingActivation.token && current.phase !== "failed"
           ? { ...current, phase: "waiting" }
           : current,
       );
@@ -1020,7 +1092,8 @@ export function Media() {
         {pendingActivation?.phase === "waiting" && (
           <>
             <p data-testid="activation-status">
-              Still applying “{pendingActivation.filename}” — it should appear shortly.
+              Still applying “{pendingActivation.filename}” — the car has it, but the
+              media catalog can take a minute or two to catch up.
             </p>
             <button
               type="button"
@@ -1028,6 +1101,23 @@ export function Media() {
               onClick={() => void refreshActivationNow()}
             >
               Refresh now
+            </button>
+          </>
+        )}
+        {pendingActivation?.phase === "failed" && (
+          <>
+            <p data-testid="activation-status" class="chime-upload-status fatal" role="alert">
+              Couldn't set “{pendingActivation.filename}” as your active chime — the car
+              rejected the change after several attempts
+              {pendingActivation.failDetail ? ` (${pendingActivation.failDetail})` : ""}.
+              Try again; if it keeps failing, check the Status page.
+            </p>
+            <button
+              type="button"
+              data-testid="activation-dismiss"
+              onClick={() => setPendingActivation(null)}
+            >
+              Dismiss
             </button>
           </>
         )}
@@ -1193,7 +1283,7 @@ export function Media() {
           onActivated={onChimeActivated}
           onLibraryLoaded={setLibrary}
           onEditChime={onEditChime}
-          activationBusy={!!pendingActivation}
+          activationBusy={!!pendingActivation && pendingActivation.phase !== "failed"}
           onBusyChange={setChildBusy}
         />
       </div>

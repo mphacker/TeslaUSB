@@ -1482,6 +1482,62 @@ test.describe("media (lock chimes) UAT", () => {
       await expect(page.locator("[data-testid=library-set-active]").first()).toBeEnabled();
     });
 
+    test("a failed_fatal mutation surfaces a real error instead of waiting forever", async ({
+      page,
+    }) => {
+      // Before this, a mutation gadgetd had permanently given up on was
+      // indistinguishable from one still in flight: the UI just said "still
+      // applying" until the poll window closed, and the operator was never told
+      // their chime would never land.
+      await page.clock.install({ time: new Date("2024-01-01T00:00:00Z") });
+      const installed = {
+        name: "LockChime.wav",
+        rel_path: "LockChime.wav",
+        size_bytes: 1024,
+        modified: "2026-06-15T23:57:58",
+      };
+
+      await page.route("**/api/chime-scheduler", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        return jsonRoute(route, 200, snapshot([{ filename: "Sparkle.wav", bytes: 2048 }]));
+      });
+      await page.route("**/api/chime-scheduler/library/*/activate", (route) => {
+        if (route.request().method() !== "POST") return route.continue();
+        return route.fulfill({
+          status: 202,
+          contentType: "application/json",
+          body: JSON.stringify({ state: "queued", job_id: "m-77" }),
+        });
+      });
+      // The catalog never converges, exactly as it would not for a failed job.
+      await page.route("**/api/chimes", (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        return jsonRoute(route, 200, { installed });
+      });
+      await page.route("**/api/jobs/mutation/m-77", (route) =>
+        jsonRoute(route, 200, {
+          jobId: "m-77",
+          state: "failed_fatal",
+          attempts: 13,
+          detail: "mount /dev/loop1p1: command timed out",
+        }),
+      );
+
+      await gotoActivationMedia(page);
+      await page.locator("[data-testid=library-set-active]").first().click();
+
+      const status = page.locator("[data-testid=activation-status]");
+      await expect(status).toContainText("Couldn't set “Sparkle.wav”", { timeout: 20000 });
+      await expect(status).toContainText("mount /dev/loop1p1: command timed out");
+      // The failure must not hold the page hostage behind the busy overlay, and
+      // the operator must be able to retry.
+      await expect(page.locator("[data-testid=activation-refresh-now]")).toHaveCount(0);
+      await expect(page.locator("[data-testid=library-set-active]").first()).toBeEnabled();
+
+      await page.locator("[data-testid=activation-dismiss]").click();
+      await expect(page.locator("[data-testid=activation-status]")).toHaveCount(0);
+    });
+
     test("same-size activation converges on modified change", async ({ page }) => {
       await page.clock.install({ time: new Date("2024-01-01T00:00:00Z") });
       let installed = {

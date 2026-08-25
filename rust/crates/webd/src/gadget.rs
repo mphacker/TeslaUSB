@@ -244,6 +244,32 @@ pub(crate) fn gadget_status_request() -> Value {
     json!({ "cmd": "gadget_status" })
 }
 
+/// `queue_status` request for a durable mutation job id (`m-<n>`).
+pub(crate) fn queue_status_request(job_id: &str) -> Value {
+    json!({ "cmd": "queue_status", "job_id": job_id })
+}
+
+/// Map `gadgetd`'s `queue_status` reply into the SPA shape.
+///
+/// `state` is passed through verbatim so the SPA sees `gadgetd`'s own lifecycle
+/// vocabulary (`queued` / `applying` / `applied` / `coalesced` / `failed_fatal`
+/// / `unknown`). `attempts` and `detail` carry the retry count and the last
+/// failure reason so a mutation that is retrying — or that exhausted its retries
+/// — can be explained to the operator instead of appearing to hang.
+///
+/// Returns `None` for a reply missing `job_id`/`state` (including `gadgetd`'s
+/// `{"error":...}` form), which the route maps to `502`.
+pub(crate) fn map_queue_status(resp: &Value) -> Option<Value> {
+    let job_id = resp.get("job_id").and_then(Value::as_str)?;
+    let state = resp.get("state").and_then(Value::as_str)?;
+    Some(json!({
+        "jobId": job_id,
+        "state": state,
+        "attempts": resp.get("attempts").and_then(Value::as_u64).unwrap_or(0),
+        "detail": resp.get("detail").and_then(Value::as_str),
+    }))
+}
+
 /// The terminal outcome of a `gadgetd` mutation handoff (clip delete, media
 /// install, or media remove), as interpreted from `gadgetd`'s JSON response
 /// (mapped to an HTTP status in the route layer). The response shape is
@@ -305,6 +331,12 @@ pub(crate) fn map_mutation_outcome(resp: &Value) -> MutationOutcome {
             detail: detail(),
         },
         Some("busy") => MutationOutcome::Busy(detail()),
+        // A transient setup failure (e.g. a mount that timed out under load)
+        // where `gadgetd` proved the image was released and re-presented the LUN.
+        // Nothing was written and a later attempt is likely to succeed, so this
+        // is a retry signal (409), NOT a `Failed` 502: reporting it as a hard
+        // failure would tell the operator their change is dead when it is not.
+        Some("failed_retryable") => MutationOutcome::Busy(detail()),
         Some("critical_fault") => MutationOutcome::CriticalFault {
             handoff_id: handoff_id.unwrap_or_default().to_owned(),
             detail: detail(),
@@ -686,11 +718,66 @@ mod tests {
     use super::{
         DeleteRefusal, MutationOutcome, QueueOutcome, enqueue_install_request,
         enqueue_remove_empty_dir_request, enqueue_remove_request_many, map_gadget_mode_status,
-        map_gadget_status, map_mutation_outcome, map_queue_outcome, map_status, plan_car_delete,
+        map_gadget_status, map_mutation_outcome, map_queue_outcome, map_queue_status, map_status,
+        plan_car_delete, queue_status_request,
     };
     use serde_json::{Value, json};
 
     const KEY: &str = "0:TeslaCam/SavedClips/2026-06-01_20-10-04/2026-06-01_20-10-04";
+
+    #[test]
+    fn queue_status_request_carries_cmd_and_job_id() {
+        let req = queue_status_request("m-7");
+        assert_eq!(req["cmd"], "queue_status");
+        assert_eq!(req["job_id"], "m-7");
+    }
+
+    #[test]
+    fn maps_queue_status_with_attempts_and_detail() {
+        let resp = json!({
+            "job_id": "m-7",
+            "partition": 2,
+            "state": "queued",
+            "attempts": 3,
+            "detail": "mount /dev/loop1p1: command timed out",
+        });
+        let mapped = map_queue_status(&resp).expect("mapped");
+        assert_eq!(mapped["jobId"], "m-7");
+        assert_eq!(mapped["state"], "queued");
+        assert_eq!(mapped["attempts"], 3);
+        assert_eq!(mapped["detail"], "mount /dev/loop1p1: command timed out");
+    }
+
+    #[test]
+    fn maps_queue_status_unknown_without_inventing_success() {
+        // An unknown/pruned job must NOT read as applied: reporting success for a
+        // job that actually failed is the silent-failure mode this route exists
+        // to close.
+        let resp = json!({ "job_id": "m-9", "state": "unknown" });
+        let mapped = map_queue_status(&resp).expect("mapped");
+        assert_eq!(mapped["state"], "unknown");
+        assert_eq!(mapped["attempts"], 0);
+        assert!(mapped["detail"].is_null());
+    }
+
+    #[test]
+    fn maps_queue_status_failed_fatal() {
+        let resp = json!({
+            "job_id": "m-9",
+            "state": "failed_fatal",
+            "attempts": 12,
+            "detail": "gave up after 12 transient attempts",
+        });
+        let mapped = map_queue_status(&resp).expect("mapped");
+        assert_eq!(mapped["state"], "failed_fatal");
+        assert_eq!(mapped["attempts"], 12);
+    }
+
+    #[test]
+    fn rejects_queue_status_error_reply() {
+        assert!(map_queue_status(&json!({ "error": "queue unavailable" })).is_none());
+        assert!(map_queue_status(&json!({ "job_id": "m-7" })).is_none());
+    }
 
     fn angles() -> Vec<(String, String)> {
         vec![
@@ -888,6 +975,22 @@ mod tests {
             map_mutation_outcome(&crit),
             MutationOutcome::CriticalFault { .. }
         ));
+    }
+
+    #[test]
+    fn maps_direct_failed_retryable_as_busy() {
+        // gadgetd proved the image was released and re-presented the LUN, so the
+        // change simply did not land yet — the caller must be told to retry (409),
+        // never that it hard-failed (502).
+        let resp = json!({
+            "handoff_id": "h-7",
+            "result": "failed_retryable",
+            "detail": "mount /dev/loop1p1: command timed out"
+        });
+        assert_eq!(
+            map_mutation_outcome(&resp),
+            MutationOutcome::Busy("mount /dev/loop1p1: command timed out".to_owned())
+        );
     }
 
     #[test]

@@ -327,6 +327,21 @@ export interface ChimeHandoffResult {
   job_id?: string;
 }
 
+/** `GET /api/jobs/mutation/:jobId` — durable state of a queued gadgetd mutation. */
+export interface MutationStatusResponse {
+  jobId: string;
+  /**
+   * gadgetd's own lifecycle vocabulary: `queued` | `applying` | `applied` |
+   * `coalesced` | `failed_fatal` | `unknown`. `unknown` means the job id is not
+   * (or is no longer) in the durable queue — it is NOT a success signal.
+   */
+  state: string;
+  /** Consecutive transient retry attempts recorded against the job. */
+  attempts: number;
+  /** Last transient or terminal failure reason, when gadgetd recorded one. */
+  detail: string | null;
+}
+
 /** Logical lock-chime size cap mirrored from webd's `CHIME_MAX_BYTES` (1 MiB). */
 export const CHIME_MAX_BYTES = 1024 * 1024;
 export const MUSIC_MAX_BYTES = 256 * 1024 * 1024;
@@ -652,6 +667,18 @@ export const api = {
   archiveDeleteStatus: (jobId: string, signal?: AbortSignal) =>
     getJson<ArchiveDeleteStatusResponse>(
       `/api/jobs/archive-delete/${encodeURIComponent(jobId)}`,
+      signal,
+    ),
+
+  /**
+   * Poll a durable `gadgetd` mutation job by the `job_id` returned on the
+   * `202 {state:"queued"}` path (`GET /api/jobs/mutation/:jobId`). Lets the UI
+   * distinguish "still retrying" from "gave up" instead of waiting forever on a
+   * catalog refresh that will never arrive.
+   */
+  mutationStatus: (jobId: string, signal?: AbortSignal) =>
+    getJson<MutationStatusResponse>(
+      `/api/jobs/mutation/${encodeURIComponent(jobId)}`,
       signal,
     ),
 

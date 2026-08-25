@@ -64,6 +64,21 @@ struct BusyBackoff {
     next_eligible: Instant,
 }
 
+/// Per-partition exponential backoff for transient setup failures
+/// (`FailedRetryable` / `Refused`) so a mount/setup timeout under load cannot
+/// spin once per second forever.
+struct TransientBackoff {
+    /// Every transient retry, capped or not. Paces the backoff delay only.
+    attempts: u32,
+    /// CONSECUTIVE capped causes (real I/O faults and permanent local refusals).
+    /// Kept separate from `attempts` because environmental refusals are unbounded
+    /// by design — a car parked for a day racks up hundreds of `save_active`
+    /// waits, and counting those toward the fault cap would retire the operator's
+    /// mutation on the very first real fault, with zero retries.
+    faults: u32,
+    next_eligible: Instant,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 struct ChimeReenumState {
     pending_target: Option<String>,
@@ -129,6 +144,18 @@ struct ReenumFailureBackoff {
 /// Base/cap for the busy backoff. Exponential: 1s, 2s, 4s, ... capped at 60s.
 const BUSY_BACKOFF_BASE: Duration = Duration::from_secs(1);
 const BUSY_BACKOFF_CAP: Duration = Duration::from_secs(60);
+const TRANSIENT_BACKOFF_BASE: Duration = Duration::from_secs(1);
+const TRANSIENT_BACKOFF_CAP: Duration = Duration::from_secs(60);
+/// Retryable I/O setup failures ([`HandoffOutcome::FailedRetryable`] — e.g. a
+/// loop-mount that timed out) are capped so a genuinely broken mutation surfaces
+/// as `failed_fatal` in ~10 minutes instead of spinning forever.
+///
+/// The cap applies ONLY to those. Environmental refusals (host enumerated, save
+/// active, gadget unbound) and `Busy` are exempt: they can legitimately persist
+/// for hours while the car is parked, and the queued work must survive the wait.
+/// They still get backoff, and their `attempts`/`last_error` are reported by
+/// `queue_status` so a stuck mutation is visible rather than silent.
+const MAX_TRANSIENT_ATTEMPTS: u32 = 12;
 const REENUM_FAILURE_BACKOFF_BASE: Duration = Duration::from_secs(1);
 const REENUM_FAILURE_BACKOFF_CAP: Duration = Duration::from_secs(60);
 
@@ -139,6 +166,14 @@ fn busy_backoff_delay(attempts: u32) -> Duration {
         .checked_mul(1u32 << shift)
         .unwrap_or(BUSY_BACKOFF_CAP);
     scaled.min(BUSY_BACKOFF_CAP)
+}
+
+fn transient_backoff_delay(attempts: u32) -> Duration {
+    let shift = attempts.saturating_sub(1).min(16);
+    let scaled = TRANSIENT_BACKOFF_BASE
+        .checked_mul(1u32 << shift)
+        .unwrap_or(TRANSIENT_BACKOFF_CAP);
+    scaled.min(TRANSIENT_BACKOFF_CAP)
 }
 
 fn reenum_failure_backoff_delay(attempts: u32) -> Duration {
@@ -251,6 +286,8 @@ struct ServeState {
     media_ro: Arc<MediaRoMount>,
     /// Per-partition (keyed by partition u8: 1=TeslaCam, 2=media) busy backoff.
     busy_backoff: Mutex<HashMap<u8, BusyBackoff>>,
+    /// Per-partition backoff for transient setup failures (retryable errors).
+    transient_backoff: Mutex<HashMap<u8, TransientBackoff>>,
 }
 
 /// Read a length-prefixed frame (4-byte LE length, then the payload).
@@ -363,6 +400,7 @@ pub(crate) fn serve(
         reenum_failure_backoff: Mutex::new(None),
         media_ro,
         busy_backoff: Mutex::new(HashMap::new()),
+        transient_backoff: Mutex::new(HashMap::new()),
     });
 
     // Retry terminal-blob cleanup once at startup so retained terminal entries
@@ -787,6 +825,9 @@ fn request_mutation(state: &ServeState, partition: u8, mutation: &Mutation) -> s
         HandoffOutcome::Done => json!({ "handoff_id": id, "result": "done" }),
         HandoffOutcome::Refused(r) => json!({ "handoff_id": id, "refused": r }),
         HandoffOutcome::Failed(d) => json!({ "handoff_id": id, "result": "failed", "detail": d }),
+        HandoffOutcome::FailedRetryable(d) => {
+            json!({ "handoff_id": id, "result": "failed_retryable", "detail": d })
+        }
         HandoffOutcome::Busy(d) => json!({ "handoff_id": id, "result": "busy", "detail": d }),
         HandoffOutcome::CriticalFault(d) => {
             json!({ "handoff_id": id, "result": "critical_fault", "detail": d })
@@ -867,20 +908,20 @@ fn enqueue_mutation(
     }
 }
 
-/// Report the lifecycle state of a queued mutation. A pruned (terminal, swept)
-/// entry reads as `applied` — once gone from the journal it has been applied or
-/// superseded, never lost.
+/// Report the lifecycle state of a queued mutation.
 fn queue_status(state: &ServeState, job_id: &str) -> serde_json::Value {
     let Ok(queue) = state.queue.lock() else {
         return json!({ "error": "queue unavailable" });
     };
     match queue.find(job_id) {
         Some(entry) => json!({
-            "job_id": entry.id,
+            "job_id": entry.id.clone(),
             "partition": entry.partition,
             "state": entry.state,
+            "attempts": entry.attempts,
+            "detail": entry.last_error.clone(),
         }),
-        None => json!({ "job_id": job_id, "state": "applied" }),
+        None => json!({ "job_id": job_id, "state": "unknown" }),
     }
 }
 
@@ -1050,6 +1091,9 @@ fn apply_partition(state: &ServeState, partition_u8: u8) {
     if busy_backoff_active(state, partition_u8) {
         return;
     }
+    if transient_backoff_active(state, partition_u8) {
+        return;
+    }
     let plan = match state.queue.lock() {
         Ok(q) => q.plan_batch(partition_u8),
         Err(_) => return,
@@ -1070,7 +1114,9 @@ fn apply_partition(state: &ServeState, partition_u8: u8) {
     // bug, not a transient condition — fail those entries rather than spin.
     for mutation in &plan.applies {
         if let Err(e) = mutation.validate() {
-            eprintln!("gadgetd drain: batched mutation failed validation ({e}); failing it");
+            let detail = format!("batched mutation failed validation ({e})");
+            eprintln!("gadgetd drain: {detail}; failing it");
+            note_failure_detail(state, &plan.apply_seqs, &detail);
             retire_seqs(state, &plan.apply_seqs, MutationState::FailedFatal);
             return;
         }
@@ -1090,12 +1136,53 @@ fn apply_partition(state: &ServeState, partition_u8: u8) {
     dispose_batch(state, partition_u8, &plan.apply_seq_groups, disposition);
 }
 
+/// Whether a [`HandoffOutcome::Refused`] reason is an ENVIRONMENTAL wait — the
+/// car is using the drive, or a save is in flight — as opposed to a local fault
+/// on our side.
+///
+/// Environmental refusals clear on their own but can legitimately persist for
+/// HOURS while the car is parked and plugged in, so they must never be capped:
+/// discarding a queued clip delete because the owner left the car connected is
+/// exactly the silent data-loss this module exists to prevent.
+///
+/// Anything else (`bound-check failed`, `save-guard failed`,
+/// `media_ro_suspend_failed` — all local I/O errors) may never clear, so it IS
+/// capped and surfaces as `failed_fatal`.
+///
+/// Unrecognised reasons default to environmental (uncapped) deliberately: an
+/// entry that spins is still visible via `queue_status`'s `attempts`/`last_error`
+/// and still applies once the condition clears, whereas a wrongly-capped entry is
+/// destroyed. When in doubt, keep the operator's work.
+fn refusal_is_environmental(reason: &str) -> bool {
+    const LOCAL_FAULT_PREFIXES: [&str; 3] = [
+        "bound-check failed",
+        "save-guard failed",
+        "media_ro_suspend_failed",
+    ];
+    !LOCAL_FAULT_PREFIXES
+        .iter()
+        .any(|prefix| reason.starts_with(prefix))
+}
+
 struct BatchDisposition {
     done_prefix: usize,
     busy: bool,
     transient: bool,
+    /// `true` when the transient cause cannot self-heal forever and must
+    /// eventually surface as a terminal failure: a genuine I/O fault
+    /// ([`HandoffOutcome::FailedRetryable`]), a permanent LOCAL refusal
+    /// (see [`refusal_is_environmental`]), or a post-apply persist failure.
+    ///
+    /// Environmental [`HandoffOutcome::Refused`] reasons deliberately do NOT set
+    /// this: gadget-unbound, host-enumerated and save-active mean the car
+    /// legitimately holds the drive for hours or days while parked, and the
+    /// mutation is meant to wait for the next safe window. Capping those would
+    /// silently discard a clip delete simply because the owner left the car
+    /// plugged in.
+    transient_capped: bool,
     fatal: Option<String>,
     busy_reason: Option<String>,
+    transient_reason: Option<String>,
 }
 
 fn run_batch_handoffs(
@@ -1110,8 +1197,13 @@ fn run_batch_handoffs(
     let mutator = LoopMutator::new(image, state.runtime_root.clone());
 
     let (mut transient, mut busy) = (false, false);
+    let mut transient_capped = false;
     let mut done_prefix = 0usize;
-    let (mut busy_reason, mut fatal): (Option<String>, Option<String>) = (None, None);
+    let (mut busy_reason, mut transient_reason, mut fatal): (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = (None, None, None);
     for (idx, mutation) in plan.applies.iter().enumerate() {
         let id = format!("h-{}", state.next_id.fetch_add(1, Ordering::SeqCst));
         set_record(
@@ -1143,6 +1235,9 @@ fn run_batch_handoffs(
                             // Defensive: staged blobs are immutable until retire, so
                             // this should be near-impossible before reclaim.
                             transient = true;
+                            transient_capped = true;
+                            transient_reason =
+                                Some(format!("chime token compute failed: {e}"));
                             break;
                         }
                     };
@@ -1152,6 +1247,9 @@ fn run_batch_handoffs(
                         // reclaimed until the pending re-enumeration marker is
                         // durable.
                         transient = true;
+                        transient_capped = true;
+                        transient_reason =
+                            Some(format!("chime pending-state persist failed: {e}"));
                         break;
                     }
                 }
@@ -1172,6 +1270,14 @@ fn run_batch_handoffs(
                 // hot handoff off / a save in progress). Leave it queued.
                 eprintln!("gadgetd drain: handoff deferred, will retry ({reason})");
                 transient = true;
+                transient_capped = !refusal_is_environmental(&reason);
+                transient_reason = Some(reason);
+                break;
+            }
+            HandoffOutcome::FailedRetryable(detail) => {
+                transient = true;
+                transient_capped = true;
+                transient_reason = Some(detail);
                 break;
             }
             HandoffOutcome::Failed(detail) => {
@@ -1188,8 +1294,10 @@ fn run_batch_handoffs(
         done_prefix,
         busy,
         transient,
+        transient_capped,
         fatal,
         busy_reason,
+        transient_reason,
     }
 }
 
@@ -1232,6 +1340,7 @@ fn dispose_batch(
     let remainder = requeue_suffix(groups, disposition.done_prefix);
     if disposition.busy {
         mark_and_persist(state, &remainder, MutationState::Queued);
+        clear_transient_backoff(state, partition_u8);
         let attempts = note_busy_backoff(state, partition_u8);
         if let Some(reason) = disposition.busy_reason {
             eprintln!(
@@ -1242,21 +1351,61 @@ fn dispose_batch(
     }
     clear_busy_backoff(state, partition_u8);
     if disposition.transient {
-        mark_and_persist(state, &remainder, MutationState::Queued);
+        let (attempts, faults) = note_transient_backoff(state, partition_u8, disposition.transient_capped);
+        if disposition.transient_capped && faults >= MAX_TRANSIENT_ATTEMPTS {
+            clear_transient_backoff(state, partition_u8);
+            let (fail, requeue) = fatal_split(groups, disposition.done_prefix);
+            let reason = disposition
+                .transient_reason
+                .unwrap_or_else(|| "transient failure".to_owned());
+            let detail = format!(
+                "transient retry limit exceeded after {faults} consecutive faults: {reason}"
+            );
+            eprintln!("gadgetd drain: {detail}; marking failed_fatal");
+            if !fail.is_empty() {
+                note_failure_detail_with_attempts(state, &fail, faults, &detail);
+                retire_seqs(state, &fail, MutationState::FailedFatal);
+            }
+            if !requeue.is_empty() {
+                mark_and_persist(state, &requeue, MutationState::Queued);
+            }
+            return;
+        }
+        let fail = groups.get(disposition.done_prefix).cloned().unwrap_or_default();
+        if let Some(reason) = disposition.transient_reason.as_deref() {
+            eprintln!(
+                "gadgetd drain: transient setup failure on partition {partition_u8} \
+                 (attempt {attempts}), requeueing: {reason}"
+            );
+        }
+        mark_transient_retry(state, &remainder, &fail, attempts, disposition.transient_reason);
     } else if let Some(detail) = disposition.fatal {
+        clear_transient_backoff(state, partition_u8);
         let (fail, requeue) = fatal_split(groups, disposition.done_prefix);
         eprintln!("gadgetd drain: batch apply failed ({detail}); marking failed_fatal");
         if !fail.is_empty() {
+            note_failure_detail(state, &fail, &detail);
             retire_seqs(state, &fail, MutationState::FailedFatal);
         }
         if !requeue.is_empty() {
             mark_and_persist(state, &requeue, MutationState::Queued);
         }
+    } else {
+        clear_transient_backoff(state, partition_u8);
     }
 }
 
 fn busy_backoff_active(state: &ServeState, partition: u8) -> bool {
     match state.busy_backoff.lock() {
+        Ok(map) => map
+            .get(&partition)
+            .is_some_and(|b| Instant::now() < b.next_eligible),
+        Err(_) => false,
+    }
+}
+
+fn transient_backoff_active(state: &ServeState, partition: u8) -> bool {
+    match state.transient_backoff.lock() {
         Ok(map) => map
             .get(&partition)
             .is_some_and(|b| Instant::now() < b.next_eligible),
@@ -1279,8 +1428,38 @@ fn note_busy_backoff(state: &ServeState, partition: u8) -> u32 {
     entry.attempts
 }
 
+/// Records a transient retry. `capped` says whether this cause counts toward the
+/// fault cap. Returns `(attempts, faults)`: `attempts` paces the backoff delay,
+/// `faults` is the consecutive-capped-cause count the cap is judged on.
+fn note_transient_backoff(state: &ServeState, partition: u8, capped: bool) -> (u32, u32) {
+    let Ok(mut map) = state.transient_backoff.lock() else {
+        return (0, 0);
+    };
+    let entry = map.entry(partition).or_insert(TransientBackoff {
+        attempts: 0,
+        faults: 0,
+        next_eligible: Instant::now(),
+    });
+    entry.attempts = entry.attempts.saturating_add(1);
+    // An environmental refusal proves the drain loop is healthy and simply
+    // waiting, so it RESETS the fault run rather than merely not extending it.
+    entry.faults = if capped {
+        entry.faults.saturating_add(1)
+    } else {
+        0
+    };
+    entry.next_eligible = Instant::now() + transient_backoff_delay(entry.attempts);
+    (entry.attempts, entry.faults)
+}
+
 fn clear_busy_backoff(state: &ServeState, partition: u8) {
     if let Ok(mut map) = state.busy_backoff.lock() {
+        map.remove(&partition);
+    }
+}
+
+fn clear_transient_backoff(state: &ServeState, partition: u8) {
+    if let Ok(mut map) = state.transient_backoff.lock() {
         map.remove(&partition);
     }
 }
@@ -1376,6 +1555,44 @@ fn mark_and_persist(state: &ServeState, seqs: &[u64], new_state: MutationState) 
         queue.set_state(seqs, new_state);
         if let Err(e) = queue.persist(&state.queue_path) {
             eprintln!("gadgetd queue: state persist failed: {e}");
+        }
+    }
+}
+
+/// Requeue `remainder`, recording transient retry accounting on the currently
+/// failing group so queue status can surface backoff/cap progress.
+fn mark_transient_retry(
+    state: &ServeState,
+    remainder: &[u64],
+    fail_group: &[u64],
+    attempts: u32,
+    reason: Option<String>,
+) {
+    if let Ok(mut queue) = state.queue.lock() {
+        queue.set_state(remainder, MutationState::Queued);
+        if !fail_group.is_empty() {
+            queue.note_transient_failure(fail_group, attempts, reason.as_deref());
+        }
+        if let Err(e) = queue.persist(&state.queue_path) {
+            eprintln!("gadgetd queue: transient retry persist failed: {e}");
+        }
+    }
+}
+
+fn note_failure_detail(state: &ServeState, seqs: &[u64], detail: &str) {
+    if let Ok(mut queue) = state.queue.lock() {
+        queue.note_terminal_failure(seqs, detail);
+        if let Err(e) = queue.persist(&state.queue_path) {
+            eprintln!("gadgetd queue: terminal detail persist failed: {e}");
+        }
+    }
+}
+
+fn note_failure_detail_with_attempts(state: &ServeState, seqs: &[u64], attempts: u32, detail: &str) {
+    if let Ok(mut queue) = state.queue.lock() {
+        queue.note_transient_failure(seqs, attempts, Some(detail));
+        if let Err(e) = queue.persist(&state.queue_path) {
+            eprintln!("gadgetd queue: terminal detail persist failed: {e}");
         }
     }
 }
@@ -1489,10 +1706,12 @@ fn finalize_record(state: &ServeState, id: &str, outcome: &HandoffOutcome) {
 #[allow(clippy::panic, clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::{
-        ChimeReenumState, MAX_FRAME, Request, ServeState, busy_backoff_delay, dispatch, drain_once,
-        enqueue_mutation, fatal_split, mutation_requires_chime_reenum, note_reenum_failure_backoff,
-        read_frame, reenum_failure_backoff_active, request_reenumerate, requeue_suffix,
-        retire_seqs, retire_seqs_with_cleanup, staged_precheck, startup_needs_connect, write_frame,
+        BatchDisposition, ChimeReenumState, MAX_FRAME, MAX_TRANSIENT_ATTEMPTS, Request, ServeState,
+        busy_backoff_delay, dispatch, dispose_batch, drain_once, enqueue_mutation, fatal_split,
+        mutation_requires_chime_reenum, note_reenum_failure_backoff, note_transient_backoff,
+        queue_status, read_frame, reenum_failure_backoff_active, refusal_is_environmental,
+        request_reenumerate, requeue_suffix, retire_seqs, retire_seqs_with_cleanup, staged_precheck,
+        startup_needs_connect, transient_backoff_delay, write_frame,
     };
     use crate::config::GadgetConfig;
     use crate::handoff::{Mutation, Partition};
@@ -1610,6 +1829,38 @@ mod tests {
     }
 
     #[test]
+    fn queue_status_reports_unknown_for_absent_job() {
+        let state = test_state();
+        let response = queue_status(&state, "m-404");
+        assert_eq!(response.get("state"), Some(&serde_json::json!("unknown")));
+    }
+
+    #[test]
+    fn queue_status_includes_attempts_and_detail() {
+        let state = test_state();
+        {
+            let mut queue = state.queue.lock().expect("lock");
+            queue
+                .enqueue(
+                    2,
+                    Mutation::DeletePath {
+                        rel_path: "Music/x.mp3".to_owned(),
+                    },
+                    None,
+                    None,
+                )
+                .expect("enqueue");
+            queue.note_transient_failure(&[1], 3, Some("mount timeout"));
+        }
+        let response = queue_status(&state, "m-1");
+        assert_eq!(response.get("attempts"), Some(&serde_json::json!(3)));
+        assert_eq!(
+            response.get("detail"),
+            Some(&serde_json::json!("mount timeout"))
+        );
+    }
+
+    #[test]
     fn parses_reenumerate_with_defaults() {
         let req: Request = serde_json::from_slice(br#"{"cmd":"reenumerate"}"#).expect("parse");
         match req {
@@ -1642,6 +1893,7 @@ mod tests {
             reenum_failure_backoff: Mutex::new(None),
             media_ro: Arc::new(MediaRoMount::new(PathBuf::from("media.img"))),
             busy_backoff: Mutex::new(HashMap::new()),
+            transient_backoff: Mutex::new(HashMap::new()),
         }
     }
 
@@ -2054,6 +2306,276 @@ mod tests {
         assert_eq!(busy_backoff_delay(3), Duration::from_secs(4));
         assert_eq!(busy_backoff_delay(7), Duration::from_secs(60));
         assert_eq!(busy_backoff_delay(100), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn transient_backoff_delay_is_exponential_and_capped() {
+        assert_eq!(transient_backoff_delay(1), Duration::from_secs(1));
+        assert_eq!(transient_backoff_delay(2), Duration::from_secs(2));
+        assert_eq!(transient_backoff_delay(3), Duration::from_secs(4));
+        assert_eq!(transient_backoff_delay(7), Duration::from_secs(60));
+        assert_eq!(transient_backoff_delay(100), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn transient_retry_cap_retires_failing_group_failed_fatal() {
+        let mut state = test_state();
+        let dir = scratch_dir("transient-cap");
+        state.queue_path = dir.join("queue.json");
+        {
+            let mut queue = state.queue.lock().expect("lock");
+            queue
+                .enqueue(
+                    2,
+                    Mutation::DeletePath {
+                        rel_path: "Music/a.mp3".to_owned(),
+                    },
+                    None,
+                    None,
+                )
+                .expect("enqueue first");
+            queue
+                .enqueue(
+                    2,
+                    Mutation::DeletePath {
+                        rel_path: "Music/b.mp3".to_owned(),
+                    },
+                    None,
+                    None,
+                )
+                .expect("enqueue second");
+            queue.set_state(&[1, 2], MutationState::Applying);
+        }
+        // Pre-charge to one below the cap; dispose_batch's own increment is the
+        // MAX_TRANSIENT_ATTEMPTS'th attempt, which is the one that must retire it.
+        for _ in 0..(MAX_TRANSIENT_ATTEMPTS - 1) {
+            note_transient_backoff(&state, 2, true);
+        }
+        let groups = vec![vec![1], vec![2]];
+        dispose_batch(
+            &state,
+            2,
+            &groups,
+            BatchDisposition {
+                done_prefix: 0,
+                busy: false,
+                transient: true,
+                transient_capped: true,
+                fatal: None,
+                busy_reason: None,
+                transient_reason: Some("mount timeout".to_owned()),
+            },
+        );
+        let queue = state.queue.lock().expect("lock");
+        let failed = queue.find("m-1").expect("failed entry");
+        assert_eq!(failed.state, MutationState::FailedFatal);
+        assert_eq!(failed.attempts, MAX_TRANSIENT_ATTEMPTS);
+        assert!(
+            failed
+                .last_error
+                .as_deref()
+                .is_some_and(|d| d.contains("transient retry limit exceeded")),
+            "expected capped transient detail, got {:?}",
+            failed.last_error
+        );
+        let requeued = queue.find("m-2").expect("requeued entry");
+        assert_eq!(requeued.state, MutationState::Queued);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn environmental_waiting_does_not_consume_the_fault_budget() {
+        // The regression this guards: a car left plugged in refuses every drain
+        // with `save_active` for hours, pushing the shared attempt counter far
+        // past the cap. If those waits counted as faults, the FIRST real mount
+        // timeout afterwards would retire the operator's delete instantly with
+        // zero retries — destroying exactly the work this cap exists to protect.
+        let mut state = test_state();
+        let dir = scratch_dir("transient-mixed");
+        state.queue_path = dir.join("queue.json");
+        {
+            let mut queue = state.queue.lock().expect("lock");
+            queue
+                .enqueue(
+                    2,
+                    Mutation::DeletePath {
+                        rel_path: "Music/a.mp3".to_owned(),
+                    },
+                    None,
+                    None,
+                )
+                .expect("enqueue");
+            queue.set_state(&[1], MutationState::Applying);
+        }
+        // Hours of environmental waiting: uncapped, so the fault run stays at 0
+        // even though the backoff attempt counter climbs well past the cap.
+        for _ in 0..(MAX_TRANSIENT_ATTEMPTS * 4) {
+            let (attempts, faults) = note_transient_backoff(&state, 2, false);
+            assert_eq!(faults, 0, "environmental waits must not accrue faults");
+            assert!(attempts > 0);
+        }
+        let groups = vec![vec![1]];
+        dispose_batch(
+            &state,
+            2,
+            &groups,
+            BatchDisposition {
+                done_prefix: 0,
+                busy: false,
+                transient: true,
+                transient_capped: true,
+                fatal: None,
+                busy_reason: None,
+                transient_reason: Some("mount timeout".to_owned()),
+            },
+        );
+        let queue = state.queue.lock().expect("lock");
+        let entry = queue.find("m-1").expect("entry");
+        assert_eq!(
+            entry.state,
+            MutationState::Queued,
+            "the first real fault after environmental waiting must retry, not retire"
+        );
+        drop(queue);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_recovery_resets_the_fault_run() {
+        // A fault run that is interrupted by a healthy environmental wait starts
+        // over: the cap means "N consecutive faults", not "N faults ever".
+        let state = test_state();
+        for _ in 0..(MAX_TRANSIENT_ATTEMPTS - 1) {
+            note_transient_backoff(&state, 2, true);
+        }
+        let (_, faults) = note_transient_backoff(&state, 2, false);
+        assert_eq!(faults, 0, "an environmental wait resets the fault run");
+        let (_, faults) = note_transient_backoff(&state, 2, true);
+        assert_eq!(faults, 1, "the next fault starts a fresh run");
+    }
+
+    #[test]
+    fn refusal_classification_caps_only_local_faults() {
+        // Environmental: the car is using the drive. May last for days. Never cap.
+        for reason in [
+            "hot_handoff_unvalidated: host is enumerated on the TeslaCam (P1) dashcam",
+            "save_active",
+            "gadget not bound",
+        ] {
+            assert!(
+                refusal_is_environmental(reason),
+                "`{reason}` must never be capped — the car legitimately holds the drive"
+            );
+        }
+        // Local faults on our side: these may never clear on their own.
+        for reason in [
+            "bound-check failed: EIO",
+            "save-guard failed: permission denied",
+            "media_ro_suspend_failed: device busy",
+        ] {
+            assert!(
+                !refusal_is_environmental(reason),
+                "`{reason}` is a local fault and must be capped"
+            );
+        }
+        // Unknown reasons default to uncapped: keeping the operator's work beats
+        // destroying it on a reason we don't recognise.
+        assert!(refusal_is_environmental("some_future_reason"));
+    }
+
+    #[test]
+    fn environmental_refusal_never_hits_transient_retry_cap() {
+        // `Refused` means the car holds the drive / a save is running / the gadget
+        // is unbound. Those clear on their own, but can persist for HOURS while the
+        // car is parked and plugged in. Capping them would silently discard the
+        // operator's queued clip delete. Only real I/O faults are capped.
+        let mut state = test_state();
+        let dir = scratch_dir("refused-no-cap");
+        state.queue_path = dir.join("queue.json");
+        {
+            let mut queue = state.queue.lock().expect("lock");
+            queue
+                .enqueue(
+                    2,
+                    Mutation::DeletePath {
+                        rel_path: "Music/a.mp3".to_owned(),
+                    },
+                    None,
+                    None,
+                )
+                .expect("enqueue");
+            queue.set_state(&[1], MutationState::Applying);
+        }
+        for _ in 0..(MAX_TRANSIENT_ATTEMPTS + 20) {
+            note_transient_backoff(&state, 2, false);
+        }
+        let groups = vec![vec![1]];
+        dispose_batch(
+            &state,
+            2,
+            &groups,
+            BatchDisposition {
+                done_prefix: 0,
+                busy: false,
+                transient: true,
+                transient_capped: false,
+                fatal: None,
+                busy_reason: None,
+                transient_reason: Some("hot_handoff_unvalidated".to_owned()),
+            },
+        );
+        let queue = state.queue.lock().expect("lock");
+        let entry = queue.find("m-1").expect("entry");
+        assert_eq!(
+            entry.state,
+            MutationState::Queued,
+            "an environmental refusal must stay queued no matter how many attempts"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn busy_outcome_never_hits_transient_retry_cap() {
+        let mut state = test_state();
+        let dir = scratch_dir("busy-no-cap");
+        state.queue_path = dir.join("queue.json");
+        {
+            let mut queue = state.queue.lock().expect("lock");
+            queue
+                .enqueue(
+                    2,
+                    Mutation::DeletePath {
+                        rel_path: "Music/a.mp3".to_owned(),
+                    },
+                    None,
+                    None,
+                )
+                .expect("enqueue");
+            queue.set_state(&[1], MutationState::Applying);
+        }
+        for _ in 0..(MAX_TRANSIENT_ATTEMPTS + 5) {
+            note_transient_backoff(&state, 2, false);
+        }
+        let groups = vec![vec![1]];
+        dispose_batch(
+            &state,
+            2,
+            &groups,
+            BatchDisposition {
+                done_prefix: 0,
+                busy: true,
+                transient: false,
+                transient_capped: false,
+                fatal: None,
+                busy_reason: Some("host holds lun".to_owned()),
+                transient_reason: None,
+            },
+        );
+        let queue = state.queue.lock().expect("lock");
+        let entry = queue.find("m-1").expect("entry");
+        assert_eq!(entry.state, MutationState::Queued);
+        assert_ne!(entry.state, MutationState::FailedFatal);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

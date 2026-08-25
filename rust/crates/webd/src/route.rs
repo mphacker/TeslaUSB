@@ -80,6 +80,7 @@ pub(crate) fn router(state: AppState, static_dir: PathBuf) -> Router {
         .route("/clips/{id}/telemetry", get(crate::media::telemetry))
         .route("/clips/{id}/export", get(crate::media::export))
         .route("/jobs/archive-delete/{job_id}", get(archive_delete_status))
+        .route("/jobs/mutation/{job_id}", get(mutation_status))
         .route("/media/content", get(crate::media::content))
         .route(
             "/clips/{id}/angles/{camera}/download",
@@ -2083,6 +2084,37 @@ fn queue_outcome_to_response(
 
 /// `GET /api/handoff/:id`: poll a prior car-delete handoff, normalized to the D2
 /// `{handoff_id, state, detail}` shape.
+/// `GET /api/jobs/mutation/{job_id}`: terminal-safe status for a durable
+/// `gadgetd` mutation job (the `m-<n>` id returned by a `202 queued` enqueue,
+/// e.g. a lock-chime activation).
+///
+/// The enqueue endpoints answer `202 {state:"queued"}` the moment the mutation
+/// is durable — *queued is not applied*. Without this route the SPA had no way
+/// to learn a queued job later failed, so a mutation that could never apply was
+/// indistinguishable from one still in flight. That is exactly how a stalled
+/// chime activation stayed invisible to the operator.
+async fn mutation_status(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    validate_mutation_job_id(&job_id).map_err(|cause| {
+        ApiError::bad_request("invalid_job_id", format!("invalid job id: {cause}"))
+    })?;
+    let client = state.gadget.clone();
+    let request = gadget::queue_status_request(&job_id);
+    let resp = tokio::task::spawn_blocking(move || client.call(request))
+        .await
+        .map_err(|_| ApiError::Internal)?
+        .map_err(transport_to_error)?;
+    gadget::map_queue_status(&resp).map(Json).ok_or_else(|| {
+        ApiError::status(
+            StatusCode::BAD_GATEWAY,
+            "gadgetd_protocol",
+            "unparseable queue_status response",
+        )
+    })
+}
+
 async fn handoff_status(
     State(state): State<AppState>,
     Path(id): Path<String>,

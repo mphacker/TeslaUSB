@@ -47,6 +47,7 @@ use crate::handoff::Mutation;
 /// refused with a real error so a runaway producer cannot fill the data fs with
 /// staged blobs. A human managing six media categories never approaches this.
 pub(crate) const MAX_QUEUE_ENTRIES: usize = 256;
+const FAILED_FATAL_RETAIN: usize = 32;
 
 /// Lifecycle of a single queued mutation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,6 +94,12 @@ pub(crate) struct QueuedMutation {
     pub enqueued_at_ms: u64,
     /// Current lifecycle state.
     pub state: MutationState,
+    /// Consecutive transient retry attempts (backoff/cap accounting).
+    #[serde(default)]
+    pub attempts: u32,
+    /// Last transient/fatal failure reason, surfaced to status callers.
+    #[serde(default)]
+    pub last_error: Option<String>,
 }
 
 /// The reconciled work for one partition's next handoff.
@@ -242,6 +249,8 @@ impl MutationQueue {
             idempotency_key,
             enqueued_at_ms: now_ms(),
             state: MutationState::Queued,
+            attempts: 0,
+            last_error: None,
         });
         Ok(id)
     }
@@ -405,6 +414,30 @@ impl MutationQueue {
         }
     }
 
+    /// Persist transient retry accounting for the affected entries.
+    pub(crate) fn note_transient_failure(
+        &mut self,
+        seqs: &[u64],
+        attempts: u32,
+        detail: Option<&str>,
+    ) {
+        for entry in &mut self.entries {
+            if seqs.contains(&entry.seq) {
+                entry.attempts = attempts;
+                entry.last_error = detail.map(ToOwned::to_owned);
+            }
+        }
+    }
+
+    /// Persist a terminal failure reason for the affected entries.
+    pub(crate) fn note_terminal_failure(&mut self, seqs: &[u64], detail: &str) {
+        for entry in &mut self.entries {
+            if seqs.contains(&entry.seq) {
+                entry.last_error = Some(detail.to_owned());
+            }
+        }
+    }
+
     /// Blob paths whose entries just reached a terminal state and can be
     /// unlinked. Call after `set_state(.., Applied|Coalesced|FailedFatal)`.
     #[allow(dead_code)]
@@ -435,13 +468,49 @@ impl MutationQueue {
         self.entries.retain(|e| !e.state.is_terminal());
     }
 
-    /// Drop only terminal entries whose blob is already absent (or had no blob).
+    /// Drop terminal entries whose blob is already absent (or had no blob),
+    /// EXCEPT keep a bounded ring of the newest [`MutationState::FailedFatal`]
+    /// entries so terminal failures remain observable via `queue_status`.
     ///
     /// Terminal entries that still reference an on-disk blob are retained so a
     /// later retire pass can retry reclaiming the blob before pruning the entry.
+    /// For failed-fatal entries, the newest [`FAILED_FATAL_RETAIN`] by `seq` are
+    /// retained regardless of blob reclaim state. Their `blob_path` is cleared
+    /// once the blob has actually been reclaimed: a retained entry keeps its
+    /// blob path out of [`Self::reclaimable_terminal_blobs`], otherwise every
+    /// subsequent sweep would re-attempt an unlink of an already-deleted file and
+    /// fsync the blob directory — up to [`FAILED_FATAL_RETAIN`] pointless
+    /// directory fsyncs on every drain tick, forever.
     pub(crate) fn prune_terminal_reclaimed(&mut self, reclaimed_blobs: &HashSet<String>) {
+        let mut failed_fatal_seqs: Vec<u64> = self
+            .entries
+            .iter()
+            .filter(|entry| entry.state == MutationState::FailedFatal)
+            .map(|entry| entry.seq)
+            .collect();
+        failed_fatal_seqs.sort_unstable();
+        let keep_failed_fatal: BTreeSet<u64> = failed_fatal_seqs
+            .into_iter()
+            .rev()
+            .take(FAILED_FATAL_RETAIN)
+            .collect();
+        for entry in &mut self.entries {
+            if entry.state != MutationState::FailedFatal || !keep_failed_fatal.contains(&entry.seq) {
+                continue;
+            }
+            if entry
+                .blob_path
+                .as_deref()
+                .is_some_and(|blob| reclaimed_blobs.contains(blob))
+            {
+                entry.blob_path = None;
+            }
+        }
         self.entries.retain(|entry| {
             if !entry.state.is_terminal() {
+                return true;
+            }
+            if entry.state == MutationState::FailedFatal && keep_failed_fatal.contains(&entry.seq) {
                 return true;
             }
             match entry.blob_path.as_deref() {
@@ -855,6 +924,73 @@ mod tests {
         assert_eq!(next, "m-2");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_legacy_journal_defaults_attempts_and_last_error() {
+        let dir = std::env::temp_dir().join(format!("gqtest-legacy-{}", now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("queue.json");
+        let legacy = r#"{
+  "next_seq": 2,
+  "entries": [
+    {
+      "seq": 1,
+      "id": "m-1",
+      "partition": 2,
+      "mutation": { "op": "delete_path", "rel_path": "Music/x.mp3" },
+      "blob_path": null,
+      "idempotency_key": null,
+      "enqueued_at_ms": 123,
+      "state": "queued"
+    }
+  ]
+}"#;
+        std::fs::write(&path, legacy).unwrap();
+        let loaded = MutationQueue::load(&path);
+        let entry = loaded.find("m-1").expect("entry");
+        assert_eq!(entry.attempts, 0);
+        assert!(entry.last_error.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn prune_terminal_reclaimed_clears_blob_path_on_retained_failures() {
+        // A retained failed_fatal entry must stop advertising an already-deleted
+        // blob, or every later sweep re-unlinks it and fsyncs the blob directory.
+        let mut q = MutationQueue::default();
+        let dir = std::env::temp_dir().join(format!("gqtest-ring-{}", now_ms()));
+        let blob = dir.join("blob-1.bin").to_string_lossy().into_owned();
+        let id = q
+            .enqueue(2, install("Music/a.mp3", &blob), Some(blob.clone()), None)
+            .unwrap();
+        let seq = q.find(&id).unwrap().seq;
+        q.set_state(&[seq], MutationState::FailedFatal);
+        assert_eq!(q.reclaimable_terminal_blobs(), vec![blob.clone()]);
+
+        let reclaimed: HashSet<String> = std::iter::once(blob).collect();
+        q.prune_terminal_reclaimed(&reclaimed);
+
+        // Entry survives for observability, but no longer names a reclaimed blob.
+        assert_eq!(q.entries().len(), 1);
+        assert_eq!(q.find(&id).unwrap().state, MutationState::FailedFatal);
+        assert!(q.find(&id).unwrap().blob_path.is_none());
+        assert!(q.reclaimable_terminal_blobs().is_empty());
+    }
+
+    #[test]
+    fn prune_terminal_reclaimed_keeps_newest_failed_fatal_ring() {
+        let mut q = MutationQueue::default();
+        for i in 0..40 {
+            q.enqueue(2, delete(&format!("Music/{i}.mp3")), None, None)
+                .unwrap();
+        }
+        let seqs: Vec<u64> = (1..=40).collect();
+        q.set_state(&seqs, MutationState::FailedFatal);
+        q.prune_terminal_reclaimed(&std::collections::HashSet::new());
+        assert_eq!(q.entries().len(), FAILED_FATAL_RETAIN);
+        let kept: Vec<u64> = q.entries().iter().map(|entry| entry.seq).collect();
+        assert_eq!(kept, (9..=40).collect::<Vec<_>>());
     }
 
     #[test]

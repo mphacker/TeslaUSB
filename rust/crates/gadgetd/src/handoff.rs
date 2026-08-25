@@ -234,6 +234,10 @@ pub(crate) enum HandoffOutcome {
     /// The mutation failed, but the image was released and the LUN re-presented
     /// (the car has its drive back).
     Failed(String),
+    /// The mutation failed on a transient setup error (before any write), while
+    /// image release was still proven and the LUN re-presented. Unlike `Failed`,
+    /// this MUST be retried rather than dropped.
+    FailedRetryable(String),
     /// The LUN was busy (the car holds the medium) so the eject could not take.
     /// Nothing was mutated and the backing medium is confirmed still present, so
     /// this is transient: the mutation must stay queued and be retried at a later
@@ -251,6 +255,7 @@ impl HandoffOutcome {
             Self::Done => "done",
             Self::Refused(_) => "refused",
             Self::Failed(_) => "failed",
+            Self::FailedRetryable(_) => "failed_retryable",
             Self::Busy(_) => "busy",
             Self::CriticalFault(_) => "critical_fault",
         }
@@ -260,7 +265,11 @@ impl HandoffOutcome {
     pub(crate) fn detail(&self) -> Option<&str> {
         match self {
             Self::Done => None,
-            Self::Refused(d) | Self::Failed(d) | Self::Busy(d) | Self::CriticalFault(d) => Some(d),
+            Self::Refused(d)
+            | Self::Failed(d)
+            | Self::FailedRetryable(d)
+            | Self::Busy(d)
+            | Self::CriticalFault(d) => Some(d),
         }
     }
 }
@@ -311,6 +320,11 @@ pub(crate) struct MutateError {
     /// `true` iff the loop device and mount were torn down (image is no longer
     /// held locally, so it is safe to re-present).
     pub(crate) image_released: bool,
+    /// `true` iff the failure happened during mount/loop setup, before any
+    /// write, and the image was proven released — retrying is safe and likely to
+    /// succeed. Mutation failures (`apply_op`) or incomplete teardown are never
+    /// retryable.
+    pub(crate) retryable: bool,
 }
 
 /// Mounts the image locally and applies a mutation (live impl uses losetup/mount).
@@ -457,7 +471,11 @@ fn run_handoff_core(
     match mutator.apply(partition, mutation) {
         Ok(()) => represent_after(lun, progress, HandoffOutcome::Done),
         Err(me) if me.image_released => {
-            represent_after(lun, progress, HandoffOutcome::Failed(me.detail))
+            if me.retryable {
+                represent_after(lun, progress, HandoffOutcome::FailedRetryable(me.detail))
+            } else {
+                represent_after(lun, progress, HandoffOutcome::Failed(me.detail))
+            }
         }
         Err(me) => HandoffOutcome::CriticalFault(format!(
             "mutate failed and image NOT released ({}); LUN left ejected to \
@@ -837,11 +855,12 @@ mod tests {
                 result: RefCell::new(Some(Ok(()))),
             }
         }
-        fn err(image_released: bool) -> Self {
+        fn err(image_released: bool, retryable: bool) -> Self {
             Self {
                 result: RefCell::new(Some(Err(MutateError {
                     detail: "mutate boom".to_owned(),
                     image_released,
+                    retryable,
                 }))),
             }
         }
@@ -996,7 +1015,7 @@ mod tests {
         let out = run_handoff(
             &lun,
             &FakeGuard(false),
-            &FakeMutator::err(true),
+            &FakeMutator::err(true, false),
             &NoopGate,
             Partition::P1,
             &del(),
@@ -1005,6 +1024,23 @@ mod tests {
         );
         assert!(matches!(out, HandoffOutcome::Failed(_)));
         // Critically, the LUN was re-presented (car gets its drive back).
+        assert_eq!(*lun.events.borrow(), ["eject", "represent"]);
+    }
+
+    #[test]
+    fn mutate_retryable_failure_that_released_maps_failed_retryable() {
+        let lun = FakeLun::ok();
+        let out = run_handoff(
+            &lun,
+            &FakeGuard(false),
+            &FakeMutator::err(true, true),
+            &NoopGate,
+            Partition::P1,
+            &del(),
+            false,
+            |_| {},
+        );
+        assert!(matches!(out, HandoffOutcome::FailedRetryable(_)));
         assert_eq!(*lun.events.borrow(), ["eject", "represent"]);
     }
 
@@ -1245,7 +1281,7 @@ mod tests {
         let out = run_handoff(
             &lun,
             &FakeGuard(false),
-            &FakeMutator::err(false),
+            &FakeMutator::err(false, false),
             &NoopGate,
             Partition::P1,
             &del(),
@@ -1413,7 +1449,7 @@ mod tests {
         let outcome = run_handoff(
             &lun,
             &FakeGuard(false),
-            &FakeMutator::err(false),
+            &FakeMutator::err(false, false),
             &gate,
             Partition::P2,
             &del(),
@@ -1439,7 +1475,7 @@ mod tests {
         let outcome = run_handoff(
             &lun,
             &FakeGuard(false),
-            &FakeMutator::err(false),
+            &FakeMutator::err(false, false),
             &gate,
             Partition::P2,
             &del(),

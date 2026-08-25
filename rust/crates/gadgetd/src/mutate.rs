@@ -26,14 +26,23 @@ const MAX_INSTALL_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Per-phase command timeouts.
 pub(crate) const LOSETUP_TIMEOUT: Duration = Duration::from_secs(5);
-pub(crate) const MOUNT_TIMEOUT: Duration = Duration::from_secs(10);
-pub(crate) const UMOUNT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Generous bound for pathological I/O stalls under load; healthy mounts are
+/// still millisecond-scale and complete well before this guard.
+pub(crate) const MOUNT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Generous bound because an umount timeout is safety-critical (an incomplete
+/// teardown leaves the image not provably released and escalates to recovery).
+pub(crate) const UMOUNT_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long to wait for a just-detached loop to actually clear (`losetup -d`
 /// is a deferred/lazy detach; the device lingers briefly, esp. after a `-P`
 /// rescan).
 pub(crate) const LOOP_CLEAR_TIMEOUT: Duration = Duration::from_secs(5);
 /// Poll cadence while waiting for loops to clear.
 const LOOP_CLEAR_POLL: Duration = Duration::from_millis(100);
+/// Bounded because this global `sync` is best-effort and its result is DISCARDED
+/// (see [`sync_all`]): waiting longer cannot make the handoff more correct, it can
+/// only hold the LUN ejected while `sync` blocks on unrelated I/O — including the
+/// car's own dashcam writes to the same card. Unlike [`UMOUNT_TIMEOUT`], a
+/// generous bound here is strictly a cost.
 const SYNC_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Mutates a backing image by loop-mounting it.
@@ -57,6 +66,22 @@ impl LoopMutator {
             image,
             runtime_root,
         }
+    }
+
+    /// Detach `loopdev` and prove this image no longer has any loop attached.
+    ///
+    /// SAFETY INVARIANT: returning `false` means "image release is NOT proven",
+    /// so callers MUST surface `image_released: false` and let handoff escalate to
+    /// `CriticalFault` rather than retrying onto a potentially stale loop.
+    fn detach_verified(&self, loopdev: &str) -> bool {
+        let detach_ok = losetup_detach(loopdev).is_ok();
+        if !detach_ok {
+            return false;
+        }
+        detach_verified_decision(
+            detach_ok,
+            wait_for_image_loops_clear(&self.image, LOOP_CLEAR_TIMEOUT),
+        )
     }
 }
 
@@ -84,30 +109,54 @@ impl ImageMutator for LoopMutator {
     }
 
     fn apply(&self, partition: Partition, mutation: &Mutation) -> Result<(), MutateError> {
-        // Attach the loop; before any mount, a failure means the image is still
-        // released (the eject already closed the kernel's fd).
+        // Attach the loop. A timeout/error from `losetup -fP --show` is ambiguous:
+        // the helper process can be killed after the kernel attached a loop. We
+        // therefore probe all loops on the image and only claim released when the
+        // probe explicitly proves none are attached.
         let loopdev = match losetup_attach(&self.image) {
             Ok(d) => d,
-            Err(e) => return Err(released_err(format!("losetup attach: {e}"))),
+            Err(e) => {
+                let image_released = match losetup_for_image(&self.image) {
+                    Ok(loops) => loops.is_empty(),
+                    Err(_) => false,
+                };
+                return Err(MutateError {
+                    detail: format!("losetup attach: {e}"),
+                    image_released,
+                    retryable: image_released,
+                });
+            }
         };
 
         // Each per-LUN image is single-partition (MBR p1).
         let node = format!("{loopdev}p1");
         if let Err(e) = wait_for_block(Path::new(&node), Duration::from_secs(3)) {
-            let _ = losetup_detach(&loopdev);
-            return Err(released_err(format!("partition node {node}: {e}")));
+            let image_released = self.detach_verified(&loopdev);
+            return Err(MutateError {
+                detail: format!("partition node {node}: {e}"),
+                image_released,
+                retryable: image_released,
+            });
         }
 
         let mnt = self.runtime_root.join(format!("h-{}", std::process::id()));
         if let Err(e) = std::fs::create_dir_all(&mnt) {
-            let _ = losetup_detach(&loopdev);
-            return Err(released_err(format!("mkdir mountpoint: {e}")));
+            let image_released = self.detach_verified(&loopdev);
+            return Err(MutateError {
+                detail: format!("mkdir mountpoint: {e}"),
+                image_released,
+                retryable: image_released,
+            });
         }
 
         if let Err(e) = mount_exfat(&node, &mnt) {
             let _ = std::fs::remove_dir(&mnt);
-            let _ = losetup_detach(&loopdev);
-            return Err(released_err(format!("mount {node}: {e}")));
+            let image_released = self.detach_verified(&loopdev);
+            return Err(MutateError {
+                detail: format!("mount {node}: {e}"),
+                image_released,
+                retryable: image_released,
+            });
         }
 
         // Mounted: from here we must umount + detach before reporting released.
@@ -138,22 +187,20 @@ impl ImageMutator for LoopMutator {
                      detach_ok={detach_ok})"
                 ),
                 image_released,
+                retryable: false,
             }),
             Err(e) => Err(MutateError {
                 detail: e.to_string(),
                 image_released,
+                retryable: false,
             }),
         }
     }
 }
 
-/// Build a `MutateError` for a failure that occurred while the image was still
-/// released (no mount held).
-fn released_err(detail: String) -> MutateError {
-    MutateError {
-        detail,
-        image_released: true,
-    }
+/// Pure decision helper for detach verification, factored for unit tests.
+fn detach_verified_decision(detach_ok: bool, clear_result: io::Result<Option<Vec<String>>>) -> bool {
+    detach_ok && matches!(clear_result, Ok(None))
 }
 
 /// Apply the validated op against the freshly-mounted partition root.
@@ -631,7 +678,8 @@ pub(crate) fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> io::Resu
 #[allow(clippy::panic, clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::{
-        delete_files, install_file, poll_loops_clear, remove_empty_dir, run_with_timeout,
+        delete_files, detach_verified_decision, install_file, poll_loops_clear, remove_empty_dir,
+        run_with_timeout,
         unescape_mountinfo,
     };
     use std::cell::Cell;
@@ -927,5 +975,16 @@ mod tests {
         )
         .expect_err("probe error should propagate");
         assert!(err.to_string().contains("probe failed"));
+    }
+
+    #[test]
+    fn detach_verified_decision_requires_successful_detach() {
+        assert!(!detach_verified_decision(false, Ok(None)));
+        assert!(!detach_verified_decision(true, Ok(Some(vec!["/dev/loop1".to_owned()]))));
+        assert!(!detach_verified_decision(
+            true,
+            Err(io::Error::other("probe failed"))
+        ));
+        assert!(detach_verified_decision(true, Ok(None)));
     }
 }

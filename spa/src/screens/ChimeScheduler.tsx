@@ -107,7 +107,7 @@ function describeSchedule(s: StoredSchedule): string {
 
 interface ChimeSchedulerProps {
   pendingUpload?: PendingUpload | null;
-  onActivated?: (filename: string, bytes: number) => void;
+  onActivated?: (filename: string, bytes: number, jobId: string | null) => void;
   onLibraryLoaded?: (library: LibraryEntry[]) => void;
   onEditChime?: (filename: string) => void;
   activationBusy?: boolean;
@@ -744,8 +744,8 @@ export function ChimeScheduler({
     setActivating(filename);
     setLibError(null);
     try {
-      await api.setActiveChime(filename);
-      onActivated?.(filename, bytes);
+      const res = await api.setActiveChime(filename);
+      onActivated?.(filename, bytes, res.job_id ?? null);
     } catch (err) {
       setLibError(failMessage(err, "Couldn't set the active chime."));
     } finally {
